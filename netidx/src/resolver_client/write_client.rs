@@ -26,7 +26,7 @@ use indexmap::IndexMap;
 use log::{debug, info, warn};
 use netidx_netproto::resolver::PublisherPriority;
 use parking_lot::{Mutex, RwLock};
-use poolshark::global::GPooled;
+use poolshark::{global::GPooled, local::LPooled};
 use rand::{RngExt, rng};
 use std::{
     cmp::max, fmt::Debug, hash::BuildHasherDefault, net::SocketAddr, sync::Arc,
@@ -64,12 +64,27 @@ macro_rules! wt {
 const HB: Duration = Duration::from_secs(TTL / 2);
 const LINGER: Duration = Duration::from_secs(TTL / 10);
 
+/// What every member of this referral's cluster should be holding for us.
+///
+/// The publisher is the only authority on this, and a resolver keeps a
+/// publisher's records only while the publisher keeps talking to it, so any
+/// connection may have to rebuild a member's whole view from scratch.
+/// `write_mgr` sees every batch before it broadcasts, so it maintains this and
+/// the connections only read it — one copy for the cluster rather than one per
+/// member.
+type Published = Arc<RwLock<IndexMap<Path, ToWrite, BuildHasherDefault<AHasher>>>>;
+
 struct Connection {
     con: Option<Channel>,
     resolver_addr: SocketAddr,
     resolver_auth: Auth,
     write_addr: SocketAddr,
-    published: IndexMap<Path, ToWrite, BuildHasherDefault<AHasher>>,
+    published: Published,
+    /// A `Clear` that failed to reach *this* member, to retry on reconnect.
+    pending_clear: bool,
+    /// Unpublishes that failed to reach *this* member. They are already gone
+    /// from `published`, so nothing else would ever remove them there.
+    pending_unpublish: AHashMap<Path, ToWrite>,
     secrets: Arc<RwLock<AHashMap<SocketAddr, u128>>>,
     security_context: Option<K5CtxWrap<ClientCtx>>,
     tls: Option<tls::CachedConnector>,
@@ -90,8 +105,29 @@ impl Connection {
         self.disconnect = time::interval_at(now + linger, linger);
     }
 
+    /// Bring this member back in line with what the publisher believes.
+    ///
+    /// Retries first — a pending `Clear` has to precede the republish it would
+    /// otherwise wipe out — then the desired state. An unpublish replayed
+    /// against a member that never had the path is a no-op, so this is safe
+    /// whether the member kept our records or lost them.
     async fn republish(&mut self, con: &mut Channel, ttl_expired: bool) -> Result<()> {
-        let len = self.published.len();
+        let mut pending: LPooled<Vec<ToWrite>> = LPooled::take();
+        if self.pending_clear {
+            pending.push(ToWrite::Clear)
+        }
+        pending.extend(self.pending_unpublish.values().cloned());
+        for msg in pending.iter() {
+            con.queue_send(msg)?
+        }
+        let npub = {
+            let published = self.published.read();
+            for msg in published.values() {
+                con.queue_send(msg)?
+            }
+            published.len()
+        };
+        let len = pending.len() + npub;
         if len == 0 {
             info!("connected to resolver {:?} for write", self.resolver_addr);
             if self.degraded {
@@ -103,85 +139,45 @@ impl Connection {
                     m => warn!("unexpected response to clear {:?}", m),
                 }
             }
-        } else {
-            info!(
-                "write_con ttl: {} degraded: {}, republishing: {}",
-                len, ttl_expired, self.degraded
-            );
-            for msg in self.published.values() {
-                con.queue_send(msg)?
-            }
-            con.flush().await?;
-            let mut success = 0;
-            let mut has_clear = false;
-            let mut to_remove: Vec<Option<Path>> = vec![];
-            for msg in self.published.values() {
-                let reply = con.receive().await?;
-                match msg {
-                    ToWrite::Publish(_)
-                    | ToWrite::PublishDefault(_)
-                    | ToWrite::PublishWithFlags(_, _)
-                    | ToWrite::PublishDefaultWithFlags(_, _) => match reply {
-                        FromWrite::Published | FromWrite::Referral(_) => success += 1,
-                        r => {
-                            warn!(
-                                "republish unexpected response to {:?} from resolver {:?}",
-                                msg, r
-                            )
-                        }
-                    },
-                    ToWrite::Unpublish(p) | ToWrite::UnpublishDefault(p) => match reply {
-                        FromWrite::Unpublished | FromWrite::Referral(_) => {
-                            success += 1;
-                            to_remove.push(Some(p.clone()));
-                        }
-                        r => {
-                            warn!(
-                                "republish unexpected response to {:?} from resolver {:?}",
-                                msg, r
-                            )
-                        }
-                    },
-                    ToWrite::Clear => match reply {
-                        FromWrite::Unpublished | FromWrite::Referral(_) => {
-                            has_clear = true;
-                            success += 1;
-                            to_remove.push(None);
-                        }
-                        r => {
-                            warn!(
-                                "republish unexpected response to {:?} from resolver {:?}",
-                                msg, r
-                            )
-                        }
-                    },
-                    ToWrite::Heartbeat => (),
-                }
-            }
-            for p in to_remove {
-                match p {
-                    Some(p) => {
-                        if has_clear {
-                            self.published.shift_remove(&p);
-                        } else {
-                            self.published.swap_remove(&p);
-                        }
-                    }
-                    None => {
-                        if let Some((pos, _, _)) =
-                            self.published.get_full(&Path::from(""))
-                        {
-                            self.published = self.published.split_off(pos);
-                        }
-                    }
-                }
-            }
-            self.degraded = success != len;
-            info!(
-                "connected to resolver {:?} for write (republished {}) degraded: {}",
-                self.resolver_addr, success, self.degraded
-            );
+            return Ok(());
         }
+        info!(
+            "write_con ttl_expired: {} degraded: {} republishing: {}",
+            ttl_expired, self.degraded, len
+        );
+        con.flush().await?;
+        let mut success = 0;
+        for msg in pending.iter() {
+            let reply = con.receive().await?;
+            match (msg, &reply) {
+                (ToWrite::Clear, FromWrite::Unpublished | FromWrite::Referral(_)) => {
+                    success += 1;
+                    self.pending_clear = false;
+                }
+                (
+                    ToWrite::Unpublish(p) | ToWrite::UnpublishDefault(p),
+                    FromWrite::Unpublished | FromWrite::Referral(_),
+                ) => {
+                    success += 1;
+                    self.pending_unpublish.remove(p);
+                }
+                (msg, r) => warn!(
+                    "republish unexpected response to {:?} from resolver {:?}",
+                    msg, r
+                ),
+            }
+        }
+        for _ in 0..npub {
+            match con.receive().await? {
+                FromWrite::Published | FromWrite::Referral(_) => success += 1,
+                r => warn!("republish unexpected response to publish {:?}", r),
+            }
+        }
+        self.degraded = success != len;
+        info!(
+            "connected to resolver {:?} for write (republished {}) degraded: {}",
+            self.resolver_addr, success, self.degraded
+        );
         Ok(())
     }
 
@@ -450,23 +446,6 @@ impl Connection {
                 }
             },
         };
-        for (_, tx) in tx.batch.iter() {
-            match tx {
-                ToWrite::Publish(p)
-                | ToWrite::PublishDefault(p)
-                | ToWrite::PublishWithFlags(p, _)
-                | ToWrite::PublishDefaultWithFlags(p, _) => {
-                    self.published.insert(p.clone(), tx.clone());
-                }
-                ToWrite::Unpublish(p) | ToWrite::UnpublishDefault(p) => {
-                    self.published.swap_remove(p);
-                }
-                ToWrite::Clear => {
-                    self.published.clear();
-                }
-                ToWrite::Heartbeat => (),
-            }
-        }
         let timeout = max(HELLO_TO, Duration::from_micros(tx.batch.len() as u64 * 100));
         for (_, m) in &*tx.batch {
             c.queue_send(m)?;
@@ -511,6 +490,7 @@ impl Connection {
         desired_auth: DesiredAuth,
         secrets: Arc<RwLock<AHashMap<SocketAddr, u128>>>,
         tls: Option<tls::CachedConnector>,
+        published: Published,
     ) {
         let now = Instant::now();
         let mut t = Self {
@@ -518,7 +498,9 @@ impl Connection {
             resolver_auth,
             write_addr,
             priority,
-            published: IndexMap::default(),
+            published,
+            pending_clear: false,
+            pending_unpublish: AHashMap::default(),
             secrets,
             desired_auth,
             security_context: None,
@@ -557,6 +539,10 @@ impl Connection {
                         Err(e) => {
                             t.con = None;
                             t.degraded = true;
+                            // Publishes need no note: they are in `published`,
+                            // and being degraded means the whole of it gets
+                            // replayed. Removals are already gone from there,
+                            // so only this connection remembers them.
                             for (_, tx) in batch.batch.iter() {
                                 match tx {
                                     ToWrite::Publish(_)
@@ -564,11 +550,9 @@ impl Connection {
                                     | ToWrite::PublishWithFlags(_, _)
                                     | ToWrite::PublishDefaultWithFlags(_, _) => (),
                                     ToWrite::Unpublish(p) | ToWrite::UnpublishDefault(p) => {
-                                        t.published.insert(p.clone(), tx.clone());
+                                        t.pending_unpublish.insert(p.clone(), tx.clone());
                                     }
-                                    ToWrite::Clear => {
-                                        t.published.insert(Path::from(""), ToWrite::Clear);
-                                    },
+                                    ToWrite::Clear => t.pending_clear = true,
                                     ToWrite::Heartbeat => (),
                                 }
                             }
@@ -590,6 +574,7 @@ async fn write_mgr(
     priority: PublisherPriority,
     tls: Option<tls::CachedConnector>,
 ) -> Result<()> {
+    let published: Published = Arc::new(RwLock::new(IndexMap::default()));
     let (sender, _) = broadcast::channel(100);
     for (addr, auth) in resolver.addrs.iter() {
         let addr = *addr;
@@ -598,6 +583,7 @@ async fn write_mgr(
         let secrets = secrets.clone();
         let tls = tls.clone();
         let receiver = sender.subscribe();
+        let published = published.clone();
         task::spawn(async move {
             Connection::start(
                 receiver,
@@ -608,12 +594,35 @@ async fn write_mgr(
                 desired_auth,
                 secrets,
                 tls,
+                published,
             )
             .await;
             info!("write task for {:?} exited", addr);
         });
     }
     while let Some((batch, reply)) = receiver.next().await {
+        // Record what the publisher wants before telling anyone about it. A
+        // connection that misses this batch — because it is down, or because
+        // it fell behind the broadcast — still finds it here when it
+        // reconnects, which is the only way it could ever learn.
+        {
+            let mut published = published.write();
+            for (_, m) in batch.iter() {
+                match m {
+                    ToWrite::Publish(p)
+                    | ToWrite::PublishDefault(p)
+                    | ToWrite::PublishWithFlags(p, _)
+                    | ToWrite::PublishDefaultWithFlags(p, _) => {
+                        published.insert(p.clone(), m.clone());
+                    }
+                    ToWrite::Unpublish(p) | ToWrite::UnpublishDefault(p) => {
+                        published.swap_remove(p);
+                    }
+                    ToWrite::Clear => published.clear(),
+                    ToWrite::Heartbeat => (),
+                }
+            }
+        }
         let mut replies = vec![];
         let mut waiters = vec![];
         for _ in resolver.addrs.iter() {

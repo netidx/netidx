@@ -588,6 +588,10 @@ mod republish {
         /// New connections are refused and live ones are killed, but the
         /// resolver behind the proxy keeps everything it knows about us.
         Cut,
+        /// Connections are accepted and then ignored, so the client stalls in
+        /// its handshake for a hello timeout instead of failing fast — long
+        /// enough to fall behind everything else the publisher is doing.
+        BlackHole,
     }
 
     /// A pass-through TCP proxy in front of one member. Dropping a `Server`
@@ -610,6 +614,12 @@ mod republish {
                     let state = *link.borrow_and_update();
                     match state {
                         Link::Cut => (),
+                        Link::BlackHole => {
+                            task::spawn(async move {
+                                let _client = client;
+                                let _ = link.wait_for(|l| *l != Link::BlackHole).await;
+                            });
+                        }
                         Link::Up => {
                             task::spawn(async move {
                                 let Ok(server) = TcpStream::connect(target).await else {
@@ -633,6 +643,76 @@ mod republish {
         fn set(&self, link: Link) {
             self.link.send_replace(link);
         }
+    }
+
+    /// Everything the publisher has must end up on a member that comes back,
+    /// including paths published while it was unreachable. A member that
+    /// missed an update has no other way to learn about it — the publisher
+    /// sends deltas and nothing replays them.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_returning_member_gets_the_whole_publish_set() {
+        let _ = env_logger::try_init();
+        let ports = [free_port(), free_port()];
+        let _a = start_member(&ports, 120, 0).await;
+        let b = start_member(&ports, 120, 1).await;
+        let w = writer(&[addr(ports[0]), addr(ports[1])]);
+        let rb = reader(addr(ports[1]));
+        let before = vec![p("/t/one"), p("/t/two"), p("/t/three")];
+        w.publish(before.iter().cloned()).await.unwrap();
+        converges_to("b", &rb, &before, &before).await;
+        drop(b);
+        // The first of these is attempted while b's connection is still
+        // nominally alive, the second after it has been marked dead. Those are
+        // different paths through the write connection, and both have to end
+        // with the path on b once it is back.
+        let during = vec![p("/t/four"), p("/t/five")];
+        for path in during.iter() {
+            let _ = w.publish(iter::once(path.clone())).await;
+        }
+        let _b = start_member(&ports, 120, 1).await;
+        // Give b's connection a reason to reconnect.
+        let _ = w.publish(iter::once(p("/t/six"))).await;
+        let all = before
+            .iter()
+            .chain(during.iter())
+            .cloned()
+            .chain(iter::once(p("/t/six")))
+            .collect::<Vec<_>>();
+        converges_to("b", &rb, &all, &all).await;
+    }
+
+    /// A connection that falls far enough behind the publisher to be dropped
+    /// from the broadcast has to recover the batches it never saw. It is the
+    /// same requirement as the test above, reached by a different route: one
+    /// slow member must not end up permanently missing paths.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_connection_that_falls_behind_recovers_what_it_missed() {
+        let _ = env_logger::try_init();
+        let ports = [free_port(), free_port()];
+        let _a = start_member(&ports, 120, 0).await;
+        let _b = start_member(&ports, 120, 1).await;
+        let proxy = Proxy::new(addr(ports[1])).await;
+        let w = writer(&[addr(ports[0]), proxy.addr]);
+        let rb = reader(addr(ports[1]));
+        let first = vec![p("/t/first")];
+        w.publish(first.iter().cloned()).await.unwrap();
+        converges_to("b", &rb, &first, &first).await;
+        // Stall b's connection in a handshake, then run far enough ahead of it
+        // that the broadcast drops what it hasn't consumed.
+        proxy.set(Link::BlackHole);
+        let many = (0..150).map(|i| p(&format!("/t/many/{i}"))).collect::<Vec<_>>();
+        for path in many.iter() {
+            let _ = w.publish(iter::once(path.clone())).await;
+        }
+        proxy.set(Link::Up);
+        let _ = w.publish(iter::once(p("/t/last"))).await;
+        let all = first
+            .iter()
+            .chain(many.iter())
+            .cloned()
+            .chain(iter::once(p("/t/last")))
+            .collect::<Vec<_>>();
+        converges_to("b", &rb, &all, &all).await;
     }
 
     /// An unpublish that could not be delivered has to be retried, not
