@@ -348,16 +348,31 @@ impl App {
         // global q/l/Tab shortcuts: a Local status overlay swallows any key to
         // dismiss, and a Remote text field must receive every keystroke because
         // hostnames and paths routinely contain 'q'/'l'.
-        match self.tab {
-            Tab::Local if self.local.status_open() => return self.local.on_key(code),
+        //
+        // Whatever they return still goes through the rest of this function.
+        // Returning early here would hand the action straight back to the
+        // caller and skip the confirmation gate at the bottom — which is how a
+        // read gate set from the duration form used to apply with no
+        // confirmation at all, while the same action chosen from the list was
+        // confirmed.
+        let captured = match self.tab {
+            Tab::Local if self.local.status_open() => Some(self.local.on_key(code)),
             Tab::Local if self.local.services_capturing_text() => {
-                return self.local.on_key(code);
+                Some(self.local.on_key(code))
             }
-            Tab::Remote if self.remote.capturing_text() => {
-                return self.remote.on_key(code);
-            }
-            _ => {}
-        }
+            Tab::Remote if self.remote.capturing_text() => Some(self.remote.on_key(code)),
+            _ => None,
+        };
+        let action = match captured {
+            Some(action) => action,
+            None => self.on_key_uncaptured(code)?,
+        }?;
+        self.post_action(action)
+    }
+
+    /// The global shortcuts and per-tab routing that a screen owning the
+    /// keyboard bypasses. `None` means the key was handled here.
+    fn on_key_uncaptured(&mut self, code: KeyCode) -> Option<Option<Action>> {
         let action = match code {
             KeyCode::Char('q') => {
                 self.should_quit = true;
@@ -385,7 +400,14 @@ impl App {
                 Tab::Local => self.local.on_key(code),
                 Tab::Remote => self.remote.on_key(code),
             },
-        }?;
+        };
+        Some(action)
+    }
+
+    /// Turn an action a screen produced into the one the event loop runs:
+    /// navigation is applied here, and anything destructive is held behind a
+    /// confirmation instead of being returned.
+    fn post_action(&mut self, action: Action) -> Option<Action> {
         match action {
             // Open the Local tab's local admin panel surface directly on the
             // requested panel (Admins / Permissions), kicking off its refresh.
