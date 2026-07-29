@@ -861,7 +861,7 @@ pub async fn await_issuance(
 /// template's `--force`-gated `apply()` installs it).
 ///
 /// The default path queues a signing request and waits for an admin to approve
-/// it remotely (`netidx admin CA approve`): the enrollee shows a request code
+/// it remotely (`netidx admin ca approve`): the enrollee shows a request code
 /// (the CSR key's fingerprint) the admin matches out of band. The synchronous
 /// path (an admin present at this machine types their password) remains one
 /// answer away; it's the only path where the id-map groups are chosen here.

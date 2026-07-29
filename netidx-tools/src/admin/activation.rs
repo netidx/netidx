@@ -62,7 +62,7 @@ pub(crate) enum Cmd {
 #[derive(Args, Debug)]
 pub(crate) struct ServiceCtlArgs {
     /// Immutable UUID of the ONE admin server to control. Required with
-    /// `--server`; obtain it from `netidx admin CA servers`. Restart remains
+    /// `--server`; obtain it from `netidx admin ca servers`. Restart remains
     /// deliberately per-server. Ignored locally.
     #[arg(long, value_name = "SERVER-ID")]
     pub target: Option<AdminServerId>,

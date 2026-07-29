@@ -88,7 +88,7 @@ pub(crate) struct RemoteAuthFlags {
     #[arg(long = "password-stdin", conflicts_with = "password_file")]
     pub password_stdin: bool,
     /// The admin server's CA fingerprint, obtained out of band (view it with
-    /// `netidx admin CA fingerprint <ip:port>`). Required off the CA host;
+    /// `netidx admin ca fingerprint <ip:port>`). Required off the CA host;
     /// auto-verified against the local CA cert on it.
     #[arg(long = "accept-glyph")]
     pub accept_glyph: Option<String>,

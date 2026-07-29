@@ -44,7 +44,7 @@ const VAULT_VERSION: u32 = 1;
 /// The off-box break-glass signing credential the operator stores in a
 /// safe — the only key-recovery credential that ever leaves the box.
 /// Minted once at init via [`create`]; rotated on-box via
-/// `admin CA recovery rotate`. With [`crate::admin_server::AUTORENEW_ADMIN`]
+/// `admin ca recovery rotate`. With [`crate::admin_server::AUTORENEW_ADMIN`]
 /// these are the only two signing (master-key-holding) slots.
 /// Crockford base32 alphabet (digits + uppercase, excluding I L O U — the
 /// characters easiest to confuse written down or read aloud). The recovery

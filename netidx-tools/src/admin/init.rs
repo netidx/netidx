@@ -262,7 +262,7 @@ pub(crate) struct WorkstationFlags {
     /// discovery — the non-interactive join path. On a TLS admin domain this
     /// enrolls a client certificate (queued for admin approval); confirm the
     /// admin domain out of band with `--accept-glyph` (view the glyph via `netidx
-    /// admin CA fingerprint <ip:port>`). Ignored when a `--parent-*` flag
+    /// admin ca fingerprint <ip:port>`). Ignored when a `--parent-*` flag
     /// specifies the parent explicitly.
     #[arg(long = "admin-server")]
     admin_server: Option<SocketAddr>,
@@ -741,7 +741,7 @@ pub(crate) struct PublisherFlags {
     /// discovery — the non-interactive join path. On a TLS admin domain this
     /// enrolls a client certificate (queued for admin approval); confirm the
     /// admin domain out of band with `--accept-glyph` (view the glyph via `netidx
-    /// admin CA fingerprint <ip:port>`). Takes precedence over `--addr` /
+    /// admin ca fingerprint <ip:port>`). Takes precedence over `--addr` /
     /// `--auth`.
     #[arg(long = "admin-server")]
     admin_server: Option<SocketAddr>,

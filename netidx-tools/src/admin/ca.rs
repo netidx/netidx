@@ -578,7 +578,7 @@ pub(crate) struct JoinArgs {
     #[arg(long = "id-map-group", num_args = 1)]
     pub id_map_groups: Vec<String>,
     /// The admin server's CA fingerprint, obtained out of band (view it with
-    /// `netidx admin CA fingerprint <ip:port>`); confirms the admin domain identity.
+    /// `netidx admin ca fingerprint <ip:port>`); confirms the admin domain identity.
     #[arg(long = "accept-glyph")]
     pub accept_glyph: Option<String>,
     /// Read the admin password from a file (never on the command line).
@@ -789,7 +789,7 @@ pub(crate) struct RequestArgs {
 pub(crate) struct SignArgs {
     /// Path to the CSR (PEM-encoded) to sign. Prompted when omitted.
     /// (To approve queued enrollment requests instead of signing a CSR
-    /// file, use `netidx admin CA approve`.)
+    /// file, use `netidx admin ca approve`.)
     pub csr_path: Option<PathBuf>,
     /// SubjectAltName entry to embed in the signed cert. Repeatable.
     /// The CA is authoritative — these override whatever the CSR
@@ -1136,7 +1136,7 @@ fn servers(f: ServersArgs) -> Result<()> {
         );
     }
     println!(
-        "\nPermanent removal requires the exact UUID: `netidx admin CA remove-server \
+        "\nPermanent removal requires the exact UUID: `netidx admin ca remove-server \
          <server-id>`."
     );
     Ok(())
@@ -1255,7 +1255,7 @@ fn ca_dir_for(override_: Option<PathBuf>) -> Result<PathBuf> {
     }
 }
 
-/// `admin CA recovery {rotate,status}`: mint a fresh recovery password on the
+/// `admin ca recovery {rotate,status}`: mint a fresh recovery password on the
 /// CA box (authorized by the box's own autorenew keytab, so a lost recovery
 /// password is recoverable while the machine lives), or report the recovery
 /// slot's state.
@@ -1325,7 +1325,7 @@ fn ensure_externally_signed(dir: &Path) -> Result<()> {
     if !ca::CaLifetimes::load(dir)?.externally_signed {
         bail!(
             "{} is not an externally-signed CA — create one with \
-             `netidx admin CA init --external-sign`",
+             `netidx admin ca init --external-sign`",
             dir.display()
         );
     }
@@ -1351,7 +1351,7 @@ fn external_emit_csr(a: ExternalDirArgs) -> Result<()> {
         })?
     };
     println!("wrote {} — get it signed by your PKI, then run:", csr_path.display());
-    println!("  netidx admin CA external install <signed-cert.pem> [--root <root.pem>]");
+    println!("  netidx admin ca external install <signed-cert.pem> [--root <root.pem>]");
     Ok(())
 }
 
@@ -1441,7 +1441,7 @@ async fn report_external_install(
                 "installed the externally-signed CA certificate.\n\
                  admin server configured ({})\n\
                  CA-cert auto-renewal is DISABLED (external issuer); re-run \
-                 `netidx admin CA external install` when your PKI re-signs it.",
+                 `netidx admin ca external install` when your PKI re-signs it.",
                 cfg_path.display()
             ));
             plan::service::offer(ans, need, gate).await
@@ -1991,7 +1991,7 @@ pub(crate) fn request(p: RequestArgs) -> Result<()> {
     println!("wrote CSR        (0644): {}", out_csr.display());
     println!();
     println!("# Next step: hand the CSR to a CA admin who runs");
-    println!("#   netidx admin CA sign {} --out <cert.pem>", out_csr.display());
+    println!("#   netidx admin ca sign {} --out <cert.pem>", out_csr.display());
     Ok(())
 }
 
@@ -2186,7 +2186,7 @@ fn queue(f: QueueArgs) -> Result<()> {
                 e.peer,
             );
         }
-        println!("  approve them all with `netidx admin CA approve --renewals`.");
+        println!("  approve them all with `netidx admin ca approve --renewals`.");
         if !pending.is_empty() {
             println!();
         }
@@ -2244,7 +2244,7 @@ fn queue(f: QueueArgs) -> Result<()> {
             }
         }
         println!(
-            "\napprove with `netidx admin CA approve <code>` after matching the code \
+            "\napprove with `netidx admin ca approve <code>` after matching the code \
              out of band."
         );
     }
@@ -2359,7 +2359,7 @@ fn list() -> Result<()> {
         }
     };
     if !dir.join("certificate.pem").is_file() {
-        println!("# no CA at {} — run `netidx admin CA init` first", dir.display());
+        println!("# no CA at {} — run `netidx admin ca init` first", dir.display());
         return Ok(());
     }
     println!("CA at {}", dir.display());
@@ -2367,7 +2367,7 @@ fn list() -> Result<()> {
         && let Ok(fp) = Fingerprint::of_cert_pem(&cert)
     {
         println!(
-            "  fingerprint: {} … (`netidx admin CA fingerprint` for the full id)",
+            "  fingerprint: {} … (`netidx admin ca fingerprint` for the full id)",
             fp.short()
         );
     }

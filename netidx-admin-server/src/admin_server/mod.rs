@@ -94,7 +94,7 @@ const PUSH_TIMEOUT: Duration = Duration::from_secs(10);
 /// policy whose only over-the-wire power is approving verified renewals.
 /// When [`CaRole::autorenew`](crate::admin_server_config::CaRole) names its
 /// keytab, the daemon authenticates as this slot to approve renewals
-/// in-process — the same narrow principal the separate `admin CA auto-approve`
+/// in-process — the same narrow principal the separate `admin ca auto-approve`
 /// process used to be, now without the extra process.
 pub use netidx_admin_proto::policy::AUTORENEW_ADMIN;
 
@@ -528,7 +528,7 @@ impl Server {
                             "admin-server: CANNOT SIGN — the autorenew credential is \
                              unavailable: {e:#}. The CA serves read-only (auth/list/deny \
                              work; issue/enroll/approve/revoke fail). Recover with \
-                             `netidx admin CA recovery rotate`."
+                             `netidx admin ca recovery rotate`."
                         );
                         None
                     }
@@ -536,7 +536,7 @@ impl Server {
                 None => {
                     error!(
                         "admin-server: CANNOT SIGN — this CA has no autorenew credential. \
-                         Set one up with `netidx admin CA auto-approve`; until then it serves \
+                         Set one up with `netidx admin ca auto-approve`; until then it serves \
                          read-only."
                     );
                     None

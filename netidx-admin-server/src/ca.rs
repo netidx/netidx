@@ -756,7 +756,7 @@ pub fn maybe_renew_ca_cert(
     Ok(true)
 }
 
-/// Inspect a PEM-encoded CSR — the engine half of `netidx admin CA sign`'s
+/// Inspect a PEM-encoded CSR — the engine half of `netidx admin ca sign`'s
 /// pre-flight confirmation. Returns the requested subject CN and the
 /// embedded SAN list. The CA admin is expected to look at this before
 /// signing, since `Ca::sign_request` deliberately ignores whatever SAN

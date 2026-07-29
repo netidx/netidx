@@ -286,7 +286,7 @@ async fn staged_ca_lock(
 }
 
 /// **The** entry point for building a new vaulted CA, shared verbatim
-/// by `netidx admin CA init` and the `netidx admin resolver install`
+/// by `netidx admin ca init` and the `netidx admin resolver install`
 /// "create a new CA" branch — so the operator gets the identical
 /// experience (admin/policy, identicon, the "set up the CA?"
 /// question) either way.
