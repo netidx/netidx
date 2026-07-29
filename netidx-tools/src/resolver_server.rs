@@ -3,19 +3,19 @@ use arcstr::ArcStr;
 use clap::Args;
 #[cfg(unix)]
 use daemonize::Daemonize;
-use enumflags2::make_bitflags;
-use extended_notify::{
-    ArcPath, EventBatch, EventKind, Interest, Watched, Watcher, WatcherConfigBuilder,
-};
 use log::{info, warn};
 use netidx::resolver_server::{
     NotApplied, Server,
     config::{Config, file},
 };
-use std::path::PathBuf;
+use std::{
+    collections::hash_map::DefaultHasher,
+    hash::{Hash, Hasher},
+    path::PathBuf,
+    time::Duration,
+};
 #[cfg(unix)]
 use tokio::signal::unix::{Signal, SignalKind, signal};
-use tokio::sync::mpsc;
 
 #[derive(Args, Debug)]
 pub(crate) struct Params {
@@ -34,21 +34,8 @@ pub(crate) struct Params {
     id: usize,
 }
 
-// What we tell the operator when the file watcher is unavailable. On
-// unix SIGHUP is still a working reload trigger; on platforms without
-// unix signals the watcher was the only trigger, so losing it disables
-// live reload entirely.
-#[cfg(unix)]
-const RELOAD_FALLBACK: &str = "continuing with SIGHUP-only reload";
-#[cfg(not(unix))]
-const RELOAD_FALLBACK: &str = "live config reload is now disabled";
-
-/// SIGHUP-driven reload trigger. On unix this is a real signal stream;
-/// elsewhere it simply never fires, leaving the file watcher as the
-/// only reload trigger. Keeping it as an always-present (if pending)
-/// select arm means the reload loop's `select!` never ends up with all
-/// branches disabled — which would otherwise panic on Windows the
-/// moment the watcher arm is gated off.
+/// SIGHUP-driven "reload now" trigger. On unix this is a real signal stream;
+/// elsewhere it simply never fires, leaving the poll as the only trigger.
 enum Sighup {
     #[cfg(unix)]
     Signal(Signal),
@@ -95,9 +82,49 @@ async fn tokio_run(
     run_reload_loop(server, config_path, baseline).await
 }
 
-/// Reload loop, driven by SIGHUP (unix) and/or on-disk changes to the
-/// config or any `include_permissions` file (all platforms). Both
-/// triggers run the same reload.
+/// How often the config and its `include_permissions` files are read to see
+/// whether they have changed. The same interval a netidx client polls its own
+/// config on.
+const POLL_INTERVAL: Duration = Duration::from_secs(30);
+
+/// A fingerprint of every file the running configuration is made of: the main
+/// config, then each `include_permissions` entry in order, with a marker for
+/// one that isn't there.
+///
+/// This is a poll, and it compares content, because the filesystem-watch
+/// version of it did not work. Every tool that writes these files — the admin
+/// plane certainly, and most editors — replaces them by renaming a new file
+/// over the top, so a watch has to follow the path onto a fresh inode each
+/// time. When it silently failed to, the daemon had no way to tell: the event
+/// channel stayed open and the loop went on waiting for events that could not
+/// arrive, and a resolver applied the first change pushed to it and ignored
+/// every one after. There are at most a handful of small files here. Reading
+/// them twice a minute costs nothing and cannot go quietly deaf.
+///
+/// Comparing content rather than mtime also means a rewrite that changes
+/// nothing is not a reload, and a torn read needs no special handling — it
+/// hashes differently from the finished file, so the next pass picks that up.
+async fn fingerprint(config_path: &std::path::Path, includes: &[ArcStr]) -> u64 {
+    async fn hash_into(h: &mut DefaultHasher, path: &std::path::Path) {
+        match tokio::fs::read(path).await {
+            Ok(bytes) => {
+                1u8.hash(h);
+                bytes.hash(h)
+            }
+            Err(_) => 0u8.hash(h),
+        }
+    }
+    let mut h = DefaultHasher::new();
+    hash_into(&mut h, config_path).await;
+    for p in includes {
+        hash_into(&mut h, std::path::Path::new(p.as_str())).await;
+    }
+    h.finish()
+}
+
+/// Reload loop, driven by SIGHUP (unix) and by on-disk changes to the config
+/// or any `include_permissions` file (all platforms). Both triggers run the
+/// same reload.
 async fn run_reload_loop(
     server: Server,
     config_path: PathBuf,
@@ -107,36 +134,10 @@ async fn run_reload_loop(
     // used only to notice a `member_servers` edit, which is the one field
     // nothing about a running server can act on. See `members_changed`.
     let mut sighup = Sighup::new()?;
-
-    // File-watch path: drive the same reload as SIGHUP whenever the
-    // config or any include_permissions file changes on disk. The
-    // watcher is best-effort — if it fails to start, log and fall
-    // back to SIGHUP (unix) or no live reload (elsewhere).
-    //
-    // `_watched` is held purely for its Drop side effect (RAII watch
-    // stop). It's reassigned when the include set changes; the
-    // assignment is meaningful even though the value isn't read
-    // again — the prior Vec drops, ending those watches.
-    let (events_tx, mut events_rx) = mpsc::channel::<EventBatch>(64);
-    #[allow(unused_assignments)]
-    let (watcher_opt, mut _watched, mut included_paths) =
-        match start_watcher_for(&config_path, &baseline, events_tx) {
-            Ok((w, h, p)) => (Some(w), h, p),
-            Err(e) => {
-                warn!(
-                    "resolver: failed to install config-file watcher: {e:#}; \
-                     {RELOAD_FALLBACK}"
-                );
-                (None, Vec::new(), Vec::new())
-            }
-        };
-    // Gate on this rather than just on the channel state: when the
-    // watcher fails to start, `events_tx` was already dropped inside
-    // `start_watcher_for` and `events_rx.recv()` would return `None`
-    // immediately — the same path codex flagged as a daemon-kill,
-    // just at startup. Initialising from `watcher_opt.is_some()`
-    // covers both that case and post-start watcher death uniformly.
-    let mut watcher_alive = watcher_opt.is_some();
+    // The include set comes from the running config, so it follows an edit
+    // that adds or drops an include file.
+    let mut includes = baseline.include_permissions.clone();
+    let mut current = fingerprint(&config_path, &includes).await;
 
     loop {
         let trigger = tokio::select! {
@@ -145,69 +146,36 @@ async fn run_reload_loop(
             // the server rather than waiting to be hard-killed.
             _ = netidx_activation::shutdown::wait() => break Ok(()),
             _ = sighup.recv() => Some("SIGHUP"),
-            batch = events_rx.recv(), if watcher_alive => match batch {
-                None => {
-                    // The watcher task / channel died. File-change
-                    // reloads are off from here on. Disabling the
-                    // select arm via `watcher_alive` avoids the
-                    // busy-loop that would otherwise come from
-                    // `recv()` returning `None` immediately for every
-                    // subsequent poll on a closed receiver.
-                    warn!(
-                        "resolver: file watcher channel closed; {RELOAD_FALLBACK}"
-                    );
-                    watcher_alive = false;
+            _ = tokio::time::sleep(POLL_INTERVAL) => {
+                let latest = fingerprint(&config_path, &includes).await;
+                if latest == current {
                     continue;
                 }
-                Some(b) if is_established_only(&b) => continue,
-                Some(_) => Some("file change"),
-            },
+                current = latest;
+                Some("file change")
+            }
         };
         let Some(trigger) = trigger else { break Ok(()) };
         info!("resolver: {trigger} — reloading");
         match handle_reload(&server, &config_path, &baseline).await {
             Ok(new_file) => {
                 info!("config reloaded successfully");
-                // Re-arm the whole watch set after EVERY reload, not just
-                // when `include_permissions` changed.
-                //
-                // Every writer of these files — the admin plane, and most
-                // editors — replaces them by renaming a temp file over the
-                // top, which gives the path a new inode. A watch that
-                // followed the old inode is then watching something that no
-                // longer has a name, and nothing here would ever notice: the
-                // event channel stays open, so the loop goes on waiting for
-                // events that cannot arrive. Observed in the lab as a
-                // resolver that applied the first pushed change and silently
-                // ignored every one after it, with `/proc/<pid>/fdinfo`
-                // showing the config's watch simply gone.
-                //
-                // Dropping the old handles first makes the new ones genuinely
-                // new watches rather than possible aliases of dead ones. The
-                // gap that opens is a few syscalls wide, and a change landing
-                // inside it would have to beat a reload that has only just
-                // finished reading the file.
-                if watcher_alive && let Some(w) = watcher_opt.as_ref() {
-                    if new_file.include_permissions != included_paths {
-                        info!(
-                            "include_permissions changed ({} → {} paths)",
-                            included_paths.len(),
-                            new_file.include_permissions.len(),
-                        );
-                    }
-                    _watched = Vec::new();
-                    match watch_all(w, &config_path, &new_file.include_permissions) {
-                        Ok(new_handles) => {
-                            _watched = new_handles;
-                            included_paths = new_file.include_permissions.clone();
-                        }
-                        Err(e) => warn!(
-                            "resolver: re-arming the watch set failed: {e:#}; \
-                             file-change reloads are off until restart — {RELOAD_FALLBACK}"
-                        ),
-                    }
+                if new_file.include_permissions != includes {
+                    info!(
+                        "include_permissions changed ({} → {} paths)",
+                        includes.len(),
+                        new_file.include_permissions.len(),
+                    );
+                    includes = new_file.include_permissions.clone();
                 }
+                // Re-read after applying, so that a file which changed again
+                // while we were reloading is noticed on the next pass, and so
+                // that a SIGHUP doesn't leave a stale fingerprint behind.
+                current = fingerprint(&config_path, &includes).await;
             }
+            // Leave the fingerprint where it is: a config we could not apply
+            // gets tried again when it changes — which is what an operator
+            // fixing it does — rather than failing identically every 30s.
             Err(e) => warn!("resolver: reload failed: {e:#}"),
         }
     }
@@ -224,68 +192,6 @@ async fn handle_reload(
     let not_applied = server.reload(&new_file).await.context("applying the config")?;
     warn_not_applied(&not_applied);
     Ok(new_file)
-}
-
-/// Start the file watcher and arm watches for the main config plus
-/// every `include_permissions` entry from `baseline`. Returns the
-/// watcher (kept alive for the lifetime of the daemon), the active
-/// `Watched` handles (one per path; drop to stop), and the path list
-/// the handles correspond to (used downstream to detect changes that
-/// require a rebuild).
-fn start_watcher_for(
-    config_path: &std::path::Path,
-    baseline: &file::Config,
-    events_tx: mpsc::Sender<EventBatch>,
-) -> Result<(Watcher, Vec<Watched>, Vec<ArcStr>)> {
-    let watcher = WatcherConfigBuilder::default()
-        .event_handler(events_tx)
-        .build()
-        .context("building config-file watcher")?
-        .start()
-        .context("starting config-file watcher")?;
-    let watched = watch_all(&watcher, config_path, &baseline.include_permissions)
-        .context("arming initial watch set")?;
-    Ok((watcher, watched, baseline.include_permissions.clone()))
-}
-
-/// Add watches for the main config + each include_permissions path.
-/// Returns the resulting `Watched` handles in the same order as the
-/// input (main config first, then includes). Caller is responsible
-/// for keeping the handles alive — drop ends the watch.
-fn watch_all(
-    watcher: &Watcher,
-    config_path: &std::path::Path,
-    include_paths: &[ArcStr],
-) -> Result<Vec<Watched>> {
-    // Established is included so the receiver loop can log when
-    // watches are armed (and the `is_established_only` guard
-    // suppresses the would-be reload that those synthetic events
-    // would otherwise trigger). Modify / Create / Delete are the
-    // real-change interests; Create covers the rename-into-place that
-    // atomic-write tools produce.
-    let interests = make_bitflags!(Interest::{Established | Modify | Create | Delete});
-    let mut handles = Vec::with_capacity(1 + include_paths.len());
-    handles.push(
-        watcher
-            .add(ArcPath::from(config_path), interests)
-            .context("watching main config")?,
-    );
-    for p in include_paths {
-        let path = std::path::PathBuf::from(p.as_str());
-        handles.push(
-            watcher
-                .add(ArcPath::from(path.as_path()), interests)
-                .with_context(|| format!("watching include_permissions {p:?}"))?,
-        );
-    }
-    Ok(handles)
-}
-
-/// True if every event in the batch is the synthetic `Established`
-/// event. Those fire once per watch when the watcher arms and don't
-/// represent an on-disk change, so they shouldn't trigger a reload.
-fn is_established_only(batch: &EventBatch) -> bool {
-    batch.iter().all(|(_, e)| matches!(e.event, EventKind::Event(Interest::Established)))
 }
 
 fn load_file_config(path: &std::path::Path) -> Result<file::Config> {
@@ -361,6 +267,61 @@ mod tests {
 
     fn empty_config() -> file::Config {
         file::ConfigBuilder::default().member_servers(vec![]).build().unwrap()
+    }
+
+    /// The case a filesystem watch got wrong: the admin plane, and most
+    /// editors, replace a config by renaming a new file over the top, so the
+    /// path gets a fresh inode every time. Nothing here follows an inode.
+    #[tokio::test]
+    async fn a_rename_over_changes_the_fingerprint_every_time() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = dir.path().join("resolver.json");
+        let tmp = dir.path().join("resolver.json.tmp");
+        std::fs::write(&cfg, b"v0").unwrap();
+        let mut last = fingerprint(&cfg, &[]).await;
+        for round in 1..=4 {
+            std::fs::write(&tmp, format!("v{round}")).unwrap();
+            std::fs::rename(&tmp, &cfg).unwrap();
+            let now = fingerprint(&cfg, &[]).await;
+            assert_ne!(now, last, "replace {round} went unnoticed");
+            last = now;
+        }
+        // A rewrite that changes nothing is not a change.
+        std::fs::write(&tmp, b"v4").unwrap();
+        std::fs::rename(&tmp, &cfg).unwrap();
+        assert_eq!(fingerprint(&cfg, &[]).await, last);
+    }
+
+    /// An `include_permissions` file is part of the configuration, and a
+    /// missing one has to be distinguishable from an empty one — otherwise
+    /// deleting it would look like no change at all.
+    #[tokio::test]
+    async fn includes_are_part_of_the_fingerprint() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = dir.path().join("resolver.json");
+        let perms = dir.path().join("perms.json");
+        std::fs::write(&cfg, b"{}").unwrap();
+        let includes = [ArcStr::from(perms.to_str().unwrap())];
+
+        let absent = fingerprint(&cfg, &includes).await;
+        std::fs::write(&perms, b"").unwrap();
+        let empty = fingerprint(&cfg, &includes).await;
+        assert_ne!(absent, empty, "a missing include must not hash as an empty one");
+
+        std::fs::write(&perms, b"{\"/\":{}}").unwrap();
+        let filled = fingerprint(&cfg, &includes).await;
+        assert_ne!(empty, filled);
+
+        // ... and the same bytes under a different name are a different set.
+        let other = dir.path().join("other.json");
+        std::fs::write(&other, b"{\"/\":{}}").unwrap();
+        let renamed = fingerprint(&cfg, &[ArcStr::from(other.to_str().unwrap())]).await;
+        assert_eq!(filled, renamed, "content is what is hashed, not the path");
+        assert_ne!(
+            filled,
+            fingerprint(&cfg, &[]).await,
+            "dropping the include is a change"
+        );
     }
 
     #[test]

@@ -82,7 +82,6 @@ netidx-wsproxy = { path = "../netidx-wsproxy", version = "0.32.0", default-featu
 enumflags2 = { workspace = true }
 # File-watching for live reload (resolver-server config + perms;
 # `netidx-id-map` uses the same crate for the same reason).
-extended-notify = { workspace = true }
 parking_lot = { workspace = true }
 rpassword = { workspace = true }
 serde_derive = { workspace = true }
