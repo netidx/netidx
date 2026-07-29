@@ -39,8 +39,14 @@ use std::{collections::HashMap, net::SocketAddr, path::PathBuf, time::Duration};
 /// load generator.
 pub const MIN_SYNC_INTERVAL: Duration = Duration::from_secs(10);
 
-/// The default minimum, giving the 12–24h spread.
-pub const DEFAULT_SYNC_INTERVAL: Duration = Duration::from_secs(43200);
+/// The default minimum, giving a 30–60 minute spread.
+///
+/// This is the bound on how long an administrative change takes to reach a
+/// client, and so on how long a newly added resolver has to be held back from
+/// serving reads before every publisher can be expected to have found it. A
+/// map fetch is small and infrequent enough that halving the day it used to
+/// be costs nothing worth counting.
+pub const DEFAULT_SYNC_INTERVAL: Duration = Duration::from_secs(1800);
 
 /// How long to wait before the next pass: somewhere in `interval..=2 *
 /// interval`, redrawn every cycle so hosts spread out and stay spread.

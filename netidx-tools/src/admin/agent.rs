@@ -23,8 +23,8 @@ pub(crate) struct RunArgs {
     #[arg(long)]
     pub server: Option<SocketAddr>,
     /// Minimum seconds between admin domain syncs. Each wait is drawn from
-    /// this to twice this, so hosts don't sync in lockstep. Default 12
-    /// hours, giving 12–24.
+    /// this to twice this, so hosts don't sync in lockstep. Default 30
+    /// minutes, giving 30–60.
     #[arg(long, default_value_t = sync::DEFAULT_SYNC_INTERVAL.as_secs())]
     pub sync_interval: u64,
     /// Seconds between certificate renewal scans. Default 6 hours.
