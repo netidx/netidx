@@ -168,35 +168,42 @@ async fn run_reload_loop(
         match handle_reload(&server, &config_path, &baseline).await {
             Ok(new_file) => {
                 info!("config reloaded successfully");
-                // If `include_permissions` changed, rebuild watches
-                // so newly-included files are observed (and removed
-                // ones stop firing). Re-watching the main config is
-                // a no-op idempotent — extended-notify de-dupes.
-                // Also gate on `watcher_alive`: if the watcher
-                // channel closed post-start, the underlying watch
-                // task is gone and adding paths to its `Watcher`
-                // handle would silently do nothing — better to skip
-                // the rebuild entirely until the operator restarts.
-                if watcher_alive
-                    && let Some(w) = watcher_opt.as_ref()
-                    && new_file.include_permissions != included_paths
-                {
-                    info!(
-                        "include_permissions changed; rebuilding watch set ({} → {} paths)",
-                        included_paths.len(),
-                        new_file.include_permissions.len(),
-                    );
+                // Re-arm the whole watch set after EVERY reload, not just
+                // when `include_permissions` changed.
+                //
+                // Every writer of these files — the admin plane, and most
+                // editors — replaces them by renaming a temp file over the
+                // top, which gives the path a new inode. A watch that
+                // followed the old inode is then watching something that no
+                // longer has a name, and nothing here would ever notice: the
+                // event channel stays open, so the loop goes on waiting for
+                // events that cannot arrive. Observed in the lab as a
+                // resolver that applied the first pushed change and silently
+                // ignored every one after it, with `/proc/<pid>/fdinfo`
+                // showing the config's watch simply gone.
+                //
+                // Dropping the old handles first makes the new ones genuinely
+                // new watches rather than possible aliases of dead ones. The
+                // gap that opens is a few syscalls wide, and a change landing
+                // inside it would have to beat a reload that has only just
+                // finished reading the file.
+                if watcher_alive && let Some(w) = watcher_opt.as_ref() {
+                    if new_file.include_permissions != included_paths {
+                        info!(
+                            "include_permissions changed ({} → {} paths)",
+                            included_paths.len(),
+                            new_file.include_permissions.len(),
+                        );
+                    }
+                    _watched = Vec::new();
                     match watch_all(w, &config_path, &new_file.include_permissions) {
                         Ok(new_handles) => {
-                            // Drop old handles AFTER establishing the
-                            // new ones so we don't have a window with
-                            // no watch on the main config.
                             _watched = new_handles;
                             included_paths = new_file.include_permissions.clone();
                         }
                         Err(e) => warn!(
-                            "resolver: rebuilding watch set failed: {e:#}; \
-                             keeping previous watches in place"
+                            "resolver: re-arming the watch set failed: {e:#}; \
+                             file-change reloads are off until restart — {RELOAD_FALLBACK}"
                         ),
                     }
                 }
@@ -303,8 +310,23 @@ fn load_file_config(path: &std::path::Path) -> Result<file::Config> {
 /// Comparison is by serialized JSON: structural equality without depending on
 /// `PartialEq`, and none of these fields have nondeterministic ordering.
 fn members_changed(orig: &file::Config, new: &file::Config) -> bool {
-    serde_json::to_string(&orig.member_servers).ok()
-        != serde_json::to_string(&new.member_servers).ok()
+    // `read_gated` lives inside `member_servers` and is the one field in there
+    // that a reload applies immediately, so comparing the array as-is would
+    // tell an operator to roll the cluster every time they opened or shut a
+    // gate — the exact thing the gate exists to avoid.
+    let without_gates = |cfg: &file::Config| {
+        serde_json::to_string(
+            &cfg.member_servers
+                .iter()
+                .map(|m| file::MemberServer {
+                    read_gated: Default::default(),
+                    ..m.clone()
+                })
+                .collect::<Vec<_>>(),
+        )
+        .ok()
+    };
+    without_gates(orig) != without_gates(new)
 }
 
 fn warn_members_changed(orig: &file::Config, new: &file::Config) {
@@ -354,6 +376,37 @@ mod tests {
                 .unwrap(),
         );
         assert!(!members_changed(&original, &original));
+        assert!(members_changed(&original, &changed));
+    }
+
+    /// The gate is the one field inside `member_servers` that a reload applies
+    /// straight away, so changing it must not tell an operator to roll the
+    /// cluster — that is the very thing a gate exists to avoid.
+    #[test]
+    fn a_read_gate_change_is_not_a_member_edit() {
+        let mut original = empty_config();
+        original.member_servers.push(
+            file::MemberServerBuilder::default()
+                .addr("127.0.0.1:4564".parse().unwrap())
+                .bind_addr("127.0.0.1".parse().unwrap())
+                .auth(file::Auth::Anonymous)
+                .build()
+                .unwrap(),
+        );
+        for gate in [
+            netidx::resolver_server::config::ReadGate::Yes,
+            netidx::resolver_server::config::ReadGate::Until(chrono::Utc::now()),
+            netidx::resolver_server::config::ReadGate::No,
+        ] {
+            let mut changed = original.clone();
+            changed.member_servers[0].read_gated = gate;
+            assert!(!members_changed(&original, &changed), "{gate:?}");
+        }
+        // ... but a real member edit alongside it still is one.
+        let mut changed = original.clone();
+        changed.member_servers[0].read_gated =
+            netidx::resolver_server::config::ReadGate::Yes;
+        changed.member_servers[0].addr = "127.0.0.1:4565".parse().unwrap();
         assert!(members_changed(&original, &changed));
     }
 
