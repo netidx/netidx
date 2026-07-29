@@ -52,14 +52,17 @@ const MAP_REFRESH_INTERVAL: Duration = Duration::from_secs(30);
 /// Poll this host's own resolver config into the admin domain map, and on a
 /// non-CA host keep the cached copy of that map current.
 ///
-/// The resolver config is re-read every pass rather than remembered from
-/// startup. Its member list, its referral edges, and its read gate are all
-/// things the admin plane or an operator can change on disk under a running
-/// process — the resolver itself now follows the file, so the map has to as
-/// well or it ends up describing a machine that no longer exists. The CA runs
-/// this too: it is usually a resolver, and nothing else would ever update its
-/// own entry.
-async fn spawn_map_refresh(state: &Arc<Server>) {
+/// The config is re-read every pass rather than remembered from startup,
+/// because the resolver itself now follows the file: the admin plane or an
+/// operator can change it under a running process, and a map built once at
+/// boot would go on describing a machine that no longer exists. What a pass
+/// can actually change is the reported status — today, the read gate. The rest
+/// of what it reads is checked against the CA-owned grant rather than
+/// overwriting it, so a config that has drifted shows up as a failing pass.
+///
+/// The CA runs this too. It is usually a resolver, and nothing else would ever
+/// update its own entry.
+async fn spawn_facts_poll(state: &Arc<Server>) {
     let weak = Arc::downgrade(state);
     tokio::spawn(async move {
         loop {
@@ -646,7 +649,7 @@ async fn serve_on(
     }
     // If the CA role names an autorenew keytab, approve verified renewals
     // in-process from here on (a no-op when it doesn't).
-    spawn_map_refresh(&state).await;
+    spawn_facts_poll(&state).await;
     let conns = Arc::new(Semaphore::new(MAX_CONNECTIONS));
     spawn_autorenew(&state, signs.clone()).await;
     spawn_local_control(&state, signs.clone()).await;
