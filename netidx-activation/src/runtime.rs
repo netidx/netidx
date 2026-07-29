@@ -9,7 +9,7 @@ use crate::{
     file::{ProcessCfg, Restart, Trigger, Unit},
     platform::{self, SigEvent},
 };
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use futures::{future::join_all, prelude::*, select_biased, stream::SelectAll};
 use log::{error, info, warn};
 use netidx::{
@@ -60,14 +60,31 @@ impl ProcessCfgExt for ProcessCfg {
             c.current_dir(dir);
         }
         platform::configure_privileges(&mut c, self.uid, self.gid)?;
+        // Name the file in these errors. They otherwise surface as "failed to
+        // setup process /usr/local/bin/netidx ... No such file or directory",
+        // which reads as a missing executable and sends you looking in the
+        // wrong place entirely.
         if let Some(stdin) = &self.stdin {
-            c.stdin(fs::File::open(stdin)?);
+            c.stdin(
+                fs::File::open(stdin)
+                    .with_context(|| format!("opening stdin {}", stdin.display()))?,
+            );
         }
+        // A log file the unit names but that does not exist yet is an ordinary
+        // thing to write down, not a reason to refuse to start the unit.
+        let log = |path: &std::path::Path| {
+            fs::OpenOptions::new()
+                .create(true)
+                .write(true)
+                .append(true)
+                .open(path)
+                .with_context(|| format!("opening log file {}", path.display()))
+        };
         if let Some(stdout) = &self.stdout {
-            c.stdout(fs::OpenOptions::new().write(true).append(true).open(stdout)?);
+            c.stdout(log(stdout)?);
         }
         if let Some(stderr) = &self.stderr {
-            c.stderr(fs::OpenOptions::new().write(true).append(true).open(stderr)?);
+            c.stderr(log(stderr)?);
         }
         match &self.environment {
             crate::file::Environment::Inherit(overrides) => {
@@ -413,7 +430,12 @@ async fn start_processes(
             None => {
                 processes.insert(
                     name.clone(),
-                    Process::new(publisher.clone(), name.clone(), unit.clone(), job.clone()),
+                    Process::new(
+                        publisher.clone(),
+                        name.clone(),
+                        unit.clone(),
+                        job.clone(),
+                    ),
                 );
             }
         }
@@ -494,9 +516,7 @@ async fn handle_control_conn(
                 // concurrent reload removed the unit); report it, don't hang.
                 pending.push((
                     display,
-                    tx.send(ToProcess::Control { op, reply: rtx })
-                        .ok()
-                        .map(|()| rrx),
+                    tx.send(ToProcess::Control { op, reply: rtx }).ok().map(|()| rrx),
                 ));
             }
         }
@@ -567,8 +587,13 @@ impl Server {
             Err(e) => error!("could not reconfigure, could not load units {}", e),
             Ok(u) => {
                 self.units = u;
-                start_processes(&self.publisher, &self.units, &mut self.processes, &self.job)
-                    .await;
+                start_processes(
+                    &self.publisher,
+                    &self.units,
+                    &mut self.processes,
+                    &self.job,
+                )
+                .await;
                 info!("units reloaded successfully")
             }
         }
@@ -585,8 +610,7 @@ impl Server {
         // behalf. Best-effort: a bind failure logs and the supervisor still
         // serves units.
         let units_dir = self.units_dir.clone().or_else(default_units_dir);
-        let mut control_listener =
-            units_dir.as_deref().and_then(platform::bind_control);
+        let mut control_listener = units_dir.as_deref().and_then(platform::bind_control);
         // Control handlers run in their own tasks; a `Reload` op reaches the
         // loop back through this channel so the reload runs here (where `self`
         // lives) and the handler gets the fresh unit set to report on.
@@ -626,8 +650,13 @@ impl Server {
                 complete => break,
             }
         }
-        start_processes(&self.publisher, &HashMap::default(), &mut self.processes, &self.job)
-            .await;
+        start_processes(
+            &self.publisher,
+            &HashMap::default(),
+            &mut self.processes,
+            &self.job,
+        )
+        .await;
         if let Some(d) = &units_dir {
             platform::remove_control(d);
         }
