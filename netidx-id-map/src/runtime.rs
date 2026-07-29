@@ -54,10 +54,6 @@
 
 use crate::file::{self, IdMap, Query};
 use anyhow::{Context, Result, bail};
-use enumflags2::make_bitflags;
-use extended_notify::{
-    ArcPath, EventBatch, Interest, Watched, Watcher, WatcherConfigBuilder,
-};
 use log::{debug, info, warn};
 use poolshark::local::LPooled;
 use std::{
@@ -66,13 +62,13 @@ use std::{
         Arc,
         atomic::{AtomicUsize, Ordering},
     },
-    time::Duration,
+    time::{Duration, SystemTime},
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{UnixListener, UnixStream},
     signal::unix::{Signal, SignalKind, signal},
-    sync::{mpsc, oneshot},
+    sync::oneshot,
     task::JoinHandle,
     time::timeout,
 };
@@ -104,8 +100,8 @@ pub struct ServerParams {
     /// resolver).
     pub socket_mode: u32,
     /// Path to the id-map JSON config. Parsed once at startup, then
-    /// re-parsed automatically whenever the file changes (via the
-    /// extended-notify watch) or `SIGHUP` is received.
+    /// re-parsed whenever its modification time changes (checked every
+    /// [`POLL_INTERVAL`]) or `SIGHUP` is received.
     pub config: PathBuf,
 }
 
@@ -117,26 +113,16 @@ impl ServerParams {
 
 /// A running id-map daemon. Drop the server to shut it down (the main
 /// loop receives a oneshot and exits; in-flight requests continue
-/// until their timeout). The file watcher shuts down implicitly when
-/// its handles drop.
+/// until their timeout).
 pub struct Server {
     _stop: oneshot::Sender<()>,
     join: Option<JoinHandle<()>>,
-    // The watcher's background task stays alive as long as either
-    // `_watcher` or `_watched` holds a sender into its command
-    // channel; `_watched` also tears down the specific path watch on
-    // drop, which is what we want at Server shutdown. Both are held
-    // here so they live exactly as long as the Server does. Dropping
-    // them closes the file-changed channel, which the main loop just
-    // stops selecting on — the SIGHUP arm and queries keep working.
-    _watcher: Option<Watcher>,
-    _watched: Option<Watched>,
 }
 
 impl Server {
-    /// Start the daemon: bind the socket, parse the config, install the
-    /// config-file watcher, and spawn the main loop (which also arms
-    /// SIGHUP). Returns when the listener is accepting connections.
+    /// Start the daemon: bind the socket, parse the config, and spawn the
+    /// main loop (which polls the config and arms SIGHUP). Returns when the
+    /// listener is accepting connections.
     pub async fn start(params: ServerParams) -> Result<Server> {
         let initial = load_config(&params.config)
             .with_context(|| format!("loading {:?}", params.config))?;
@@ -197,39 +183,20 @@ impl Server {
 
         let (stop_tx, stop_rx) = oneshot::channel();
         let config_path = params.config.clone();
-        // The watcher forwards event batches here; `run_loop` reloads on
-        // any of them. Bounded because changes are debounced and rare,
-        // and a couple of events coalescing into one reload is fine.
-        let (watch_tx, watch_rx) = mpsc::channel(16);
-        // Filesystem watcher for live reload. If it can't be set up on
-        // this platform we log once and carry on — SIGHUP is still the
-        // manual fallback, and the daemon serves the initial map either
-        // way. (On the failure path `watch_tx` is dropped, so the main
-        // loop's receiver closes and it simply stops watching.)
-        let (watcher, watched) = match start_config_watcher(config_path.clone(), watch_tx)
-        {
-            Ok((w, h)) => (Some(w), Some(h)),
-            Err(e) => {
-                warn!(
-                    "id-map: config-file watcher unavailable: {e:#}; \
-                         SIGHUP still reloads"
-                );
-                (None, None)
-            }
-        };
-        let join = tokio::spawn(run_loop(listener, config_path, map, watch_rx, stop_rx));
+        // Record what we started from HERE, not inside the spawned loop.
+        // `start` returns as soon as the task is spawned, so a config written
+        // between those two points would otherwise be the first thing the loop
+        // stat'ed — and it would take that for the state it had always had, and
+        // never reload at all.
+        let stamp = mtime(&config_path).await;
+        let join = tokio::spawn(run_loop(listener, config_path, map, stamp, stop_rx));
 
         info!(
             "id-map daemon ready on {} (config {})",
             params.socket.display(),
             params.config.display(),
         );
-        Ok(Server {
-            _stop: stop_tx,
-            join: Some(join),
-            _watcher: watcher,
-            _watched: watched,
-        })
+        Ok(Server { _stop: stop_tx, join: Some(join) })
     }
 
     /// Signal shutdown and block until the main loop exits. The
@@ -237,8 +204,7 @@ impl Server {
     /// because `self` still owned `_stop` while awaiting the loop
     /// task — the `oneshot::Receiver` in `run_loop` would never fire,
     /// so the task would never exit. This method destructures `Self`
-    /// up front so `_stop` (and the watcher handles) drop *before* we
-    /// start awaiting the loop.
+    /// up front so `_stop` drops *before* we start awaiting the loop.
     ///
     /// The only other way to stop the daemon is dropping the `Server`
     /// (same drop order via the struct's implicit `Drop`, just without
@@ -250,13 +216,11 @@ impl Server {
         // rather than silently letting it ride along on the implicit
         // end-of-function drop (which is what caused the original
         // deadlock).
-        let Self { _stop, mut join, _watcher, _watched } = self;
-        // Drop the stop sender (and watcher handles) before awaiting
-        // the join, so the main loop's `select` sees the closed
-        // oneshot and breaks rather than blocking here forever.
+        let Self { _stop, mut join } = self;
+        // Drop the stop sender before awaiting the join, so the main
+        // loop's `select` sees the closed oneshot and breaks rather
+        // than blocking here forever.
         drop(_stop);
-        drop(_watcher);
-        drop(_watched);
         if let Some(h) = join.take() {
             h.await.context("id-map main loop task panicked")?;
         }
@@ -266,7 +230,7 @@ impl Server {
 
 /// The daemon's single long-lived task. It owns the current map,
 /// serves queries by handing each accepted connection a clone of it,
-/// and folds both reload triggers — SIGHUP and the file watcher — into
+/// and folds both reload triggers — SIGHUP and the config poll — into
 /// the same `select` so a reload is just a between-branches rebind of
 /// the local `map`. The only other tasks are the per-connection
 /// handlers it spawns.
@@ -274,7 +238,7 @@ async fn run_loop(
     listener: UnixListener,
     config_path: PathBuf,
     mut map: Arc<IdMap>,
-    mut watch_events: mpsc::Receiver<EventBatch>,
+    mut stamp: Option<SystemTime>,
     stop: oneshot::Receiver<()>,
 ) {
     let inflight = Arc::new(AtomicUsize::new(0));
@@ -291,6 +255,15 @@ async fn run_loop(
             None
         }
     };
+    // An interval, not a fresh `sleep` per iteration: this `select` also has a
+    // busy arm (`accept`), and a timer rebuilt each time round would be
+    // cancelled by every query, so a daemon anyone was actually using would
+    // never get as far as re-reading its config.
+    let mut poll = tokio::time::interval_at(
+        tokio::time::Instant::now() + POLL_INTERVAL,
+        POLL_INTERVAL,
+    );
+    poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     tokio::pin!(stop);
     loop {
         tokio::select! {
@@ -309,17 +282,17 @@ async fn run_loop(
                 );
                 reload(&config_path, &mut map).await;
             }
-            // Live reload from the file watcher. We don't inspect the
-            // batch — any event means re-read the file. The refutable
-            // `Some(_)` disables this arm when the watcher channel is
-            // closed (watcher failed to start, or dropped at shutdown)
-            // instead of spinning on an immediately-ready `None`.
-            Some(_batch) = watch_events.recv() => {
-                info!(
-                    "id-map: detected change to {}, reloading",
-                    config_path.display()
-                );
-                reload(&config_path, &mut map).await;
+            // Live reload from the config poll.
+            _ = poll.tick() => {
+                let latest = mtime(&config_path).await;
+                if latest != stamp {
+                    stamp = latest;
+                    info!(
+                        "id-map: detected change to {}, reloading",
+                        config_path.display()
+                    );
+                    reload(&config_path, &mut map).await;
+                }
             }
             r = listener.accept() => match r {
                 Ok((client, _addr)) => {
@@ -442,34 +415,29 @@ async fn handle_one(mut client: UnixStream, map: Arc<IdMap>) -> Result<()> {
     Ok(())
 }
 
-/// Start the config-file watcher, forwarding its event batches onto
-/// `events`. `extended-notify` implements its `EventHandler` trait for
-/// an mpsc sender directly, so we don't need a custom handler — the
-/// main loop reloads on any batch it receives. Returns the ownership
-/// handles; dropping either stops the watch.
-fn start_config_watcher(
-    config_path: PathBuf,
-    events: mpsc::Sender<EventBatch>,
-) -> Result<(Watcher, Watched)> {
-    let watcher = WatcherConfigBuilder::default()
-        .event_handler(events)
-        .build()
-        .context("building config-file watcher")?
-        .start()
-        .context("starting config-file watcher")?;
-    // Modify covers in-place writes; Create covers the rename-to side
-    // of an atomic write (a fresh inode appearing at the path); Delete
-    // covers `rm` followed by a fresh write. Established is the
-    // synthetic "watch is now armed" event: because the main loop
-    // reloads on any event without inspecting it, subscribing to it
-    // buys one reload right after the watch goes live. That costs a
-    // single spurious re-read per run but closes the window between the
-    // synchronous startup read and the watch arming — a change landing
-    // in that gap would otherwise never be observed.
-    let interests = make_bitflags!(Interest::{Established | Modify | Create | Delete});
-    let watched =
-        watcher.add(ArcPath::from(config_path), interests).context("adding watch")?;
-    Ok((watcher, watched))
+/// How often the config's modification time is checked. The same interval the
+/// resolver polls its own config on, and a netidx client its own.
+///
+/// A poll rather than a filesystem watch, for one small file. A watch has to
+/// follow the path onto a fresh inode every time the file is replaced — and
+/// every tool that writes it replaces it by renaming a new file over the top —
+/// and when it stops doing that there is nothing to notice the silence. The
+/// resolver's watch did exactly that in the lab, applying the first change
+/// pushed to it and ignoring every one after.
+///
+/// The cost is up to 30 seconds of staleness after an enrollment, during which
+/// a newly registered identity is not yet mapped. The resolver's own retry
+/// covers that: an unmapped identity is refused, not mismapped.
+#[cfg(not(test))]
+const POLL_INTERVAL: Duration = Duration::from_secs(30);
+/// Short enough that the reload tests don't wait out a real interval.
+#[cfg(test)]
+const POLL_INTERVAL: Duration = Duration::from_millis(100);
+
+/// The config's modification time, or `None` if it isn't there — so deleting
+/// it reads as a change, and recreating it reads as another.
+async fn mtime(path: &Path) -> Option<SystemTime> {
+    tokio::fs::metadata(path).await.ok()?.modified().ok()
 }
 
 fn load_config(path: &Path) -> Result<IdMap> {
@@ -788,8 +756,7 @@ mod tests {
                 groups: vec![],
             },
         );
-        for (i, name) in
-            ["bob", "carol", "dave", "erin", "frank"].into_iter().enumerate()
+        for (i, name) in ["bob", "carol", "dave", "erin", "frank"].into_iter().enumerate()
         {
             let uid = 1001 + i as u32;
             let host = format!("{name}.example.com");

@@ -9,10 +9,8 @@ use netidx::resolver_server::{
     config::{Config, file},
 };
 use std::{
-    collections::hash_map::DefaultHasher,
-    hash::{Hash, Hasher},
     path::PathBuf,
-    time::Duration,
+    time::{Duration, SystemTime},
 };
 #[cfg(unix)]
 use tokio::signal::unix::{Signal, SignalKind, signal};
@@ -76,50 +74,56 @@ async fn tokio_run(
     config_path: PathBuf,
     params: Params,
 ) -> Result<()> {
+    // Stamp before starting the server, not after: anything written while the
+    // server is coming up would otherwise be the first thing the loop stat'ed,
+    // and it would take that for the state it had always had.
+    let mut stamp = Vec::new();
+    mtimes(&config_path, &baseline.include_permissions, &mut stamp).await;
     let server = Server::new(config, params.delay_reads, params.id)
         .await
         .context("starting server")?;
-    run_reload_loop(server, config_path, baseline).await
+    run_reload_loop(server, config_path, baseline, stamp).await
 }
 
-/// How often the config and its `include_permissions` files are read to see
-/// whether they have changed. The same interval a netidx client polls its own
-/// config on.
+/// How often the config and its `include_permissions` files are checked for
+/// changes. The same interval a netidx client polls its own config on.
 const POLL_INTERVAL: Duration = Duration::from_secs(30);
 
-/// A fingerprint of every file the running configuration is made of: the main
-/// config, then each `include_permissions` entry in order, with a marker for
-/// one that isn't there.
+/// The modification time of every file the running configuration is made of:
+/// the main config, then each `include_permissions` entry in order. `None` for
+/// a file that isn't there, so deleting one reads as a change.
 ///
-/// This is a poll, and it compares content, because the filesystem-watch
-/// version of it did not work. Every tool that writes these files — the admin
-/// plane certainly, and most editors — replaces them by renaming a new file
-/// over the top, so a watch has to follow the path onto a fresh inode each
-/// time. When it silently failed to, the daemon had no way to tell: the event
-/// channel stayed open and the loop went on waiting for events that could not
-/// arrive, and a resolver applied the first change pushed to it and ignored
-/// every one after. There are at most a handful of small files here. Reading
-/// them twice a minute costs nothing and cannot go quietly deaf.
+/// mtime is a coarse signal: Linux stamps inodes from a cached clock that only
+/// advances once per timer tick, so two writes a few milliseconds apart get
+/// the same time and the second is invisible until something touches the file
+/// again. Nothing writes these files twice in a tick — every writer is an
+/// administrative operation, and they are seconds apart — but that is the
+/// limit of what this notices.
 ///
-/// Comparing content rather than mtime also means a rewrite that changes
-/// nothing is not a reload, and a torn read needs no special handling — it
-/// hashes differently from the finished file, so the next pass picks that up.
-async fn fingerprint(config_path: &std::path::Path, includes: &[ArcStr]) -> u64 {
-    async fn hash_into(h: &mut DefaultHasher, path: &std::path::Path) {
-        match tokio::fs::read(path).await {
-            Ok(bytes) => {
-                1u8.hash(h);
-                bytes.hash(h)
-            }
-            Err(_) => 0u8.hash(h),
-        }
+/// A poll rather than a filesystem watch, because the watch version did not
+/// work. Every tool that writes these files — the admin plane certainly, and
+/// most editors — replaces them by renaming a new file over the top, so a
+/// watch has to follow the path onto a fresh inode each time. When it silently
+/// stopped doing that the daemon had no way to tell: the event channel stayed
+/// open and the loop went on waiting for events that could not arrive, and a
+/// resolver applied the first change pushed to it and ignored every one after.
+/// Two or three `stat`s twice a minute cannot go quietly deaf.
+///
+/// Fills `into` rather than returning, so a poll that finds nothing allocates
+/// nothing.
+async fn mtimes(
+    config_path: &std::path::Path,
+    includes: &[ArcStr],
+    into: &mut Vec<Option<SystemTime>>,
+) {
+    async fn mtime(path: &std::path::Path) -> Option<SystemTime> {
+        tokio::fs::metadata(path).await.ok()?.modified().ok()
     }
-    let mut h = DefaultHasher::new();
-    hash_into(&mut h, config_path).await;
+    into.clear();
+    into.push(mtime(config_path).await);
     for p in includes {
-        hash_into(&mut h, std::path::Path::new(p.as_str())).await;
+        into.push(mtime(std::path::Path::new(p.as_str())).await);
     }
-    h.finish()
 }
 
 /// Reload loop, driven by SIGHUP (unix) and by on-disk changes to the config
@@ -129,6 +133,7 @@ async fn run_reload_loop(
     server: Server,
     config_path: PathBuf,
     baseline: file::Config,
+    mut current: Vec<Option<SystemTime>>,
 ) -> Result<()> {
     // `baseline` is the startup snapshot, and it is **never updated**. It is
     // used only to notice a `member_servers` edit, which is the one field
@@ -137,7 +142,15 @@ async fn run_reload_loop(
     // The include set comes from the running config, so it follows an edit
     // that adds or drops an include file.
     let mut includes = baseline.include_permissions.clone();
-    let mut current = fingerprint(&config_path, &includes).await;
+    let mut latest = Vec::new();
+    // An interval, not a fresh `sleep` per iteration: a timer rebuilt each
+    // time round the loop is cancelled by any other arm firing, so the poll
+    // would slip every time a signal arrived.
+    let mut poll = tokio::time::interval_at(
+        tokio::time::Instant::now() + POLL_INTERVAL,
+        POLL_INTERVAL,
+    );
+    poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
     loop {
         let trigger = tokio::select! {
@@ -146,12 +159,12 @@ async fn run_reload_loop(
             // the server rather than waiting to be hard-killed.
             _ = netidx_activation::shutdown::wait() => break Ok(()),
             _ = sighup.recv() => Some("SIGHUP"),
-            _ = tokio::time::sleep(POLL_INTERVAL) => {
-                let latest = fingerprint(&config_path, &includes).await;
+            _ = poll.tick() => {
+                mtimes(&config_path, &includes, &mut latest).await;
                 if latest == current {
                     continue;
                 }
-                current = latest;
+                std::mem::swap(&mut current, &mut latest);
                 Some("file change")
             }
         };
@@ -168,14 +181,14 @@ async fn run_reload_loop(
                     );
                     includes = new_file.include_permissions.clone();
                 }
-                // Re-read after applying, so that a file which changed again
-                // while we were reloading is noticed on the next pass, and so
-                // that a SIGHUP doesn't leave a stale fingerprint behind.
-                current = fingerprint(&config_path, &includes).await;
+                // Re-stat after applying: the include set may have just
+                // changed, a file may have moved again while we were
+                // reloading, and a SIGHUP must not leave a stale record.
+                mtimes(&config_path, &includes, &mut current).await;
             }
-            // Leave the fingerprint where it is: a config we could not apply
-            // gets tried again when it changes — which is what an operator
-            // fixing it does — rather than failing identically every 30s.
+            // Leave the record where it is. A config we could not apply gets
+            // tried again when it changes — which is what an operator fixing
+            // it does — rather than failing identically twice a minute.
             Err(e) => warn!("resolver: reload failed: {e:#}"),
         }
     }
@@ -269,59 +282,63 @@ mod tests {
         file::ConfigBuilder::default().member_servers(vec![]).build().unwrap()
     }
 
+    async fn stamp(
+        cfg: &std::path::Path,
+        includes: &[ArcStr],
+    ) -> Vec<Option<SystemTime>> {
+        let mut v = Vec::new();
+        mtimes(cfg, includes, &mut v).await;
+        v
+    }
+
     /// The case a filesystem watch got wrong: the admin plane, and most
     /// editors, replace a config by renaming a new file over the top, so the
     /// path gets a fresh inode every time. Nothing here follows an inode.
+    ///
+    /// The sleep is the documented limit of an mtime check, not test noise —
+    /// without it these four replaces land in one timer tick and share a
+    /// timestamp. Real writers are administrative operations seconds apart.
     #[tokio::test]
-    async fn a_rename_over_changes_the_fingerprint_every_time() {
+    async fn a_rename_over_is_noticed_every_time() {
         let dir = tempfile::tempdir().unwrap();
         let cfg = dir.path().join("resolver.json");
         let tmp = dir.path().join("resolver.json.tmp");
         std::fs::write(&cfg, b"v0").unwrap();
-        let mut last = fingerprint(&cfg, &[]).await;
+        let mut last = stamp(&cfg, &[]).await;
+        assert_eq!(last.len(), 1);
         for round in 1..=4 {
+            tokio::time::sleep(Duration::from_millis(20)).await;
             std::fs::write(&tmp, format!("v{round}")).unwrap();
             std::fs::rename(&tmp, &cfg).unwrap();
-            let now = fingerprint(&cfg, &[]).await;
+            let now = stamp(&cfg, &[]).await;
             assert_ne!(now, last, "replace {round} went unnoticed");
             last = now;
         }
-        // A rewrite that changes nothing is not a change.
-        std::fs::write(&tmp, b"v4").unwrap();
-        std::fs::rename(&tmp, &cfg).unwrap();
-        assert_eq!(fingerprint(&cfg, &[]).await, last);
     }
 
     /// An `include_permissions` file is part of the configuration, and a
-    /// missing one has to be distinguishable from an empty one — otherwise
+    /// missing one has to be distinguishable from a present one — otherwise
     /// deleting it would look like no change at all.
     #[tokio::test]
-    async fn includes_are_part_of_the_fingerprint() {
+    async fn includes_are_part_of_what_is_watched() {
         let dir = tempfile::tempdir().unwrap();
         let cfg = dir.path().join("resolver.json");
         let perms = dir.path().join("perms.json");
         std::fs::write(&cfg, b"{}").unwrap();
         let includes = [ArcStr::from(perms.to_str().unwrap())];
 
-        let absent = fingerprint(&cfg, &includes).await;
-        std::fs::write(&perms, b"").unwrap();
-        let empty = fingerprint(&cfg, &includes).await;
-        assert_ne!(absent, empty, "a missing include must not hash as an empty one");
+        let absent = stamp(&cfg, &includes).await;
+        assert_eq!(absent, vec![stamp(&cfg, &[]).await[0], None]);
+        std::fs::write(&perms, b"{}").unwrap();
+        let present = stamp(&cfg, &includes).await;
+        assert_ne!(absent, present, "a missing include must differ from a present one");
 
-        std::fs::write(&perms, b"{\"/\":{}}").unwrap();
-        let filled = fingerprint(&cfg, &includes).await;
-        assert_ne!(empty, filled);
+        std::fs::remove_file(&perms).unwrap();
+        assert_eq!(stamp(&cfg, &includes).await, absent, "deleting it is a change back");
 
-        // ... and the same bytes under a different name are a different set.
-        let other = dir.path().join("other.json");
-        std::fs::write(&other, b"{\"/\":{}}").unwrap();
-        let renamed = fingerprint(&cfg, &[ArcStr::from(other.to_str().unwrap())]).await;
-        assert_eq!(filled, renamed, "content is what is hashed, not the path");
-        assert_ne!(
-            filled,
-            fingerprint(&cfg, &[]).await,
-            "dropping the include is a change"
-        );
+        // Dropping the entry entirely is a shorter list, so also a change.
+        std::fs::write(&perms, b"{}").unwrap();
+        assert_ne!(stamp(&cfg, &includes).await, stamp(&cfg, &[]).await);
     }
 
     #[test]
