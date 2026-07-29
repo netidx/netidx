@@ -29,6 +29,46 @@ use std::{
 type Permissions = ArcStr;
 type Entity = ArcStr;
 
+/// Whether a member server refuses read clients.
+///
+/// A resolver holds only what publishers have told it, so a replica that has
+/// just joined a cluster knows nothing until every publisher has found it and
+/// republished. Subscribers pointed at it in the meantime get correct-looking
+/// empty answers. Gating reads keeps them away while letting publishers fill
+/// it — writes are never gated, which is the whole point.
+///
+/// It is equally the way to take a decommissioned member out of service
+/// without stopping it: `Yes` makes it stop answering subscribers while its
+/// records age out, and it survives a restart of that host because it lives
+/// in the config.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ReadGate {
+    /// Serve reads.
+    No,
+    /// Refuse reads until an administrator opens the gate.
+    Yes,
+    /// Refuse reads until this time. Set when a member joins a cluster that
+    /// is already publishing, because that is the one case where how long to
+    /// wait can actually be computed.
+    Until(chrono::DateTime<chrono::Utc>),
+}
+
+impl Default for ReadGate {
+    fn default() -> Self {
+        ReadGate::No
+    }
+}
+
+impl ReadGate {
+    pub fn is_open(&self) -> bool {
+        match self {
+            ReadGate::No => true,
+            ReadGate::Yes => false,
+            ReadGate::Until(t) => chrono::Utc::now() >= *t,
+        }
+    }
+}
+
 /// The type of authentication to use
 #[derive(Debug, Clone)]
 pub enum Auth {
@@ -422,6 +462,12 @@ pub mod file {
         #[serde(default = "default_id_map_timeout")]
         #[builder(default = "default_id_map_timeout()")]
         pub id_map_timeout: u64,
+        /// Whether this member refuses read clients (default `No`). Applied
+        /// live on reload, so it can be opened or shut without a restart.
+        /// See [`super::ReadGate`].
+        #[serde(default)]
+        #[builder(default)]
+        pub read_gated: super::ReadGate,
     }
 
     /// The toplevel config object
@@ -480,6 +526,7 @@ pub struct MemberServer {
     pub(super) addr: SocketAddr,
     pub(super) bind_addr: IpAddr,
     pub(super) auth: Auth,
+    pub(super) read_gated: ReadGate,
     pub(super) hello_timeout: Duration,
     pub(super) max_connections: usize,
     pub(super) reader_ttl: Duration,
@@ -640,6 +687,7 @@ impl Config {
                 addr: m.addr,
                 bind_addr: m.bind_addr,
                 auth: m.auth.into(),
+                read_gated: m.read_gated,
                 hello_timeout: Duration::from_secs(m.hello_timeout),
                 max_connections: m.max_connections,
                 reader_ttl: Duration::from_secs(m.reader_ttl),

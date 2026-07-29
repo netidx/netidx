@@ -13,7 +13,7 @@ use crate::{
     tls as tlsmod,
 };
 use anyhow::Result;
-use netidx::resolver_server::config::file::IdMapType;
+use netidx::resolver_server::config::{ReadGate, file::IdMapType};
 use std::{net::SocketAddr, path::PathBuf};
 
 /// How the resolver maps an authenticated identity (a TLS cert SAN, or
@@ -54,6 +54,10 @@ pub struct ResolverParams {
     pub listen: SocketAddr,
     pub bind: Option<std::net::IpAddr>,
     pub parent: Option<ParentRef>,
+    /// Whether this member starts out refusing read clients. Set when joining
+    /// a cluster that is already serving; see
+    /// [`netidx::resolver_server::config::ReadGate`].
+    pub read_gated: ReadGate,
     /// Initial perms map. The engine emits this as a separate file
     /// (referenced from the resolver config's `include_permissions`)
     /// and **leaves the resolver config's inline `perms` empty** —
@@ -215,7 +219,8 @@ pub fn resolver(p: &ResolverParams) -> Result<RenderedTemplate> {
     member_builder
         .addr(p.listen)
         .bind_addr(bind_addr)
-        .auth(resolver_auth_from(&p.auth, &tls_dest));
+        .auth(resolver_auth_from(&p.auth, &tls_dest))
+        .read_gated(p.read_gated);
     if let Some(sock) = &id_map_socket_path {
         member_builder
             .id_map_type(IdMapType::Socket)
@@ -518,6 +523,7 @@ mod tests {
 
     fn anon_params(out: &tempfile::TempDir) -> ResolverParams {
         ResolverParams {
+            read_gated: ReadGate::No,
             auth: AuthChoice::Anonymous,
             base: ArcStr::from("/"),
             listen: "127.0.0.1:4564".parse().unwrap(),

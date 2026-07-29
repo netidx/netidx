@@ -17,7 +17,7 @@ use ahash::AHashMap;
 use anyhow::{Context, Result};
 use arcstr::{ArcStr, literal};
 use auth::{ANONYMOUS, UserInfo};
-use config::{Config, MemberServer};
+use config::{Config, MemberServer, ReadGate};
 use cross_krb5::{AcceptFlags, K5ServerCtx, ServerCtx, Step};
 use futures::{channel::oneshot, prelude::*, select_biased};
 use log::{debug, error, info, trace, warn};
@@ -253,6 +253,20 @@ struct Ctx {
     id: SocketAddr,
     store: Store,
     delay_reads: Option<Instant>,
+    read_gate: Arc<SyncMutex<ReadGate>>,
+}
+
+impl Ctx {
+    /// Reads are refused while the startup delay is still running, or while
+    /// the config gate is shut. Writes are never gated either way: a
+    /// publisher has to be able to fill a replica that subscribers are being
+    /// kept away from, and a departing one has to be able to age out.
+    fn reads_allowed(&self) -> bool {
+        match self.delay_reads {
+            Some(t) if Instant::now() < t => false,
+            Some(_) | None => self.read_gate.lock().is_open(),
+        }
+    }
 }
 
 async fn client_loop_write(
@@ -846,10 +860,8 @@ async fn hello_client(
     let hello: ClientHello = recv(ctx.cfg.hello_timeout, &mut s).await?;
     match hello {
         ClientHello::ReadOnly(hello) => {
-            if let Some(t) = ctx.delay_reads {
-                if Instant::now() < t {
-                    bail!("no read clients allowed yet");
-                }
+            if !ctx.reads_allowed() {
+                bail!("no read clients allowed yet");
             }
             Ok(hello_client_read(ctx, s, server_stop, hello).await?)
         }
@@ -863,7 +875,7 @@ async fn server_loop(
     cfg: Config,
     delay_reads: bool,
     stop: oneshot::Receiver<()>,
-    ready: oneshot::Sender<(SocketAddr, SecCtx, Store)>,
+    ready: oneshot::Sender<Ready>,
     id: usize,
     listener: Option<TcpListener>,
 ) -> Result<()> {
@@ -888,6 +900,7 @@ async fn server_loop(
         secctx.clone(),
         id,
     );
+    let read_gate = Arc::new(SyncMutex::new(member.read_gated));
     let ctx = Arc::new(Ctx {
         cfg: member,
         secctx,
@@ -896,6 +909,7 @@ async fn server_loop(
         id,
         delay_reads,
         store,
+        read_gate: read_gate.clone(),
     });
     let mut stop = stop.fuse();
     let mut client_stops: Vec<oneshot::Sender<()>> = Vec::new();
@@ -903,7 +917,12 @@ async fn server_loop(
     debug!("signaling ready");
     let mut listen_addr = listener.local_addr()?;
     listen_addr.set_ip(id.ip());
-    let _ = ready.send((listen_addr, ctx.secctx.clone(), ctx.store.clone()));
+    let _ = ready.send(Ready {
+        local_addr: listen_addr,
+        secctx: ctx.secctx.clone(),
+        store: ctx.store.clone(),
+        read_gate,
+    });
     loop {
         select_biased! {
             _ = stop => {
@@ -942,12 +961,23 @@ async fn server_loop(
     }
 }
 
+/// What `server_loop` hands back once the server is up.
+struct Ready {
+    local_addr: SocketAddr,
+    secctx: SecCtx,
+    store: Store,
+    read_gate: Arc<SyncMutex<ReadGate>>,
+}
+
 /// The parts of a config that are fixed once the server is running: which
 /// members exist, and where each child cluster attaches.
-fn startup_shape(cfg: &Config) -> (Vec<SocketAddr>, BTreeSet<Path>) {
+fn startup_shape(
+    cfg: &Config,
+    id: usize,
+) -> (SocketAddr, Vec<SocketAddr>, BTreeSet<Path>) {
     let members = cfg.member_servers.iter().map(|m| m.addr).collect::<Vec<_>>();
     let children = cfg.children.keys().cloned().collect::<BTreeSet<_>>();
-    (members, children)
+    (members[id], members, children)
 }
 
 /// Run a resolver server
@@ -956,6 +986,12 @@ pub struct Server {
     local_addr: SocketAddr,
     secctx: SecCtx,
     store: Store,
+    read_gate: Arc<SyncMutex<ReadGate>>,
+    /// The advertised address of the member this process is running. Used to
+    /// find ourselves in an edited config: matching by address rather than by
+    /// index means a reordered `member_servers` can't hand us someone else's
+    /// settings.
+    member_addr: SocketAddr,
     /// The member addresses this server started with. `member_servers` is not
     /// applied live, so this — not whatever the file says now — is what a
     /// reloaded referral must not point back at.
@@ -1011,7 +1047,7 @@ impl Server {
     /// When this future is resolved the server will be running. If
     /// the returned `Server` is dropped the server will stop.
     pub async fn new(cfg: Config, delay_reads: bool, id: usize) -> Result<Server> {
-        let (member_addrs, child_paths) = startup_shape(&cfg);
+        let (member_addr, member_addrs, child_paths) = startup_shape(&cfg, id);
         let (send_stop, recv_stop) = oneshot::channel();
         let (send_ready, recv_ready) = oneshot::channel();
         task::spawn(async move {
@@ -1023,15 +1059,17 @@ impl Server {
             }
             res
         });
-        let (local_addr, secctx, store) = match recv_ready.await {
+        let ready = match recv_ready.await {
             Err(_) => bail!("resolver server shutdown"),
             Ok(t) => t,
         };
         Ok(Server {
             stop: Some(send_stop),
-            local_addr,
-            secctx,
-            store,
+            local_addr: ready.local_addr,
+            secctx: ready.secctx,
+            store: ready.store,
+            read_gate: ready.read_gate,
+            member_addr,
             member_addrs,
             child_paths,
         })
@@ -1057,7 +1095,7 @@ impl Server {
         if cfg.member_servers[0].addr != listener.local_addr()? {
             bail!("cfg addr does not match actual listen addr")
         }
-        let (member_addrs, child_paths) = startup_shape(&cfg);
+        let (member_addr, member_addrs, child_paths) = startup_shape(&cfg, 0);
         let (send_stop, recv_stop) = oneshot::channel();
         let (send_ready, recv_ready) = oneshot::channel();
         task::spawn(async move {
@@ -1069,15 +1107,17 @@ impl Server {
             }
             res
         });
-        let (local_addr, secctx, store) = match recv_ready.await {
+        let ready = match recv_ready.await {
             Err(_) => bail!("resolver server shutdown"),
             Ok(t) => t,
         };
         Ok(Server {
             stop: Some(send_stop),
-            local_addr,
-            secctx,
-            store,
+            local_addr: ready.local_addr,
+            secctx: ready.secctx,
+            store: ready.store,
+            read_gate: ready.read_gate,
+            member_addr,
             member_addrs,
             child_paths,
         })
@@ -1160,6 +1200,24 @@ impl Server {
                 children.into_iter().map(|(p, r)| (p, r.into())).collect(),
             )
             .await;
+        // Found by address, not by index: a reordered `member_servers` must
+        // not hand this process someone else's gate. If we aren't in the file
+        // at all the gate is left alone — that is a `member_servers` edit,
+        // and the caller is already warning about it.
+        if let Some(member) =
+            cfg.member_servers.iter().find(|m| m.addr == self.member_addr)
+        {
+            let mut gate = self.read_gate.lock();
+            if *gate != member.read_gated {
+                info!("read gate is now {:?}", member.read_gated);
+                *gate = member.read_gated;
+            }
+        }
         Ok(not_applied)
+    }
+
+    /// Whether this server is currently answering read clients.
+    pub fn reads_allowed(&self) -> bool {
+        self.read_gate.lock().is_open()
     }
 }

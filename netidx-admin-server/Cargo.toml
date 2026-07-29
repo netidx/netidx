@@ -24,6 +24,7 @@ compact_str = { workspace = true }
 enumflags2 = { workspace = true }
 futures = { workspace = true }
 globset = { workspace = true }
+chrono = { workspace = true }
 humantime = { workspace = true }
 humantime-serde = { workspace = true }
 log = { workspace = true }

@@ -1397,6 +1397,9 @@ async fn run_workstation(
 
 fn resolver_input(common: InstallCommon) -> ResolverInput {
     ResolverInput {
+        // Let the install decide from whether it is joining a cluster that is
+        // already serving.
+        read_gate: None,
         auth: None,
         spn: None,
         tls_name: None,

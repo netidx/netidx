@@ -3,6 +3,8 @@
 
 use anyhow::{Context, Result};
 use arcstr::ArcStr;
+use chrono::Utc;
+use netidx::resolver_server::config::ReadGate;
 // Qualified `admin_proto::` uses are all in the unix-only admin-server
 // enrollment path; the items below are cross-platform.
 use clap::Args;
@@ -588,6 +590,17 @@ pub(crate) struct ResolverFlags {
     /// host with no system IdM). Ignored for other auth schemes.
     #[arg(long = "id-map-mode")]
     id_map_mode: Option<String>,
+    /// Serve reads immediately, rather than waiting for publishers to fill
+    /// this replica. A resolver knows only what publishers have told it, so a
+    /// member joining a cluster that is already serving refuses reads by
+    /// default until they have all found it. Use this when you know nothing
+    /// is publishing yet.
+    #[arg(long = "no-read-gate")]
+    no_read_gate: bool,
+    /// Refuse reads for this long instead of the computed default. Takes a
+    /// duration such as `30m` or `2h`.
+    #[arg(long = "read-gate", conflicts_with = "no_read_gate")]
+    read_gate: Option<humantime::Duration>,
     /// Skip admin-server setup entirely (expert). On a fresh krb5 /
     /// anonymous admin domain this also skips the admin-plane CA. A host
     /// without an admin server is invisible to discovery, and if no admin
@@ -693,6 +706,13 @@ fn resolver_input(
         netidx_binary: f.netidx_binary,
         no_id_map: f.no_id_map,
         id_map_mode: f.id_map_mode,
+        read_gate: match (f.no_read_gate, f.read_gate) {
+            (true, _) => Some(ReadGate::No),
+            (false, Some(d)) => {
+                Some(ReadGate::Until(Utc::now() + chrono::Duration::from_std(*d)?))
+            }
+            (false, None) => None,
+        },
         no_admin_server: f.no_admin_server,
         with_admin_server: f.with_admin_server,
         insecure_no_tpm: f.insecure_no_tpm,

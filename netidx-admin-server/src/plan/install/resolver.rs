@@ -30,7 +30,9 @@ use crate::{
 };
 use anyhow::{Context, Result, bail};
 use arcstr::ArcStr;
+use chrono::Utc;
 use compact_str::format_compact;
+use netidx::resolver_server::config::ReadGate;
 use std::{
     net::{IpAddr, SocketAddr},
     path::{Path, PathBuf},
@@ -97,6 +99,9 @@ pub struct ResolverInput {
     /// (`platform` | `netidx` | `none`). `None` ⇒ prompt (interactive) or a
     /// required-value error (strict). Ignored for other auth schemes.
     pub id_map_mode: Option<String>,
+    /// An explicit read gate for this member. `None` ⇒ decide from whether
+    /// this install is joining a cluster that is already serving.
+    pub read_gate: Option<ReadGate>,
     /// Skip admin-server setup entirely (expert).
     pub no_admin_server: bool,
     /// Explicitly set up an admin server. Only meaningful for an anonymous data
@@ -573,7 +578,30 @@ pub async fn run_resolver(
     } else {
         Vec::new()
     };
+    // A resolver holds only what publishers have told it, so a member that
+    // joins a cluster which is already serving is empty until every publisher
+    // has found it and republished. Hold reads off until they can have; the
+    // first member of a cluster has nothing to wait for. The bound is what the
+    // admin agent's own cadence allows for, plus a writer ttl for the
+    // republish itself.
+    let joining_a_serving_cluster = authoritative_peer_topology.is_some()
+        || probe.have().is_some_and(|net| {
+            net.info.resolver_base.as_deref() == Some(input.base.as_str())
+                && net.info.resolvers.iter().any(|r| r.addr != listen)
+        });
+    let read_gated = match input.read_gate {
+        Some(gate) => gate,
+        None if joining_a_serving_cluster => ReadGate::Until(
+            Utc::now()
+                + chrono::Duration::seconds(
+                    (2 * netidx_admin_client::sync::DEFAULT_SYNC_INTERVAL.as_secs() + 120)
+                        as i64,
+                ),
+        ),
+        None => ReadGate::No,
+    };
     let params = template::resolver::ResolverParams {
+        read_gated,
         auth,
         base: ArcStr::from(input.base),
         listen,

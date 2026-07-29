@@ -474,7 +474,7 @@ mod republish {
         resolver_client::{DesiredAuth, ResolverRead, ResolverWrite},
         resolver_server::{
             Server,
-            config::{Config as ServerConfig, file as sfile},
+            config::{Config as ServerConfig, ReadGate, file as sfile},
         },
     };
     use netidx_netproto::resolver::PublisherPriority;
@@ -526,6 +526,13 @@ mod republish {
             .member_servers(members(ports, writer_ttl))
             .build()
             .unwrap()
+    }
+
+    /// The same cluster, with the *second* member's read gate set.
+    fn gated_cfg_file(ports: &[u16], gate: ReadGate) -> sfile::Config {
+        let mut members = members(ports, 120);
+        members[1].read_gated = gate;
+        sfile::ConfigBuilder::default().member_servers(members).build().unwrap()
     }
 
     /// A resolver at `/` that refers everything under `/eu` to `eu`. The ttl
@@ -897,6 +904,46 @@ mod republish {
             .unwrap();
         assert_eq!(not_applied.children_removed, vec![p("/eu")]);
         assert!(not_applied.children_added.is_empty());
+    }
+
+    /// A gated member keeps taking writes and stops answering reads, and
+    /// clients fail over to a member that will. This is what lets a replica
+    /// be filled before anyone is pointed at it, and a decommissioned one be
+    /// taken out of service without being stopped.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_gated_member_takes_writes_but_not_reads() {
+        let _ = env_logger::try_init();
+        let ports = [free_port(), free_port()];
+        let _a = start_member(&ports, 120, 0).await;
+        let gated = start(gated_cfg_file(&ports, ReadGate::Yes), 1).await;
+        assert!(!gated.reads_allowed());
+        // The publisher talks to both, including the gated one.
+        let w = writer(&[addr(ports[0]), addr(ports[1])]);
+        let paths = vec![p("/t/one"), p("/t/two")];
+        w.publish(paths.iter().cloned()).await.unwrap();
+        // The ungated member answers.
+        converges_to("a", &reader(addr(ports[0])), &paths, &paths).await;
+        // The gated one took the writes but refuses to talk about them, and a
+        // subscriber that knows about both still gets its answer.
+        let both = ResolverRead::new(
+            client_cfg(&[addr(ports[0]), addr(ports[1])]),
+            DesiredAuth::Anonymous,
+        );
+        converges_to("a subscriber", &both, &paths, &paths).await;
+        // Open the gate and the same member starts answering — with the paths
+        // it has been quietly accepting all along.
+        gated.reload(&gated_cfg_file(&ports, ReadGate::No)).await.unwrap();
+        assert!(gated.reads_allowed());
+        converges_to("the gated member", &reader(addr(ports[1])), &paths, &paths).await;
+    }
+
+    #[test]
+    fn a_gate_opens_when_its_deadline_passes() {
+        use chrono::{Duration as CDuration, Utc};
+        assert!(ReadGate::No.is_open());
+        assert!(!ReadGate::Yes.is_open());
+        assert!(!ReadGate::Until(Utc::now() + CDuration::seconds(60)).is_open());
+        assert!(ReadGate::Until(Utc::now() - CDuration::seconds(1)).is_open());
     }
 
     /// An unpublish that could not be delivered has to be retried, not

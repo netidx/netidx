@@ -181,6 +181,7 @@ async fn round_trip(
 /// every anonymous-auth test as the common case.
 fn anon_params(dir: &TempDir, port: u16) -> ResolverParams {
     ResolverParams {
+        read_gated: netidx::resolver_server::config::ReadGate::No,
         auth: AuthChoice::Anonymous,
         base: ArcStr::from("/"),
         listen: format!("127.0.0.1:{port}").parse().unwrap(),
