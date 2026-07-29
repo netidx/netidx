@@ -41,7 +41,9 @@ type Entity = ArcStr;
 /// without stopping it: `Yes` makes it stop answering subscribers while its
 /// records age out, and it survives a restart of that host because it lives
 /// in the config.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, netidx_derive::Pack,
+)]
 pub enum ReadGate {
     /// Serve reads.
     No,

@@ -39,6 +39,8 @@ mod id_map;
 mod init;
 mod lifecycle;
 mod perms;
+#[cfg(unix)]
+mod read_gate;
 // `perms` admin (remote, map-routed perms show/edit) drives the admin
 // server's CA admin auth + resolver cluster push, both unix-only (the engine
 // pulls openssl), same as `delegation`.

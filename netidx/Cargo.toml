@@ -42,6 +42,7 @@ indexmap = { workspace = true }
 keyring = { workspace = true }
 log = { workspace = true }
 netidx-core = { version = "0.32.0", path = "../netidx-core" }
+netidx-derive = { version = "0.32.0", path = "../netidx-derive" }
 netidx-netproto = { version = "0.32.0", path = "../netidx-netproto" }
 # TPM-sealed key passwords: `tls::load_key_password` reads `<key>.tpm`
 # sidecars (machine-bound daemon credentials, no keychain required).

@@ -36,6 +36,7 @@
 
 use anyhow::{Context, Result, bail};
 use enumflags2::{BitFlags, bitflags};
+use netidx::resolver_server::config::ReadGate;
 use netidx_core::pack::Pack;
 use netidx_derive::Pack;
 use serde_derive::{Deserialize, Serialize};
@@ -487,6 +488,19 @@ pub enum Request {
     /// Answered with [`CaStatusResponse`].
     #[pack(tag(43))]
     CaStatus,
+    /// Admin-authenticated, sent to the **CA**: open or shut the read gate on
+    /// **one** member (`target_server`). Scoped exactly like
+    /// [`Request::ControlService`] — the caller's `service_control_scopes`
+    /// must cover that server's resolver cluster base, or hold a signing
+    /// slot. The CA forwards a single [`Request::ApplySetReadGate`] to the
+    /// target. Answered with [`SetReadGateResponse`].
+    #[pack(tag(44))]
+    SetReadGate(SetReadGateRequest),
+    /// Server-to-server: write the read gate into this host's own resolver
+    /// config. Peer-cert-gated like [`Request::ApplyReferralEdit`]. Answered
+    /// with [`ApplySetReadGateResponse`].
+    #[pack(tag(45))]
+    ApplySetReadGate(ApplySetReadGateRequest),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Pack)]
@@ -1238,6 +1252,16 @@ pub struct RemoveServerOk {
     #[serde(default)]
     #[pack(default)]
     pub crl_peers: Vec<PeerResult>,
+    /// Whether the departing member was told to stop answering read clients.
+    ///
+    /// Taking it out of everyone's configuration does not stop the clients
+    /// that have not synced yet from asking it, and it has no reason to
+    /// refuse them. `None` ⇒ it was already gone from the map; otherwise the
+    /// result of telling it, so an operator who can see it failed knows to go
+    /// and stop that host.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[pack(default)]
+    pub gated: Option<PeerResult>,
 }
 
 pub type RemoveServerResponse = RpcResult<RemoveServerOk>;
@@ -1357,6 +1381,38 @@ pub type ControlServiceResponse = RpcResult<ControlServiceOk>;
 
 /// Server → server: apply a service-control op to this host's local
 /// activation supervisor. `units` are the resolved unit names for THIS host.
+/// Admin → CA: open or shut one member's read gate.
+///
+/// A resolver holds only what publishers have told it, so a member that has
+/// just joined a cluster serves correct-looking empty answers until every
+/// publisher has found it. The gate keeps subscribers away meanwhile — and is
+/// equally how a decommissioned member stops answering without being stopped.
+#[derive(Debug, Clone, Serialize, Deserialize, Pack)]
+pub struct SetReadGateRequest {
+    pub credential: AdminCredential,
+    pub target_server: AdminServerId,
+    pub gate: ReadGate,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Pack)]
+pub struct SetReadGateOk {
+    pub operation_id: OperationId,
+    pub gate: ReadGate,
+}
+
+pub type SetReadGateResponse = RpcResult<SetReadGateOk>;
+
+/// CA → node: write the read gate into this host's own resolver config. The
+/// resolver applies it live, so it takes effect without a restart, and it
+/// survives one because it is in the config.
+#[derive(Debug, Clone, Serialize, Deserialize, Pack)]
+pub struct ApplySetReadGateRequest {
+    pub operation_id: OperationId,
+    pub gate: ReadGate,
+}
+
+pub type ApplySetReadGateResponse = RpcResult<()>;
+
 #[derive(Debug, Clone, Serialize, Deserialize, Pack)]
 pub struct ApplyServiceControlRequest {
     pub operation_id: OperationId,
@@ -1984,6 +2040,11 @@ mod tests {
                 error: Some("offline".to_string()),
             }],
             crl_peers: vec![],
+            gated: Some(PeerResult {
+                server,
+                addr: "10.0.0.2:4565".parse().unwrap(),
+                error: None,
+            }),
         });
         write_msg(&mut a, &removal).await.unwrap();
         match read_msg::<_, RemoveServerResponse>(&mut b).await.unwrap() {
@@ -1995,6 +2056,7 @@ mod tests {
                 affected_clusters,
                 peers,
                 crl_peers,
+                gated,
             }) => {
                 assert_eq!(version, 8);
                 assert_eq!(got_operation, Some(operation_id));
@@ -2004,6 +2066,9 @@ mod tests {
                 assert_eq!(peers[0].server, server);
                 assert_eq!(peers[0].error.as_deref(), Some("offline"));
                 assert!(crl_peers.is_empty());
+                let gated = gated.expect("gate result round trips");
+                assert_eq!(gated.server, server);
+                assert_eq!(gated.error, None);
             }
             RemoveServerResponse::Err { reason } => panic!("err: {reason}"),
         }

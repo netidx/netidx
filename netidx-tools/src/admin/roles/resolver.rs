@@ -5,7 +5,7 @@ use anyhow::Result;
 use clap::Subcommand;
 
 #[cfg(unix)]
-use crate::admin::delegation;
+use crate::admin::{delegation, read_gate};
 use crate::admin::{init, lifecycle};
 use netidx_admin_client::provenance::InstallRole;
 
@@ -33,6 +33,10 @@ pub(crate) enum Cmd {
     /// deny one pending delegation request by its code
     #[cfg(unix)]
     DenyDelegation(delegation::DenyDelegationFlags),
+    /// take one member in or out of service without stopping it — it keeps
+    /// taking writes from publishers and stops answering subscribers
+    #[cfg(unix)]
+    ReadGate(read_gate::ReadGateFlags),
 }
 
 pub(crate) fn run(cmd: Cmd) -> Result<()> {
@@ -48,5 +52,7 @@ pub(crate) fn run(cmd: Cmd) -> Result<()> {
         Cmd::ApproveDelegation(f) => delegation::approve_delegation(f),
         #[cfg(unix)]
         Cmd::DenyDelegation(f) => delegation::deny_delegation(f),
+        #[cfg(unix)]
+        Cmd::ReadGate(f) => read_gate::read_gate(f),
     }
 }

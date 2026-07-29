@@ -26,6 +26,7 @@ use super::{
         handle_approve_request, handle_deny, handle_enqueue, handle_list_issued,
         handle_list_queue, handle_poll,
     },
+    read_gate::{handle_apply_set_read_gate, handle_set_read_gate},
     revocation::{handle_apply_crl, handle_get_crl, handle_revoke},
     service_control::{handle_apply_service_control, handle_control_service},
     topology::{
@@ -38,10 +39,10 @@ use super::{
 use crate::admin_proto::{
     self, AddIdentityResponse, ApplyCaStateResponse, ApplyCrlResponse,
     ApplyPermsEditResponse, ApplyReferralEditResponse, ApplyServiceControlResponse,
-    ClientHello, DelegationPollResponse, DelegationResponse, DenyResponse,
-    EnqueueResponse, GetMapResponse, GetMapVersionResponse, ListDelegationsResponse,
-    ListQueueResponse, MapVersion, PROTOCOL_VERSION, RegisterResponse, Request,
-    RevokeResponse, ServerHello,
+    ApplySetReadGateResponse, ClientHello, DelegationPollResponse, DelegationResponse,
+    DenyResponse, EnqueueResponse, GetMapResponse, GetMapVersionResponse,
+    ListDelegationsResponse, ListQueueResponse, MapVersion, PROTOCOL_VERSION,
+    RegisterResponse, Request, RevokeResponse, ServerHello,
 };
 use anyhow::{Context, Result, bail};
 use std::{net::SocketAddr, sync::Arc};
@@ -542,6 +543,25 @@ where
                 .await
                 .context("writing ApplyServiceControlResponse")
         }
+        Request::SetReadGate(req) => {
+            let resp = handle_set_read_gate(state, &req, request_authentication()).await;
+            admin_proto::write_msg(&mut tls, &resp)
+                .await
+                .context("writing SetReadGateResponse")
+        }
+        Request::ApplySetReadGate(req) => {
+            let resp = if !peer_is_admin_server {
+                ApplySetReadGateResponse::Err {
+                    reason: "a read gate requires an admin-server peer certificate"
+                        .to_string(),
+                }
+            } else {
+                handle_apply_set_read_gate(state, &req).await
+            };
+            admin_proto::write_msg(&mut tls, &resp)
+                .await
+                .context("writing ApplySetReadGateResponse")
+        }
         Request::RotateRecovery => {
             let resp = rotate_recovery(state, &signs, local).await;
             admin_proto::write_msg(&mut tls, &resp)
@@ -647,7 +667,8 @@ fn request_requirements(req: &Request) -> RequestRequirements<'_> {
         | GetPerms
         | ApplyPermsEdit(_)
         | ApplyReferralEdit(_)
-        | ApplyServiceControl(_) => RequestRequirements::CaOnly,
+        | ApplyServiceControl(_)
+        | ApplySetReadGate(_) => RequestRequirements::CaOnly,
         Register(_) | Deregister => RequestRequirements::NodeSelf,
         RotateRecovery | RotateAutorenew | CaStatus => {
             RequestRequirements::LocalOnly { server_key: NotNeeded }
@@ -729,6 +750,10 @@ fn request_requirements(req: &Request) -> RequestRequirements<'_> {
             server_key: NotNeeded,
         },
         ControlService(req) => RequestRequirements::Admin {
+            credential: &req.credential,
+            server_key: NotNeeded,
+        },
+        SetReadGate(req) => RequestRequirements::Admin {
             credential: &req.credential,
             server_key: NotNeeded,
         },

@@ -21,6 +21,7 @@ mod issuance;
 mod password_limiter;
 mod permissions;
 mod queue;
+mod read_gate;
 mod request;
 mod revocation;
 mod runtime;

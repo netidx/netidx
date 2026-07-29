@@ -22,14 +22,17 @@ use std::{net::SocketAddr, sync::Arc, time::Duration};
 
 /// Whether `authd` may control services on an admin server whose resolver cluster base
 /// is `base`.
-fn service_control_authority(authd: &ca_vault::Authenticated, base: &str) -> bool {
+pub(super) fn service_control_authority(
+    authd: &ca_vault::Authenticated,
+    base: &str,
+) -> bool {
     signing_slot(authd) || scope_covers(&authd.policy.service_control_scopes, base)
 }
 
 /// The resolver cluster base of the admin server whose listen address is `addr`, from
 /// the map — the authorization scope for controlling that server's services.
 /// `None` if the server isn't in the map or runs no resolver cluster.
-fn base_for_server(
+pub(super) fn base_for_server(
     map: &AdminDomainMap,
     id: admin_proto::AdminServerId,
 ) -> Option<String> {
@@ -43,7 +46,7 @@ fn base_for_server(
 
 /// Resolve only an immutable registered identity to its current routing
 /// address. Addresses are deliberately never accepted as lookup keys here.
-fn registered_server_addr(
+pub(super) fn registered_server_addr(
     map: &AdminDomainMap,
     id: admin_proto::AdminServerId,
 ) -> Option<SocketAddr> {

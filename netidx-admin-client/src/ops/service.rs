@@ -84,3 +84,27 @@ pub async fn control_remote(
     )
     .await
 }
+
+/// Open or shut one member's read gate over the admin plane. Same session,
+/// same target, same scope as `control_remote` — a resolver that is running
+/// but not answering is a service-control state like any other.
+pub async fn set_read_gate(
+    ans: &mut dyn Answerer,
+    server: SocketAddr,
+    ca_dir: Option<PathBuf>,
+    admin: Option<String>,
+    password: Option<Secret>,
+    target_server: AdminServerId,
+    gate: netidx::resolver_server::config::ReadGate,
+) -> Result<()> {
+    let sess = open_admin_session(ans, Some(server), ca_dir, admin, password).await?;
+    transport::set_read_gate(
+        sess.server,
+        netidx_admin_proto::NodeKind::Client,
+        &sess.identity,
+        sess.credential.clone(),
+        target_server,
+        gate,
+    )
+    .await
+}

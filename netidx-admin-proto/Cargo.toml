@@ -17,6 +17,7 @@ anyhow = { workspace = true }
 bytes = { workspace = true }
 enumflags2 = { workspace = true }
 humantime-serde = { workspace = true }
+netidx = { path = "../netidx", version = "0.32.0", default-features = false }
 netidx-activation = { path = "../netidx-activation", version = "0.32.0" }
 netidx-core = { path = "../netidx-core", version = "0.32.0" }
 netidx-derive = { path = "../netidx-derive", version = "0.32.0" }

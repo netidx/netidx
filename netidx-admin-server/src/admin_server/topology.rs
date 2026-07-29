@@ -1158,6 +1158,17 @@ pub(super) async fn handle_remove_server(
     prepared_server_unlock: &PreparedServerUnlock,
 ) -> RemoveServerResponse {
     let operation_id = admin_proto::OperationId::new();
+    // Captured before the commit takes it out of the map — we still have to
+    // reach it afterwards.
+    let target = req.server;
+    let (my_id, target_addr) = state
+        .read(move |state| {
+            (
+                state.cfg.server_id,
+                super::service_control::registered_server_addr(&state.map, target),
+            )
+        })
+        .await;
     let prepared = remove_server_prepare(
         state,
         &req,
@@ -1169,6 +1180,31 @@ pub(super) async fn handle_remove_server(
     let prepared = match prepared {
         Ok(prepared) => prepared,
         Err(response) => return response,
+    };
+    // Removing a member from everyone's configuration does not stop the
+    // clients that have not synced yet from asking it, and it has no reason to
+    // refuse them, so it would keep answering from a snapshot that only
+    // decays. Tell it to stop. Best effort — a host that is already down is
+    // not answering anyway, and the result says so either way.
+    //
+    // After the commit, not before: the caller has to be authorized first, and
+    // the CA can still reach a host whose certificate it just revoked, because
+    // outbound peer connections do not consult the CRL.
+    let gated = match target_addr {
+        None => None,
+        Some(addr) => {
+            let error = super::read_gate::push_to(
+                state,
+                target,
+                addr,
+                my_id,
+                netidx::resolver_server::config::ReadGate::Yes,
+                operation_id,
+            )
+            .await
+            .err();
+            Some(admin_proto::PeerResult { server: target, addr, error })
+        }
     };
     let crl_peers = match prepared.crl_pem {
         Some(crl_pem) => push_crl_to_peers(state, &crl_pem, operation_id).await,
@@ -1183,6 +1219,7 @@ pub(super) async fn handle_remove_server(
         affected_clusters: prepared.affected_clusters,
         peers,
         crl_peers,
+        gated,
     })
 }
 

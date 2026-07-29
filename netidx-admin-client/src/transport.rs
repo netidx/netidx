@@ -973,6 +973,35 @@ pub async fn control_service(
     }
 }
 
+/// Admin → CA: open or shut one member's read gate. Authorized by the same
+/// `service_control_scopes` as [`control_service`], because it is the same
+/// kind of act on the same target.
+pub async fn set_read_gate(
+    addr: SocketAddr,
+    kind: NodeKind,
+    expected: &CaIdentity,
+    credential: admin_proto::AdminCredential,
+    target_server: admin_proto::AdminServerId,
+    gate: netidx::resolver_server::config::ReadGate,
+) -> Result<()> {
+    let mut tls = connect_ca_pinned(addr, kind, expected).await?;
+    admin_proto::write_msg(
+        &mut tls,
+        &Request::SetReadGate(admin_proto::SetReadGateRequest {
+            credential: credential.clone(),
+            target_server,
+            gate,
+        }),
+    )
+    .await?;
+    match admin_proto::read_msg::<_, admin_proto::SetReadGateResponse>(&mut tls).await? {
+        admin_proto::SetReadGateResponse::Ok(_) => Ok(()),
+        admin_proto::SetReadGateResponse::Err { reason } => {
+            Err(admin_refusal(expected, &credential, "the CA refused", reason))
+        }
+    }
+}
+
 /// Server → server: apply a service-control op to a peer admin server's local
 /// activation supervisor (serving-cert authed). Mirrors [`push_perms_edit`].
 pub async fn push_service_control(
@@ -1005,6 +1034,42 @@ pub async fn push_service_control(
         ApplyServiceControlResponse::Ok(units) => Ok(units),
         ApplyServiceControlResponse::Err { reason } => {
             bail!("peer refused service control: {reason}")
+        }
+    }
+}
+
+/// CA → node: write a read gate into one exact admin server's own resolver
+/// config. Peer-cert-gated the same way as a service-control push.
+pub async fn push_set_read_gate(
+    client: &AuthenticatedPkiClient,
+    addr: SocketAddr,
+    target_id: admin_proto::AdminServerId,
+    target_ca: bool,
+    home_ca: CertificateDer<'static>,
+    operation_id: admin_proto::OperationId,
+    gate: netidx::resolver_server::config::ReadGate,
+) -> Result<()> {
+    let (mut tls, _hello) = connect_pki_target(
+        client,
+        addr,
+        NodeKind::AdminServer,
+        Some(ExactTarget { id: Some(target_id), home_ca: &home_ca, ca: target_ca }),
+    )
+    .await?;
+    admin_proto::write_msg(
+        &mut tls,
+        &Request::ApplySetReadGate(admin_proto::ApplySetReadGateRequest {
+            operation_id,
+            gate,
+        }),
+    )
+    .await?;
+    match admin_proto::read_msg::<_, admin_proto::ApplySetReadGateResponse>(&mut tls)
+        .await?
+    {
+        admin_proto::ApplySetReadGateResponse::Ok(()) => Ok(()),
+        admin_proto::ApplySetReadGateResponse::Err { reason } => {
+            bail!("peer refused the read gate: {reason}")
         }
     }
 }
@@ -2099,6 +2164,9 @@ pub struct RemoveServerOutcome {
     pub affected_clusters: Vec<String>,
     pub peers: Vec<admin_proto::PeerResult>,
     pub crl_peers: Vec<admin_proto::PeerResult>,
+    /// Whether the departing member was told to stop answering read clients.
+    /// `None` ⇒ it was already gone from the map.
+    pub gated: Option<admin_proto::PeerResult>,
 }
 
 /// Permanently evict one immutable admin-server identity through the verified
@@ -2126,6 +2194,7 @@ pub async fn remove_server(
             affected_clusters,
             peers,
             crl_peers,
+            gated,
         }) => Ok(RemoveServerOutcome {
             version,
             operation_id,
@@ -2134,6 +2203,7 @@ pub async fn remove_server(
             affected_clusters,
             peers,
             crl_peers,
+            gated,
         }),
         RemoveServerResponse::Err { reason } => {
             bail!("the CA refused server removal: {reason}")
