@@ -1172,6 +1172,22 @@ fn remove_server(f: RemoveServerArgs) -> Result<()> {
     if !out.affected_clusters.is_empty() {
         println!("  affected clusters: {}", out.affected_clusters.join(", "));
     }
+    // Whether the departing member was told to stop answering subscribers. It
+    // keeps whatever it already holds, so a member that could not be reached
+    // goes on serving a snapshot that only decays — say so rather than let the
+    // operator assume it went quiet.
+    match &out.gated {
+        None => {}
+        Some(peer) if peer.error.is_none() => {
+            println!("  read gate: {} is no longer answering read clients", peer.addr)
+        }
+        Some(peer) => println!(
+            "  ! read gate: could not reach {} to stop it answering read clients: {}\n    \
+             it is still serving whatever it last held — stop that machine.",
+            peer.addr,
+            peer.error.as_deref().unwrap_or("unknown error")
+        ),
+    }
     let crl_failed: Vec<_> =
         out.crl_peers.iter().filter(|peer| peer.error.is_some()).collect();
     println!(

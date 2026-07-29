@@ -1370,6 +1370,20 @@ async fn remove_server(
             format!("Server {server} was already absent; reconciled topology.")
         },
         format!("Revoked {} serving certificate(s).", out.revoked),
+        match &out.gated {
+            None => {
+                "It was already absent from the map; no read gate was set.".to_string()
+            }
+            Some(peer) if peer.error.is_none() => {
+                format!("{} has stopped answering read clients.", peer.addr)
+            }
+            Some(peer) => format!(
+                "! Could not reach {} to stop it answering read clients: {}. It is \
+                 still serving whatever it last held — stop that machine.",
+                peer.addr,
+                peer.error.as_deref().unwrap_or("unknown error")
+            ),
+        },
         format!(
             "Updated CRL on {} of {} target(s).",
             out.crl_peers.len() - crl_failed.len(),
