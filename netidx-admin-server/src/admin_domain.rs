@@ -94,6 +94,7 @@ pub fn upsert_ca(
         bail!("CA entry must use the map CA id and carry the CA role");
     }
     entry.state = ServerState::Registered;
+    entry.reported_read_gate = cluster.as_ref().map(|facts| facts.read_gated);
     let mut did_change = match map.admin_servers.iter_mut().find(|s| s.id == entry.id) {
         Some(old) if *old == entry => false,
         Some(old) => {
@@ -281,6 +282,7 @@ pub fn enroll(
         resolver: Some(resolver_member.clone()),
         cluster: Some(cluster),
         state: ServerState::Enrolled,
+        reported_read_gate: None,
     });
     changed(map);
     Ok(cluster)
@@ -667,11 +669,19 @@ pub fn register(
                 && cluster.state == ResolverClusterState::Pending
         })
     });
+    // Status, deliberately outside `facts_match`: a host that has taken itself
+    // out of service has not drifted from its grant, it is still exactly the
+    // member the CA approved. Recording it is how an operator sees that a gate
+    // the CA pushed actually landed.
+    let gate = resolver.map(|facts| facts.read_gated);
     let server = &mut map.admin_servers[pos];
-    let server_changed = server.addr != addr || server.state != ServerState::Registered;
+    let server_changed = server.addr != addr
+        || server.state != ServerState::Registered
+        || server.reported_read_gate != gate;
     if server_changed {
         server.addr = addr;
         server.state = ServerState::Registered;
+        server.reported_read_gate = gate;
     }
     if activate_root {
         map.resolver_clusters
@@ -784,6 +794,7 @@ pub fn reparent(
 mod tests {
     use super::*;
     use crate::admin_proto::{InfoAuth, ServerState};
+    use netidx::resolver_server::config::ReadGate;
 
     fn addr(s: &str) -> ResolverAddr {
         ResolverAddr { addr: s.parse().unwrap(), auth: InfoAuth::Anonymous }
@@ -818,6 +829,7 @@ mod tests {
             resolver: Some(old.clone()),
             cluster: Some(cluster),
             state: ServerState::Registered,
+            reported_read_gate: None,
         };
         let peer_entry = AdminServerEntry {
             id: peer,
@@ -826,6 +838,7 @@ mod tests {
             resolver: Some(peer_addr.clone()),
             cluster: Some(cluster),
             state: ServerState::Registered,
+            reported_read_gate: None,
         };
         let mut map = AdminDomainMap {
             version: 7,
@@ -883,6 +896,7 @@ mod tests {
                     resolver: Some(old.clone()),
                     cluster: Some(cluster),
                     state: ServerState::Registered,
+                    reported_read_gate: None,
                 },
                 AdminServerEntry {
                     id: peer,
@@ -891,6 +905,7 @@ mod tests {
                     resolver: Some(peer_addr.clone()),
                     cluster: Some(cluster),
                     state: ServerState::Registered,
+                    reported_read_gate: None,
                 },
             ],
             resolver_clusters: vec![ResolverClusterEntry {
@@ -934,6 +949,7 @@ mod tests {
             base: "/eu".into(),
             parent: None,
             children: vec![],
+            read_gated: ReadGate::No,
         };
         assert!(
             register(&mut map, server, "10.0.0.20:4565".parse().unwrap(), Some(&facts),)
@@ -954,6 +970,36 @@ mod tests {
     }
 
     #[test]
+    fn registration_records_the_reported_read_gate_without_calling_it_drift() {
+        let ca = AdminServerId::new();
+        let server = AdminServerId::new();
+        let mut map = AdminDomainMap::empty(ca);
+        let request = enrollment("/eu", "10.0.0.10:4564");
+        enroll(&mut map, server, &request).unwrap();
+        assert_eq!(map.admin_servers[0].reported_read_gate, None);
+        let addr = "10.0.0.20:4565".parse().unwrap();
+        let mut facts = ResolverClusterFacts {
+            members: request.resolver_members.clone(),
+            base: "/eu".into(),
+            parent: None,
+            children: vec![],
+            read_gated: ReadGate::No,
+        };
+        assert!(register(&mut map, server, addr, Some(&facts)).unwrap());
+        assert_eq!(map.admin_servers[0].reported_read_gate, Some(ReadGate::No));
+        let version = map.version;
+        // A host that has taken itself out of service has not drifted from
+        // its grant — it is still exactly the member the CA approved.
+        facts.read_gated = ReadGate::Yes;
+        assert!(register(&mut map, server, addr, Some(&facts)).unwrap());
+        assert_eq!(map.admin_servers[0].reported_read_gate, Some(ReadGate::Yes));
+        assert_eq!(map.admin_servers[0].state, ServerState::Registered);
+        assert!(map.version > version, "a gate change has to reach map readers");
+        // ... and reporting the same gate again is not a change.
+        assert!(!register(&mut map, server, addr, Some(&facts)).unwrap());
+    }
+
+    #[test]
     fn first_root_resolver_below_a_dedicated_ca_activates_on_registration() {
         let ca = AdminServerId::new();
         let server = AdminServerId::new();
@@ -966,6 +1012,7 @@ mod tests {
             base: "/".into(),
             parent: None,
             children: vec![],
+            read_gated: ReadGate::No,
         };
         assert!(
             register(&mut map, server, "10.0.0.10:4565".parse().unwrap(), Some(&facts),)
@@ -992,6 +1039,7 @@ mod tests {
             resolver: Some(addr("10.0.0.1:4564")),
             cluster: Some(root),
             state: ServerState::Registered,
+            reported_read_gate: Some(ReadGate::No),
         };
         let facts = ResolverClusterFacts {
             members: vec![addr("10.0.0.1:4564")],
@@ -1001,6 +1049,7 @@ mod tests {
                 path: "/eu".into(),
                 addrs: vec![addr("10.0.0.2:4564")],
             }],
+            read_gated: ReadGate::No,
         };
         let mut map = AdminDomainMap {
             version: 1,
@@ -1044,6 +1093,7 @@ mod tests {
             resolver: Some(addr("10.0.60.1:4564")),
             cluster: Some(child),
             state: ServerState::Registered,
+            reported_read_gate: Some(ReadGate::No),
         };
         let authoritative_child = ResolverClusterEntry {
             id: child,
@@ -1065,6 +1115,7 @@ mod tests {
                     resolver: Some(addr("10.0.0.1:4564")),
                     cluster: Some(root),
                     state: ServerState::Registered,
+                    reported_read_gate: None,
                 },
             ],
             resolver_clusters: vec![
@@ -1086,6 +1137,7 @@ mod tests {
             base: "/".into(),
             parent: None,
             children: vec![],
+            read_gated: ReadGate::No,
         };
 
         assert!(!upsert_ca(&mut map, ca_entry, Some(stale)).unwrap());
@@ -1134,6 +1186,7 @@ mod tests {
                 addrs: vec![addr("10.0.0.1:4564")],
             }),
             children: vec![],
+            read_gated: ReadGate::No,
         };
         assert!(
             register(
@@ -1203,6 +1256,7 @@ mod tests {
                 resolver: Some(addr(member)),
                 cluster: Some(root),
                 state: ServerState::Registered,
+                reported_read_gate: None,
             })
             .collect();
         let mut members: Vec<_> =
@@ -1281,6 +1335,7 @@ mod tests {
                 resolver: Some(addr(member)),
                 cluster: Some(cluster),
                 state: ServerState::Registered,
+                reported_read_gate: None,
             })
             .collect(),
             resolver_clusters: vec![ResolverClusterEntry {

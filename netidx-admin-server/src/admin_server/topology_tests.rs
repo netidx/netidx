@@ -115,6 +115,7 @@ fn ca_reconciliation_fanout_covers_the_complete_hierarchy() {
                 resolver: Some(root_member.clone()),
                 cluster: Some(root),
                 state: admin_proto::ServerState::Registered,
+                reported_read_gate: None,
             },
             AdminServerEntry {
                 id: satellite,
@@ -123,6 +124,7 @@ fn ca_reconciliation_fanout_covers_the_complete_hierarchy() {
                 resolver: Some(child_member.clone()),
                 cluster: Some(child),
                 state: admin_proto::ServerState::Registered,
+                reported_read_gate: None,
             },
         ],
         resolver_clusters: vec![
@@ -181,6 +183,7 @@ fn registration_fanout_updates_its_cluster_and_both_adjacent_levels() {
         resolver: Some(member),
         cluster: Some(cluster),
         state: admin_proto::ServerState::Registered,
+        reported_read_gate: None,
     };
     let root_member = resolver("10.1.0.1:4564");
     let joining_member = resolver("10.2.0.1:4564");
@@ -288,6 +291,7 @@ async fn ca_state_relocation_persists_route_map_and_crl_without_rollback() {
         resolver: None,
         cluster: None,
         state: admin_proto::ServerState::Registered,
+        reported_read_gate: None,
     };
     let mut old_map = AdminDomainMap::empty(ca);
     old_map.version = 4;
@@ -367,6 +371,7 @@ fn deciding_a_delegation_requires_authority_over_the_parent_cluster() {
         resolver: Some(member.clone()),
         cluster: Some(cluster),
         state: admin_proto::ServerState::Registered,
+        reported_read_gate: None,
     };
     let map = AdminDomainMap {
         version: 1,
@@ -430,4 +435,61 @@ fn deciding_a_delegation_requires_authority_over_the_parent_cluster() {
     // The root admin may decide both.
     assert!(decide_delegation_authority(&scoped("/"), &map, &under_root).is_ok());
     assert!(decide_delegation_authority(&scoped("/"), &map, &under_eu).is_ok());
+}
+
+/// The CA's own entry is refreshed by a poll now, not only at startup, so what
+/// that poll is allowed to change matters. It may move the address and record
+/// the reported gate; it may not re-derive the owned resolver member or its
+/// cluster from disk, and it may not drop them on a pass where the resolver
+/// config would not load.
+#[test]
+fn the_ca_poll_refreshes_its_own_status_but_never_its_own_grant() {
+    use crate::admin_server_config::Roles;
+    use std::path::PathBuf;
+
+    let ca = admin_proto::AdminServerId::new();
+    let cluster = admin_proto::ResolverClusterId::new();
+    let member = ResolverAddr {
+        addr: "10.0.0.1:4564".parse().unwrap(),
+        auth: InfoAuth::Anonymous,
+    };
+    let relocated = ResolverAddr {
+        addr: "10.0.0.9:4564".parse().unwrap(),
+        auth: InfoAuth::Anonymous,
+    };
+    let cfg = AdminServerConfig {
+        domain: "example.com".into(),
+        server_id: ca,
+        home_ca_fingerprint: String::new(),
+        listen: "10.0.0.1:4565".parse().unwrap(),
+        serving_cert: PathBuf::new(),
+        serving_key: PathBuf::new(),
+        trusted: PathBuf::new(),
+        roles: Roles::default(),
+        ca_addr: None,
+        peers: vec![],
+        mdns: false,
+        activation_units_dir: None,
+    };
+    // Nothing in the map yet: the local config seeds the grant, and a resolver
+    // cluster id is minted for it.
+    let mut map = AdminDomainMap::empty(ca);
+    let seeded = own_ca_entry(&map, &cfg, Some(member.clone()), true);
+    assert_eq!(seeded.resolver, Some(member.clone()));
+    let minted = seeded.cluster.expect("a resolver role gets a cluster");
+    map.admin_servers.push(AdminServerEntry { cluster: Some(cluster), ..seeded });
+
+    // The grant now exists. A poll that reads a *different* member off disk
+    // must not quietly relocate it — that is `relocate_resolver`'s job, and
+    // only it keeps the cluster roster in step.
+    let next = own_ca_entry(&map, &cfg, Some(relocated), true);
+    assert_eq!(next.resolver, Some(member.clone()));
+    assert_eq!(next.cluster, Some(cluster));
+    assert_ne!(next.cluster, Some(minted));
+
+    // A poll where the resolver config failed to parse reports no facts at
+    // all. Before, that cleared the entry's cluster; the grant has to survive.
+    let blind = own_ca_entry(&map, &cfg, None, false);
+    assert_eq!(blind.resolver, Some(member));
+    assert_eq!(blind.cluster, Some(cluster));
 }

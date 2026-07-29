@@ -16,17 +16,18 @@ use netidx_admin_proto::AdminServerId;
 #[derive(Args, Debug)]
 #[command(group(ArgGroup::new("gate").required(true).args(["shut", "open", "until"])))]
 pub(crate) struct ReadGateFlags {
-    /// Immutable UUID of the ONE member to gate. Obtain it from
-    /// `netidx admin ca servers`.
+    /// Immutable UUID of the ONE member to gate. `netidx admin ca servers`
+    /// lists them, with each one's current gate.
     #[arg(long, value_name = "SERVER-ID")]
     pub target: AdminServerId,
-    /// Stop answering read clients until someone opens the gate again. What
-    /// you want when taking a member out of service: publishers keep writing
-    /// to it, so its records age out rather than vanishing.
+    /// Stop answering read clients until someone opens the gate again.
+    /// Subscribers stop resolving through it; publishers keep writing to it,
+    /// so its records stay fresh — it just stops answering.
     #[arg(long)]
     pub shut: bool,
     /// Answer read clients. Use once you are satisfied that every publisher
-    /// has found a newly added member.
+    /// has found a newly added member — until they have, it answers from a
+    /// namespace they have not finished rebuilding.
     #[arg(long)]
     pub open: bool,
     /// Stop answering read clients for this long, then start. Takes a

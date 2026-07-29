@@ -946,6 +946,26 @@ mod republish {
         assert!(ReadGate::Until(Utc::now() - CDuration::seconds(1)).is_open());
     }
 
+    /// A host reports one gate but may hold several member blocks. Whichever
+    /// of them refuses reads for longest is the one that can turn a subscriber
+    /// away, so that is the one worth reporting.
+    #[test]
+    fn the_strictest_gate_is_the_one_that_refuses_longest() {
+        use chrono::{Duration as CDuration, Utc};
+        let soon = ReadGate::Until(Utc::now() + CDuration::seconds(60));
+        let later = ReadGate::Until(Utc::now() + CDuration::seconds(600));
+        for (a, b, want) in [
+            (ReadGate::No, ReadGate::No, ReadGate::No),
+            (ReadGate::No, ReadGate::Yes, ReadGate::Yes),
+            (ReadGate::No, soon, soon),
+            (soon, ReadGate::Yes, ReadGate::Yes),
+            (soon, later, later),
+        ] {
+            assert_eq!(a.strictest(b), want, "{a:?} vs {b:?}");
+            assert_eq!(b.strictest(a), want, "{b:?} vs {a:?} (must commute)");
+        }
+    }
+
     /// An unpublish that could not be delivered has to be retried, not
     /// forgotten. The member still holds the record — nothing else will ever
     /// remove it before the writer ttl expires.

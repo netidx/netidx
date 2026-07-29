@@ -282,6 +282,7 @@ mod tests {
             resolver: Some(resolver(resolver_addr)),
             cluster: Some(cluster),
             state: ServerState::Registered,
+            reported_read_gate: None,
         }
     }
 

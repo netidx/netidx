@@ -1020,6 +1020,7 @@ mod tests {
             resolver: None,
             cluster: Some(cluster),
             state: ServerState::Registered,
+            reported_read_gate: None,
         });
         map.resolver_clusters.push(ResolverClusterEntry {
             id: cluster,

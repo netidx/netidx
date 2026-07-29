@@ -1125,17 +1125,18 @@ fn servers(f: ServersArgs) -> Result<()> {
             if row.ca { "  CA" } else { "" }
         );
         println!(
-            "    roles {}  resolver {}",
+            "    roles {}  resolver {}  reads {}",
             if roles.is_empty() { "-" } else { &roles },
             row.resolver
                 .as_ref()
                 .map(|member| member.addr.to_string())
                 .as_deref()
-                .unwrap_or("-")
+                .unwrap_or("-"),
+            server_ops::read_gate_label(row.read_gate)
         );
     }
     println!(
-        "\nPermanent removal requires the exact UUID: `netidx admin ca remove-server \
+        "\nPermanent removal requires the exact UUID: `netidx admin CA remove-server \
          <server-id>`."
     );
     Ok(())
@@ -1324,7 +1325,7 @@ fn ensure_externally_signed(dir: &Path) -> Result<()> {
     if !ca::CaLifetimes::load(dir)?.externally_signed {
         bail!(
             "{} is not an externally-signed CA — create one with \
-             `netidx admin ca init --external-sign`",
+             `netidx admin CA init --external-sign`",
             dir.display()
         );
     }
@@ -1440,7 +1441,7 @@ async fn report_external_install(
                 "installed the externally-signed CA certificate.\n\
                  admin server configured ({})\n\
                  CA-cert auto-renewal is DISABLED (external issuer); re-run \
-                 `netidx admin ca external install` when your PKI re-signs it.",
+                 `netidx admin CA external install` when your PKI re-signs it.",
                 cfg_path.display()
             ));
             plan::service::offer(ans, need, gate).await
@@ -2243,7 +2244,7 @@ fn queue(f: QueueArgs) -> Result<()> {
             }
         }
         println!(
-            "\napprove with `netidx admin ca approve <code>` after matching the code \
+            "\napprove with `netidx admin CA approve <code>` after matching the code \
              out of band."
         );
     }

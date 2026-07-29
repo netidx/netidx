@@ -10,7 +10,9 @@ use crate::{
     transport,
 };
 use anyhow::{Context, Result, bail};
+use chrono::Utc;
 use enumflags2::BitFlags;
+use netidx::resolver_server::config::ReadGate;
 use std::{net::SocketAddr, path::PathBuf};
 
 #[derive(Debug, Clone)]
@@ -24,6 +26,51 @@ pub struct ServerInfo {
     pub cluster_base: Option<String>,
     pub cluster_state: Option<ResolverClusterState>,
     pub ca: bool,
+    /// What this host last told the CA its own resolver config says, or `None`
+    /// if it runs no resolver or has not reported yet. Reported state, not the
+    /// CA's intent — a gate the CA pushed but that never landed shows here as
+    /// it really is.
+    pub read_gate: Option<ReadGate>,
+}
+
+/// One column's worth of read-gate status: short enough for a list row, and
+/// relative, because the question an operator has is "how long until it starts
+/// answering", not "at what instant".
+pub fn read_gate_label(gate: Option<ReadGate>) -> String {
+    match gate {
+        None => "-".to_string(),
+        Some(ReadGate::No) => "open".to_string(),
+        Some(ReadGate::Yes) => "shut".to_string(),
+        Some(ReadGate::Until(t)) => match (t - Utc::now()).to_std() {
+            Err(_) => "open (expired)".to_string(),
+            Ok(left) => format!("shut {}", humantime::format_duration(round(left))),
+        },
+    }
+}
+
+/// The same status in full, for a detail pane: the exact instant the gate
+/// opens is what you need when deciding whether to open it early.
+pub fn read_gate_detail(gate: Option<ReadGate>) -> String {
+    match gate {
+        None => "-".to_string(),
+        Some(ReadGate::No) => "open — answering read clients".to_string(),
+        Some(ReadGate::Yes) => "shut — refusing read clients until opened".to_string(),
+        Some(g @ ReadGate::Until(t)) => {
+            let t = t.format("%Y-%m-%d %H:%M:%SZ");
+            if g.is_open() {
+                format!("open — the gate expired at {t}")
+            } else {
+                format!("shut — refusing read clients until {t}")
+            }
+        }
+    }
+}
+
+/// Whole seconds, then whole minutes above an hour: `humantime` will otherwise
+/// render every remaining nanosecond.
+fn round(d: std::time::Duration) -> std::time::Duration {
+    let secs = d.as_secs();
+    std::time::Duration::from_secs(if secs >= 3600 { secs - secs % 60 } else { secs })
 }
 
 /// List every server grant in the verified CA map, including enrolled
@@ -57,6 +104,7 @@ pub async fn list_servers(
                 cluster_base: cluster.map(|cluster| cluster.base.clone()),
                 cluster_state: cluster.map(|cluster| cluster.state),
                 ca: entry.id == map.ca,
+                read_gate: entry.reported_read_gate,
             }
         })
         .collect();
@@ -113,4 +161,48 @@ pub async fn reconcile_ca(
         sess.credential,
     )
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Duration;
+
+    #[test]
+    fn a_gate_is_described_as_open_or_shut_never_as_yes_or_no() {
+        // "read gated: yes" leaves the reader working out whether the gate is
+        // on or the reads are. Neither surface says it.
+        for gate in [None, Some(ReadGate::No), Some(ReadGate::Yes)] {
+            let (label, detail) = (read_gate_label(gate), read_gate_detail(gate));
+            for s in [&label, &detail] {
+                assert!(!s.contains("yes") && !s.contains("no "), "{s:?}");
+            }
+        }
+        assert_eq!(read_gate_label(None), "-");
+        assert_eq!(read_gate_label(Some(ReadGate::No)), "open");
+        assert_eq!(read_gate_label(Some(ReadGate::Yes)), "shut");
+    }
+
+    #[test]
+    fn a_live_deadline_reads_as_time_left_and_a_passed_one_as_open() {
+        let live = Some(ReadGate::Until(Utc::now() + Duration::minutes(30)));
+        let label = read_gate_label(live);
+        assert!(label.starts_with("shut "), "{label:?}");
+        assert!(label.contains("29m") || label.contains("30m"), "{label:?}");
+        assert!(
+            read_gate_detail(live).contains("until 20"),
+            "{:?}",
+            read_gate_detail(live)
+        );
+
+        // An expired Until stays in the config — the resolver never rewrites
+        // its own file — so both surfaces have to read it as open.
+        let past = Some(ReadGate::Until(Utc::now() - Duration::minutes(1)));
+        assert_eq!(read_gate_label(past), "open (expired)");
+        assert!(
+            read_gate_detail(past).starts_with("open"),
+            "{:?}",
+            read_gate_detail(past)
+        );
+    }
 }

@@ -77,6 +77,7 @@ fn centralized_requirements_protect_all_mutations() {
         resolver: None,
         cluster: None,
         state: admin_proto::ServerState::Registered,
+        reported_read_gate: None,
     });
     assert_ca(&Request::ApplyCaState(ApplyCaStateRequest {
         operation_id,

@@ -69,6 +69,20 @@ impl ReadGate {
             ReadGate::Until(t) => chrono::Utc::now() >= *t,
         }
     }
+
+    /// The gate that refuses reads for longer. A host whose member blocks
+    /// disagree is described by its strictest one, since that is the one a
+    /// subscriber can be turned away by.
+    pub fn strictest(self, other: ReadGate) -> ReadGate {
+        match (self, other) {
+            (ReadGate::Yes, _) | (_, ReadGate::Yes) => ReadGate::Yes,
+            (ReadGate::Until(a), ReadGate::Until(b)) => ReadGate::Until(a.max(b)),
+            (ReadGate::Until(t), ReadGate::No) | (ReadGate::No, ReadGate::Until(t)) => {
+                ReadGate::Until(t)
+            }
+            (ReadGate::No, ReadGate::No) => ReadGate::No,
+        }
+    }
 }
 
 /// The type of authentication to use

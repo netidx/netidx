@@ -1129,6 +1129,10 @@ pub struct ResolverClusterFacts {
     pub parent: Option<ResolverClusterEdge>,
     /// The child resolver clusters delegated below this one.
     pub children: Vec<ResolverClusterEdge>,
+    /// Whether this host is currently refusing read clients, as its own
+    /// resolver config says. Status, not topology: it is never checked
+    /// against the grant and never decides anything.
+    pub read_gated: ReadGate,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Pack)]
@@ -1160,6 +1164,14 @@ pub struct AdminServerEntry {
     pub resolver: Option<ResolverAddr>,
     pub cluster: Option<ResolverClusterId>,
     pub state: ServerState,
+    /// The read gate this host last reported from its own resolver config,
+    /// or `None` if it runs no resolver or has not reported since the CA
+    /// started. Unlike every other field here it is not a grant — the CA
+    /// records what the host said it is doing, not what the CA told it to
+    /// do, so an operator can see a push that never landed.
+    #[serde(default)]
+    #[pack(default)]
+    pub reported_read_gate: Option<ReadGate>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Pack)]
@@ -1994,6 +2006,7 @@ mod tests {
                     }],
                 }),
                 children: vec![],
+                read_gated: ReadGate::No,
             }),
         });
         write_msg(&mut a, &req).await.unwrap();
@@ -2013,6 +2026,7 @@ mod tests {
                 resolver: None,
                 cluster: None,
                 state: ServerState::Registered,
+                reported_read_gate: None,
             }],
             resolver_clusters: vec![],
         });
@@ -2094,11 +2108,16 @@ mod tests {
     #[test]
     fn cluster_facts_root_decodes() {
         // A root resolver cluster reports base "/" and no parent/children.
-        let json = r#"{"members":[{"addr":"10.0.0.1:4564","auth":"Anonymous"}],"base":"/","parent":null,"children":[]}"#;
+        // `read_gated` is required, not defaulted: facts are always built from
+        // a config the sender just read, so a missing gate means the sender is
+        // not reporting one — and defaulting that to "open" would be the map
+        // asserting something nobody said.
+        let json = r#"{"members":[{"addr":"10.0.0.1:4564","auth":"Anonymous"}],"base":"/","parent":null,"children":[],"read_gated":"No"}"#;
         let cf: ResolverClusterFacts = serde_json::from_str(json).unwrap();
         assert_eq!(cf.base, "/");
         assert!(cf.parent.is_none());
         assert!(cf.children.is_empty());
         assert_eq!(cf.members.len(), 1);
+        assert_eq!(cf.read_gated, ReadGate::No);
     }
 }

@@ -23,6 +23,7 @@ use anyhow::Result;
 #[cfg(unix)]
 use anyhow::{Context, bail};
 use crossterm::event::KeyCode;
+use netidx::resolver_server::config::ReadGate;
 use netidx_admin_proto::AdminServerId;
 use netidx_admin_proto::fingerprint::Fingerprint;
 use ratatui::{
@@ -161,7 +162,9 @@ impl Panel {
             Panel::Queue => "a approve · d deny · R renewals · r refresh · Esc back",
             Panel::Delegations => "a approve · d deny · r refresh · Esc back",
             Panel::Roster => "a add · e edit-policy · d remove · r refresh · Esc back",
-            Panel::Servers => "c reconcile CA · x force-remove · r refresh · Esc back",
+            Panel::Servers => {
+                "g read gate · c reconcile CA · x force-remove · r refresh · Esc back"
+            }
             Panel::Revocation => "x revoke · r refresh · Esc back",
             Panel::Perms => "e edit · r reload · Esc back",
             Panel::Service => "s start · t stop · R restart · r refresh · Esc back",
@@ -216,6 +219,12 @@ pub(super) enum RowKey {
         addr: SocketAddr,
         cluster: String,
         ca: bool,
+        /// Whether this identity holds a resolver grant at all — a host with
+        /// no resolver has nothing to gate.
+        resolver: bool,
+        /// The gate this host last reported. Carried so the confirmation can
+        /// say how much of a timed gate is being cut short.
+        gate: Option<ReadGate>,
     },
 }
 
@@ -273,6 +282,16 @@ pub(super) enum RemoteAction {
         addr: SocketAddr,
         cluster: String,
     },
+    /// Open or shut one member's read gate. Confirm-gated in both directions:
+    /// shutting takes it out of service for subscribers, and opening one that
+    /// is still filling exposes a partial namespace.
+    SetReadGate {
+        target: PanelTarget,
+        server: ServiceTarget,
+        gate: ReadGate,
+        /// What the member reported before this change, for the confirmation.
+        current: Option<ReadGate>,
+    },
     /// Re-send the CA's current address, map, and CRL to every
     /// registered node. Idempotent manual retry after recovery/relocation.
     ReconcileCa { target: PanelTarget },
@@ -312,6 +331,12 @@ impl RemoteAction {
             RemoteAction::SetPolicy { .. } => "Setting policy".to_string(),
             RemoteAction::RemoveAdmin { .. } => "Removing an admin".to_string(),
             RemoteAction::RemoveServer { .. } => "Removing a server".to_string(),
+            RemoteAction::SetReadGate { gate, .. } => match gate {
+                ReadGate::No => "Opening the read gate".to_string(),
+                ReadGate::Yes | ReadGate::Until(_) => {
+                    "Shutting the read gate".to_string()
+                }
+            },
             RemoteAction::ReconcileCa { .. } => "Reconciling CA state".to_string(),
             RemoteAction::ListResolverClusters { .. } => "Loading bases".to_string(),
             RemoteAction::EditPerms { .. } => "Editing permissions".to_string(),
@@ -364,6 +389,9 @@ impl RemoteAction {
                 server.id,
                 server.addr,
             )),
+            RemoteAction::SetReadGate { server, gate, current, .. } => {
+                read_gate_confirm(server, *gate, *current)
+            }
             // Everything else runs without a prompt. Adding a destructive
             // action means adding it above, not here.
             RemoteAction::Connect { .. }
@@ -404,6 +432,7 @@ impl RemoteAction {
             | RemoteAction::SetPolicy { .. }
             | RemoteAction::RemoveAdmin { .. }
             | RemoteAction::RemoveServer { .. }
+            | RemoteAction::SetReadGate { .. }
             | RemoteAction::ReconcileCa { .. }
             | RemoteAction::ListResolverClusters { .. }
             | RemoteAction::EditPerms { .. }
@@ -429,12 +458,74 @@ impl RemoteAction {
             | RemoteAction::SetPolicy { target, .. }
             | RemoteAction::RemoveAdmin { target, .. }
             | RemoteAction::RemoveServer { target, .. }
+            | RemoteAction::SetReadGate { target, .. }
             | RemoteAction::ReconcileCa { target }
             | RemoteAction::ListResolverClusters { target }
             | RemoteAction::EditPerms { target, .. }
             | RemoteAction::ListServiceServers { target }
             | RemoteAction::ServiceControl { target, .. } => target.glyph(),
         }
+    }
+}
+
+/// The gate states offered for a member, as label + what it does. Never "yes"
+/// and "no": a gate that is "on" and reads that are "on" mean opposite things,
+/// and an operator reading a one-word answer has no way to tell which was
+/// meant. The CLI avoids it the same way, with `--open` / `--shut`.
+const GATE_CHOICES: [(&str, &str); 3] = [
+    ("Open", "Answer read clients."),
+    ("Shut", "Stop answering read clients until someone opens the gate again."),
+    ("Shut until", "Stop answering read clients for a while, then start."),
+];
+
+/// The confirmation for a gate change, or `None` when nothing is changing.
+///
+/// Both directions are worth stopping on, for opposite reasons. Shutting takes
+/// a member out of service for subscribers. Opening one that is still filling
+/// is the quieter mistake: it answers, but from a namespace that publishers
+/// have not finished rebuilding, and a path that is merely missing is
+/// indistinguishable from a path that does not exist.
+fn read_gate_confirm(
+    server: &ServiceTarget,
+    gate: ReadGate,
+    current: Option<ReadGate>,
+) -> Option<String> {
+    let (id, addr) = (server.id, server.addr);
+    let left = |t: chrono::DateTime<chrono::Utc>| {
+        humantime::format_duration(std::time::Duration::from_secs(
+            (t - chrono::Utc::now()).num_seconds().max(0) as u64 / 60 * 60,
+        ))
+        .to_string()
+    };
+    match (gate, current) {
+        (ReadGate::No, Some(ReadGate::Until(t))) if !ReadGate::Until(t).is_open() => {
+            Some(format!(
+                "Start {id} at {addr} answering read clients {} early?\n\nIt is \
+                 waiting for publishers to find it. Anything that has not been \
+                 republished yet will look absent to subscribers resolving through \
+                 it.",
+                left(t)
+            ))
+        }
+        (ReadGate::No, Some(ReadGate::Yes)) => Some(format!(
+            "Start {id} at {addr} answering read clients?\n\nIt will answer from \
+             whatever it holds now. If it was taken out of service, that may be a \
+             stale picture of the namespace."
+        )),
+        // Already open, or as good as: nothing to warn about.
+        (ReadGate::No, _) => None,
+        (ReadGate::Yes, _) => Some(format!(
+            "Stop {id} at {addr} answering read clients?\n\nSubscribers stop \
+             resolving through it until someone opens the gate again. Publishers \
+             keep writing to it, so its records stay fresh — it just stops \
+             answering."
+        )),
+        (ReadGate::Until(t), _) => Some(format!(
+            "Stop {id} at {addr} answering read clients for {}?\n\nSubscribers stop \
+             resolving through it until then. Publishers keep writing to it, so its \
+             records stay fresh — it just stops answering.",
+            left(t)
+        )),
     }
 }
 
@@ -527,6 +618,9 @@ pub(super) async fn run(
         }
         RemoteAction::RemoveServer { target, server, .. } => {
             remove_server(ans, target.into_remote()?, server).await
+        }
+        RemoteAction::SetReadGate { target, server, gate, .. } => {
+            set_read_gate(ans, target.into_remote()?, server, gate).await
         }
         RemoteAction::ReconcileCa { target } => {
             reconcile_ca(ans, target.into_remote()?).await
@@ -1191,12 +1285,20 @@ fn server_row(server: &netidx_admin_client::ops::servers::ServerInfo) -> PanelRo
         tags.push_str(", CA");
     }
     PanelRow {
-        text: format!("{:<12}  {}  {}  [{tags}]", cluster, server.id, server.addr),
+        text: format!(
+            "{:<12}  {}  {}  {:<14}  [{tags}]",
+            cluster,
+            server.id,
+            server.addr,
+            netidx_admin_client::ops::servers::read_gate_label(server.read_gate),
+        ),
         key: RowKey::Server {
             id: server.id,
             addr: server.addr,
             cluster: cluster.clone(),
             ca: server.ca,
+            resolver: server.roles.contains(netidx_admin_proto::Role::Resolver),
+            gate: server.read_gate,
         },
         detail: vec![
             ("Server ID".to_string(), server.id.to_string()),
@@ -1217,6 +1319,10 @@ fn server_row(server: &netidx_admin_client::ops::servers::ServerInfo) -> PanelRo
                     .unwrap_or_else(|| "-".to_string()),
             ),
             ("Enrollment state".to_string(), format!("{:?}", server.state)),
+            (
+                "Read gate".to_string(),
+                netidx_admin_client::ops::servers::read_gate_detail(server.read_gate),
+            ),
             ("Roles".to_string(), if roles.is_empty() { "-".to_string() } else { roles }),
             (
                 "Resolver address".to_string(),
@@ -1321,6 +1427,54 @@ async fn remove_server(
         Panel::Servers,
         rows,
     ))
+}
+
+/// The panel is re-listed from the map afterwards rather than assuming the
+/// change took: the member reports its own gate, so what comes back is what
+/// that host says it is doing, not what we just asked for.
+#[cfg(unix)]
+async fn set_read_gate(
+    ans: &mut TuiAnswerer,
+    conn: RemoteConn,
+    server: ServiceTarget,
+    gate: ReadGate,
+) -> Result<super::action::Outcome> {
+    use netidx_admin_client::ops::service;
+    service::set_read_gate(
+        ans,
+        conn.server,
+        None,
+        Some(conn.admin.clone()),
+        None,
+        server.id,
+        gate,
+    )
+    .await?;
+    let (title, line) = match gate {
+        ReadGate::No => (
+            "Read gate opened",
+            format!("{} at {} is answering read clients.", server.id, server.addr),
+        ),
+        ReadGate::Yes => (
+            "Read gate shut",
+            format!(
+                "{} at {} is no longer answering read clients. Publishers keep \
+                 writing to it.",
+                server.id, server.addr
+            ),
+        ),
+        ReadGate::Until(t) => (
+            "Read gate shut",
+            format!(
+                "{} at {} will start answering read clients at {}.",
+                server.id,
+                server.addr,
+                t.format("%Y-%m-%d %H:%M:%SZ")
+            ),
+        ),
+    };
+    let rows = server_rows(ans, &conn).await?;
+    Ok(super::action::Outcome::remote_after(title, vec![line], Panel::Servers, rows))
 }
 
 #[cfg(unix)]
@@ -1770,6 +1924,16 @@ enum Screen {
     /// services panel — service control is per-server, so you pick the one to
     /// manage.
     ServerPick { admin_servers: Vec<ServiceServerRow>, state: ListState },
+    /// Choose a read gate for the member selected in the Servers panel: pick a
+    /// state, then — only for a timed gate — say how long. Kept out of the op
+    /// body so the confirmation can name what is actually about to happen.
+    Gate {
+        server: ServiceTarget,
+        current: Option<ReadGate>,
+        choice: ListState,
+        /// `Some` once "Shut until" is picked: the duration being typed.
+        until: Option<String>,
+    },
     /// A panel's rows.
     Panel(Panel),
 }
@@ -2020,6 +2184,7 @@ impl RemoteState {
     /// paths routinely contain those letters).
     pub(super) fn capturing_text(&self) -> bool {
         matches!(self.screen, Screen::Manual { .. })
+            || matches!(self.screen, Screen::Gate { until: Some(_), .. })
     }
 
     /// The tool keys for the App gutter when this surface is drilled in (a
@@ -2039,6 +2204,8 @@ impl RemoteState {
             },
             Screen::ResolverClusterPick { .. } => "↑/↓ · Enter open · Esc back",
             Screen::ServerPick { .. } => "↑/↓ · Enter open · Esc back",
+            Screen::Gate { until: None, .. } => "↑/↓ · Enter choose · Esc back",
+            Screen::Gate { until: Some(_), .. } => "Enter apply · Esc back",
             Screen::Panel(panel) => panel.keys(),
         };
         Some(format!(" {keys} "))
@@ -2054,8 +2221,87 @@ impl RemoteState {
             Screen::Menu => self.on_key_menu(code),
             Screen::ResolverClusterPick { .. } => self.on_key_resolver_cluster_pick(code),
             Screen::ServerPick { .. } => self.on_key_server_pick(code),
+            Screen::Gate { .. } => self.on_key_gate(code),
             Screen::Panel(panel) => self.on_key_panel(code, *panel),
         }
+    }
+
+    /// Pick a read gate for the selected member, then — for a timed gate only
+    /// — how long. The duration is a duration, not an instant: it is what the
+    /// CLI's `--until` takes, it needs no timezone, and `1h` needs no
+    /// explaining. The confirmation echoes back what it resolved to.
+    fn on_key_gate(&mut self, code: KeyCode) -> Option<Action> {
+        let target = self.target.clone()?;
+        let Screen::Gate { server, current, choice, until } = &mut self.screen else {
+            return None;
+        };
+        let (server, current) = (*server, *current);
+        if let Some(text) = until {
+            match code {
+                KeyCode::Char(c) => {
+                    text.push(c);
+                    self.error = None;
+                }
+                KeyCode::Backspace => {
+                    text.pop();
+                }
+                KeyCode::Esc => {
+                    *until = None;
+                    self.error = None;
+                }
+                KeyCode::Enter => match parse_gate_duration(text) {
+                    Ok(gate) => {
+                        self.error = None;
+                        self.screen = Screen::Panel(Panel::Servers);
+                        return Some(Action::Remote(RemoteAction::SetReadGate {
+                            target,
+                            server,
+                            gate,
+                            current,
+                        }));
+                    }
+                    Err(e) => self.error = Some(e),
+                },
+                _ => {}
+            }
+            return None;
+        }
+        match code {
+            KeyCode::Up | KeyCode::Char('k') => {
+                let i = choice.selected().unwrap_or(0).saturating_sub(1);
+                choice.select(Some(i));
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                let last = GATE_CHOICES.len() - 1;
+                let i = choice.selected().map_or(0, |i| (i + 1).min(last));
+                choice.select(Some(i));
+            }
+            KeyCode::Esc => {
+                self.error = None;
+                self.screen = Screen::Panel(Panel::Servers);
+            }
+            KeyCode::Enter => {
+                let gate = match choice.selected().unwrap_or(0) {
+                    0 => ReadGate::No,
+                    1 => ReadGate::Yes,
+                    _ => {
+                        *until = Some(DEFAULT_GATE_DURATION.to_string());
+                        self.error = None;
+                        return None;
+                    }
+                };
+                self.error = None;
+                self.screen = Screen::Panel(Panel::Servers);
+                return Some(Action::Remote(RemoteAction::SetReadGate {
+                    target,
+                    server,
+                    gate,
+                    current,
+                }));
+            }
+            _ => {}
+        }
+        None
     }
 
     /// Pick a resolver cluster from the map-derived list, then open the
@@ -2427,6 +2673,35 @@ impl RemoteState {
             KeyCode::Char('c') => {
                 Some(Action::Remote(RemoteAction::ReconcileCa { target }))
             }
+            KeyCode::Char('g') => {
+                // The CA can be gated like any other member — unlike
+                // force-remove, taking it out of service for readers is an
+                // ordinary thing to want.
+                match &self.rows.get(self.list.selected()?)?.key {
+                    RowKey::Server { resolver: false, .. } => {
+                        self.error = Some(
+                            "that server runs no resolver, so it has no read gate to set"
+                                .to_string(),
+                        );
+                    }
+                    RowKey::Server { id, addr, gate, .. } => {
+                        let mut choice = ListState::default();
+                        choice.select(Some(0));
+                        self.error = None;
+                        self.screen = Screen::Gate {
+                            server: ServiceTarget { id: *id, addr: *addr },
+                            current: *gate,
+                            choice,
+                            until: None,
+                        };
+                    }
+                    RowKey::None
+                    | RowKey::Code(_)
+                    | RowKey::Name(_)
+                    | RowKey::Cert { .. } => {}
+                }
+                None
+            }
             KeyCode::Char('x') => {
                 self.selected_server().map(|(server, addr, cluster)| {
                     Action::Remote(RemoteAction::RemoveServer {
@@ -2478,7 +2753,7 @@ impl RemoteState {
     /// the inventory but cannot produce a destructive action.
     fn selected_server(&self) -> Option<(AdminServerId, SocketAddr, String)> {
         match &self.rows.get(self.list.selected()?)?.key {
-            RowKey::Server { id, addr, cluster, ca: false } => {
+            RowKey::Server { id, addr, cluster, ca: false, .. } => {
                 Some((*id, *addr, cluster.clone()))
             }
             RowKey::None
@@ -2525,8 +2800,90 @@ impl RemoteState {
             Screen::ServerPick { admin_servers: servers, state } => {
                 self.render_server_pick(f, area, servers, &mut state.clone())
             }
+            Screen::Gate { server, current, choice, until } => {
+                self.render_gate(f, area, server, *current, &mut choice.clone(), until)
+            }
             Screen::Panel(panel) => self.render_panel(f, area, *panel),
         }
+    }
+
+    /// The gate chooser: the three states on the left with what each does on
+    /// the right, then the duration form once a timed gate is picked.
+    fn render_gate(
+        &self,
+        f: &mut Frame,
+        area: Rect,
+        server: &ServiceTarget,
+        current: Option<ReadGate>,
+        choice: &mut ListState,
+        until: &Option<String>,
+    ) {
+        use netidx_admin_client::ops::servers::read_gate_detail;
+        if let Some(text) = until {
+            render_form(
+                f,
+                area,
+                "Shut the read gate until",
+                &[
+                    "How long should it stop answering read clients?",
+                    "A duration, such as 30m, 90m, or 2h.",
+                ],
+                text,
+                self.error.as_deref(),
+                "Publishers keep writing to it the whole time.",
+            );
+            return;
+        }
+        let cols =
+            Layout::horizontal([Constraint::Length(24), Constraint::Min(0)]).split(area);
+        let items: Vec<ListItem> =
+            GATE_CHOICES.iter().map(|(label, _)| ListItem::new(*label)).collect();
+        f.render_stateful_widget(
+            List::new(items)
+                .style(theme::panel_style())
+                .block(
+                    theme::panel_block()
+                        .title(Span::styled(" Read gate ", theme::title_style())),
+                )
+                .highlight_style(theme::selected_style())
+                .highlight_symbol("▸ "),
+            cols[0],
+            choice,
+        );
+        let sel = choice.selected().unwrap_or(0).min(GATE_CHOICES.len() - 1);
+        let mut lines = vec![
+            Line::from(vec![
+                Span::styled("server:  ", theme::hint_style()),
+                Span::styled(server.id.to_string(), theme::panel_style()),
+            ]),
+            Line::from(vec![
+                Span::styled("address: ", theme::hint_style()),
+                Span::styled(server.addr.to_string(), theme::panel_style()),
+            ]),
+            Line::from(vec![
+                Span::styled("now:     ", theme::hint_style()),
+                Span::styled(read_gate_detail(current), theme::panel_style()),
+            ]),
+            Line::from(""),
+            Line::from(Span::styled(GATE_CHOICES[sel].1, theme::panel_style())),
+        ];
+        if let Some(e) = &self.error {
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                e.clone(),
+                Style::default().bg(theme::PANEL_BG).fg(theme::ACCENT),
+            )));
+        }
+        f.render_widget(
+            Paragraph::new(lines)
+                .wrap(Wrap { trim: true })
+                .style(theme::panel_style())
+                .block(
+                    theme::panel_block()
+                        .title(Span::styled(" Member ", theme::title_style())),
+                ),
+            cols[1],
+        );
     }
 
     /// The admin domain resolver cluster picker: a list of the map's resolver bases.
@@ -2974,6 +3331,25 @@ pub(super) fn render_form(
 /// The conventional admin-server port, pre-filled in the manual-connect form.
 const DEFAULT_ADMIN_PORT: u16 = 4565;
 
+/// Pre-filled in the gate-duration form. Long enough to be a plausible answer,
+/// short enough that accepting it blindly is not the dangerous choice, and it
+/// shows the format without needing to explain it.
+const DEFAULT_GATE_DURATION: &str = "1h";
+
+/// A typed duration into the absolute deadline the config stores. Duration in,
+/// instant out: the deadline is what survives a restart, but nobody wants to
+/// type a timestamp.
+fn parse_gate_duration(text: &str) -> Result<ReadGate, String> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Err("enter a duration, such as 30m or 2h".to_string());
+    }
+    let d: std::time::Duration =
+        text.parse::<humantime::Duration>().map_err(|e| format!("{e}"))?.into();
+    let d = chrono::Duration::from_std(d).map_err(|_| "that is too long".to_string())?;
+    Ok(ReadGate::Until(chrono::Utc::now() + d))
+}
+
 /// Render a `label: [ value ]` form row (value masked when `secret`). Returns the
 /// cursor position when `focused` so the caller can place the terminal cursor.
 fn labeled_field(
@@ -3209,8 +3585,9 @@ mod tests {
         );
     }
 
-    #[test]
-    fn server_panel_lists_identity_and_protects_ca() {
+    /// The Servers panel with two rows: the CA, open, and a satellite still
+    /// inside a 45-minute join gate.
+    fn a_servers_panel() -> RemoteState {
         let ca = AdminServerId::new();
         let satellite = AdminServerId::new();
         let mut s = RemoteState::new();
@@ -3224,6 +3601,8 @@ mod tests {
                     addr: "10.0.0.1:4565".parse().unwrap(),
                     cluster: "/".to_string(),
                     ca: true,
+                    resolver: true,
+                    gate: Some(ReadGate::No),
                 },
                 detail: vec![(
                     "Removal".to_string(),
@@ -3237,10 +3616,29 @@ mod tests {
                     addr: "10.0.60.11:4565".parse().unwrap(),
                     cluster: "/eu".to_string(),
                     ca: false,
+                    resolver: true,
+                    gate: Some(ReadGate::Until(
+                        chrono::Utc::now() + chrono::Duration::minutes(45),
+                    )),
                 },
                 detail: vec![("Roles".to_string(), "resolver".to_string())],
             },
         ];
+        s
+    }
+
+    /// The satellite's id, read back out of the fixture's second row.
+    fn satellite_of(s: &RemoteState) -> AdminServerId {
+        match &s.rows[1].key {
+            RowKey::Server { id, .. } => *id,
+            _ => panic!("expected a server row"),
+        }
+    }
+
+    #[test]
+    fn server_panel_lists_identity_and_protects_ca() {
+        let mut s = a_servers_panel();
+        let satellite = satellite_of(&s);
         s.list.select(Some(0));
         assert!(matches!(
             s.on_key(KeyCode::Char('c')),
@@ -3264,6 +3662,106 @@ mod tests {
         assert!(out.contains("Admin Servers"), "server title missing: {out:?}");
         assert!(out.contains("Server identity"), "detail title missing: {out:?}");
         assert!(out.contains("/eu"), "admin domain grouping missing: {out:?}");
+    }
+
+    /// The CA is gateable — unlike force-remove, taking a member out of
+    /// service for readers is ordinary — and both directions are confirmed,
+    /// because both have a way of going wrong.
+    #[test]
+    fn the_gate_chooser_offers_open_shut_and_a_deadline() {
+        let mut s = a_servers_panel();
+        // The CA row. Force-remove refuses it; the gate does not.
+        s.list.select(Some(0));
+        assert!(s.on_key(KeyCode::Char('x')).is_none());
+        assert!(s.on_key(KeyCode::Char('g')).is_none(), "g opens a chooser, not an op");
+        let out = render(&mut s, 120, 30);
+        for label in GATE_CHOICES.iter().map(|(l, _)| *l) {
+            assert!(out.contains(label), "choice {label:?} missing: {out:?}");
+        }
+        assert!(!out.contains("Yes"), "a gate is never offered as yes/no: {out:?}");
+        // Shut, the second choice.
+        s.on_key(KeyCode::Down);
+        let Some(Action::Remote(action)) = s.on_key(KeyCode::Enter) else {
+            panic!("choosing Shut did not produce an action")
+        };
+        assert!(matches!(action, RemoteAction::SetReadGate { gate: ReadGate::Yes, .. }));
+        let confirm = action.confirm_message().expect("shutting must be confirmed");
+        assert!(confirm.contains("Publishers keep writing"), "{confirm:?}");
+        assert!(matches!(s.screen, Screen::Panel(Panel::Servers)));
+    }
+
+    #[test]
+    fn a_deadline_is_typed_as_a_duration_prefilled_and_echoed_absolutely() {
+        let mut s = a_servers_panel();
+        s.list.select(Some(0));
+        s.on_key(KeyCode::Char('g'));
+        s.on_key(KeyCode::Down);
+        s.on_key(KeyCode::Down);
+        assert!(s.on_key(KeyCode::Enter).is_none(), "a deadline needs a follow-up");
+        assert!(s.capturing_text(), "the duration form must capture keystrokes");
+        let out = render(&mut s, 120, 30);
+        assert!(out.contains(DEFAULT_GATE_DURATION), "no prefilled duration: {out:?}");
+        assert!(out.contains("30m"), "the format is not shown: {out:?}");
+        // Nonsense is refused in place rather than sent.
+        for _ in 0..DEFAULT_GATE_DURATION.len() {
+            s.on_key(KeyCode::Backspace);
+        }
+        for c in "soon".chars() {
+            s.on_key(KeyCode::Char(c));
+        }
+        assert!(s.on_key(KeyCode::Enter).is_none(), "\"soon\" is not a duration");
+        assert!(s.error.is_some(), "a bad duration must say so");
+        for _ in 0..4 {
+            s.on_key(KeyCode::Backspace);
+        }
+        for c in "90m".chars() {
+            s.on_key(KeyCode::Char(c));
+        }
+        let Some(Action::Remote(action)) = s.on_key(KeyCode::Enter) else {
+            panic!("a valid duration did not produce an action")
+        };
+        let RemoteAction::SetReadGate { gate: ReadGate::Until(t), .. } = action else {
+            panic!("expected a deadline gate")
+        };
+        let left = t - chrono::Utc::now();
+        assert!(
+            left > chrono::Duration::minutes(89) && left <= chrono::Duration::minutes(90),
+            "a duration must become that far in the future, got {left}"
+        );
+    }
+
+    /// Opening a gate early is the quieter mistake — the member answers, from a
+    /// namespace publishers have not finished rebuilding — so it is confirmed
+    /// too, and the confirmation says how much time is being cut short.
+    #[test]
+    fn opening_a_live_deadline_early_is_confirmed_and_says_how_early() {
+        let mut s = a_servers_panel();
+        s.list.select(Some(1)); // the satellite, gated for another 45 minutes
+        s.on_key(KeyCode::Char('g'));
+        let Some(Action::Remote(action)) = s.on_key(KeyCode::Enter) else {
+            panic!("choosing Open did not produce an action")
+        };
+        assert!(matches!(action, RemoteAction::SetReadGate { gate: ReadGate::No, .. }));
+        let confirm = action.confirm_message().expect("opening early must be confirmed");
+        assert!(confirm.contains("44m") || confirm.contains("45m"), "{confirm:?}");
+        assert!(confirm.contains("early"), "{confirm:?}");
+        assert!(confirm.contains("look absent"), "{confirm:?}");
+    }
+
+    #[test]
+    fn a_server_with_no_resolver_has_no_gate_to_set() {
+        let mut s = a_servers_panel();
+        let RowKey::Server { resolver, gate, .. } = &mut s.rows[0].key else {
+            panic!("expected a server row")
+        };
+        (*resolver, *gate) = (false, None);
+        s.list.select(Some(0));
+        assert!(s.on_key(KeyCode::Char('g')).is_none());
+        assert!(
+            matches!(s.screen, Screen::Panel(Panel::Servers)),
+            "an ungateable row must not open the chooser"
+        );
+        assert!(s.error.as_deref().is_some_and(|e| e.contains("no resolver")));
     }
 
     fn a_conn(server: &str) -> RemoteConn {

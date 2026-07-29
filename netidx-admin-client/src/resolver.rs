@@ -10,7 +10,7 @@ use crate::{
 };
 use anyhow::{Context, Result, bail};
 use netidx::path::Path as NetidxPath;
-use netidx::resolver_server::config::{self, Config, file};
+use netidx::resolver_server::config::{self, Config, ReadGate, file};
 use std::path::{Path, PathBuf};
 
 /// A loaded resolver-server config. Wraps
@@ -195,6 +195,16 @@ impl ResolverConfig {
         self.0.children.iter().map(referral_to_edge).collect()
     }
 
+    /// Whether this host is refusing read clients, across all its member
+    /// blocks. Reported to the CA so `netidx admin ca servers` and the TUI can
+    /// show what each host is *doing* rather than what it was last told.
+    pub fn read_gate(&self) -> ReadGate {
+        self.0
+            .member_servers
+            .iter()
+            .fold(ReadGate::No, |acc, m| acc.strictest(m.read_gated))
+    }
+
     /// This resolver cluster's [`ResolverClusterFacts`] for the admin domain map:
     /// advertisable members + base path + resolver hierarchy edges.
     pub fn cluster_facts(&self) -> ResolverClusterFacts {
@@ -203,6 +213,7 @@ impl ResolverConfig {
             base: self.base_path(),
             parent: self.parent_edge(),
             children: self.children_edges(),
+            read_gated: self.read_gate(),
         }
     }
 }

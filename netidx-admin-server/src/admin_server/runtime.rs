@@ -5,9 +5,10 @@ use super::{
     issuance::{PushPlan, leaf_serial, push_registrations},
     queue::autorenew_sweep,
     request::{PeerIdent, cert_signed_by, serve_request},
-    topology::{local_resolver_data, reconcile_ca_state_on_start},
+    topology::{local_resolver_data, own_ca_entry, reconcile_ca_state_on_start},
 };
 use crate::{
+    admin_domain,
     admin_proto::{NodeKind, RegisterRequest},
     admin_server_config,
     config_lock::ConfigDirLock,
@@ -48,82 +49,109 @@ pub fn load_roots(trusted_pem: &[u8]) -> Result<RootCertStore> {
 
 const MAP_REFRESH_INTERVAL: Duration = Duration::from_secs(30);
 
-/// On a non-CA admin server, keep the cached admin domain map current and keep
-/// our own entry registered with the CA. The CA owns the map; we are a
-/// read-replica — if the CA is unreachable we keep serving the last copy
-/// we cached, and the re-register self-heals a push lost while it was down.
+/// Poll this host's own resolver config into the admin domain map, and on a
+/// non-CA host keep the cached copy of that map current.
+///
+/// The resolver config is re-read every pass rather than remembered from
+/// startup. Its member list, its referral edges, and its read gate are all
+/// things the admin plane or an operator can change on disk under a running
+/// process — the resolver itself now follows the file, so the map has to as
+/// well or it ends up describing a machine that no longer exists. The CA runs
+/// this too: it is usually a resolver, and nothing else would ever update its
+/// own entry.
 async fn spawn_map_refresh(state: &Arc<Server>) {
-    if state.read(move |state| state.cfg.roles.ca.is_some()).await {
-        return; // the CA owns the map — nothing to refresh
-    }
     let weak = Arc::downgrade(state);
     tokio::spawn(async move {
         loop {
             let Some(state) = weak.upgrade() else { break };
-            let client = match state.outbound_client().await {
-                Ok(client) => client,
-                Err(e) => {
-                    warn!("admin-server: loading outbound identity failed: {e:#}");
-                    drop(state);
-                    tokio::time::sleep(MAP_REFRESH_INTERVAL).await;
-                    continue;
-                }
-            };
-            let cfg = state.read(move |state| state.cfg.clone()).await;
-            let (_, resolver) = local_resolver_data(&cfg).await;
-            let ca_addr = cfg.ca_addr;
-            let req = RegisterRequest { addr: cfg.listen, resolver };
-            let Some(ca_addr) = ca_addr else {
-                drop(state);
-                tokio::time::sleep(MAP_REFRESH_INTERVAL).await;
-                continue;
-            };
-            // Self-heal: (re)register our own facts. Idempotent at the CA.
-            if let Err(e) =
-                transport::register(&client, ca_addr, state.home_ca_der.clone(), &req)
-                    .await
-            {
-                warn!(
-                    "admin-server: registering with the CA {ca_addr} failed (will retry): {e:#}"
-                );
-            }
-            // Refresh the cache: cheap version check, full pull only when changed.
-            match transport::get_map_version_from_ca(
-                &state.pki_client,
-                ca_addr,
-                state.home_ca_der.clone(),
-                NodeKind::AdminServer,
-            )
-            .await
-            {
-                Ok(v) => {
-                    let stale = state.read(move |state| state.map.version != v).await;
-                    if stale {
-                        match transport::get_map_from_ca(
-                            &state.pki_client,
-                            ca_addr,
-                            state.home_ca_der.clone(),
-                            NodeKind::AdminServer,
-                        )
-                        .await
-                        {
-                            Ok(map) => state.write(move |state| state.map = map).await,
-                            Err(e) => warn!(
-                                "admin-server: pulling the admin domain map from {ca_addr} failed \
-                                 (serving the cached copy): {e:#}"
-                            ),
-                        }
-                    }
-                }
-                Err(e) => warn!(
-                    "admin-server: map version check against {ca_addr} failed \
-                     (serving the cached copy): {e:#}"
-                ),
+            report_facts(&state).await;
+            if !state.has_ca().await {
+                refresh_map_cache(&state).await;
             }
             drop(state);
             tokio::time::sleep(MAP_REFRESH_INTERVAL).await;
         }
     });
+}
+
+/// Put this host's current resolver facts in the map: directly when we hold
+/// the CA, otherwise by re-registering. The register is idempotent at the CA
+/// and self-heals a push lost while we were down.
+///
+/// Also called the moment something deliberately changes those facts, so an
+/// operator who has just shut a gate sees it rather than waiting out the poll.
+pub(super) async fn report_facts(state: &Arc<Server>) {
+    let cfg = state.read(move |state| state.cfg.clone()).await;
+    let (resolver, facts) = local_resolver_data(&cfg).await;
+    if state.has_ca().await {
+        let Some(ca_dir) = state.ca_dir().await else { return };
+        let config_lock = state.config_lock.clone();
+        let r = state
+            .write_async(async move |state| {
+                let entry = own_ca_entry(&state.map, &cfg, resolver, facts.is_some());
+                if admin_domain::upsert_ca(&mut state.map, entry, facts)? {
+                    admin_domain::save_async(&config_lock, &ca_dir, &state.map).await?;
+                }
+                Ok::<_, anyhow::Error>(())
+            })
+            .await;
+        if let Err(e) = r {
+            warn!("admin-server: recording our own resolver facts failed: {e:#}");
+        }
+        return;
+    }
+    let Some(ca_addr) = cfg.ca_addr else { return };
+    let client = match state.outbound_client().await {
+        Ok(client) => client,
+        Err(e) => return warn!("admin-server: loading outbound identity failed: {e:#}"),
+    };
+    let req = RegisterRequest { addr: cfg.listen, resolver: facts };
+    if let Err(e) =
+        transport::register(&client, ca_addr, state.home_ca_der.clone(), &req).await
+    {
+        warn!(
+            "admin-server: registering with the CA {ca_addr} failed (will retry): {e:#}"
+        );
+    }
+}
+
+/// Cheap version check, full pull only when it moved. The CA owns the map; we
+/// are a read-replica, and if the CA is unreachable we keep serving the last
+/// copy we cached.
+async fn refresh_map_cache(state: &Arc<Server>) {
+    let Some(ca_addr) = state.read(move |state| state.cfg.ca_addr).await else { return };
+    match transport::get_map_version_from_ca(
+        &state.pki_client,
+        ca_addr,
+        state.home_ca_der.clone(),
+        NodeKind::AdminServer,
+    )
+    .await
+    {
+        Ok(v) => {
+            let stale = state.read(move |state| state.map.version != v).await;
+            if stale {
+                match transport::get_map_from_ca(
+                    &state.pki_client,
+                    ca_addr,
+                    state.home_ca_der.clone(),
+                    NodeKind::AdminServer,
+                )
+                .await
+                {
+                    Ok(map) => state.write(move |state| state.map = map).await,
+                    Err(e) => warn!(
+                        "admin-server: pulling the admin domain map from {ca_addr} failed \
+                         (serving the cached copy): {e:#}"
+                    ),
+                }
+            }
+        }
+        Err(e) => warn!(
+            "admin-server: map version check against {ca_addr} failed \
+             (serving the cached copy): {e:#}"
+        ),
+    }
 }
 
 /// Renew this host's certificates from inside the server process.

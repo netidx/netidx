@@ -771,8 +771,38 @@ pub(super) fn roles_of(cfg: &AdminServerConfig) -> BitFlags<Role> {
     out
 }
 
-/// This host's own [`AdminServerEntry`] for the admin domain map: its listen
-/// address, its roles, and — if it runs a resolver — its resolver cluster facts.
+/// The CA host's own map entry. Only the CA writes its own entry directly;
+/// every other host gets there through [`handle_register`], and this holds to
+/// the same rule that registration enforces: a host's report may move its
+/// address and its status, never its grant.
+///
+/// So the owned resolver member and its resolver cluster are read back out of
+/// the map, and the local config is consulted only to seed a grant that does
+/// not exist yet. [`relocate_resolver`](admin_domain::relocate_resolver) is how
+/// an owned member moves, and it keeps the cluster roster consistent with the
+/// entry — re-deriving the entry from disk on every poll would route around
+/// that, and would drop the grant entirely on any poll where the resolver
+/// config failed to parse.
+pub(super) fn own_ca_entry(
+    map: &AdminDomainMap,
+    cfg: &AdminServerConfig,
+    resolver: Option<ResolverAddr>,
+    has_resolver: bool,
+) -> admin_proto::AdminServerEntry {
+    let existing = map.admin_servers.iter().find(|s| s.id == cfg.server_id);
+    admin_proto::AdminServerEntry {
+        id: cfg.server_id,
+        addr: cfg.listen,
+        roles: roles_of(cfg),
+        resolver: existing.and_then(|s| s.resolver.clone()).or(resolver),
+        cluster: existing
+            .and_then(|s| s.cluster)
+            .or_else(|| has_resolver.then(admin_proto::ResolverClusterId::new)),
+        state: admin_proto::ServerState::Registered,
+        reported_read_gate: None,
+    }
+}
+
 /// This host's own resolver base (the single resolver cluster a local, control-socket
 /// caller may edit permissions at). `None` when this host serves no resolver.
 pub(super) async fn own_base(state: &Server) -> Option<String> {

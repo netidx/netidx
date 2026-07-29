@@ -360,6 +360,7 @@ mod tests {
             resolver: None,
             cluster: cluster.map(|c| ResolverClusterId(Uuid::from_u128(c))),
             state,
+            reported_read_gate: None,
         }
     }
 

@@ -20,7 +20,7 @@ use crate::{
     transport,
 };
 use anyhow::Context;
-use log::info;
+use log::{info, warn};
 use netidx::resolver_server::config::ReadGate;
 use std::{net::SocketAddr, sync::Arc, time::Duration};
 
@@ -149,15 +149,32 @@ pub(super) async fn push_to(
 /// Server-to-server (peer-cert-gated): write the gate into this host's own
 /// resolver config. The resolver picks it up from there, so it applies
 /// without a restart and survives one.
+///
+/// Reporting the new facts before answering is what makes the map agree with
+/// the box by the time the operator who asked for this can look at it. The
+/// poll would get there on its own; it would just get there after they had
+/// already read the old value.
 pub(super) async fn handle_apply_set_read_gate(
-    state: &Server,
+    state: &Arc<Server>,
     req: &ApplySetReadGateRequest,
 ) -> ApplySetReadGateResponse {
     info!(
         "admin-server: applying read gate operation {}: {:?}",
         req.operation_id, req.gate
     );
-    apply_local(state, req.gate).await
+    let resp = apply_local(state, req.gate).await;
+    if let ApplySetReadGateResponse::Ok(()) = resp {
+        if tokio::time::timeout(PUSH_TIMEOUT, super::runtime::report_facts(state))
+            .await
+            .is_err()
+        {
+            warn!(
+                "admin-server: reporting the new read gate timed out; the map will \
+                 catch up on the next poll"
+            );
+        }
+    }
+    resp
 }
 
 async fn apply_local(state: &Server, gate: ReadGate) -> ApplySetReadGateResponse {

@@ -33,7 +33,7 @@ mod topology;
 use auth::PasswordAttempt;
 use issuance::handle_add_identity;
 use runtime::load_serving_keypair;
-use topology::{apply_referral_edit_local, local_resolver_data, roles_of};
+use topology::{apply_referral_edit_local, local_resolver_data, own_ca_entry, roles_of};
 
 #[cfg(test)]
 pub(crate) use ca_ops::read_autorenew_password;
@@ -43,7 +43,7 @@ pub use runtime::{load_roots, serve};
 use crate::{
     admin_domain,
     admin_proto::{
-        self, AddIdentityRequest, AddIdentityResponse, AdminDomainMap, AdminServerEntry,
+        AddIdentityRequest, AddIdentityResponse, AdminDomainMap,
         ApplyReferralEditRequest, ApplyReferralEditResponse, Role,
     },
     admin_server_config::AdminServerConfig,
@@ -109,6 +109,7 @@ mod state_tests {
         PreparedAdminAuthentication, PreparedServerUnlock, authenticate, server_unlock,
     };
     use super::*;
+    use crate::admin_proto;
 
     #[test]
     fn custom_config_root_retains_the_offline_ca_lock() {
@@ -527,7 +528,7 @@ impl Server {
                             "admin-server: CANNOT SIGN — the autorenew credential is \
                              unavailable: {e:#}. The CA serves read-only (auth/list/deny \
                              work; issue/enroll/approve/revoke fail). Recover with \
-                             `netidx admin ca recovery rotate`."
+                             `netidx admin CA recovery rotate`."
                         );
                         None
                     }
@@ -535,7 +536,7 @@ impl Server {
                 None => {
                     error!(
                         "admin-server: CANNOT SIGN — this CA has no autorenew credential. \
-                         Set one up with `netidx admin ca auto-approve`; until then it serves \
+                         Set one up with `netidx admin CA auto-approve`; until then it serves \
                          read-only."
                     );
                     None
@@ -566,26 +567,8 @@ impl Server {
             Some(dir) => {
                 let mut m = admin_domain::load_async(dir, cfg.server_id).await?;
                 let (resolver, facts) = local_resolver_data(&cfg).await;
-                let existing_cluster = m
-                    .admin_servers
-                    .iter()
-                    .find(|s| s.id == cfg.server_id)
-                    .and_then(|s| s.cluster);
-                let cluster = facts.as_ref().map(|_| {
-                    existing_cluster.unwrap_or_else(admin_proto::ResolverClusterId::new)
-                });
-                admin_domain::upsert_ca(
-                    &mut m,
-                    AdminServerEntry {
-                        id: cfg.server_id,
-                        addr: cfg.listen,
-                        roles: roles_of(&cfg),
-                        resolver,
-                        cluster,
-                        state: admin_proto::ServerState::Registered,
-                    },
-                    facts,
-                )?;
+                let entry = own_ca_entry(&m, &cfg, resolver, facts.is_some());
+                admin_domain::upsert_ca(&mut m, entry, facts)?;
                 admin_domain::save_async(&config_lock, dir, &m).await?;
                 m
             }

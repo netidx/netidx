@@ -3010,6 +3010,7 @@ mod tests {
                 resolver: None,
                 cluster: None,
                 state: ServerState::Registered,
+                reported_read_gate: None,
             }],
             resolver_clusters: vec![],
         };
@@ -3141,6 +3142,7 @@ mod tests {
                     resolver: None,
                     cluster: None,
                     state: ServerState::Registered,
+                    reported_read_gate: None,
                 },
                 AdminServerEntry {
                     id: root_server,
@@ -3149,6 +3151,7 @@ mod tests {
                     resolver: Some(root.clone()),
                     cluster: Some(root_cluster),
                     state: ServerState::Registered,
+                    reported_read_gate: None,
                 },
                 AdminServerEntry {
                     id: waiting,
@@ -3157,6 +3160,7 @@ mod tests {
                     resolver: Some(waiting_root.clone()),
                     cluster: Some(root_cluster),
                     state: ServerState::Enrolled,
+                    reported_read_gate: None,
                 },
                 AdminServerEntry {
                     id: satellite,
@@ -3165,6 +3169,7 @@ mod tests {
                     resolver: Some(child.clone()),
                     cluster: Some(child_cluster),
                     state: ServerState::Registered,
+                    reported_read_gate: None,
                 },
             ],
             resolver_clusters: vec![
