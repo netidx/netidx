@@ -26,15 +26,31 @@ use rand::{RngExt, rng, seq::SliceRandom};
 use std::{cmp::max, fmt::Debug, net::SocketAddr, sync::Arc, time::Duration};
 use tokio::{net::TcpStream, sync::watch, task, time};
 
-// continue with timeout
+/// Try a step of the hello exchange with `addr`, moving on to the next member
+/// if it fails or times out.
+///
+/// The address is in the message because these are the failures you cannot
+/// otherwise attribute: a member refusing reads (a read gate) closes the
+/// connection mid-hello, and without the address the operator is left looking
+/// at the members that are merely *down*, which are the ones that do get
+/// named. `warn` for the same reason — a member that hangs up on you is a
+/// failed connection attempt like any other.
 macro_rules! cwt {
-    ($msg:expr, $e:expr) => {
-        try_cf!(
-            $msg,
-            continue,
-            try_cf!($msg, continue, time::timeout(HELLO_TO, $e).await)
-        )
-    };
+    ($step:expr, $addr:expr, $e:expr) => {{
+        let step = $step;
+        let addr = $addr;
+        match time::timeout(HELLO_TO, $e).await {
+            Err(_) => {
+                warn!("resolver server {addr} timed out during {step}");
+                continue;
+            }
+            Ok(Err(e)) => {
+                warn!("resolver server {addr} failed during {step}: {e}");
+                continue;
+            }
+            Ok(Ok(r)) => r,
+        }
+    }};
 }
 
 /// Connect to any one member of `resolver`, returning which one it turned out
@@ -83,15 +99,19 @@ async fn connect(
             }
         };
         try_cf!("no delay", con.set_nodelay(true));
-        cwt!("send version", channel::write_raw(&mut con, &3u64));
-        if cwt!("recv version", channel::read_raw::<u64, _, 1024>(&mut con)) != 3 {
+        cwt!("send version", addr, channel::write_raw(&mut con, &3u64));
+        if cwt!("recv version", addr, channel::read_raw::<u64, _, 1024>(&mut con)) != 3 {
             continue;
         }
         let con = match (desired_auth, auth) {
             (DesiredAuth::Anonymous, _) => {
                 let mut con = Channel::new::<ClientCtx, TcpStream>(None, con);
-                cwt!("hello", con.send_one(&ClientHello::ReadOnly(AuthRead::Anonymous)));
-                match cwt!("reply", con.receive::<AuthRead>()) {
+                cwt!(
+                    "hello",
+                    addr,
+                    con.send_one(&ClientHello::ReadOnly(AuthRead::Anonymous))
+                );
+                match cwt!("reply", addr, con.receive::<AuthRead>()) {
                     AuthRead::Anonymous => (),
                     AuthRead::Local | AuthRead::Krb5 | AuthRead::Tls => {
                         bail!("protocol error")
@@ -110,10 +130,14 @@ async fn connect(
                 Auth::Local { path },
             ) => {
                 let mut con = Channel::new::<ClientCtx, TcpStream>(None, con);
-                let tok = cwt!("local token", AuthClient::token(&*path));
-                cwt!("hello", con.send_one(&ClientHello::ReadOnly(AuthRead::Local)));
-                cwt!("token", con.send_one(&tok));
-                match cwt!("reply", con.receive::<AuthRead>()) {
+                let tok = cwt!("local token", addr, AuthClient::token(&*path));
+                cwt!(
+                    "hello",
+                    addr,
+                    con.send_one(&ClientHello::ReadOnly(AuthRead::Local))
+                );
+                cwt!("token", addr, con.send_one(&tok));
+                match cwt!("reply", addr, con.receive::<AuthRead>()) {
                     AuthRead::Local => (),
                     AuthRead::Krb5 | AuthRead::Anonymous | AuthRead::Tls => {
                         bail!("protocol error")
@@ -130,9 +154,13 @@ async fn connect(
             (DesiredAuth::Krb5 { upn, .. }, Auth::Krb5 { spn }) => {
                 let upn = upn.as_ref().map(|s| s.as_str());
                 let hello = ClientHello::ReadOnly(AuthRead::Krb5);
-                cwt!("hello", channel::write_raw(&mut con, &hello));
-                let ctx = cwt!("k5auth", krb5_authentication(upn, &*spn, &mut con));
-                match cwt!("reply", channel::read_raw::<AuthRead, _, 1024>(&mut con)) {
+                cwt!("hello", addr, channel::write_raw(&mut con, &hello));
+                let ctx = cwt!("k5auth", addr, krb5_authentication(upn, &*spn, &mut con));
+                match cwt!(
+                    "reply",
+                    addr,
+                    channel::read_raw::<AuthRead, _, 1024>(&mut con)
+                ) {
                     AuthRead::Krb5 => Channel::new(Some(K5CtxWrap::new(ctx)), con),
                     AuthRead::Local | AuthRead::Anonymous | AuthRead::Tls => {
                         bail!("protocol error")
@@ -162,19 +190,19 @@ async fn connect(
                     .and_then(|r| r)
                 );
                 let hello = ClientHello::ReadOnly(AuthRead::Tls);
-                cwt!("hello", channel::write_raw(&mut con, &hello));
+                cwt!("hello", addr, channel::write_raw(&mut con, &hello));
                 let name = try_cf!(
                     "creating rustls servername",
                     continue,
                     rustls_pki_types::ServerName::try_from(&**name)
                 )
                 .to_owned();
-                let tls = cwt!("tls handshake", ctx.connect(name, con));
+                let tls = cwt!("tls handshake", addr, ctx.connect(name, con));
                 let mut con = Channel::new::<
                     ClientCtx,
                     tokio_rustls::client::TlsStream<TcpStream>,
                 >(None, tls);
-                match cwt!("reply", con.receive::<AuthRead>()) {
+                match cwt!("reply", addr, con.receive::<AuthRead>()) {
                     AuthRead::Tls => con,
                     AuthRead::Local | AuthRead::Anonymous | AuthRead::Krb5 { .. } => {
                         bail!("protocol error")
