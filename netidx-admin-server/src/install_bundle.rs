@@ -1236,6 +1236,7 @@ mod tests {
             tls: None,
             default_auth: netidx::config::DefaultAuthMech::Anonymous,
             default_bind_config: Some("10.0.0.1/32".into()),
+            origin: Default::default(),
         };
         let addresses =
             RestoreAddresses { admin_listen: Some(new_admin), resolver: Some(new) };

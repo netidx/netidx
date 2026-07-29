@@ -2,7 +2,7 @@ use super::PublisherTable;
 use crate::{
     channel,
     path::Path,
-    protocol::resolver::{FromRead, FromWrite, Resolved, ToRead, ToWrite},
+    protocol::resolver::{FromRead, FromWrite, Referral, Resolved, ToRead, ToWrite},
     utils,
 };
 use anyhow::Result;
@@ -80,6 +80,20 @@ impl FromStr for DesiredAuth {
             "tls" => Ok(DesiredAuth::Tls { identity: None }),
             _ => bail!("expected, anonymous, local, krb5, or tls"),
         }
+    }
+}
+
+/// Wait for a cluster's address list to change.
+///
+/// A closed channel means it never will — the ordinary case for a referral
+/// learned at runtime, or a config that isn't backed by a file — so park
+/// rather than report a change that isn't coming.
+pub(super) async fn addrs_changed(
+    resolver: &mut tokio::sync::watch::Receiver<std::sync::Arc<Referral>>,
+) {
+    use futures::future;
+    if resolver.changed().await.is_err() {
+        future::pending::<()>().await
     }
 }
 

@@ -11,10 +11,49 @@ use poolshark::global::GPooled;
 use serde_json::from_str;
 use std::{
     cmp::min, collections::BTreeMap, convert::AsRef, convert::Into, fs::read_to_string,
-    net::SocketAddr, path::Path as FsPath, str,
+    net::SocketAddr, path::Path as FsPath, str, sync::Arc,
 };
 
 mod local_only;
+pub(crate) mod watch;
+
+/// Where a config came from.
+///
+/// A config loaded from a file keeps a pointer back to it, and that is what
+/// makes the file authoritative for the process using it: the resolver
+/// addresses are re-read when the file changes, so a resolver added to or
+/// removed from the cluster reaches running publishers and subscribers
+/// without a restart.
+///
+/// If you change `addrs` after loading, set this back to `Internal` (see
+/// `PublisherBuilder::follow_config` / `SubscriberBuilder::follow_config`),
+/// or the file will win the next time it is read.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum Origin {
+    /// Built in memory, or deliberately detached from its file. Nothing is
+    /// re-read; the config is exactly what the caller supplied.
+    #[default]
+    Internal,
+    File(Arc<FsPath>),
+}
+
+impl Origin {
+    /// Canonicalize best-effort so the origin survives a `chdir`, and fall
+    /// back to the path as given when it can't be resolved.
+    fn from_path(path: &FsPath) -> Origin {
+        match path.canonicalize() {
+            Ok(path) => Origin::File(Arc::from(path.as_path())),
+            Err(_) => Origin::File(Arc::from(path)),
+        }
+    }
+
+    pub fn path(&self) -> Option<&FsPath> {
+        match self {
+            Origin::Internal => None,
+            Origin::File(path) => Some(path),
+        }
+    }
+}
 
 /// The on disk format, encoded as JSON
 pub mod file {
@@ -119,6 +158,11 @@ pub mod file {
         #[serde(default)]
         #[builder(setter(into, strip_option), default)]
         pub default_bind_config: Option<String>,
+        /// The file this was loaded from, if any. Not part of the on disk
+        /// format; set by `load`. See [`super::Origin`].
+        #[serde(skip)]
+        #[builder(default)]
+        pub origin: super::Origin,
     }
 
     impl Config {
@@ -172,7 +216,10 @@ pub mod file {
 
         /// Load from `file`
         pub fn load<P: AsRef<Path>>(file: P) -> Result<Config> {
-            Ok(serde_json::from_reader(std::fs::File::open(file)?)?)
+            let file = file.as_ref();
+            let mut cfg: Config = serde_json::from_reader(std::fs::File::open(file)?)?;
+            cfg.origin = super::Origin::from_path(file);
+            Ok(cfg)
         }
 
         /// Load from the default platform specific location
@@ -313,6 +360,9 @@ pub struct Config {
     pub tls: Option<Tls>,
     pub default_auth: DefaultAuthMech,
     pub default_bind_config: publisher::BindCfg,
+    /// See [`Origin`]. Loading from a file sets this, and a publisher or
+    /// subscriber built from such a config follows the file's address list.
+    pub origin: Origin,
 }
 
 impl Config {
@@ -376,12 +426,21 @@ impl Config {
                 None => publisher::BindCfg::default(),
                 Some(s) => s.parse()?,
             },
+            origin: cfg.origin,
         })
     }
 
     /// Parse and transform a file::Config into a validated netidx Config
     pub fn parse(s: &str) -> Result<Config> {
         Self::from_file(from_str(s)?)
+    }
+
+    /// Stop following the file this config was loaded from, if any.
+    ///
+    /// A detached config is exactly what you hold and nothing is re-read.
+    /// Do this if you modify `addrs` yourself, otherwise the file wins.
+    pub fn detach(&mut self) {
+        self.origin = Origin::Internal
     }
 
     /// Return the default DesiredAuth as specified by the config.
@@ -395,8 +454,15 @@ impl Config {
     }
 
     /// Load the config from the specified file.
+    ///
+    /// The resulting config remembers where it came from, and a publisher or
+    /// subscriber built from it will follow the file's resolver addresses as
+    /// they change. See [`Origin`].
     pub fn load<P: AsRef<FsPath>>(file: P) -> Result<Config> {
-        Config::parse(&read_to_string(file)?)
+        let file = file.as_ref();
+        let mut cfg = Config::parse(&read_to_string(file)?)?;
+        cfg.origin = Origin::from_path(file);
+        Ok(cfg)
     }
 
     /// Transform the config into a resolver Referral with a ttl that

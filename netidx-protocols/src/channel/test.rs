@@ -28,6 +28,7 @@ impl Ctx {
         let mut cfg = ClientConfig::load("../cfg/simple-client.json")
             .expect("load simple client config");
         cfg.addrs[0].0 = *_server.local_addr();
+        cfg.detach();
         let publisher = Publisher::new(
             cfg.clone(),
             DesiredAuth::Anonymous,

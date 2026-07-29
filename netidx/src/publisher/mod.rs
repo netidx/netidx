@@ -1052,6 +1052,7 @@ pub struct PublisherBuilder {
     priority: PublisherPriority,
     max_clients: usize,
     slack: usize,
+    follow_config: bool,
 }
 
 impl PublisherBuilder {
@@ -1063,11 +1064,15 @@ impl PublisherBuilder {
             priority: PublisherPriority::Normal,
             max_clients: 768,
             slack: 3,
+            follow_config: true,
         }
     }
 
     pub async fn build(&mut self) -> Result<Publisher> {
-        let cfg = self.config.take().ok_or_else(|| anyhow!("config is required"))?;
+        let mut cfg = self.config.take().ok_or_else(|| anyhow!("config is required"))?;
+        if !self.follow_config {
+            cfg.detach();
+        }
         let desired_auth = self.desired_auth.take().unwrap_or_else(|| cfg.default_auth());
         let bind_cfg =
             self.bind_cfg.take().unwrap_or_else(|| cfg.default_bind_config.clone());
@@ -1094,6 +1099,20 @@ impl PublisherBuilder {
     /// specified then the config default will be used.
     pub fn bind_cfg(&mut self, bind: Option<BindCfg>) -> &mut Self {
         self.bind_cfg = bind;
+        self
+    }
+
+    /// Whether to follow the config file's resolver addresses as they
+    /// change. Default true.
+    ///
+    /// A config loaded from a file keeps a pointer back to it, and the
+    /// publisher re-reads the address list so that a resolver added to or
+    /// removed from the cluster reaches it without a restart. Set this false
+    /// to pin the addresses you started with — which you must do if you
+    /// modify `Config::addrs` yourself, since otherwise the file wins.
+    /// Configs built in memory are unaffected either way.
+    pub fn follow_config(&mut self, follow: bool) -> &mut Self {
+        self.follow_config = follow;
         self
     }
 

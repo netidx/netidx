@@ -1,6 +1,6 @@
 use super::common::{
     DesiredAuth, FROMWRITEPOOL, HELLO_TO, PUBLISHERPOOL, RAWFROMWRITEPOOL, Response,
-    ResponseChan, krb5_authentication,
+    ResponseChan, addrs_changed, krb5_authentication,
 };
 use crate::{
     channel::{self, Channel, K5CtxWrap},
@@ -34,7 +34,10 @@ use std::{
 };
 use tokio::{
     net::TcpStream,
-    sync::broadcast::{self, error::RecvError},
+    sync::{
+        broadcast::{self, error::RecvError},
+        watch,
+    },
     task,
     time::{self, Instant, Interval},
 };
@@ -491,7 +494,9 @@ impl Connection {
         secrets: Arc<RwLock<AHashMap<SocketAddr, u128>>>,
         tls: Option<tls::CachedConnector>,
         published: Published,
+        stop: oneshot::Receiver<()>,
     ) {
+        let mut stop = stop.fuse();
         let now = Instant::now();
         let mut t = Self {
             resolver_addr,
@@ -511,8 +516,23 @@ impl Connection {
             heartbeat: time::interval_at(now + HB, HB),
             disconnect: time::interval_at(now + LINGER, LINGER),
         };
+        // A member added to a cluster that is already publishing has to be
+        // brought up to date now. Otherwise it sits empty until the next batch
+        // or heartbeat, and a heartbeat is half a ttl away. When there is
+        // nothing to say — the ordinary case at startup — stay lazy and don't
+        // touch the resolver until the publisher does.
+        if !t.published.read().is_empty() {
+            t.send_heartbeat().await;
+        }
         loop {
             select_biased! {
+                _ = stop => {
+                    // This member has left the cluster. Stop heartbeating and
+                    // let the resolver expire our records; unpublishing would
+                    // be pointless work against a server nobody is reading.
+                    info!("write_con {:?} left the cluster", t.resolver_addr);
+                    break
+                },
                 _ = t.disconnect.tick().fuse() => {
                     if t.active {
                         t.active = false;
@@ -565,18 +585,37 @@ impl Connection {
     }
 }
 
-async fn write_mgr(
-    mut receiver: mpsc::UnboundedReceiver<Batch>,
-    resolver: Arc<Referral>,
-    desired_auth: DesiredAuth,
-    secrets: Arc<RwLock<AHashMap<SocketAddr, u128>>>,
+/// One live write connection. Dropping the stop sender ends the task.
+struct Live {
+    addr: SocketAddr,
+    auth: Auth,
+    _stop: oneshot::Sender<()>,
+}
+
+/// Start a connection to every member of `referral` we don't already have one
+/// for, and retire the ones that are no longer in it. A new member finds the
+/// publish set already waiting for it in `published`, so nothing has to be
+/// handed over.
+fn reconcile(
+    live: &mut LPooled<Vec<Live>>,
+    referral: &Referral,
+    sender: &broadcast::Sender<Arc<ToCon>>,
+    published: &Published,
+    desired_auth: &DesiredAuth,
+    secrets: &Arc<RwLock<AHashMap<SocketAddr, u128>>>,
     write_addr: SocketAddr,
     priority: PublisherPriority,
-    tls: Option<tls::CachedConnector>,
-) -> Result<()> {
-    let published: Published = Arc::new(RwLock::new(IndexMap::default()));
-    let (sender, _) = broadcast::channel(100);
-    for (addr, auth) in resolver.addrs.iter() {
+    tls: &Option<tls::CachedConnector>,
+) {
+    live.retain(|l| {
+        referral.addrs.iter().any(|(a, auth)| *a == l.addr && *auth == l.auth)
+    });
+    for (addr, auth) in referral.addrs.iter() {
+        if live.iter().any(|l| l.addr == *addr && l.auth == *auth) {
+            continue;
+        }
+        let (stop, stop_rx) = oneshot::channel();
+        live.push(Live { addr: *addr, auth: auth.clone(), _stop: stop });
         let addr = *addr;
         let auth = auth.clone();
         let desired_auth = desired_auth.clone();
@@ -595,16 +634,58 @@ async fn write_mgr(
                 secrets,
                 tls,
                 published,
+                stop_rx,
             )
             .await;
             info!("write task for {:?} exited", addr);
         });
     }
-    while let Some((batch, reply)) = receiver.next().await {
+}
+
+async fn write_mgr(
+    mut receiver: mpsc::UnboundedReceiver<Batch>,
+    mut resolver: watch::Receiver<Arc<Referral>>,
+    desired_auth: DesiredAuth,
+    secrets: Arc<RwLock<AHashMap<SocketAddr, u128>>>,
+    write_addr: SocketAddr,
+    priority: PublisherPriority,
+    tls: Option<tls::CachedConnector>,
+) -> Result<()> {
+    let published: Published = Arc::new(RwLock::new(IndexMap::default()));
+    let (sender, _) = broadcast::channel(100);
+    let mut live: LPooled<Vec<Live>> = LPooled::take();
+    let reconcile_now = |live: &mut LPooled<Vec<Live>>, referral: &Referral| {
+        reconcile(
+            live,
+            referral,
+            &sender,
+            &published,
+            &desired_auth,
+            &secrets,
+            write_addr,
+            priority,
+            &tls,
+        )
+    };
+    let referral = resolver.borrow_and_update().clone();
+    reconcile_now(&mut live, &referral);
+    loop {
+        let (batch, reply) = select_biased! {
+            () = addrs_changed(&mut resolver).fuse() => {
+                let referral = resolver.borrow_and_update().clone();
+                reconcile_now(&mut live, &referral);
+                continue
+            },
+            batch = receiver.next().fuse() => match batch {
+                None => break,
+                Some(b) => b,
+            },
+        };
         // Record what the publisher wants before telling anyone about it. A
-        // connection that misses this batch — because it is down, or because
-        // it fell behind the broadcast — still finds it here when it
-        // reconnects, which is the only way it could ever learn.
+        // connection that misses this batch — because it is down, because it
+        // fell behind the broadcast, or because it doesn't exist yet — still
+        // finds it here when it connects, which is the only way it could ever
+        // learn.
         {
             let mut published = published.write();
             for (_, m) in batch.iter() {
@@ -625,7 +706,7 @@ async fn write_mgr(
         }
         let mut replies = vec![];
         let mut waiters = vec![];
-        for _ in resolver.addrs.iter() {
+        for _ in live.iter() {
             let (tx, rx) = oneshot::channel();
             replies.push(tx);
             waiters.push(rx);
@@ -647,7 +728,7 @@ pub(crate) struct WriteClient(mpsc::UnboundedSender<Batch>);
 
 impl WriteClient {
     pub(crate) fn new(
-        resolver: Arc<Referral>,
+        resolver: watch::Receiver<Arc<Referral>>,
         desired_auth: DesiredAuth,
         write_addr: SocketAddr,
         priority: PublisherPriority,

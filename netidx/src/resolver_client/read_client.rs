@@ -1,6 +1,6 @@
 use super::common::{
     DesiredAuth, FROMREADPOOL, HELLO_TO, PUBLISHERPOOL, RAWFROMREADPOOL, Response,
-    ResponseChan, krb5_authentication,
+    ResponseChan, addrs_changed, krb5_authentication,
 };
 use super::insert_publisher;
 use crate::{
@@ -18,12 +18,13 @@ use cross_krb5::ClientCtx;
 use futures::{
     channel::{mpsc, oneshot},
     prelude::*,
+    select_biased,
 };
 use log::{info, warn};
 use poolshark::{global::GPooled, local::LPooled};
 use rand::{RngExt, rng, seq::SliceRandom};
 use std::{cmp::max, fmt::Debug, net::SocketAddr, sync::Arc, time::Duration};
-use tokio::{net::TcpStream, task, time};
+use tokio::{net::TcpStream, sync::watch, task, time};
 
 // continue with timeout
 macro_rules! cwt {
@@ -36,17 +37,20 @@ macro_rules! cwt {
     };
 }
 
+/// Connect to any one member of `resolver`, returning which one it turned out
+/// to be so the caller can tell when that member leaves the cluster.
 async fn connect(
     bad_addrs: &mut AHashSet<SocketAddr>,
     resolver: &Referral,
     desired_auth: &DesiredAuth,
     tls: &Option<tls::CachedConnector>,
-) -> Result<Channel> {
+) -> Result<(SocketAddr, Channel)> {
     let mut addrs = resolver.addrs.clone();
     addrs.as_mut_slice().shuffle(&mut rng());
     let mut n = 0;
     loop {
         let (addr, auth) = &addrs[n % addrs.len()];
+        let addr = *addr;
         let tries = n / addrs.len();
         if tries >= 3 {
             bail!("can't connect to any resolver servers");
@@ -69,12 +73,12 @@ async fn connect(
                     "failed to connect to resolver server {} connection timed out",
                     addr
                 );
-                bad_addrs.insert(*addr);
+                bad_addrs.insert(addr);
                 continue;
             }
             Ok(Err(e)) => {
                 warn!("failed to connect to resolver server {} error: {}", addr, e);
-                bad_addrs.insert(*addr);
+                bad_addrs.insert(addr);
                 continue;
             }
         };
@@ -140,19 +144,32 @@ async fn connect(
             }
             (DesiredAuth::Tls { .. }, Auth::Tls { name }) => {
                 let tls = tls.as_ref().ok_or_else(|| anyhow!("no tls cache"))?;
-                let ctx = task::spawn_blocking({
-                    let tls = tls.clone();
-                    let name = name.clone();
-                    move || tls.load(&name)
-                })
-                .await
-                .context("loading tls connector")??;
+                // Everything from here on is specific to *this* server: its
+                // identity, its name, its handshake. A failure means try the
+                // next address, not give up on the cluster — and a server
+                // that accepts the connection and then says nothing must not
+                // hang us, which is what a read-gated member looks like.
+                let ctx = try_cf!(
+                    "loading tls connector",
+                    continue,
+                    task::spawn_blocking({
+                        let tls = tls.clone();
+                        let name = name.clone();
+                        move || tls.load(&name)
+                    })
+                    .await
+                    .context("joining tls connector load")
+                    .and_then(|r| r)
+                );
                 let hello = ClientHello::ReadOnly(AuthRead::Tls);
                 cwt!("hello", channel::write_raw(&mut con, &hello));
-                let name = rustls_pki_types::ServerName::try_from(&**name)
-                    .context("creating rustls servername")?
-                    .to_owned();
-                let tls = ctx.connect(name, con).await?;
+                let name = try_cf!(
+                    "creating rustls servername",
+                    continue,
+                    rustls_pki_types::ServerName::try_from(&**name)
+                )
+                .to_owned();
+                let tls = cwt!("tls handshake", ctx.connect(name, con));
                 let mut con = Channel::new::<
                     ClientCtx,
                     tokio_rustls::client::TlsStream<TcpStream>,
@@ -165,7 +182,7 @@ async fn connect(
                 }
             }
         };
-        break Ok(con);
+        break Ok((addr, con));
     }
 }
 
@@ -187,14 +204,29 @@ fn partition_publishers(m: FromRead) -> Either<FromRead, Publisher> {
 
 async fn connection(
     mut receiver: mpsc::UnboundedReceiver<Batch>,
-    resolver: Arc<Referral>,
+    mut resolver: watch::Receiver<Arc<Referral>>,
     desired_auth: DesiredAuth,
     tls: Option<tls::CachedConnector>,
 ) {
-    let mut con: Option<Channel> = None;
+    let mut con: Option<(SocketAddr, Channel)> = None;
     let mut bad_addrs: LPooled<AHashSet<SocketAddr>> = LPooled::take();
     'main: loop {
-        match receiver.next().await {
+        let batch = select_biased! {
+            () = addrs_changed(&mut resolver).fuse() => {
+                // Nothing forces us off a member that is still in the cluster,
+                // but staying connected to one that has left would keep
+                // answering from a resolver nobody is publishing to any more.
+                if let Some((addr, _)) = con.as_ref()
+                    && !resolver.borrow().addrs.iter().any(|(a, _)| a == addr)
+                {
+                    info!("read_con {addr} left the cluster, disconnecting");
+                    con = None;
+                }
+                continue 'main;
+            },
+            batch = receiver.next().fuse() => batch,
+        };
+        match batch {
             None => break,
             Some((tx_batch, reply)) => {
                 let mut tries: usize = 0;
@@ -208,14 +240,15 @@ async fn connection(
                     }
                     tries += 1;
                     let c = match con {
-                        Some(ref mut c) => c,
+                        Some((_, ref mut c)) => c,
                         None => {
-                            match connect(&mut *bad_addrs, &resolver, &desired_auth, &tls)
+                            let current = resolver.borrow_and_update().clone();
+                            match connect(&mut *bad_addrs, &current, &desired_auth, &tls)
                                 .await
                             {
                                 Ok(c) => {
                                     con = Some(c);
-                                    con.as_mut().unwrap()
+                                    &mut con.as_mut().unwrap().1
                                 }
                                 Err(e) => {
                                     con = None;
@@ -301,7 +334,7 @@ pub(super) struct ReadClient(mpsc::UnboundedSender<Batch>);
 
 impl ReadClient {
     pub(super) fn new(
-        resolver: Arc<Referral>,
+        resolver: watch::Receiver<Arc<Referral>>,
         desired_auth: DesiredAuth,
         tls: Option<tls::CachedConnector>,
     ) -> Self {

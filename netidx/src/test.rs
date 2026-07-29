@@ -30,11 +30,18 @@ mod resolver {
 
         let dir = tempfile::tempdir().unwrap();
         let auth_socket = dir.path().join("auth.sock");
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let addr = listener.local_addr().unwrap();
-        drop(listener);
-        let cfg = Config::parse(&format!(
-            r#"{{
+        // The server has to be started twice on one address, so it can't bind
+        // port 0. Reserving a port by binding and dropping it races with
+        // everything else in the suite doing the same, so take the first one
+        // the server can actually claim. The bind happens before the auth
+        // socket is created, so a lost race leaves nothing behind.
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let (cfg, server) = loop {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let addr = listener.local_addr().unwrap();
+            drop(listener);
+            let cfg = Config::parse(&format!(
+                r#"{{
                 "parent": null,
                 "children": [],
                 "member_servers": [{{
@@ -44,10 +51,17 @@ mod resolver {
                 }}],
                 "perms": {{}}
             }}"#,
-            auth_socket.display()
-        ))
-        .unwrap();
-        let server = Server::new(cfg.clone(), false, 0).await.unwrap();
+                auth_socket.display()
+            ))
+            .unwrap();
+            match Server::new(cfg.clone(), false, 0).await {
+                Ok(server) => break (cfg, server),
+                Err(e) => assert!(
+                    std::time::Instant::now() < deadline,
+                    "could not start the first server: {e}"
+                ),
+            }
+        };
 
         AuthClient::token(auth_socket.to_str().unwrap()).await.unwrap();
         assert!(Server::new(cfg, false, 0).await.is_err());
@@ -65,6 +79,7 @@ mod resolver {
             .expect("load simple client config");
         let server = Server::new(server_cfg, false, 0).await.expect("start server");
         client_cfg.addrs[0].0 = *server.local_addr();
+        client_cfg.detach();
         let paddr: SocketAddr = "127.0.0.1:1".parse().unwrap();
         let w = ResolverWrite::new(
             client_cfg.clone(),
@@ -105,6 +120,7 @@ mod resolver {
             .expect("load simple client config");
         let server = Server::new(server_cfg, false, 0).await.expect("start server");
         client_cfg.addrs[0].0 = *server.local_addr();
+        client_cfg.detach();
         let paddr: SocketAddr = "127.0.0.1:1".parse().unwrap();
         let w = ResolverWrite::new(
             client_cfg.clone(),
@@ -451,7 +467,9 @@ mod resolver {
 /// reconnect. These tests pin that contract.
 mod republish {
     use crate::{
-        config::{Config as ClientConfig, DefaultAuthMech, file as cfile},
+        config::{
+            Config as ClientConfig, DefaultAuthMech, file as cfile, watch::POLL_INTERVAL,
+        },
         path::Path,
         resolver_client::{DesiredAuth, ResolverRead, ResolverWrite},
         resolver_server::{
@@ -464,6 +482,7 @@ mod republish {
         collections::BTreeSet,
         iter,
         net::{IpAddr, Ipv4Addr, SocketAddr},
+        sync::Arc,
         time::Duration,
     };
     use tokio::{
@@ -505,13 +524,26 @@ mod republish {
         ServerConfig::from_file(cfg).unwrap()
     }
 
-    fn client_cfg(addrs: &[SocketAddr]) -> ClientConfig {
-        let cfg = cfile::ConfigBuilder::default()
+    fn client_cfg_file(addrs: &[SocketAddr]) -> cfile::Config {
+        cfile::ConfigBuilder::default()
             .addrs(addrs.iter().map(|a| (*a, cfile::Auth::Anonymous)).collect::<Vec<_>>())
             .default_auth(DefaultAuthMech::Anonymous)
             .build()
+            .unwrap()
+    }
+
+    fn client_cfg(addrs: &[SocketAddr]) -> ClientConfig {
+        ClientConfig::from_file(client_cfg_file(addrs)).unwrap()
+    }
+
+    /// Write a client config the way the admin agent does — to a temporary
+    /// file, then renamed into place — so a reader can never see a partial
+    /// one.
+    fn write_client_cfg(path: &std::path::Path, addrs: &[SocketAddr]) {
+        let tmp = path.with_extension("tmp");
+        std::fs::write(&tmp, serde_json::to_string(&client_cfg_file(addrs)).unwrap())
             .unwrap();
-        ClientConfig::from_file(cfg).unwrap()
+        std::fs::rename(&tmp, path).unwrap();
     }
 
     /// Start member `id`, retrying while the previous incarnation's listener
@@ -601,6 +633,11 @@ mod republish {
     struct Proxy {
         addr: SocketAddr,
         link: watch::Sender<Link>,
+        /// Held by every forwarding task, so `set` can tell when they are all
+        /// gone. Without this a test that cuts the link and immediately sends
+        /// something can have it arrive anyway, through a connection that has
+        /// been told to die but hasn't yet.
+        forwarding: Arc<()>,
     }
 
     impl Proxy {
@@ -608,6 +645,11 @@ mod republish {
             let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
             let addr = listener.local_addr().unwrap();
             let (tx, rx) = watch::channel(Link::Up);
+            let forwarding = Arc::new(());
+            // Weak, so the only strong references are the `Proxy` itself and
+            // the tasks actually carrying traffic. Otherwise the accept loop's
+            // own clone would keep the count above one forever.
+            let token = Arc::downgrade(&forwarding);
             task::spawn(async move {
                 while let Ok((client, _)) = listener.accept().await {
                     let mut link = rx.clone();
@@ -621,7 +663,9 @@ mod republish {
                             });
                         }
                         Link::Up => {
+                            let Some(token) = token.upgrade() else { break };
                             task::spawn(async move {
+                                let _token = token;
                                 let Ok(server) = TcpStream::connect(target).await else {
                                     return;
                                 };
@@ -637,11 +681,20 @@ mod republish {
                     }
                 }
             });
-            Proxy { addr, link: tx }
+            Proxy { addr, link: tx, forwarding }
         }
 
-        fn set(&self, link: Link) {
+        /// Change the link state and, when that means "stop carrying traffic",
+        /// wait until it really has stopped. New connections in `Cut` are
+        /// dropped and in `BlackHole` never forward, so neither can keep this
+        /// waiting.
+        async fn set(&self, link: Link) {
             self.link.send_replace(link);
+            if link != Link::Up {
+                while Arc::strong_count(&self.forwarding) > 1 {
+                    time::sleep(Duration::from_millis(10)).await
+                }
+            }
         }
     }
 
@@ -699,12 +752,12 @@ mod republish {
         converges_to("b", &rb, &first, &first).await;
         // Stall b's connection in a handshake, then run far enough ahead of it
         // that the broadcast drops what it hasn't consumed.
-        proxy.set(Link::BlackHole);
+        proxy.set(Link::BlackHole).await;
         let many = (0..150).map(|i| p(&format!("/t/many/{i}"))).collect::<Vec<_>>();
         for path in many.iter() {
             let _ = w.publish(iter::once(path.clone())).await;
         }
-        proxy.set(Link::Up);
+        proxy.set(Link::Up).await;
         let _ = w.publish(iter::once(p("/t/last"))).await;
         let all = first
             .iter()
@@ -713,6 +766,65 @@ mod republish {
             .chain(iter::once(p("/t/last")))
             .collect::<Vec<_>>();
         converges_to("b", &rb, &all, &all).await;
+    }
+
+    /// A publisher must start using a member added to its config, with
+    /// everything it already has, and without being restarted. This is what
+    /// the whole config-following change is for.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_publisher_takes_up_a_member_added_to_its_config() {
+        let _ = env_logger::try_init();
+        let dir = tempfile::tempdir().unwrap();
+        let cfg_path = dir.path().join("client.json");
+        let ports = [free_port(), free_port()];
+        let _a = start_member(&ports, 120, 0).await;
+        let _b = start_member(&ports, 120, 1).await;
+        write_client_cfg(&cfg_path, &[addr(ports[0])]);
+        let w = ResolverWrite::new(
+            ClientConfig::load(&cfg_path).unwrap(),
+            DesiredAuth::Anonymous,
+            "127.0.0.1:1".parse().unwrap(),
+            PublisherPriority::Normal,
+        )
+        .unwrap();
+        let ra = reader(addr(ports[0]));
+        let rb = reader(addr(ports[1]));
+        let paths = vec![p("/t/one"), p("/t/two"), p("/t/three")];
+        w.publish(paths.iter().cloned()).await.unwrap();
+        converges_to("a", &ra, &paths, &paths).await;
+        // b is in the cluster but not in this publisher's config, so it must
+        // have nothing — otherwise the assertion below proves nothing.
+        assert!(published(&rb, &paths).await.is_empty());
+        write_client_cfg(&cfg_path, &[addr(ports[0]), addr(ports[1])]);
+        converges_to("b", &rb, &paths, &paths).await;
+    }
+
+    /// A subscriber must likewise start using a member added to its config,
+    /// which is what lets it survive losing the one it had.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_subscriber_takes_up_a_member_added_to_its_config() {
+        let _ = env_logger::try_init();
+        let dir = tempfile::tempdir().unwrap();
+        let cfg_path = dir.path().join("client.json");
+        let ports = [free_port(), free_port()];
+        let a = start_member(&ports, 120, 0).await;
+        let _b = start_member(&ports, 120, 1).await;
+        write_client_cfg(&cfg_path, &[addr(ports[0])]);
+        // Publishes to both members; only the subscriber's view is under test.
+        let w = writer(&[addr(ports[0]), addr(ports[1])]);
+        let paths = vec![p("/t/one"), p("/t/two")];
+        w.publish(paths.iter().cloned()).await.unwrap();
+        let r = ResolverRead::new(
+            ClientConfig::load(&cfg_path).unwrap(),
+            DesiredAuth::Anonymous,
+        );
+        converges_to("the subscriber", &r, &paths, &paths).await;
+        write_client_cfg(&cfg_path, &[addr(ports[0]), addr(ports[1])]);
+        // Wait long enough for the change to have been picked up, then take
+        // away the only resolver the subscriber was started with.
+        time::sleep(POLL_INTERVAL * 5).await;
+        drop(a);
+        converges_to("the subscriber", &r, &paths, &paths).await;
     }
 
     /// An unpublish that could not be delivered has to be retried, not
@@ -730,13 +842,13 @@ mod republish {
         let paths = vec![p("/t/one"), p("/t/two"), p("/t/three")];
         w.publish(paths.iter().cloned()).await.unwrap();
         converges_to("b", &rb, &paths, &paths).await;
-        proxy.set(Link::Cut);
+        proxy.set(Link::Cut).await;
         let _ = w.unpublish(iter::once(p("/t/two"))).await;
         // Let b's write connection notice the break, and confirm the unpublish
         // really did not land — otherwise the assertion below proves nothing.
         time::sleep(Duration::from_secs(1)).await;
         assert!(published(&rb, &paths).await.contains(&p("/t/two")));
-        proxy.set(Link::Up);
+        proxy.set(Link::Up).await;
         let _ = w.publish(iter::once(p("/t/four"))).await;
         converges_to("b", &rb, &paths, &[p("/t/one"), p("/t/three")]).await;
     }
@@ -755,11 +867,11 @@ mod republish {
         let paths = vec![p("/t/one"), p("/t/two"), p("/t/three")];
         w.publish(paths.iter().cloned()).await.unwrap();
         converges_to("b", &rb, &paths, &paths).await;
-        proxy.set(Link::Cut);
+        proxy.set(Link::Cut).await;
         let _ = w.clear().await;
         time::sleep(Duration::from_secs(1)).await;
         assert_eq!(published(&rb, &paths).await.len(), paths.len());
-        proxy.set(Link::Up);
+        proxy.set(Link::Up).await;
         let _ = w.publish(iter::once(p("/t/four"))).await;
         converges_to("b", &rb, &paths, &[]).await;
     }
@@ -949,6 +1061,7 @@ mod publisher {
             .expect("load simple client config");
         let server = Server::new(server_cfg, false, 0).await.expect("start server");
         client_cfg.addrs[0].0 = *server.local_addr();
+        client_cfg.detach();
         let default_destroyed = Arc::new(Mutex::new(false));
         let (tx, ready) = oneshot::channel();
         task::spawn(run_publisher(
@@ -979,7 +1092,9 @@ mod publisher {
         let (tx, ready) = oneshot::channel();
         let server = Server::new(server_cfg, false, 0).await.expect("start server");
         pub_cfg.addrs[0].0 = *server.local_addr();
+        pub_cfg.detach();
         sub_cfg.addrs[0].0 = *server.local_addr();
+        sub_cfg.detach();
         task::spawn(run_publisher(
             pub_cfg.clone(),
             default_destroyed.clone(),
@@ -1009,6 +1124,7 @@ mod publisher {
         let server = Server::new(server_cfg, false, 0).await.expect("start server");
         let mut cfg = cfg;
         cfg.addrs[0].0 = *server.local_addr();
+        cfg.detach();
         let default_destroyed = Arc::new(Mutex::new(false));
         let (tx, ready) = oneshot::channel();
         task::spawn(run_publisher(cfg.clone(), default_destroyed, tx, auth.clone()));
@@ -1205,7 +1321,9 @@ mod publisher {
         let mut sub_cfg = ClientConfig::load(lab.join("client.json")).unwrap();
         let server = Server::new(server_cfg, false, 0).await.expect("start server");
         pub_cfg.addrs[0].0 = *server.local_addr();
+        pub_cfg.detach();
         sub_cfg.addrs[0].0 = *server.local_addr();
+        sub_cfg.detach();
         let default_destroyed = Arc::new(Mutex::new(false));
         let (tx, ready) = oneshot::channel();
         task::spawn(run_publisher(

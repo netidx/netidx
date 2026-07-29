@@ -47,7 +47,7 @@ use std::{
     sync::Arc,
     time::Duration,
 };
-use tokio::time::Instant;
+use tokio::{sync::watch, time::Instant};
 use write_client::WriteClient;
 
 const MAX_REFERRALS: usize = 128;
@@ -214,13 +214,23 @@ impl ToReferral for FromWrite {
     }
 }
 
+/// A referral that will never change. The channel is created, the value
+/// published, and the sender dropped: `borrow` keeps working forever and
+/// `changed` never fires, so a connection to a referral learned at runtime
+/// needs no special case.
+fn constant(referral: Arc<Referral>) -> watch::Receiver<Arc<Referral>> {
+    let (tx, rx) = watch::channel(referral);
+    drop(tx);
+    rx
+}
+
 trait Connection<T, F>
 where
     T: ToPath + Send + Sync + 'static,
     F: ToReferral + Send + Sync + 'static,
 {
     fn new(
-        resolver: Arc<Referral>,
+        resolver: watch::Receiver<Arc<Referral>>,
         desired_auth: DesiredAuth,
         writer_addr: SocketAddr,
         priority: PublisherPriority,
@@ -232,7 +242,7 @@ where
 
 impl Connection<ToRead, FromRead> for ReadClient {
     fn new(
-        resolver: Arc<Referral>,
+        resolver: watch::Receiver<Arc<Referral>>,
         desired_auth: DesiredAuth,
         _writer_addr: SocketAddr,
         _priority: PublisherPriority,
@@ -249,7 +259,7 @@ impl Connection<ToRead, FromRead> for ReadClient {
 
 impl Connection<ToWrite, FromWrite> for WriteClient {
     fn new(
-        resolver: Arc<Referral>,
+        resolver: watch::Receiver<Arc<Referral>>,
         desired_auth: DesiredAuth,
         writer_addr: SocketAddr,
         priority: PublisherPriority,
@@ -272,7 +282,12 @@ where
 {
     router: Router,
     desired_auth: DesiredAuth,
-    default: Arc<Referral>,
+    /// The local cluster, which can change under us as members are added and
+    /// removed. Its connection is kept out of `by_server` — that map is keyed
+    /// by referral, so re-keying it on every address change would drop the
+    /// connection and everything it knows.
+    default: watch::Receiver<Arc<Referral>>,
+    default_con: Option<C>,
     by_server: HashMap<Arc<Referral>, C>,
     writer_addr: SocketAddr,
     priority: PublisherPriority,
@@ -290,26 +305,59 @@ where
     T: ToPath + Clone + Send + Sync + 'static,
     F: ToReferral + Clone + Send + Sync + 'static,
 {
+    /// Pick up an address change before routing anything. The router caches
+    /// the default referral by path, so a new one has to replace it there too
+    /// or batches would keep routing to the copy it already has.
+    fn refresh_default(&mut self) -> Arc<Referral> {
+        if self.default.has_changed().unwrap_or(false) {
+            let referral = self.default.borrow_and_update().clone();
+            self.router.add_referral(referral.clone());
+            referral
+        } else {
+            self.default.borrow().clone()
+        }
+    }
+
     fn send_to_server(
         &mut self,
         server: Option<Arc<Referral>>,
         batch: GPooled<Vec<(usize, T)>>,
     ) -> ResponseChan<F> {
-        let r = server.unwrap_or_else(|| self.default.clone());
-        match self.by_server.get_mut(&r) {
-            Some(con) => con.send(batch),
+        let default = self.default.borrow().clone();
+        let r = match server {
+            None => None,
+            Some(r) if Arc::ptr_eq(&r, &default) => None,
+            Some(r) => Some(r),
+        };
+        match r {
             None => {
-                let mut con = C::new(
-                    r.clone(),
-                    self.desired_auth.clone(),
-                    self.writer_addr,
-                    self.priority,
-                    self.secrets.clone(),
-                    self.tls.clone(),
-                );
-                self.by_server.insert(r, con.clone());
-                con.send(batch)
+                if self.default_con.is_none() {
+                    self.default_con = Some(C::new(
+                        self.default.clone(),
+                        self.desired_auth.clone(),
+                        self.writer_addr,
+                        self.priority,
+                        self.secrets.clone(),
+                        self.tls.clone(),
+                    ));
+                }
+                self.default_con.as_mut().unwrap().send(batch)
             }
+            Some(r) => match self.by_server.get_mut(&r) {
+                Some(con) => con.send(batch),
+                None => {
+                    let mut con = C::new(
+                        constant(r.clone()),
+                        self.desired_auth.clone(),
+                        self.writer_addr,
+                        self.priority,
+                        self.secrets.clone(),
+                        self.tls.clone(),
+                    );
+                    self.by_server.insert(r, con.clone());
+                    con.send(batch)
+                }
+            },
         }
     }
 }
@@ -338,12 +386,17 @@ where
         let secrets = Arc::new(RwLock::new(AHashMap::default()));
         let tls = default.tls.clone().map(tls::CachedConnector::new);
         let mut router = Router::new();
-        let default: Arc<Referral> = Arc::new(default.to_referral());
-        router.add_referral(default.clone());
+        let referral: Arc<Referral> = Arc::new(default.clone().to_referral());
+        router.add_referral(referral.clone());
+        let (tx, rx) = watch::channel(referral);
+        // Dropped immediately for a config that has no origin, which leaves
+        // `rx` frozen on the value it was created with.
+        crate::config::watch::follow(&default, tx);
         ResolverWrap(Arc::new(Mutex::new(ResolverWrapInner {
             router,
             desired_auth,
-            default,
+            default: rx,
+            default_con: None,
             by_server: HashMap::new(),
             writer_addr,
             priority,
@@ -370,6 +423,7 @@ where
             let (mut finished, mut res) = {
                 let mut guard = self.0.lock();
                 let inner = &mut *guard;
+                inner.refresh_default();
                 if inner.by_server.len() > MAX_REFERRALS {
                     inner.by_server.clear(); // a workable sledgehammer
                 }
@@ -538,8 +592,9 @@ impl ResolverRead {
             let mut waiters = Vec::new();
             {
                 let mut inner = self.0.0.lock();
+                let default = inner.refresh_default();
                 for referral in pending.drain(..) {
-                    let referral = referral.unwrap_or_else(|| inner.default.clone());
+                    let referral = referral.unwrap_or_else(|| default.clone());
                     if !done.contains(&referral) {
                         done.insert(referral.clone());
                         let referral = inner.router.add_referral(referral);
