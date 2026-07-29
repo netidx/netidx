@@ -657,7 +657,6 @@ pub async fn run_resolver(
                 .await?;
                 let parent_ref = ParentRef {
                     path: ArcStr::from(subtree.as_str()),
-                    ttl: None,
                     addrs: parent_addrs
                         .into_iter()
                         .map(|r| (r.addr, delegation::info_to_referral_auth(&r.auth)))
@@ -1101,7 +1100,6 @@ fn info_to_template_referral(auth: &InfoAuth) -> ReferralAuth {
 fn edge_to_parent_ref(edge: &ResolverClusterEdge) -> ParentRef {
     ParentRef {
         path: ArcStr::from(edge.path.as_str()),
-        ttl: None,
         addrs: edge
             .addrs
             .iter()
@@ -1116,7 +1114,7 @@ fn edge_into_file(
     use netidx::resolver_server::config::file::{RefAuth, Referral};
     Referral {
         path: ArcStr::from(edge.path),
-        ttl: None,
+        ttl: Some(netidx_admin_client::template::REFERRAL_TTL),
         addrs: edge
             .addrs
             .into_iter()

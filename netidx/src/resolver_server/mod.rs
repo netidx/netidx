@@ -1,4 +1,5 @@
 //! Resolver server for mapping paths to publishers.
+use crate::path::Path;
 use crate::{
     channel::{self, Channel, K5CtxWrap},
     pack::Pack,
@@ -28,7 +29,7 @@ use rand::{RngExt, rng};
 use secctx::{K5SecData, LocalSecData, SecCtx, TlsSecData};
 use shard_store::Store;
 use std::{
-    collections::hash_map::Entry,
+    collections::{BTreeSet, hash_map::Entry},
     fmt::Debug,
     mem,
     net::SocketAddr,
@@ -862,7 +863,7 @@ async fn server_loop(
     cfg: Config,
     delay_reads: bool,
     stop: oneshot::Receiver<()>,
-    ready: oneshot::Sender<(SocketAddr, SecCtx)>,
+    ready: oneshot::Sender<(SocketAddr, SecCtx, Store)>,
     id: usize,
     listener: Option<TcpListener>,
 ) -> Result<()> {
@@ -902,7 +903,7 @@ async fn server_loop(
     debug!("signaling ready");
     let mut listen_addr = listener.local_addr()?;
     listen_addr.set_ip(id.ip());
-    let _ = ready.send((listen_addr, ctx.secctx.clone()));
+    let _ = ready.send((listen_addr, ctx.secctx.clone(), ctx.store.clone()));
     loop {
         select_biased! {
             _ = stop => {
@@ -941,11 +942,46 @@ async fn server_loop(
     }
 }
 
+/// The parts of a config that are fixed once the server is running: which
+/// members exist, and where each child cluster attaches.
+fn startup_shape(cfg: &Config) -> (Vec<SocketAddr>, BTreeSet<Path>) {
+    let members = cfg.member_servers.iter().map(|m| m.addr).collect::<Vec<_>>();
+    let children = cfg.children.keys().cloned().collect::<BTreeSet<_>>();
+    (members, children)
+}
+
 /// Run a resolver server
 pub struct Server {
     stop: Option<oneshot::Sender<()>>,
     local_addr: SocketAddr,
     secctx: SecCtx,
+    store: Store,
+    /// The member addresses this server started with. `member_servers` is not
+    /// applied live, so this — not whatever the file says now — is what a
+    /// reloaded referral must not point back at.
+    member_addrs: Vec<SocketAddr>,
+    /// The child paths this server started with. Where a child attaches is
+    /// structural; only its addresses can change under a running server.
+    child_paths: BTreeSet<Path>,
+}
+
+/// What a reload could not apply.
+///
+/// The resolver takes referral *addresses* live, so a resolver added to or
+/// removed from a neighbouring cluster reaches it without a restart. The shape
+/// of the tree is fixed when the store is built.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct NotApplied {
+    /// Child paths in the file that the running server does not serve.
+    pub children_added: Vec<Path>,
+    /// Child paths the running server serves that the file no longer lists.
+    pub children_removed: Vec<Path>,
+}
+
+impl NotApplied {
+    pub fn is_empty(&self) -> bool {
+        self.children_added.is_empty() && self.children_removed.is_empty()
+    }
 }
 
 impl std::fmt::Debug for Server {
@@ -975,6 +1011,7 @@ impl Server {
     /// When this future is resolved the server will be running. If
     /// the returned `Server` is dropped the server will stop.
     pub async fn new(cfg: Config, delay_reads: bool, id: usize) -> Result<Server> {
+        let (member_addrs, child_paths) = startup_shape(&cfg);
         let (send_stop, recv_stop) = oneshot::channel();
         let (send_ready, recv_ready) = oneshot::channel();
         task::spawn(async move {
@@ -986,11 +1023,18 @@ impl Server {
             }
             res
         });
-        let (local_addr, secctx) = match recv_ready.await {
+        let (local_addr, secctx, store) = match recv_ready.await {
             Err(_) => bail!("resolver server shutdown"),
             Ok(t) => t,
         };
-        Ok(Server { stop: Some(send_stop), local_addr, secctx })
+        Ok(Server {
+            stop: Some(send_stop),
+            local_addr,
+            secctx,
+            store,
+            member_addrs,
+            child_paths,
+        })
     }
 
     /// Start a new local only resolver server
@@ -1013,6 +1057,7 @@ impl Server {
         if cfg.member_servers[0].addr != listener.local_addr()? {
             bail!("cfg addr does not match actual listen addr")
         }
+        let (member_addrs, child_paths) = startup_shape(&cfg);
         let (send_stop, recv_stop) = oneshot::channel();
         let (send_ready, recv_ready) = oneshot::channel();
         task::spawn(async move {
@@ -1024,11 +1069,18 @@ impl Server {
             }
             res
         });
-        let (local_addr, secctx) = match recv_ready.await {
+        let (local_addr, secctx, store) = match recv_ready.await {
             Err(_) => bail!("resolver server shutdown"),
             Ok(t) => t,
         };
-        Ok(Server { stop: Some(send_stop), local_addr, secctx })
+        Ok(Server {
+            stop: Some(send_stop),
+            local_addr,
+            secctx,
+            store,
+            member_addrs,
+            child_paths,
+        })
     }
 
     /// Get the local address this resolver server is bound to
@@ -1059,5 +1111,55 @@ impl Server {
         new_perms: &crate::resolver_server::config::PMap,
     ) -> Result<()> {
         self.secctx.reload_pmap(new_perms).await
+    }
+
+    /// Apply an edited config to the running server.
+    ///
+    /// Two things are taken live: the permission map, and the *addresses* of
+    /// the parent and child referrals. Between them that covers the whole of
+    /// "a resolver was added to or removed from a neighbouring cluster",
+    /// which the administrative plane pushes into this file and which
+    /// otherwise sat there until the next restart.
+    ///
+    /// What is not taken live is the shape of the tree — where children
+    /// attach, and which members exist — because the store is built around
+    /// it. Anything of that kind found in `cfg` is returned in
+    /// [`NotApplied`] rather than silently ignored, so the caller can tell
+    /// the operator a restart is still needed.
+    ///
+    /// Validation happens before anything is swapped, so a config that
+    /// doesn't hold together leaves the running server exactly as it was and
+    /// returns the error. Callers should log it and carry on — never crash a
+    /// running resolver over a bad edit.
+    pub async fn reload(&self, cfg: &config::file::Config) -> Result<NotApplied> {
+        let perms = config::merge_perms_only(cfg)
+            .context("merging perms (include_permissions + inline)")?;
+        let (parent, children) = config::check_referrals(
+            cfg.parent.clone(),
+            cfg.children.clone(),
+            &self.member_addrs,
+        )
+        .context("validating referrals")?;
+        let not_applied = NotApplied {
+            children_added: children
+                .keys()
+                .filter(|p| !self.child_paths.contains(*p))
+                .cloned()
+                .collect(),
+            children_removed: self
+                .child_paths
+                .iter()
+                .filter(|p| !children.contains_key(*p))
+                .cloned()
+                .collect(),
+        };
+        self.secctx.reload_pmap(&perms).await.context("swapping the live PMap")?;
+        self.store
+            .set_referrals(
+                parent.map(|r| r.into()),
+                children.into_iter().map(|(p, r)| (p, r.into())).collect(),
+            )
+            .await;
+        Ok(not_applied)
     }
 }

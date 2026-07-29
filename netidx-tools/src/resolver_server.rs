@@ -9,8 +9,8 @@ use extended_notify::{
 };
 use log::{info, warn};
 use netidx::resolver_server::{
-    Server,
-    config::{self, Config, file},
+    NotApplied, Server,
+    config::{Config, file},
 };
 use std::path::PathBuf;
 #[cfg(unix)]
@@ -103,14 +103,9 @@ async fn run_reload_loop(
     config_path: PathBuf,
     baseline: file::Config,
 ) -> Result<()> {
-    // Diff baseline for structural-field warnings. Frozen at startup
-    // and **never updated**: the fields we compare (parent, children,
-    // member_servers) are not applied live — the running server still
-    // has the startup values. Diffing against startup means an
-    // operator who edits a field and then reverts it gets the warn
-    // once and silence after; an operator who edits without
-    // reverting keeps getting the warn on every reload, which is
-    // honest: "your edit still hasn't taken effect; restart to apply."
+    // `baseline` is the startup snapshot, and it is **never updated**. It is
+    // used only to notice a `member_servers` edit, which is the one field
+    // nothing about a running server can act on. See `members_changed`.
     let mut sighup = Sighup::new()?;
 
     // File-watch path: drive the same reload as SIGHUP whenever the
@@ -172,7 +167,7 @@ async fn run_reload_loop(
         info!("resolver: {trigger} — reloading");
         match handle_reload(&server, &config_path, &baseline).await {
             Ok(new_file) => {
-                info!("perms reloaded successfully");
+                info!("config reloaded successfully");
                 // If `include_permissions` changed, rebuild watches
                 // so newly-included files are observed (and removed
                 // ones stop firing). Re-watching the main config is
@@ -218,17 +213,9 @@ async fn handle_reload(
 ) -> Result<file::Config> {
     info!("re-reading {:?}", config_path);
     let new_file = load_file_config(config_path)?;
-    warn_structural_changes(baseline, &new_file);
-    // Merge include_permissions + inline perms WITHOUT going through
-    // `Config::from_file`: the full validator opens TLS cert files,
-    // re-validates addrs / parent / children / member_servers — none
-    // of which are applied live on reload, and one of which (TLS
-    // file I/O) could spuriously fail mid-rotation. The merge helper
-    // only touches `include_permissions` + `perms` and surfaces the
-    // structural-diff warning separately.
-    let new_perms = config::merge_perms_only(&new_file)
-        .context("merging perms (include_permissions + inline)")?;
-    server.reload_perms(&new_perms).await.context("swapping live PMap")?;
+    warn_members_changed(baseline, &new_file);
+    let not_applied = server.reload(&new_file).await.context("applying the config")?;
+    warn_not_applied(&not_applied);
     Ok(new_file)
 }
 
@@ -302,38 +289,45 @@ fn load_file_config(path: &std::path::Path) -> Result<file::Config> {
     Config::load_raw(path).with_context(|| format!("reading {:?}", path))
 }
 
-/// Emit one WARN per non-perms field that changed between the startup snapshot
-/// and the reloaded config. The running resolver is deliberately left alone:
-/// topology is activated only by an administrator's one-member-at-a-time
-/// rolling restart, with each member allowed to finish its delay-reads warm-up
-/// before the next member is restarted.
+/// Has `member_servers` changed since startup?
 ///
-/// Comparison is by serialized JSON so we get a stable, structural
-/// equality without depending on `PartialEq` impls. None of the
-/// compared fields contain hash maps with nondeterministic ordering.
-fn structural_changes(orig: &file::Config, new: &file::Config) -> Vec<&'static str> {
-    let mut changed = Vec::new();
-    macro_rules! cmp {
-        ($field:ident) => {
-            let a = serde_json::to_string(&orig.$field).ok();
-            let b = serde_json::to_string(&new.$field).ok();
-            if a != b {
-                changed.push(stringify!($field));
-            }
-        };
-    }
-    cmp!(parent);
-    cmp!(children);
-    cmp!(member_servers);
-    changed
+/// It is the one field a reload can do nothing at all with: it says which
+/// server this process is and how it listens, both settled when the listener
+/// was bound. Referral *addresses* are applied live, and the rest of what a
+/// reload has to refuse comes back from the server itself as
+/// [`NotApplied`].
+///
+/// Compared against the startup snapshot rather than the previous reload, so
+/// an operator who edits and reverts is warned once, and one who edits and
+/// leaves it keeps being told their change still hasn't taken effect.
+/// Comparison is by serialized JSON: structural equality without depending on
+/// `PartialEq`, and none of these fields have nondeterministic ordering.
+fn members_changed(orig: &file::Config, new: &file::Config) -> bool {
+    serde_json::to_string(&orig.member_servers).ok()
+        != serde_json::to_string(&new.member_servers).ok()
 }
 
-fn warn_structural_changes(orig: &file::Config, new: &file::Config) {
-    for field in structural_changes(orig, new) {
+fn warn_members_changed(orig: &file::Config, new: &file::Config) {
+    if members_changed(orig, new) {
         warn!(
-            "config field '{field}' changed; the running resolver was not \
-             restarted — use a manual one-member-at-a-time rolling restart to \
-             apply the change"
+            "config field 'member_servers' changed; the running resolver was \
+             not restarted — use a manual one-member-at-a-time rolling restart \
+             to apply the change"
+        );
+    }
+}
+
+fn warn_not_applied(not_applied: &NotApplied) {
+    for path in not_applied.children_added.iter() {
+        warn!(
+            "child cluster {path} was added to the config; where a child \
+             attaches is fixed when the server starts, so restart to serve it"
+        );
+    }
+    for path in not_applied.children_removed.iter() {
+        warn!(
+            "child cluster {path} was removed from the config; the running \
+             resolver still refers clients to it, restart to stop"
         );
     }
 }
@@ -348,7 +342,26 @@ mod tests {
     }
 
     #[test]
-    fn topology_changes_are_reported_for_manual_restart() {
+    fn a_member_edit_is_reported_for_manual_restart() {
+        let original = empty_config();
+        let mut changed = original.clone();
+        changed.member_servers.push(
+            file::MemberServerBuilder::default()
+                .addr("127.0.0.1:4564".parse().unwrap())
+                .bind_addr("127.0.0.1".parse().unwrap())
+                .auth(file::Auth::Anonymous)
+                .build()
+                .unwrap(),
+        );
+        assert!(!members_changed(&original, &original));
+        assert!(members_changed(&original, &changed));
+    }
+
+    #[test]
+    fn a_referral_edit_is_not_reported_here() {
+        // Referral addresses are applied live, and a change to where a child
+        // attaches comes back from `Server::reload` as `NotApplied` — neither
+        // belongs in the member diff.
         let original = empty_config();
         let mut changed = original.clone();
         changed.children.push(file::Referral {
@@ -356,9 +369,7 @@ mod tests {
             ttl: None,
             addrs: vec![],
         });
-
-        assert!(structural_changes(&original, &original).is_empty());
-        assert_eq!(structural_changes(&original, &changed), vec!["children"]);
+        assert!(!members_changed(&original, &changed));
     }
 }
 

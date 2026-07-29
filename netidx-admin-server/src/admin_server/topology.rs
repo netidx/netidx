@@ -710,9 +710,13 @@ pub(super) async fn apply_referral_edit_local(
                 }
             }
             rc.as_file_mut().member_servers = ordered;
+            // The ttl is what lets an edit reach clients that have already
+            // been told where a neighbouring cluster lives; without one a
+            // referral is cached for the life of the process.
+            let ttl = Some(netidx_admin_client::template::REFERRAL_TTL);
             rc.as_file_mut().parent = parent.as_ref().map(|edge| Referral {
                 path: arcstr::ArcStr::from(edge.path.as_str()),
-                ttl: None,
+                ttl,
                 addrs: edge
                     .addrs
                     .iter()
@@ -723,7 +727,7 @@ pub(super) async fn apply_referral_edit_local(
                 .iter()
                 .map(|edge| Referral {
                     path: arcstr::ArcStr::from(edge.path.as_str()),
-                    ttl: None,
+                    ttl,
                     addrs: edge
                         .addrs
                         .iter()

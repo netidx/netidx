@@ -162,6 +162,27 @@ impl Store {
         t
     }
 
+    /// Replace the referrals this store hands out.
+    ///
+    /// The parent is swapped whole — nothing structural depends on it, it is
+    /// only consulted when deciding whether a path lives elsewhere. Children
+    /// are matched by path and only their addresses are taken: the set of
+    /// child paths is baked into `published_by_level` when the store is built,
+    /// so adding or removing one still needs a restart.
+    pub(super) fn set_referrals(
+        &mut self,
+        parent: Option<Referral>,
+        children: &BTreeMap<Path, Referral>,
+    ) {
+        self.parent = parent;
+        for (path, next) in children.iter() {
+            if let Some(current) = self.children.get_mut(path) {
+                current.ttl = next.ttl;
+                current.addrs = next.addrs.clone();
+            }
+        }
+    }
+
     pub(crate) fn shrink_to_fit(&mut self) {
         self.publishers_by_id.shrink_to_fit();
         self.publishers_by_addr.shrink_to_fit();

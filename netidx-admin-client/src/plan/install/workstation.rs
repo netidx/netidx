@@ -185,11 +185,7 @@ pub async fn run_workstation(
                         &mut tls_staging,
                     )
                     .await?;
-                    Some(ParentRef {
-                        path: ArcStr::from(base.as_str()),
-                        ttl: None,
-                        addrs,
-                    })
+                    Some(ParentRef { path: ArcStr::from(base.as_str()), addrs })
                 }
                 None => {
                     match prompt_parent_referral(
@@ -321,7 +317,7 @@ pub async fn run_workstation_join(
         &mut tls_staging,
     )
     .await?;
-    let parent = ParentRef { path: ArcStr::from(rec.base.as_str()), ttl: None, addrs };
+    let parent = ParentRef { path: ArcStr::from(rec.base.as_str()), addrs };
     // Capture the confirmed identity for the marker before applying.
     let admin_domain =
         AdminDomainIdentity::new(net.identity.domain.clone(), &net.identity.fingerprint);
@@ -424,11 +420,7 @@ async fn prompt_parent_referral(
         }
     };
     Ok(Some((
-        ParentRef {
-            path: ArcStr::from(default_path),
-            ttl: None,
-            addrs: vec![(addr, auth)],
-        },
+        ParentRef { path: ArcStr::from(default_path), addrs: vec![(addr, auth)] },
         identity,
     )))
 }

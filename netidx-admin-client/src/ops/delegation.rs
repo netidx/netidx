@@ -332,7 +332,6 @@ pub async fn prepare_add_parent(
     let parent = approved;
     let parent_ref = ParentRef {
         path: ArcStr::from(proposed_path),
-        ttl: None,
         addrs: parent.iter().map(|r| (r.addr, info_to_referral_auth(&r.auth))).collect(),
     };
     // The CA fanout normally reaches this registered child while the
@@ -403,7 +402,6 @@ mod tests {
             }],
             parent_ref: ParentRef {
                 path: ArcStr::from("/eu"),
-                ttl: None,
                 addrs: vec![("10.0.0.1:4564".parse().unwrap(), ReferralAuth::Anonymous)],
             },
             outcome: AddParentOutcome {

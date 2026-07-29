@@ -282,10 +282,10 @@ pub mod file {
     }
 
     impl Referral {
-        pub(super) fn check(
-            self,
-            us: Option<&Vec<(SocketAddr, Auth)>>,
-        ) -> Result<super::Referral> {
+        /// `us` is this cluster's own member addresses; a referral may not
+        /// point back at one of them. Only the addresses matter, so the
+        /// caller need not carry the auth along with them.
+        pub(super) fn check(self, us: Option<&[SocketAddr]>) -> Result<super::Referral> {
             let path = Path::from(self.path);
             if !Path::is_absolute(&path) {
                 bail!("absolute server path is required")
@@ -297,7 +297,7 @@ pub mod file {
                 }
             }
             if let Some(us) = us {
-                for (a, _) in us {
+                for a in us {
                     if self.addrs.iter().any(|(s, _)| s == a) {
                         bail!("server may not be it's own parent");
                     }
@@ -498,6 +498,56 @@ pub struct Config {
     pub member_servers: Vec<MemberServer>,
 }
 
+/// Validate a config's referrals against the member addresses `us`, returning
+/// the parent and the children keyed by where they attach.
+///
+/// Shared by `Config::from_file` and by the reload path in the running
+/// server, so an edit is held to exactly the rules a fresh start would apply.
+pub(super) fn check_referrals(
+    parent: Option<file::Referral>,
+    children: Vec<file::Referral>,
+    us: &[SocketAddr],
+) -> Result<(Option<Referral>, BTreeMap<Path, Referral>)> {
+    let parent = parent.map(|r| r.check(Some(us))).transpose()?;
+    let root = parent.as_ref().map(|r| r.path.as_ref()).unwrap_or("/");
+    let children = children
+        .into_iter()
+        .map(|r| {
+            let r = r.check(Some(us))?;
+            Ok((r.path.clone(), r))
+        })
+        .collect::<Result<BTreeMap<Path, Referral>>>()?;
+    for (p, r) in children.iter() {
+        // Component-aware containment (matches the overlap check below):
+        // `/european` is not under `/eu`, so a byte-prefix test would wrongly
+        // accept it as a child of a `/eu`-rooted resolver.
+        if !Path::is_parent(root, p) {
+            bail!("child paths much be under the root path {}", p)
+        }
+        if Path::levels(&*p) <= Path::levels(&*root) {
+            bail!("child paths must be deeper than the root {}", p);
+        }
+        let mut res = children.range::<str, (Bound<&str>, Bound<&str>)>((
+            Excluded(r.path.as_ref()),
+            Unbounded,
+        ));
+        match res.next() {
+            None => (),
+            Some((p, _)) => {
+                // The immediate successor is the lexicographically smallest
+                // path greater than r.path; if r.path is an ancestor of
+                // anything, its descendants sort first, so this catches every
+                // nested (overlapping) child. Component-aware: `/european` is
+                // not below `/eu`.
+                if Path::is_parent(&r.path, p) {
+                    bail!("can't put a referral {} below {}", p, r.path);
+                }
+            }
+        }
+    }
+    Ok((parent, children))
+}
+
 impl Config {
     /// Translate a file::Config into a validated netidx cluster Config
     pub fn from_file(cfg: file::Config) -> Result<Config> {
@@ -507,48 +557,9 @@ impl Config {
             .map(|m| (m.addr, m.auth.clone()))
             .collect::<Vec<_>>();
         check_addrs(&addrs)?;
-        let parent = cfg.parent.map(|r| r.check(Some(&addrs))).transpose()?;
-        let children = {
-            let root = parent.as_ref().map(|r| r.path.as_ref()).unwrap_or("/");
-            let children = cfg
-                .children
-                .into_iter()
-                .map(|r| {
-                    let r = r.check(Some(&addrs))?;
-                    Ok((r.path.clone(), r))
-                })
-                .collect::<Result<BTreeMap<Path, Referral>>>()?;
-            for (p, r) in children.iter() {
-                // Component-aware containment (matches the overlap check
-                // below): `/european` is not under `/eu`, so a byte-prefix
-                // test would wrongly accept it as a child of a `/eu`-rooted
-                // resolver.
-                if !Path::is_parent(root, p) {
-                    bail!("child paths much be under the root path {}", p)
-                }
-                if Path::levels(&*p) <= Path::levels(&*root) {
-                    bail!("child paths must be deeper than the root {}", p);
-                }
-                let mut res = children.range::<str, (Bound<&str>, Bound<&str>)>((
-                    Excluded(r.path.as_ref()),
-                    Unbounded,
-                ));
-                match res.next() {
-                    None => (),
-                    Some((p, _)) => {
-                        // The immediate successor is the lexicographically
-                        // smallest path greater than r.path; if r.path is an
-                        // ancestor of anything, its descendants sort first,
-                        // so this catches every nested (overlapping) child.
-                        // Component-aware: `/european` is not below `/eu`.
-                        if Path::is_parent(&r.path, p) {
-                            bail!("can't put a referral {} below {}", p, r.path);
-                        }
-                    }
-                }
-            }
-            children
-        };
+        let member_addrs = addrs.iter().map(|(a, _)| *a).collect::<Vec<_>>();
+        let (parent, children) =
+            check_referrals(cfg.parent, cfg.children, &member_addrs)?;
         fn check_member_server_auth(m: &file::MemberServer) -> Result<()> {
             match &m.auth {
                 file::Auth::Anonymous

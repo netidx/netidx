@@ -541,7 +541,6 @@ mod tests {
         let mut p = base_params(&out);
         p.parent = Some(ParentRef {
             path: ArcStr::from("/"),
-            ttl: None,
             addrs: vec![(parent_addr(), ReferralAuth::Anonymous)],
         });
         let rt = workstation(&p).unwrap();
@@ -566,7 +565,6 @@ mod tests {
         let mut p = base_params(&out);
         p.parent = Some(ParentRef {
             path: ArcStr::from("/"),
-            ttl: None,
             addrs: vec![(
                 parent_addr(),
                 ReferralAuth::Krb5(ArcStr::from("host/resolver.example.com@REALM")),
@@ -600,7 +598,6 @@ mod tests {
         let mut p = base_params(&out);
         p.parent = Some(ParentRef {
             path: ArcStr::from("/"),
-            ttl: None,
             addrs: vec![(
                 parent_addr(),
                 ReferralAuth::Tls(ArcStr::from("resolver.example.com")),
@@ -652,7 +649,6 @@ mod tests {
         let mut p = base_params(&out);
         p.parent = Some(ParentRef {
             path: ArcStr::from("/"),
-            ttl: None,
             addrs: vec![(
                 parent_addr(),
                 ReferralAuth::Tls(ArcStr::from("resolver.example.com")),

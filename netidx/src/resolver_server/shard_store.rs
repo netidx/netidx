@@ -82,11 +82,22 @@ struct WriteRequest {
     batch: GPooled<WriteB>,
 }
 
+/// Everything that is neither a read nor a write: bookkeeping the server
+/// itself asks of a shard.
+enum Internal {
+    PublishedForId(PublisherId, oneshot::Sender<AHashSet<Path>>),
+    SetReferrals {
+        parent: Option<Referral>,
+        children: BTreeMap<Path, Referral>,
+        ack: oneshot::Sender<()>,
+    },
+}
+
 #[derive(Clone)]
 struct Shard {
     read: UnboundedSender<(ReadRequest, oneshot::Sender<ReadResponse>)>,
     write: UnboundedSender<(WriteRequest, oneshot::Sender<GPooled<WriteR>>)>,
-    internal: UnboundedSender<(PublisherId, oneshot::Sender<AHashSet<Path>>)>,
+    internal: UnboundedSender<Internal>,
 }
 
 impl Shard {
@@ -134,10 +145,14 @@ impl Shard {
                             let _ = reply.send(r);
                         }
                     },
-                    id = internal_rx.next() => match id {
+                    msg = internal_rx.next() => match msg {
                         None => break,
-                        Some((id, reply)) => {
+                        Some(Internal::PublishedForId(id, reply)) => {
                             let _ = reply.send(store.published_for_id(&id));
+                        }
+                        Some(Internal::SetReferrals { parent, children, ack }) => {
+                            store.set_referrals(parent, &children);
+                            let _ = ack.send(());
                         }
                     }
                 }
@@ -456,6 +471,25 @@ impl Store {
             async { t.write_task(rx_write).await }
         });
         t
+    }
+
+    /// Push new referrals to every shard, returning once they have all
+    /// applied so a reload is never silently half done.
+    pub(super) async fn set_referrals(
+        &self,
+        parent: Option<Referral>,
+        children: BTreeMap<Path, Referral>,
+    ) {
+        join_all(self.shards.iter().map(|shard| {
+            let (ack, rx) = oneshot::channel();
+            let _ = shard.internal.unbounded_send(Internal::SetReferrals {
+                parent: parent.clone(),
+                children: children.clone(),
+                ack,
+            });
+            rx
+        }))
+        .await;
     }
 
     async fn handle_queued_write(
@@ -807,7 +841,8 @@ impl Store {
         trace!("clearing publisher {:?}", &publisher);
         let mut published_paths = join_all(self.shards.iter().map(|shard| {
             let (tx, rx) = oneshot::channel();
-            let _ = shard.internal.unbounded_send((publisher.id, tx));
+            let _ =
+                shard.internal.unbounded_send(Internal::PublishedForId(publisher.id, tx));
             rx
         }))
         .await

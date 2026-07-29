@@ -125,9 +125,22 @@ pub enum AuthChoice {
 pub struct ParentRef {
     /// Netidx path where the parent attaches. Use `/` for the root.
     pub path: ArcStr,
-    pub ttl: Option<u16>,
     pub addrs: Vec<(SocketAddr, ReferralAuth)>,
 }
+
+/// How long a client may cache a referral this admin domain hands out.
+///
+/// Referrals are cached until they expire, so this is the upper bound on how
+/// long a *running* subscriber can keep asking the wrong cluster after a
+/// neighbouring one gains or loses a member. The resolver itself picks the
+/// edit up from its config immediately; a client that has already been told
+/// where a subtree lives has no reason to ask again until this runs out.
+///
+/// Without a ttl a referral is cached forever, which would make the resolver's
+/// live reload invisible to everyone already connected. An hour is the same
+/// order as the admin agent's own sync cadence, and costs one extra resolve
+/// per subtree per client per hour.
+pub const REFERRAL_TTL: u16 = 3600;
 
 /// Per-address auth for a parent referral.
 #[derive(Debug, Clone)]
@@ -627,10 +640,7 @@ pub(crate) fn parent_referral_matches_config(
     let Some(actual) = rcfg.as_file().parent.as_ref() else {
         return false;
     };
-    if actual.path != expected.path
-        || actual.ttl != expected.ttl
-        || actual.addrs.len() != expected.addrs.len()
-    {
+    if actual.path != expected.path || actual.addrs.len() != expected.addrs.len() {
         return false;
     }
     expected.addrs.iter().all(|(addr, auth)| {
@@ -850,7 +860,7 @@ impl AsRef<ReferralAuth> for ReferralAuth {
 pub(crate) fn parent_into_file(p: ParentRef) -> rfile::Referral {
     rfile::Referral {
         path: p.path,
-        ttl: p.ttl,
+        ttl: Some(REFERRAL_TTL),
         addrs: p
             .addrs
             .into_iter()
@@ -875,7 +885,6 @@ mod tests {
     fn anon_parent() -> ParentRef {
         ParentRef {
             path: ArcStr::from("/local"),
-            ttl: None,
             addrs: vec![("10.0.0.1:4564".parse().unwrap(), ReferralAuth::Anonymous)],
         }
     }
@@ -933,7 +942,6 @@ mod tests {
         );
         let expected = ParentRef {
             path: "/ap".into(),
-            ttl: None,
             addrs: vec![
                 ("10.0.0.1:4564".parse().unwrap(), ReferralAuth::Anonymous),
                 ("10.0.0.2:4564".parse().unwrap(), ReferralAuth::Anonymous),

@@ -59,9 +59,6 @@ struct ParentFlags {
     /// (rare — the two usually match by convention).
     #[arg(long = "parent-path")]
     parent_path: Option<String>,
-    /// TTL in seconds.
-    #[arg(long = "parent-ttl")]
-    parent_ttl: Option<u16>,
 }
 
 impl ParentFlags {
@@ -79,7 +76,6 @@ impl ParentFlags {
             parent_socket,
             parent_tls_name,
             parent_path,
-            parent_ttl,
         } = self;
         parent_addr.is_some()
             || parent_auth.is_some()
@@ -87,7 +83,6 @@ impl ParentFlags {
             || parent_socket.is_some()
             || parent_tls_name.is_some()
             || parent_path.is_some()
-            || parent_ttl.is_some()
     }
 
     /// Build a `ParentRef` from the parent-* flags. `default_path`
@@ -131,11 +126,7 @@ impl ParentFlags {
             )),
         };
         let path = self.parent_path.as_deref().unwrap_or(default_path);
-        Ok(Some(ParentRef {
-            path: ArcStr::from(path),
-            ttl: self.parent_ttl,
-            addrs: vec![(addr, auth)],
-        }))
+        Ok(Some(ParentRef { path: ArcStr::from(path), addrs: vec![(addr, auth)] }))
     }
 }
 

@@ -506,8 +506,8 @@ mod republish {
         std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
     }
 
-    fn server_cfg(ports: &[u16], writer_ttl: u64) -> ServerConfig {
-        let members = ports
+    fn members(ports: &[u16], writer_ttl: u64) -> Vec<sfile::MemberServer> {
+        ports
             .iter()
             .map(|port| {
                 sfile::MemberServerBuilder::default()
@@ -518,10 +518,32 @@ mod republish {
                     .build()
                     .unwrap()
             })
-            .collect::<Vec<_>>();
-        let cfg =
-            sfile::ConfigBuilder::default().member_servers(members).build().unwrap();
-        ServerConfig::from_file(cfg).unwrap()
+            .collect()
+    }
+
+    fn server_cfg_file(ports: &[u16], writer_ttl: u64) -> sfile::Config {
+        sfile::ConfigBuilder::default()
+            .member_servers(members(ports, writer_ttl))
+            .build()
+            .unwrap()
+    }
+
+    /// A resolver at `/` that refers everything under `/eu` to `eu`. The ttl
+    /// is what makes an edit reach a client that has already been told where
+    /// `/eu` lives — without one, referrals are cached forever.
+    fn root_cfg_file(root: u16, eu: &[u16]) -> sfile::Config {
+        sfile::ConfigBuilder::default()
+            .member_servers(members(&[root], 120))
+            .children(vec![sfile::Referral {
+                path: arcstr::ArcStr::from("/eu"),
+                ttl: Some(1),
+                addrs: eu
+                    .iter()
+                    .map(|port| (addr(*port), sfile::RefAuth::Anonymous))
+                    .collect(),
+            }])
+            .build()
+            .unwrap()
     }
 
     fn client_cfg_file(addrs: &[SocketAddr]) -> cfile::Config {
@@ -546,11 +568,12 @@ mod republish {
         std::fs::rename(&tmp, path).unwrap();
     }
 
-    /// Start member `id`, retrying while the previous incarnation's listener
-    /// is still winding down — `Server`'s stop is signalled from `Drop` and
-    /// completes on another task.
-    async fn start_member(ports: &[u16], writer_ttl: u64, id: usize) -> Server {
-        let cfg = server_cfg(ports, writer_ttl);
+    /// Start member `id`, retrying while a previous incarnation's listener is
+    /// still winding down — `Server`'s stop is signalled from `Drop` and
+    /// completes on another task — or while another test is holding the port
+    /// we reserved.
+    async fn start(cfg: sfile::Config, id: usize) -> Server {
+        let cfg = ServerConfig::from_file(cfg).unwrap();
         let deadline = time::Instant::now() + Duration::from_secs(10);
         loop {
             match Server::new(cfg.clone(), false, id).await {
@@ -563,6 +586,10 @@ mod republish {
                 }
             }
         }
+    }
+
+    async fn start_member(ports: &[u16], writer_ttl: u64, id: usize) -> Server {
+        start(server_cfg_file(ports, writer_ttl), id).await
     }
 
     fn writer(addrs: &[SocketAddr]) -> ResolverWrite {
@@ -825,6 +852,51 @@ mod republish {
         time::sleep(POLL_INTERVAL * 5).await;
         drop(a);
         converges_to("the subscriber", &r, &paths, &paths).await;
+    }
+
+    /// A resolver must pick up an edited referral from its own config. This
+    /// is the other half of the same problem: the administrative plane
+    /// rewrites `parent` and `children` when a neighbouring cluster changes,
+    /// and until now nothing read them back.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_resolver_picks_up_an_edited_child_referral() {
+        let _ = env_logger::try_init();
+        let root_port = free_port();
+        let eu_ports = [free_port(), free_port()];
+        let root = start(root_cfg_file(root_port, &[eu_ports[0]]), 0).await;
+        let _eu0 = start_member(&eu_ports, 120, 0).await;
+        let _eu1 = start_member(&eu_ports, 120, 1).await;
+        // Published only to the member root does *not* refer to yet.
+        let w = writer(&[addr(eu_ports[1])]);
+        let paths = vec![p("/eu/x")];
+        w.publish(paths.iter().cloned()).await.unwrap();
+        let r = ResolverRead::new(client_cfg(&[addr(root_port)]), DesiredAuth::Anonymous);
+        assert!(published(&r, &paths).await.is_empty());
+        let not_applied = root.reload(&root_cfg_file(root_port, &[eu_ports[1]])).await;
+        assert_eq!(not_applied.unwrap(), Default::default());
+        converges_to("the subscriber", &r, &paths, &paths).await;
+    }
+
+    /// Where a child attaches is fixed when the store is built, so a reload
+    /// has to say so rather than appear to have worked.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_added_child_is_reported_as_not_applied() {
+        let _ = env_logger::try_init();
+        let root_port = free_port();
+        let eu_port = free_port();
+        let root = start(server_cfg_file(&[root_port], 120), 0).await;
+        let not_applied =
+            root.reload(&root_cfg_file(root_port, &[eu_port])).await.unwrap();
+        assert_eq!(not_applied.children_added, vec![p("/eu")]);
+        assert!(not_applied.children_removed.is_empty());
+        // ...and the other way round.
+        let with_child = start(root_cfg_file(free_port(), &[eu_port]), 0).await;
+        let not_applied = with_child
+            .reload(&server_cfg_file(&[*with_child.local_addr()].map(|a| a.port()), 120))
+            .await
+            .unwrap();
+        assert_eq!(not_applied.children_removed, vec![p("/eu")]);
+        assert!(not_applied.children_added.is_empty());
     }
 
     /// An unpublish that could not be delivered has to be retried, not
