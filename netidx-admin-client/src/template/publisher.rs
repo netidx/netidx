@@ -1,8 +1,14 @@
-//! Publisher-host template. No resolver, no activation units — just
-//! a client config pointing at explicit addresses. (The on-disk file
-//! is still `client.json` because that's the netidx config name; the
-//! template is named for the typical host running it, which mostly
-//! hosts publishers connecting to a remote resolver cluster.)
+//! Publisher-host template. No resolver — just a client config
+//! pointing at explicit addresses. (The on-disk file is still
+//! `client.json` because that's the netidx config name; the template
+//! is named for the typical host running it, which mostly hosts
+//! publishers connecting to a remote resolver cluster.)
+//!
+//! The template emits no activation units, but the role is not
+//! service-free: a publisher joined to an admin domain gets an
+//! `admin-agent` unit from [`crate::plan::install::publisher`], whatever its
+//! data-plane auth, because its resolver addresses go stale even when
+//! it has no certificates to renew.
 //!
 //! Auth model:
 //! - Each address in [`addrs`](PublisherParams::addrs) carries its own
