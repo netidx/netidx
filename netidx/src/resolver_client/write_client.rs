@@ -115,13 +115,14 @@ impl Connection {
     /// against a member that never had the path is a no-op, so this is safe
     /// whether the member kept our records or lost them.
     async fn republish(&mut self, con: &mut Channel, ttl_expired: bool) -> Result<()> {
-        let mut pending: LPooled<Vec<ToWrite>> = LPooled::take();
+        let mut nretry = 0;
         if self.pending_clear {
-            pending.push(ToWrite::Clear)
+            con.queue_send(&ToWrite::Clear)?;
+            nretry += 1;
         }
-        pending.extend(self.pending_unpublish.values().cloned());
-        for msg in pending.iter() {
-            con.queue_send(msg)?
+        for msg in self.pending_unpublish.values() {
+            con.queue_send(msg)?;
+            nretry += 1;
         }
         let npub = {
             let published = self.published.read();
@@ -130,7 +131,7 @@ impl Connection {
             }
             published.len()
         };
-        let len = pending.len() + npub;
+        let len = nretry + npub;
         if len == 0 {
             info!("connected to resolver {:?} for write", self.resolver_addr);
             if self.degraded {
@@ -150,25 +151,18 @@ impl Connection {
         );
         con.flush().await?;
         let mut success = 0;
-        for msg in pending.iter() {
-            let reply = con.receive().await?;
-            match (msg, &reply) {
-                (ToWrite::Clear, FromWrite::Unpublished | FromWrite::Referral(_)) => {
-                    success += 1;
-                    self.pending_clear = false;
-                }
-                (
-                    ToWrite::Unpublish(p) | ToWrite::UnpublishDefault(p),
-                    FromWrite::Unpublished | FromWrite::Referral(_),
-                ) => {
-                    success += 1;
-                    self.pending_unpublish.remove(p);
-                }
-                (msg, r) => warn!(
-                    "republish unexpected response to {:?} from resolver {:?}",
-                    msg, r
+        for _ in 0..nretry {
+            match con.receive().await? {
+                FromWrite::Unpublished | FromWrite::Referral(_) => success += 1,
+                r => warn!(
+                    "republish unexpected response to retry {:?} from resolver {:?}",
+                    r, self.resolver_addr
                 ),
             }
+        }
+        if success == nretry {
+            self.pending_clear = false;
+            self.pending_unpublish.clear();
         }
         for _ in 0..npub {
             match con.receive().await? {
