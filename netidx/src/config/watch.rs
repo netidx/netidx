@@ -22,7 +22,6 @@ use log::{info, warn};
 use poolshark::{global::GPooled, local::LPooled};
 use std::{
     mem::{self, Discriminant},
-    net::SocketAddr,
     path::Path as FsPath,
     sync::Arc,
     time::{Duration, SystemTime},
@@ -92,24 +91,30 @@ fn acceptable(current: &Config, next: &Config) -> Result<()> {
     Ok(())
 }
 
-/// Size and mtime, or `None` if the file isn't there. Cheap enough to do
-/// every interval, and a false positive costs one read that finds nothing
-/// changed.
-async fn stamp(path: &FsPath) -> Option<(u64, SystemTime)> {
-    let md = tokio::fs::metadata(path).await.ok()?;
-    Some((md.len(), md.modified().ok()?))
+/// The file's modification time, or `None` if it isn't there — so a config
+/// that disappears and comes back is noticed. One `stat` per interval.
+async fn stamp(path: &FsPath) -> Option<SystemTime> {
+    tokio::fs::metadata(path).await.ok()?.modified().ok()
 }
 
-/// Re-read `path` and return its addresses if they are both usable and
-/// different from what we are running with.
-fn reload(path: &FsPath, current: &Config) -> Result<Option<Vec<(SocketAddr, Auth)>>> {
+/// What we ran with, or `None` for a config that came from somewhere else.
+/// Compared against [`stamp`] to decide whether to look again.
+fn running(cfg: &Config) -> Option<SystemTime> {
+    cfg.origin.mtime()
+}
+
+/// Re-read `path` and return the new config if its addresses are both usable
+/// and different from what we are running with.
+fn reload(path: &FsPath, current: &Config) -> Result<Option<Config>> {
     let next = Config::load(path).context("re-reading")?;
     acceptable(current, &next)?;
-    Ok(if next.addrs == current.addrs { None } else { Some(next.addrs) })
+    Ok(if next.addrs == current.addrs { None } else { Some(next) })
 }
 
 async fn poll(mut current: Config, path: Arc<FsPath>, tx: watch::Sender<Arc<Referral>>) {
-    let mut last = stamp(&path).await;
+    // What we started from comes from the load, not from a fresh look at the
+    // path — see `crate::config_file`.
+    let mut last = running(&current);
     // Look again on the next tick after a failure even if nothing else moved.
     // A hand-edited file can be caught mid-write, and the whole point of
     // following it is that an edit takes effect — one retry covers that
@@ -125,7 +130,6 @@ async fn poll(mut current: Config, path: Arc<FsPath>, tx: watch::Sender<Arc<Refe
         if now == last && !retry {
             continue;
         }
-        last = now;
         retry = false;
         let reloaded = task::spawn_blocking({
             let path = path.clone();
@@ -134,15 +138,26 @@ async fn poll(mut current: Config, path: Arc<FsPath>, tx: watch::Sender<Arc<Refe
         })
         .await;
         match reloaded {
-            Err(e) => warn!("{}: reload task failed: {e}", path.display()),
+            Err(e) => {
+                last = now;
+                warn!("{}: reload task failed: {e}", path.display())
+            }
             Ok(Err(e)) => {
+                last = now;
                 retry = true;
                 warn!("{}: keeping the current resolvers: {e:#}", path.display())
             }
-            Ok(Ok(None)) => (),
-            Ok(Ok(Some(addrs))) => {
-                info!("{}: resolvers are now {addrs:?}", path.display());
-                current.addrs = addrs.clone();
+            // Nothing we can act on changed, but record what we looked at so
+            // we don't re-read it every interval from here on.
+            Ok(Ok(None)) => last = now,
+            Ok(Ok(Some(next))) => {
+                info!("{}: resolvers are now {:?}", path.display(), next.addrs);
+                // From the descriptor the new config was read from, not from
+                // `now` — a write between the stat and the read would
+                // otherwise be remembered as already applied.
+                last = running(&next);
+                let addrs = next.addrs.clone();
+                current = next;
                 let referral = Referral {
                     path: current.base.clone(),
                     ttl: None,
@@ -161,7 +176,7 @@ async fn poll(mut current: Config, path: Arc<FsPath>, tx: watch::Sender<Arc<Refe
 /// detached — `tx` is simply dropped. Its receivers keep working and just
 /// never see a change, so callers need no second code path.
 pub(crate) fn follow(cfg: &Config, tx: watch::Sender<Arc<Referral>>) {
-    let Origin::File(path) = cfg.origin.clone() else { return };
+    let Origin::File { path, .. } = cfg.origin.clone() else { return };
     let current = cfg.clone();
     task::spawn(poll(current, path, tx));
 }
@@ -171,6 +186,31 @@ mod tests {
     use super::*;
     use crate::config::{DefaultAuthMech, file};
     use arcstr::ArcStr;
+
+    /// The stamp a follower starts from has to come from the load, so that a
+    /// write landing between reading the file and describing it is not
+    /// mistaken for something already applied.
+    #[test]
+    fn a_loaded_config_remembers_when_it_was_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("client.json");
+        std::fs::write(
+            &path,
+            br#"{"base":"/","addrs":[["127.0.0.1:4564","Anonymous"]],"default_auth":"Anonymous"}"#,
+        )
+        .unwrap();
+        let cfg = Config::load(&path).unwrap();
+        let loaded = running(&cfg).expect("a file origin records its mtime");
+        assert_eq!(
+            Some(loaded),
+            std::fs::metadata(&path).unwrap().modified().ok(),
+            "the recorded time must be the file we read",
+        );
+        // Detaching drops the whole relationship, stamp included.
+        let mut detached = cfg.clone();
+        detached.detach();
+        assert_eq!(running(&detached), None);
+    }
 
     fn cfg(base: &str, addrs: &[(&str, file::Auth)], auth: DefaultAuthMech) -> Config {
         let f = file::ConfigBuilder::default()

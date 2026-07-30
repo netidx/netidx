@@ -20,7 +20,6 @@ use std::{
     convert::AsRef,
     convert::Into,
     default::Default,
-    fs::read_to_string,
     net::{IpAddr, SocketAddr},
     path::Path as FsPath,
     time::Duration,
@@ -740,12 +739,17 @@ impl Config {
     /// this function reading the file with serde is that this function will
     /// canonicalize the paths of any included permissions files (see
     /// [`resolve_relative_includes`]).
-    pub fn load_raw<P: AsRef<FsPath>>(file: P) -> Result<file::Config> {
+    /// Also returns the modification time of the descriptor the config was
+    /// read from — not of the path, which is a different thing and wrong in
+    /// the dangerous direction. See [`crate::config_file`].
+    pub fn load_raw<P: AsRef<FsPath>>(
+        file: P,
+    ) -> Result<(file::Config, Option<std::time::SystemTime>)> {
         let file_path = file.as_ref();
-        let contents = read_to_string(file_path)?;
+        let (contents, mtime) = crate::config_file::read(file_path)?;
         let mut parsed: file::Config = from_str(&contents)?;
         resolve_relative_includes(&mut parsed, file_path)?;
-        Ok(parsed)
+        Ok((parsed, mtime))
     }
 
     /// Load the cluster config from the specified file.
@@ -757,7 +761,7 @@ impl Config {
     /// keep working after `daemonize` chdirs the process to `/`.
     /// Absolute include paths pass through unchanged.
     pub fn load<P: AsRef<FsPath>>(file: P) -> Result<Config> {
-        Self::from_file(Self::load_raw(file)?)
+        Self::from_file(Self::load_raw(file)?.0)
     }
 
     pub(super) fn root(&self) -> &str {

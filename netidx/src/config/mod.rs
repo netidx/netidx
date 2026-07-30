@@ -10,8 +10,8 @@ use anyhow::Result;
 use poolshark::global::GPooled;
 use serde_json::from_str;
 use std::{
-    cmp::min, collections::BTreeMap, convert::AsRef, convert::Into, fs::read_to_string,
-    net::SocketAddr, path::Path as FsPath, str, sync::Arc,
+    cmp::min, collections::BTreeMap, convert::AsRef, convert::Into, net::SocketAddr,
+    path::Path as FsPath, str, sync::Arc,
 };
 
 mod local_only;
@@ -34,23 +34,43 @@ pub enum Origin {
     /// re-read; the config is exactly what the caller supplied.
     #[default]
     Internal,
-    File(Arc<FsPath>),
+    File {
+        path: Arc<FsPath>,
+        /// The modification time of the descriptor this config was read from,
+        /// or `None` if the filesystem wouldn't say.
+        ///
+        /// It travels with the config so that whatever follows the file
+        /// compares against the configuration that is *running*, rather than
+        /// against a fresh look at the path — which is a different thing, and
+        /// wrong in the dangerous direction. See [`crate::config_file`].
+        mtime: Option<std::time::SystemTime>,
+    },
 }
 
 impl Origin {
     /// Canonicalize best-effort so the origin survives a `chdir`, and fall
     /// back to the path as given when it can't be resolved.
-    fn from_path(path: &FsPath) -> Origin {
-        match path.canonicalize() {
-            Ok(path) => Origin::File(Arc::from(path.as_path())),
-            Err(_) => Origin::File(Arc::from(path)),
+    fn from_file(path: &FsPath, mtime: Option<std::time::SystemTime>) -> Origin {
+        let path = match path.canonicalize() {
+            Ok(path) => Arc::from(path.as_path()),
+            Err(_) => Arc::from(path),
+        };
+        Origin::File { path, mtime }
+    }
+
+    /// When the file this was read from was last modified, as reported by the
+    /// descriptor it was read from. `None` for an internal config.
+    pub fn mtime(&self) -> Option<std::time::SystemTime> {
+        match self {
+            Origin::Internal => None,
+            Origin::File { mtime, .. } => *mtime,
         }
     }
 
     pub fn path(&self) -> Option<&FsPath> {
         match self {
             Origin::Internal => None,
-            Origin::File(path) => Some(path),
+            Origin::File { path, .. } => Some(path),
         }
     }
 }
@@ -217,8 +237,9 @@ pub mod file {
         /// Load from `file`
         pub fn load<P: AsRef<Path>>(file: P) -> Result<Config> {
             let file = file.as_ref();
-            let mut cfg: Config = serde_json::from_reader(std::fs::File::open(file)?)?;
-            cfg.origin = super::Origin::from_path(file);
+            let (contents, mtime) = crate::config_file::read(file)?;
+            let mut cfg: Config = serde_json::from_str(&contents)?;
+            cfg.origin = super::Origin::from_file(file, mtime);
             Ok(cfg)
         }
 
@@ -460,8 +481,9 @@ impl Config {
     /// they change. See [`Origin`].
     pub fn load<P: AsRef<FsPath>>(file: P) -> Result<Config> {
         let file = file.as_ref();
-        let mut cfg = Config::parse(&read_to_string(file)?)?;
-        cfg.origin = Origin::from_path(file);
+        let (contents, mtime) = crate::config_file::read(file)?;
+        let mut cfg = Config::parse(&contents)?;
+        cfg.origin = Origin::from_file(file, mtime);
         Ok(cfg)
     }
 

@@ -12,12 +12,31 @@
 //! On Windows the mode argument is ignored, and the directory fsync
 //! step is a no-op (NTFS rename atomicity does not require it; there
 //! is no portable way to fsync a directory handle on Windows).
+//!
+//! Both variants settle for [`SETTLE`] before returning, so that two
+//! writes to the same path can never land in one filesystem timestamp.
 
 use anyhow::{Context, Result, bail};
 use compact_str::format_compact;
 use serde::Serialize;
-use std::{io::Write, path::Path};
+use std::{io::Write, path::Path, time::Duration};
 use tokio::io::AsyncWriteExt;
+
+/// How long an atomic write waits before returning.
+///
+/// Everything that follows one of these files — a resolver watching its own
+/// config, a netidx client watching its resolver addresses, the id-map daemon —
+/// notices a change by its modification time. Linux stamps inodes from a clock
+/// that only advances once per timer tick (a millisecond or four), so two
+/// writes closer together than that share a timestamp, and the second is
+/// invisible to anything comparing times.
+///
+/// Rather than make every reader pay to defend against that, the writer simply
+/// declines to produce it. Administrative writes are seconds apart in any case;
+/// the cost of being certain is this pause, in the one place all of them go
+/// through. It must stay comfortably above one tick at any plausible
+/// `CONFIG_HZ`.
+pub const SETTLE: Duration = Duration::from_millis(50);
 
 /// Write `bytes` to `path` atomically (temp file + rename), with the
 /// given unix `mode`. On Windows the mode is ignored.
@@ -54,6 +73,7 @@ pub fn write_atomic(path: &Path, bytes: &[u8], mode: u32) -> Result<()> {
     // directory fsync to make the dirent change durable.
     #[cfg(unix)]
     fsync_dir(dir).with_context(|| format!("fsync parent dir {dir:?}"))?;
+    std::thread::sleep(SETTLE);
     Ok(())
 }
 
@@ -107,6 +127,8 @@ pub async fn write_atomic_async(path: &Path, bytes: &[u8], mode: u32) -> Result<
     .await;
     if result.is_err() {
         let _ = tokio::fs::remove_file(&tmp).await;
+    } else {
+        tokio::time::sleep(SETTLE).await;
     }
     result
 }
@@ -185,6 +207,21 @@ pub async fn write_atomic_pretty_json_async<T: Serialize>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The reason [`SETTLE`] exists: two writes to the same path must not land
+    /// on one filesystem timestamp, or whatever is following the file compares
+    /// two different configs and finds them equal.
+    #[test]
+    fn consecutive_writes_land_on_different_timestamps() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("resolver.json");
+        let mtime = || std::fs::metadata(&p).unwrap().modified().unwrap();
+        write_atomic(&p, b"{\"read_gated\":\"No\"}", 0o644).unwrap();
+        let first = mtime();
+        write_atomic(&p, b"{\"read_gated\":\"Yes\"}", 0o644).unwrap();
+        let second = mtime();
+        assert_ne!(first, second, "a follower comparing times would miss this write");
+    }
 
     #[test]
     fn round_trip_text() {

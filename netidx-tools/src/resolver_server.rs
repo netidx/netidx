@@ -72,17 +72,30 @@ async fn tokio_run(
     config: Config,
     baseline: file::Config,
     config_path: PathBuf,
+    main_mtime: Option<SystemTime>,
     params: Params,
 ) -> Result<()> {
-    // Stamp before starting the server, not after: anything written while the
-    // server is coming up would otherwise be the first thing the loop stat'ed,
-    // and it would take that for the state it had always had.
+    // `main_mtime` came from the descriptor the startup config was read from,
+    // so what we record here describes exactly what the server is starting
+    // with — not whatever is at the path once it has finished coming up.
     let mut stamp = Vec::new();
-    mtimes(&config_path, &baseline.include_permissions, &mut stamp).await;
+    stamp_of(&config_path, &baseline.include_permissions, main_mtime, &mut stamp).await;
     let server = Server::new(config, params.delay_reads, params.id)
         .await
         .context("starting server")?;
     run_reload_loop(server, config_path, baseline, stamp).await
+}
+
+/// The stamp for a configuration that was just read: the main config's time
+/// from the descriptor it came from, the include files stat'ed.
+async fn stamp_of(
+    config_path: &std::path::Path,
+    includes: &[ArcStr],
+    main: Option<SystemTime>,
+    into: &mut Vec<Option<SystemTime>>,
+) {
+    mtimes(config_path, includes, into).await;
+    into[0] = main;
 }
 
 /// How often the config and its `include_permissions` files are checked for
@@ -93,13 +106,6 @@ const POLL_INTERVAL: Duration = Duration::from_secs(30);
 /// the main config, then each `include_permissions` entry in order. `None` for
 /// a file that isn't there, so deleting one reads as a change.
 ///
-/// mtime is a coarse signal: Linux stamps inodes from a cached clock that only
-/// advances once per timer tick, so two writes a few milliseconds apart get
-/// the same time and the second is invisible until something touches the file
-/// again. Nothing writes these files twice in a tick — every writer is an
-/// administrative operation, and they are seconds apart — but that is the
-/// limit of what this notices.
-///
 /// A poll rather than a filesystem watch, because the watch version did not
 /// work. Every tool that writes these files — the admin plane certainly, and
 /// most editors — replaces them by renaming a new file over the top, so a
@@ -108,6 +114,10 @@ const POLL_INTERVAL: Duration = Duration::from_secs(30);
 /// open and the loop went on waiting for events that could not arrive, and a
 /// resolver applied the first change pushed to it and ignored every one after.
 /// Two or three `stat`s twice a minute cannot go quietly deaf.
+///
+/// Consecutive writes have to land on different timestamps for this to see
+/// them, which is why `netidx_admin_client::atomic` settles for longer than a
+/// filesystem timestamp tick before returning.
 ///
 /// Fills `into` rather than returning, so a poll that finds nothing allocates
 /// nothing.
@@ -171,7 +181,7 @@ async fn run_reload_loop(
         let Some(trigger) = trigger else { break Ok(()) };
         info!("resolver: {trigger} — reloading");
         match handle_reload(&server, &config_path, &baseline).await {
-            Ok(new_file) => {
+            Ok((new_file, main_mtime)) => {
                 info!("config reloaded successfully");
                 if new_file.include_permissions != includes {
                     info!(
@@ -179,12 +189,22 @@ async fn run_reload_loop(
                         includes.len(),
                         new_file.include_permissions.len(),
                     );
-                    includes = new_file.include_permissions.clone();
                 }
-                // Re-stat after applying: the include set may have just
-                // changed, a file may have moved again while we were
-                // reloading, and a SIGHUP must not leave a stale record.
-                mtimes(&config_path, &includes, &mut current).await;
+                // The main config's time comes from the descriptor it was
+                // read from, so it always describes what we just applied.
+                // The include files are re-stat'ed because the include set
+                // may have changed — and because that is the safe direction:
+                // one edited while we were reloading looks newer next pass
+                // and gets applied then, where remembering a time we never
+                // read would lose it for good.
+                stamp_of(
+                    &config_path,
+                    &new_file.include_permissions,
+                    main_mtime,
+                    &mut current,
+                )
+                .await;
+                includes = new_file.include_permissions.clone();
             }
             // Leave the record where it is. A config we could not apply gets
             // tried again when it changes — which is what an operator fixing
@@ -194,20 +214,24 @@ async fn run_reload_loop(
     }
 }
 
+/// Returns the config that was applied, and the modification time of the
+/// descriptor it was read from.
 async fn handle_reload(
     server: &Server,
     config_path: &std::path::Path,
     baseline: &file::Config,
-) -> Result<file::Config> {
+) -> Result<(file::Config, Option<SystemTime>)> {
     info!("re-reading {:?}", config_path);
-    let new_file = load_file_config(config_path)?;
+    let (new_file, mtime) = load_file_config(config_path)?;
     warn_members_changed(baseline, &new_file);
     let not_applied = server.reload(&new_file).await.context("applying the config")?;
     warn_not_applied(&not_applied);
-    Ok(new_file)
+    Ok((new_file, mtime))
 }
 
-fn load_file_config(path: &std::path::Path) -> Result<file::Config> {
+fn load_file_config(
+    path: &std::path::Path,
+) -> Result<(file::Config, Option<SystemTime>)> {
     // Goes through `Config::load_file` (not raw serde_json) so that
     // relative `include_permissions` paths are resolved against the
     // config file's parent directory — matching the startup load
@@ -422,7 +446,7 @@ pub(crate) fn run(params: Params) -> Result<()> {
     //   - the file::Config to set pid_file before daemonizing (unix)
     //   - the validated Config for the running server
     #[cfg_attr(not(unix), allow(unused_mut))]
-    let mut file_cfg = load_file_config(&config_path)?;
+    let (mut file_cfg, main_mtime) = load_file_config(&config_path)?;
     #[cfg(unix)]
     if !params.foreground {
         let member = &mut file_cfg.member_servers[params.id];
@@ -435,5 +459,5 @@ pub(crate) fn run(params: Params) -> Result<()> {
     let baseline = file_cfg.clone();
     let config =
         Config::from_file(file_cfg).context("validating resolver server config")?;
-    tokio_run(config, baseline, config_path, params)
+    tokio_run(config, baseline, config_path, main_mtime, params)
 }

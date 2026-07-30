@@ -124,7 +124,7 @@ impl Server {
     /// main loop (which polls the config and arms SIGHUP). Returns when the
     /// listener is accepting connections.
     pub async fn start(params: ServerParams) -> Result<Server> {
-        let initial = load_config(&params.config)
+        let (initial, stamp) = load_config(&params.config)
             .with_context(|| format!("loading {:?}", params.config))?;
         let map = Arc::new(initial);
 
@@ -183,12 +183,6 @@ impl Server {
 
         let (stop_tx, stop_rx) = oneshot::channel();
         let config_path = params.config.clone();
-        // Record what we started from HERE, not inside the spawned loop.
-        // `start` returns as soon as the task is spawned, so a config written
-        // between those two points would otherwise be the first thing the loop
-        // stat'ed — and it would take that for the state it had always had, and
-        // never reload at all.
-        let stamp = mtime(&config_path).await;
         let join = tokio::spawn(run_loop(listener, config_path, map, stamp, stop_rx));
 
         info!(
@@ -280,18 +274,24 @@ async fn run_loop(
                     "id-map: SIGHUP received, reloading {}",
                     config_path.display()
                 );
-                reload(&config_path, &mut map).await;
+                if let Some(m) = reload(&config_path, &mut map).await {
+                    stamp = Some(m);
+                }
             }
             // Live reload from the config poll.
             _ = poll.tick() => {
                 let latest = mtime(&config_path).await;
                 if latest != stamp {
-                    stamp = latest;
                     info!(
                         "id-map: detected change to {}, reloading",
                         config_path.display()
                     );
-                    reload(&config_path, &mut map).await;
+                    // From the descriptor the new map was read from, not from
+                    // `latest`: a write between the stat and the read would
+                    // otherwise be remembered as already applied. A failed
+                    // reload records `latest` so a config that cannot be
+                    // parsed is retried when it changes, not every tick.
+                    stamp = reload(&config_path, &mut map).await.or(latest);
                 }
             }
             r = listener.accept() => match r {
@@ -353,17 +353,24 @@ async fn recv_sighup(sighup: &mut Option<Signal>) -> Option<()> {
 /// edit can't lock out every TLS identity. `spawn_blocking` keeps the
 /// disk read off the runtime thread so the per-connection handlers
 /// still make progress on a single-threaded runtime while we wait.
-async fn reload(config_path: &Path, map: &mut Arc<IdMap>) {
+/// On success also returns the time of the descriptor the new map was read
+/// from, for the caller to record.
+async fn reload(config_path: &Path, map: &mut Arc<IdMap>) -> Option<SystemTime> {
     let path = config_path.to_path_buf();
     match tokio::task::spawn_blocking(move || load_config(&path)).await {
-        Ok(Ok(new)) => {
+        Ok(Ok((new, mtime))) => {
             *map = Arc::new(new);
             info!("id-map: reload OK");
+            mtime
         }
         Ok(Err(e)) => {
-            warn!("id-map: reload failed, keeping last-known-good map: {e:#}")
+            warn!("id-map: reload failed, keeping last-known-good map: {e:#}");
+            None
         }
-        Err(e) => warn!("id-map: reload task panicked: {e:#}"),
+        Err(e) => {
+            warn!("id-map: reload task panicked: {e:#}");
+            None
+        }
     }
 }
 
@@ -440,13 +447,27 @@ async fn mtime(path: &Path) -> Option<SystemTime> {
     tokio::fs::metadata(path).await.ok()?.modified().ok()
 }
 
-fn load_config(path: &Path) -> Result<IdMap> {
+/// Parse the config, and report the modification time of the descriptor it was
+/// read from.
+///
+/// From the descriptor, not from the path: asking the path again afterwards
+/// leaves a window for a write to land in between, so you hold one version and
+/// remember another — and if what you remember matches the file, the poll never
+/// reloads again. Every writer replaces this file by renaming a new one over
+/// the top, so the inode behind an open descriptor is never modified underneath
+/// us and the time it reports belongs to the bytes we parsed.
+fn load_config(path: &Path) -> Result<(IdMap, Option<SystemTime>)> {
+    use std::io::Read;
     // Synchronous on purpose: callers from async contexts wrap us in
     // `spawn_blocking`; the synchronous startup path runs before the
     // runtime is doing anything else.
-    let bytes =
-        std::fs::read(path).with_context(|| format!("reading id-map config {path:?}"))?;
-    file::parse_bytes(&bytes)
+    let mut file = std::fs::File::open(path)
+        .with_context(|| format!("opening id-map config {path:?}"))?;
+    let mtime = file.metadata().ok().and_then(|md| md.modified().ok());
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)
+        .with_context(|| format!("reading id-map config {path:?}"))?;
+    Ok((file::parse_bytes(&bytes)?, mtime))
 }
 
 #[cfg(unix)]

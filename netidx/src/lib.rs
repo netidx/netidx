@@ -150,6 +150,7 @@ mod channel;
 /// resolver-name probe.
 pub use channel::{read_raw, write_raw};
 pub mod config;
+mod config_file;
 mod os;
 
 /// Small Windows integration helpers shared by netidx's own processes.
