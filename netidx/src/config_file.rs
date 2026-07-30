@@ -20,18 +20,19 @@
 //! than a tick before returning; see `atomic::SETTLE`.
 
 use anyhow::{Context, Result};
+use poolshark::local::LPooled;
 use std::{fs::File, io::Read, path::Path, time::SystemTime};
 
 /// Read a config file, returning its contents and the modification time of
 /// the descriptor they came from. The caller parses the string it is handed,
 /// so the time it records always belongs to the configuration it applied.
-pub(crate) fn read(path: &Path) -> Result<(String, Option<SystemTime>)> {
+pub(crate) fn read(path: &Path) -> Result<(LPooled<String>, Option<SystemTime>)> {
     let mut file =
         File::open(path).with_context(|| format!("opening config {}", path.display()))?;
     // fstat, not stat: this is the file we are about to read, whatever is at
     // the path by the time we finish.
     let mtime = file.metadata().ok().and_then(|md| md.modified().ok());
-    let mut s = String::new();
+    let mut s: LPooled<String> = LPooled::take();
     file.read_to_string(&mut s)
         .with_context(|| format!("reading config {}", path.display()))?;
     Ok((s, mtime))
