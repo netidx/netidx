@@ -34,7 +34,10 @@ use std::{
     mem,
     net::SocketAddr,
     ops::Deref,
-    sync::{Arc, LazyLock},
+    sync::{
+        Arc, LazyLock,
+        atomic::{AtomicI64, Ordering},
+    },
     time::Duration,
 };
 use tokio::{
@@ -245,6 +248,32 @@ impl Clinfos {
     }
 }
 
+/// The read gate as the accept path wants it: one relaxed load.
+///
+/// Every read connection checks this at hello, so it must not be a lock. A
+/// herd of subscribers reconnecting at once would serialize on the cache
+/// line, and an `RwLock` would not help — a reader still has to take the line
+/// exclusively to count itself in, where a shared load leaves it shared.
+struct Gate(AtomicI64);
+
+impl Gate {
+    fn new(gate: ReadGate) -> Gate {
+        Gate(AtomicI64::new(gate.opens_at()))
+    }
+
+    fn is_open(&self) -> bool {
+        ReadGate::open_at(self.0.load(Ordering::Relaxed))
+    }
+
+    /// Set the gate, returning whether that changed it. Relaxed is enough
+    /// either way: the gate publishes nothing but itself, so a connection that
+    /// reads the old one is indistinguishable from one that arrived sooner.
+    fn set(&self, gate: ReadGate) -> bool {
+        let opens_at = gate.opens_at();
+        self.0.swap(opens_at, Ordering::Relaxed) != opens_at
+    }
+}
+
 struct Ctx {
     clinfos: Clinfos,
     ctracker: CTracker,
@@ -253,7 +282,7 @@ struct Ctx {
     id: SocketAddr,
     store: Store,
     delay_reads: Option<Instant>,
-    read_gate: Arc<SyncMutex<ReadGate>>,
+    read_gate: Arc<Gate>,
 }
 
 impl Ctx {
@@ -264,7 +293,7 @@ impl Ctx {
     fn reads_allowed(&self) -> bool {
         match self.delay_reads {
             Some(t) if Instant::now() < t => false,
-            Some(_) | None => self.read_gate.lock().is_open(),
+            Some(_) | None => self.read_gate.is_open(),
         }
     }
 }
@@ -900,7 +929,7 @@ async fn server_loop(
         secctx.clone(),
         id,
     );
-    let read_gate = Arc::new(SyncMutex::new(member.read_gated));
+    let read_gate = Arc::new(Gate::new(member.read_gated));
     let ctx = Arc::new(Ctx {
         cfg: member,
         secctx,
@@ -966,7 +995,7 @@ struct Ready {
     local_addr: SocketAddr,
     secctx: SecCtx,
     store: Store,
-    read_gate: Arc<SyncMutex<ReadGate>>,
+    read_gate: Arc<Gate>,
 }
 
 /// The parts of a config that are fixed once the server is running: which
@@ -986,7 +1015,7 @@ pub struct Server {
     local_addr: SocketAddr,
     secctx: SecCtx,
     store: Store,
-    read_gate: Arc<SyncMutex<ReadGate>>,
+    read_gate: Arc<Gate>,
     /// The advertised address of the member this process is running. Used to
     /// find ourselves in an edited config: matching by address rather than by
     /// index means a reordered `member_servers` can't hand us someone else's
@@ -1207,10 +1236,8 @@ impl Server {
         if let Some(member) =
             cfg.member_servers.iter().find(|m| m.addr == self.member_addr)
         {
-            let mut gate = self.read_gate.lock();
-            if *gate != member.read_gated {
+            if self.read_gate.set(member.read_gated) {
                 info!("read gate is now {:?}", member.read_gated);
-                *gate = member.read_gated;
             }
         }
         Ok(not_applied)
@@ -1218,6 +1245,6 @@ impl Server {
 
     /// Whether this server is currently answering read clients.
     pub fn reads_allowed(&self) -> bool {
-        self.read_gate.lock().is_open()
+        self.read_gate.is_open()
     }
 }

@@ -946,6 +946,17 @@ mod republish {
         assert!(ReadGate::Until(Utc::now() - CDuration::seconds(1)).is_open());
     }
 
+    /// The running server keeps its gate as the millisecond scale `opens_at`
+    /// collapses it to, so the sentinels standing in for `No` and `Yes` have
+    /// to stay out of the range a real deadline can reach. chrono's own limits
+    /// are the ones that decide it.
+    #[test]
+    fn no_deadline_can_be_mistaken_for_a_constant_gate() {
+        use chrono::{DateTime, Utc};
+        assert!(DateTime::<Utc>::MAX_UTC.timestamp_millis() < i64::MAX);
+        assert!(DateTime::<Utc>::MIN_UTC.timestamp_millis() > i64::MIN);
+    }
+
     /// A host reports one gate but may hold several member blocks. Whichever
     /// of them refuses reads for longest is the one that can turn a subscriber
     /// away, so that is the one worth reporting.

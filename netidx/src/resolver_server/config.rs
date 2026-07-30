@@ -61,12 +61,32 @@ impl Default for ReadGate {
 }
 
 impl ReadGate {
-    pub fn is_open(&self) -> bool {
+    /// When reads become allowed, in milliseconds since the epoch.
+    ///
+    /// A gate says "refuse reads until", so the two constant answers are the
+    /// extremes of the same scale: `No` opened at the beginning of time and
+    /// `Yes` opens at the end of it. Collapsing the enum this way is what lets
+    /// a running server hold its gate in one atomic. Neither sentinel can
+    /// collide with a real deadline; chrono's range is an order of magnitude
+    /// short of `i64` milliseconds.
+    pub(crate) fn opens_at(self) -> i64 {
         match self {
-            ReadGate::No => true,
-            ReadGate::Yes => false,
-            ReadGate::Until(t) => chrono::Utc::now() >= *t,
+            ReadGate::No => i64::MIN,
+            ReadGate::Yes => i64::MAX,
+            ReadGate::Until(t) => t.timestamp_millis(),
         }
+    }
+
+    pub(crate) fn open_at(millis: i64) -> bool {
+        match millis {
+            i64::MIN => true,
+            i64::MAX => false,
+            t => chrono::Utc::now().timestamp_millis() >= t,
+        }
+    }
+
+    pub fn is_open(&self) -> bool {
+        ReadGate::open_at(self.opens_at())
     }
 
     /// The gate that refuses reads for longer. A host whose member blocks
