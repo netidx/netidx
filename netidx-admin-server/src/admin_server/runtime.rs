@@ -647,10 +647,10 @@ async fn serve_on(
             Err(e) => warn!("admin-server: listing pending id-map pushes: {e:#}"),
         }
     }
-    // If the CA role names an autorenew keytab, approve verified renewals
-    // in-process from here on (a no-op when it doesn't).
     spawn_facts_poll(&state).await;
     let conns = Arc::new(Semaphore::new(MAX_CONNECTIONS));
+    // If the CA role names an autorenew keytab, approve verified renewals
+    // in-process from here on (a no-op when it doesn't).
     spawn_autorenew(&state, signs.clone()).await;
     spawn_local_control(&state, signs.clone()).await;
     // After `spawn_local_control`, which binds admin.sock before returning:
