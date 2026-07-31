@@ -9,6 +9,7 @@ use std::{
     collections::HashMap,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
+use zeroize::Zeroizing;
 
 pub const DEFAULT_ABSOLUTE_LIFETIME: Duration = Duration::from_secs(8 * 60 * 60);
 pub const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(30 * 60);
@@ -62,9 +63,12 @@ impl SessionStore {
     }
 
     pub fn login_authenticated(&mut self, authenticated: Authenticated) -> LoginResponse {
-        let mut raw = [0u8; 32];
-        rand::rng().fill(&mut raw);
-        let token = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(raw);
+        // A slice, not `*raw`: the array is `Copy`, so passing it by value
+        // would leave a second unzeroized copy of the token in the callee.
+        let mut raw = Zeroizing::new([0u8; 32]);
+        rand::rng().fill(&mut *raw);
+        let token =
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(raw.as_slice());
         let hash = token_hash(&token);
         let issued = now();
         let settings = self.settings;
