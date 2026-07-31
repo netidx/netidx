@@ -1,20 +1,27 @@
-use anyhow::{Context, Result, anyhow, bail};
+#[cfg(unix)]
+use anyhow::anyhow;
+use anyhow::{Context, Result, bail};
 use clap::{Args, Subcommand};
 use netidx_admin::{
     answer::{Answerer, Field},
     atomic,
-    ca::{self, SanEntry, Subject},
-    ca_vault,
-    config_lock::ConfigDirLock,
-    local,
-    offline_ca::{default_csr_filename, parse_san_one, parse_sans},
+    csr::{self, Subject},
     ops::{
-        self, offline as offline_ops, queue as ca_ops, revoke as revoke_ops,
-        roster as roster_ops, servers as server_ops, slots as slots_ops,
+        self, queue as ca_ops, revoke as revoke_ops, roster as roster_ops,
+        servers as server_ops,
     },
     paths,
-    plan::{self, ca_setup},
+    plan::ca_setup,
     tls, transport,
+};
+#[cfg(unix)]
+use netidx_admin::{
+    ca, ca_vault,
+    config_lock::ConfigDirLock,
+    csr::SanEntry,
+    local,
+    ops::{offline as offline_ops, slots as slots_ops},
+    plan,
 };
 use netidx_admin_proto::{
     self as admin_proto, NodeKind,
@@ -28,22 +35,25 @@ use std::{
 };
 use zeroize::Zeroizing;
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 use netidx_admin::ca::{Ca, CaParams};
 
-use super::{
-    answer_cli::{RemoteAuthFlags, make_offline_answerer},
-    init, service,
-};
+#[cfg(unix)]
+use super::answer_cli::make_offline_answerer;
+#[cfg(unix)]
+use super::service;
+use super::{answer_cli::RemoteAuthFlags, init};
 
 fn runtime() -> Result<tokio::runtime::Runtime> {
     tokio::runtime::Runtime::new().context("starting tokio runtime")
 }
 
+#[cfg(unix)]
 pub(crate) async fn acquire_ca_lock(ca_dir: &Path) -> Result<ConfigDirLock> {
     ConfigDirLock::acquire_for_ca_dir(ca_dir).await
 }
 
+#[cfg(unix)]
 pub(crate) async fn ca_access(
     ca_dir: &Path,
     config: Option<PathBuf>,
@@ -79,6 +89,7 @@ pub(crate) async fn ca_access(
     Ok(slots_ops::CaAccess::Offline { config, lock, ca_alias_lock })
 }
 
+#[cfg(unix)]
 async fn matching_ca_config(ca_dir: &Path, supplied: Option<PathBuf>) -> Option<PathBuf> {
     if let Some(path) = supplied.as_ref()
         && config_owns_ca(path, ca_dir).await
@@ -98,6 +109,7 @@ async fn matching_ca_config(ca_dir: &Path, supplied: Option<PathBuf>) -> Option<
     None
 }
 
+#[cfg(unix)]
 async fn config_owns_ca(config: &Path, ca_dir: &Path) -> bool {
     let Ok(config) =
         netidx_admin::admin_server_config::load_for_recovery_async(config).await
@@ -126,14 +138,19 @@ fn parse_server_role(value: &str) -> std::result::Result<admin_proto::Role, Stri
 #[derive(Subcommand, Debug)]
 pub(crate) enum Cmd {
     /// install this machine as the admin domain's CA and certificate authority
+    #[cfg(unix)]
     Install(CaInstallArgs),
     /// create a new local CA (keyslot vault; can serve via `admin server`)
+    #[cfg(unix)]
     Init(InitParams),
     /// issue a leaf certificate from a CA
+    #[cfg(unix)]
     Issue(IssueArgs),
     /// sign an externally-supplied CSR file with a local CA
+    #[cfg(unix)]
     Sign(SignArgs),
     /// print a CSR's contents (CN, key bits, SAN) without signing it
+    #[cfg(unix)]
     InspectCsr(InspectCsrArgs),
     /// list the pending enrollment queue (each request keyed by its code)
     Queue(QueueArgs),
@@ -143,6 +160,7 @@ pub(crate) enum Cmd {
     /// deny one pending enrollment request by its code
     Deny(DenyArgs),
     /// list local CAs
+    #[cfg(unix)]
     List,
     /// manage CA admin keyslots (add / revoke / set-policy / list)
     Admin {
@@ -166,14 +184,17 @@ pub(crate) enum Cmd {
     ReconcileCa(ReconcileCaArgs),
     /// set up or rotate the auto-approve slot, so the running admin server
     /// approves verified renewals in-process (no human per renewal)
+    #[cfg(unix)]
     AutoApprove(AutoApproveArgs),
     /// manage the off-box recovery credential (rotate it on the CA box)
+    #[cfg(unix)]
     Recovery {
         #[command(subcommand)]
         cmd: RecoveryCmd,
     },
     /// manage an externally-signed (intermediate) CA: (re-)emit its CSR or
     /// install a signed certificate
+    #[cfg(unix)]
     External {
         #[command(subcommand)]
         cmd: ExternalCmd,
@@ -714,6 +735,7 @@ pub(crate) struct RecoveryAuth {
     pub recovery_password_stdin: bool,
 }
 
+#[cfg(unix)]
 impl RecoveryAuth {
     fn answerer(&self) -> Result<super::answer_cli::FlagAnswerer> {
         make_offline_answerer(
@@ -770,8 +792,6 @@ pub(crate) struct RequestArgs {
     /// single `dns:<cn>` if not given.
     #[arg(long, num_args = 1)]
     pub san: Vec<String>,
-    #[arg(long, default_value = "4096")]
-    pub key_bits: u32,
     /// Output path for the generated private key (mode 0600).
     /// Defaults to `./private.key`; the default path refuses to
     /// overwrite an existing file (an explicit `--out-key` does not).
@@ -833,14 +853,20 @@ pub(crate) struct SignArgs {
 
 pub(crate) fn run(cmd: Cmd) -> Result<()> {
     match cmd {
+        #[cfg(unix)]
         Cmd::Install(p) => install_ca(p),
+        #[cfg(unix)]
         Cmd::Init(p) => init(p),
+        #[cfg(unix)]
         Cmd::Issue(p) => issue(p),
+        #[cfg(unix)]
         Cmd::Sign(p) => sign(p),
+        #[cfg(unix)]
         Cmd::InspectCsr(p) => inspect_csr(p),
         Cmd::Queue(f) => queue(f),
         Cmd::Approve(p) => approve(p),
         Cmd::Deny(f) => deny(f),
+        #[cfg(unix)]
         Cmd::List => list(),
         Cmd::Admin { cmd } => admin(cmd),
         Cmd::Fingerprint(p) => fingerprint(p),
@@ -849,12 +875,16 @@ pub(crate) fn run(cmd: Cmd) -> Result<()> {
         Cmd::Servers(p) => servers(p),
         Cmd::RemoveServer(p) => remove_server(p),
         Cmd::ReconcileCa(p) => reconcile_ca(p),
+        #[cfg(unix)]
         Cmd::AutoApprove(p) => auto_approve(p),
+        #[cfg(unix)]
         Cmd::Recovery { cmd } => recovery(cmd),
+        #[cfg(unix)]
         Cmd::External { cmd } => external(cmd),
     }
 }
 
+#[cfg(unix)]
 fn install_ca(p: CaInstallArgs) -> Result<()> {
     let mut ans = super::answer_cli::FlagAnswerer::install(
         None,
@@ -904,8 +934,10 @@ fn install_ca(p: CaInstallArgs) -> Result<()> {
 /// blast radius of a leaked keytab; the keytab itself lives outside
 /// the CA dir so CA-dir backups stay harmless on their own, and
 /// `--rotate` is the one-command kill-and-replace.
+#[cfg(unix)]
 pub(super) const AUTORENEW_ADMIN: &str = netidx_admin::AUTORENEW_ADMIN;
 
+#[cfg(unix)]
 /// Set up (or rotate) the autorenew slot and point this host's
 /// admin-server config at its keytab. Approval itself is the running
 /// daemon's job now — it reads the keytab named here and approves
@@ -1269,6 +1301,7 @@ fn ca_dir_for(override_: Option<PathBuf>) -> Result<PathBuf> {
     }
 }
 
+#[cfg(unix)]
 /// `admin ca recovery {rotate,status}`: mint a fresh recovery password on the
 /// CA box (authorized by the box's own autorenew keytab, so a lost recovery
 /// password is recoverable while the machine lives), or report the recovery
@@ -1299,6 +1332,7 @@ fn recovery(cmd: RecoveryCmd) -> Result<()> {
     }
 }
 
+#[cfg(unix)]
 fn recovery_rotate(a: RecoveryRotateArgs) -> Result<()> {
     let dir = ca_dir_for(a.ca_dir)?;
     let cfg = paths::discover_admin_server_config().ok();
@@ -1324,6 +1358,7 @@ fn recovery_rotate(a: RecoveryRotateArgs) -> Result<()> {
 
 // -- CA external (intermediate CA signed by an external PKI) -----------------
 
+#[cfg(unix)]
 fn external(cmd: ExternalCmd) -> Result<()> {
     match cmd {
         ExternalCmd::EmitCsr(a) => external_emit_csr(a),
@@ -1333,6 +1368,7 @@ fn external(cmd: ExternalCmd) -> Result<()> {
     }
 }
 
+#[cfg(unix)]
 /// Refuse the `external` ops on a CA that isn't externally-signed, with the
 /// same clear pointer the overloaded `renew` gave.
 fn ensure_externally_signed(dir: &Path) -> Result<()> {
@@ -1346,6 +1382,7 @@ fn ensure_externally_signed(dir: &Path) -> Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
 fn external_emit_csr(a: ExternalDirArgs) -> Result<()> {
     let dir = ca_dir_for(a.ca_dir)?;
     ensure_externally_signed(&dir)?;
@@ -1353,7 +1390,7 @@ fn external_emit_csr(a: ExternalDirArgs) -> Result<()> {
     let csr_path = if marker.setup_server && dir.join("certificate.pem").is_file() {
         let cfg = external_ca_config(&dir)?;
         let (common_name, csr) = runtime()?.block_on(local::external_ca_csr(&cfg))?;
-        let path = default_csr_filename(&common_name);
+        let path = csr::default_csr_filename(&common_name);
         atomic::write_atomic(&path, csr.as_bytes(), 0o644)
             .with_context(|| format!("writing CSR to {}", path.display()))?;
         path
@@ -1369,6 +1406,7 @@ fn external_emit_csr(a: ExternalDirArgs) -> Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
 fn external_install(a: ExternalInstallArgs) -> Result<()> {
     let dir = ca_dir_for(a.ca_dir)?;
     ensure_externally_signed(&dir)?;
@@ -1417,6 +1455,7 @@ fn external_install(a: ExternalInstallArgs) -> Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
 fn external_ca_config(ca_dir: &Path) -> Result<PathBuf> {
     let cfg_path = paths::discover_admin_server_config().context(
         "this externally-signed CA is configured as a CA, but no local admin-server config was found",
@@ -1436,6 +1475,7 @@ fn external_ca_config(ca_dir: &Path) -> Result<PathBuf> {
     Ok(cfg_path)
 }
 
+#[cfg(unix)]
 async fn report_external_install(
     ans: &mut dyn Answerer,
     out: slots_ops::ExternalInstallOutcome,
@@ -1470,6 +1510,7 @@ async fn report_external_install(
     }
 }
 
+#[cfg(unix)]
 fn external_status(a: ExternalDirArgs) -> Result<()> {
     let dir = ca_dir_for(a.ca_dir)?;
     let cfg = paths::discover_admin_server_config().ok();
@@ -1494,6 +1535,7 @@ fn external_status(a: ExternalDirArgs) -> Result<()> {
 
 /// Compatibility shim for the old overloaded `ca external renew`: no argument
 /// (re-)emits a CSR; a signed certificate installs it.
+#[cfg(unix)]
 fn external_renew(a: ExternalRenewArgs) -> Result<()> {
     match a.signed_cert {
         None => {
@@ -1510,6 +1552,7 @@ fn external_renew(a: ExternalRenewArgs) -> Result<()> {
     }
 }
 
+#[cfg(unix)]
 /// Phase 1 of `ca init --external-sign`: generate the CA key + a CSR for its
 /// certificate, seal the vault (recovery slot always; for a served CA also
 /// the box autorenew slot and the superuser role slot), mark the CA
@@ -1525,6 +1568,7 @@ async fn external_bootstrap(
     Ok(service::ServiceNeed::NONE)
 }
 
+#[cfg(unix)]
 fn init(p: InitParams) -> Result<()> {
     let directory = ca_dir_for(p.dir)?;
     // `ca init` always wants the unit when a server is set up (it has no
@@ -1660,11 +1704,14 @@ fn policy_context(
     target: &ops::AdminTarget,
     ca_dir: Option<&Path>,
 ) -> (String, Option<String>) {
+    #[cfg(not(unix))]
+    let _ = ca_dir;
     match target {
         ops::AdminTarget::Remote { session } => {
             let domain = session.identity.domain.to_string();
             (ca_setup::default_ca_cn(&domain), Some(domain))
         }
+        #[cfg(unix)]
         ops::AdminTarget::Local { .. } => {
             let dir = ca_dir.map(Path::to_path_buf).or_else(|| paths::user_ca_dir().ok());
             let cn = dir.map(|d| existing_ca_cn(&d)).unwrap_or_default();
@@ -1790,6 +1837,7 @@ fn report_admin_target(what: &str, name: &str, target: &ops::AdminTarget) {
         ops::AdminTarget::Remote { session } => {
             println!("{what} {name:?} on the CA at {}", session.server)
         }
+        #[cfg(unix)]
         ops::AdminTarget::Local { .. } => {
             println!("{what} {name:?} (via the local admin server)")
         }
@@ -1915,11 +1963,13 @@ fn show_ca_identity(ca_dir: &std::path::Path) -> Result<()> {
 /// suggestion when scoping admins on an already-built CA (`admin add` /
 /// `admin set-policy`). Empty if it can't be read — the prompt then has
 /// no domain to suggest.
+#[cfg(unix)]
 fn existing_ca_cn(dir: &Path) -> String {
     netidx_admin::tls::extract_dns_san_from_pem(&dir.join("certificate.pem"))
         .unwrap_or_default()
 }
 
+#[cfg(unix)]
 fn issue(p: IssueArgs) -> Result<()> {
     let directory = ca_dir_for(p.ca_dir)?;
     let cn =
@@ -1927,7 +1977,7 @@ fn issue(p: IssueArgs) -> Result<()> {
     let out_dir = p
         .out_dir
         .ok_or_else(|| anyhow!("--out is required (the output dir for key + cert)"))?;
-    let san = parse_sans(&p.san, &cn)?;
+    let san = csr::parse_sans(&p.san, &cn)?;
     let subject = Subject {
         common_name: cn,
         country: p.country,
@@ -1979,9 +2029,12 @@ pub(crate) fn request(p: RequestArgs) -> Result<()> {
     };
     // The CSR and (later) the signed cert are cheap to regenerate, so
     // their CWD defaults overwrite freely.
-    let out_csr = p.out_csr.unwrap_or_else(|| default_csr_filename(&cn));
-    let san = parse_sans(&p.san, &cn)?;
-    let kr = ca::generate_csr(
+    let out_csr = p.out_csr.unwrap_or_else(|| csr::default_csr_filename(&cn));
+    let san = csr::parse_sans(&p.san, &cn)?;
+    // The key is written unencrypted — same rationale as the `ca issue` CLI:
+    // encrypted leaf keys are wired through `netidx admin init`, which knows
+    // how to set the matching `tls.askpass` in the emitted config.
+    let kr = csr::generate_key_and_csr(
         &Subject {
             common_name: cn.clone(),
             country: p.country,
@@ -1990,16 +2043,10 @@ pub(crate) fn request(p: RequestArgs) -> Result<()> {
             organization: p.organization,
         },
         &san,
-        p.key_bits,
-        // Bare `ca request` CLI doesn't encrypt the key — same
-        // rationale as the `ca issue` CLI: encrypted leaf keys are
-        // wired through `netidx admin init`, which knows how to set
-        // the matching `tls.askpass` in the emitted config.
-        None,
     )?;
-    atomic::write_atomic(&out_key, &kr.private_key_pem, 0o600)
+    atomic::write_atomic(&out_key, kr.private_key_pem.as_bytes(), 0o600)
         .with_context(|| format!("writing private key to {:?}", out_key))?;
-    atomic::write_atomic(&out_csr, &kr.csr_pem, 0o644)
+    atomic::write_atomic(&out_csr, kr.csr_pem.as_bytes(), 0o644)
         .with_context(|| format!("writing CSR to {:?}", out_csr))?;
     println!("wrote private key (0600): {}", out_key.display());
     println!("wrote CSR        (0644): {}", out_csr.display());
@@ -2009,6 +2056,7 @@ pub(crate) fn request(p: RequestArgs) -> Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
 fn sign(mut p: SignArgs) -> Result<()> {
     let csr_path = p
         .csr_path
@@ -2064,13 +2112,17 @@ fn sign(mut p: SignArgs) -> Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
 /// Build the SAN choice from `--san` / `--accept-csr-san`, preserving the
 /// mutually-exclusive decision table (the library resolves what `Ask` means).
 fn sign_san_choice(p: &SignArgs) -> Result<offline_ops::SignSan> {
     Ok(match (p.san.is_empty(), p.accept_csr_san) {
         (false, false) => {
-            let san =
-                p.san.iter().map(|s| parse_san_one(s)).collect::<Result<Vec<_>>>()?;
+            let san = p
+                .san
+                .iter()
+                .map(|s| csr::parse_san_one(s))
+                .collect::<Result<Vec<_>>>()?;
             offline_ops::SignSan::Explicit(san)
         }
         (false, true) => bail!(
@@ -2083,12 +2135,14 @@ fn sign_san_choice(p: &SignArgs) -> Result<offline_ops::SignSan> {
 
 /// Build the post-sign id-map action from `--no-id-map` / `--id-map-group` /
 /// `--uid` (`--uid` requires `--id-map-group`, enforced by clap).
+#[cfg(unix)]
 enum IdMapChoice {
     Skip,
     Register { groups: Vec<String>, uid: Option<u32> },
     Ask,
 }
 
+#[cfg(unix)]
 fn id_map_choice(p: &SignArgs) -> IdMapChoice {
     if p.no_id_map {
         IdMapChoice::Skip
@@ -2099,6 +2153,7 @@ fn id_map_choice(p: &SignArgs) -> IdMapChoice {
     }
 }
 
+#[cfg(unix)]
 fn print_sign_outcome(csr_path: &Path, out: &offline_ops::SignOutcome) {
     print_csr_summary(csr_path, &out.summary);
     println!("  signing SAN:");
@@ -2109,6 +2164,7 @@ fn print_sign_outcome(csr_path: &Path, out: &offline_ops::SignOutcome) {
     print_id_map_result(&out.id_map);
 }
 
+#[cfg(unix)]
 fn print_id_map_result(r: &offline_ops::IdMapResult) {
     use offline_ops::IdMapResult;
     match r {
@@ -2142,6 +2198,7 @@ pub(crate) struct InspectCsrArgs {
     pub csr_path: PathBuf,
 }
 
+#[cfg(unix)]
 fn inspect_csr(p: InspectCsrArgs) -> Result<()> {
     let csr_pem = std::fs::read(&p.csr_path)
         .with_context(|| format!("reading CSR {}", p.csr_path.display()))?;
@@ -2150,6 +2207,7 @@ fn inspect_csr(p: InspectCsrArgs) -> Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
 /// Print the standard CSR summary block (`path`, `cn`, `key bits`, `san`),
 /// shared by `sign` and `inspect-csr`.
 fn print_csr_summary(csr_path: &Path, summary: &ca::CsrSummary) {
@@ -2355,6 +2413,7 @@ pub(super) fn fmt_age(secs: u64) -> String {
     }
 }
 
+#[cfg(unix)]
 fn san_display(s: &SanEntry) -> String {
     match s {
         SanEntry::Dns(d) => format!("dns:{d}"),
@@ -2364,6 +2423,7 @@ fn san_display(s: &SanEntry) -> String {
     }
 }
 
+#[cfg(unix)]
 fn list() -> Result<()> {
     let dir = match paths::user_ca_dir() {
         Ok(p) => p,
@@ -2445,6 +2505,7 @@ fn list() -> Result<()> {
 mod tests {
     use super::*;
     use clap::Parser;
+    #[cfg(unix)]
     use netidx_admin_proto::policy::RECOVERY_ADMIN;
 
     #[derive(Debug, Parser)]
@@ -2502,6 +2563,7 @@ mod tests {
         assert!(TestCaCli::try_parse_from(["CA", "recover-ca"]).is_err());
     }
 
+    #[cfg(unix)]
     #[test]
     fn request_then_sign_round_trip() {
         // The full client/admin handoff: client generates key+CSR
@@ -2517,7 +2579,6 @@ mod tests {
             locality: None,
             organization: None,
             san: vec!["dns:client.example.com".into()],
-            key_bits: 2048,
             out_key: Some(key_path.clone()),
             out_csr: Some(csr_path.clone()),
         })
@@ -2574,6 +2635,7 @@ mod tests {
         assert!(bytes.starts_with(b"-----BEGIN CERTIFICATE-----"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn sign_without_san_flags_errors_in_strict_mode() {
         // With neither --san nor --accept-csr-san, the strict FlagAnswerer
@@ -2591,7 +2653,6 @@ mod tests {
             locality: None,
             organization: None,
             san: vec!["dns:x.example.com".into()],
-            key_bits: 2048,
             out_key: Some(key_path),
             out_csr: Some(csr_path.clone()),
         })
@@ -2631,6 +2692,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn sign_accept_csr_san_bails_when_csr_has_no_san() {
         // The "no SAN to inherit" branch: --accept-csr-san on a CSR that
@@ -2674,6 +2736,7 @@ mod tests {
         assert!(msg.contains("--san"), "error should mention --san: {msg}");
     }
 
+    #[cfg(unix)]
     #[test]
     fn sign_refuses_both_san_and_accept_flag() {
         let scratch = tempfile::tempdir().unwrap();
@@ -2686,7 +2749,6 @@ mod tests {
             locality: None,
             organization: None,
             san: vec!["dns:x.example.com".into()],
-            key_bits: 2048,
             out_key: Some(key_path),
             out_csr: Some(csr_path.clone()),
         })
@@ -2722,6 +2784,7 @@ mod tests {
         assert!(format!("{err:#}").contains("not both"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn issue_identity_into_round_trip() {
         // Stand up a tiny CA, issue an identity from it into a temp
@@ -2779,6 +2842,7 @@ mod tests {
     /// role admins (a role admin needs a daemon to authenticate to). The
     /// whole path runs with no prompts and no TTY. `--insecure-no-tpm`
     /// keeps it from refusing on a TPM-less CI host.
+    #[cfg(unix)]
     #[test]
     fn offline_ca_init_makes_exactly_the_recovery_slot() {
         let scratch = tempfile::tempdir().unwrap();

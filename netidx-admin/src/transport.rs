@@ -194,11 +194,7 @@ impl HasTlsClient for AuthenticatedPkiClient {
 }
 
 /// A freshly generated leaf identity awaiting signature.
-pub struct KeyAndCsr {
-    /// PKCS#8 PEM of the private key (ECDSA P-256). Zeroized on drop.
-    pub private_key_pem: Zeroizing<String>,
-    pub csr_pem: String,
-}
+pub use crate::csr::KeyAndCsr;
 
 /// The result of a successful join or enrollment: the signed leaf, the
 /// matching private key, and the full trusted-CA bundle to install.
@@ -212,21 +208,14 @@ pub struct Issued {
     pub warnings: Vec<String>,
 }
 
-/// Generate an ECDSA P-256 key and a CSR for `name` (a single DNS SAN
-/// equal to the CN). rcgen's only practical keygen is ECDSA; the CA
-/// accepts it (see `ca::check_pubkey_strength`) and netidx's TLS
-/// runtime is algorithm-agnostic.
+/// Generate a key and a CSR for `name` — a single DNS SAN equal to the CN,
+/// which is the shape every enrollment uses.
 pub fn generate_key_and_csr(name: &str) -> Result<KeyAndCsr> {
-    use rcgen::{CertificateParams, DnType, KeyPair};
-    let key_pair = KeyPair::generate().context("generating key pair")?;
-    let mut params =
-        CertificateParams::new(vec![name.to_string()]).context("building CSR params")?;
-    params.distinguished_name.push(DnType::CommonName, name);
-    let csr = params.serialize_request(&key_pair).context("serializing CSR")?;
-    Ok(KeyAndCsr {
-        private_key_pem: Zeroizing::new(key_pair.serialize_pem()),
-        csr_pem: csr.pem().context("encoding CSR PEM")?,
-    })
+    use crate::csr::{SanEntry, Subject};
+    crate::csr::generate_key_and_csr(
+        &Subject::cn(name),
+        &[SanEntry::Dns(name.to_string())],
+    )
 }
 
 /// An admin server's verified identity, captured by [`fetch_identity`]:

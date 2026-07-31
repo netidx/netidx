@@ -14,7 +14,8 @@ use std::{net::SocketAddr, str::FromStr};
 
 /// Building a new CA: the vault, the recovery credential, the founding
 /// superuser role admin, and the bootstrap certificates the daemon serves under.
-#[cfg(unix)]
+/// The vault half is `#[cfg(unix)]`; the naming, policy, and identity-display
+/// helpers around it are portable.
 pub mod ca_setup;
 /// The child half of resolver-hierarchy delegation (`delegate_under_parent`).
 pub mod delegation;

@@ -51,6 +51,10 @@ pub mod client;
 #[cfg(feature = "cloud-detect")]
 mod cloud;
 pub mod config_lock;
+/// Certificate signing requests: the subject/SAN types, the `<kind>:<value>`
+/// parser, and an rcgen key + CSR generator. Portable — only *signing* needs
+/// the vault.
+pub mod csr;
 /// Pending delegation requests from child resolver hierarchies.
 #[cfg(unix)]
 pub mod delegation_store;

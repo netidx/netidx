@@ -40,38 +40,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-/// A DistinguishedName-ish subject. CN is required; the rest are
-/// optional and only emitted if `Some`.
-#[derive(Debug, Clone)]
-pub struct Subject {
-    pub common_name: String,
-    pub country: Option<String>,
-    pub state: Option<String>,
-    pub locality: Option<String>,
-    pub organization: Option<String>,
-}
-
-impl Subject {
-    pub fn cn<S: Into<String>>(cn: S) -> Self {
-        Self {
-            common_name: cn.into(),
-            country: None,
-            state: None,
-            locality: None,
-            organization: None,
-        }
-    }
-}
-
-/// One SubjectAltName entry. CSR generation and cert signing both
-/// take a slice of these.
-#[derive(Debug, Clone)]
-pub enum SanEntry {
-    Dns(String),
-    Ip(IpAddr),
-    Uri(String),
-    Email(String),
-}
+pub use crate::csr::{SanEntry, Subject};
 
 /// Default key size — matches the shell scripts.
 pub const DEFAULT_KEY_BITS: u32 = 4096;

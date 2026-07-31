@@ -8,15 +8,13 @@ use netidx::resolver_server::config::ReadGate;
 // Qualified `admin_proto::` uses are all in the unix-only admin-server
 // enrollment path; the items below are cross-platform.
 use clap::Args;
-#[cfg(unix)]
-use netidx_admin::transport;
 use netidx_admin::{
     config_lock::ConfigDirLock,
     paths,
     plan::AuthKind,
     template::{ParentRef, ReferralAuth},
+    transport,
 };
-#[cfg(unix)]
 use netidx_admin_proto::{NodeKind, Role, fingerprint::ColorMode};
 // Re-exported so the sibling admin submodules keep calling
 // `init::resolve_admin_server_addr`; the impl now lives in the engine.
@@ -430,7 +428,6 @@ pub(crate) fn run_workstation_join(f: WorkstationJoinFlags) -> Result<()> {
 
 /// Print a confirmed-or-not admin domain identity: domain, claimed roles,
 /// fingerprint text + identicon.
-#[cfg(unix)]
 pub(super) fn show_admin_domain_identity(
     addr: SocketAddr,
     identity: &transport::CaIdentity,
@@ -445,7 +442,6 @@ pub(super) fn show_admin_domain_identity(
     println!("{}", identity.fingerprint.identicon(ColorMode::detect()));
 }
 
-#[cfg(unix)]
 fn describe_roles(roles: enumflags2::BitFlags<Role>) -> String {
     if roles.is_empty() {
         return "none".to_string();
@@ -464,7 +460,6 @@ fn describe_roles(roles: enumflags2::BitFlags<Role>) -> String {
 /// The id-map group default suggested at enrollment, by node kind:
 /// infrastructure identities (resolvers, admin servers) don't act as
 /// users, so they default to no registration.
-#[cfg(unix)]
 pub(super) fn default_id_map_groups(kind: NodeKind) -> &'static str {
     match kind {
         NodeKind::Resolver | NodeKind::AdminServer => "",
@@ -476,7 +471,6 @@ pub(super) fn default_id_map_groups(kind: NodeKind) -> &'static str {
 /// is the explicit "no groups" sentinel — blank input is taken by the
 /// prompt's default, so it can't double as "none"; otherwise the answer
 /// is the comma-separated list, trimmed of surrounding space and blanks.
-#[cfg(unix)]
 pub(super) fn parse_id_map_answer(answer: &str) -> Vec<String> {
     if answer.trim() == "-" {
         return Vec::new();

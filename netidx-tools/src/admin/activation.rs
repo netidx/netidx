@@ -19,7 +19,6 @@ use netidx_admin::{
 use netidx_admin_proto::AdminServerId;
 // Remote, admin-plane control is unix-only (it needs the CA/openssl modules);
 // the local control path below is cross-platform.
-#[cfg(unix)]
 use netidx_admin::ops;
 
 use super::answer_cli::RemoteAuthFlags;
@@ -207,10 +206,6 @@ pub(crate) fn run(cmd: Cmd) -> Result<()> {
 fn service_control(op: ControlOp, a: ServiceCtlArgs) -> Result<()> {
     let server = a.auth.server_addr()?;
     match server {
-        // Remote, admin-plane control is unix-only: the admin session needs the
-        // openssl-backed CA module. On Windows (workstation-only) the local
-        // control path below is the one that matters.
-        #[cfg(unix)]
         Some(server) => {
             let target = a.target.context(
                 "remote service control requires --target <SERVER-ID>; list immutable \
@@ -231,11 +226,6 @@ fn service_control(op: ControlOp, a: ServiceCtlArgs) -> Result<()> {
             print_service_units(&units);
             Ok(())
         }
-        #[cfg(not(unix))]
-        Some(_server) => bail!(
-            "remote activation control (--server) is unix-only; omit --server \
-             to control this host's local activation supervisor"
-        ),
         None => {
             // Local: talk straight to this host's activation control socket.
             let dir = a
@@ -274,7 +264,6 @@ fn print_unit_statuses(units: &[UnitStatus]) {
     }
 }
 
-#[cfg(unix)]
 fn print_service_units(units: &[netidx_admin_proto::ServiceUnit]) {
     if units.is_empty() {
         println!("  (no units)");
@@ -529,7 +518,6 @@ mod tests {
         ])
         .expect_err("a mutable address must not parse as a service target");
 
-        #[cfg(unix)]
         {
             let parsed = TestActivationCli::try_parse_from([
                 "activation",

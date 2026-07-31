@@ -15,24 +15,19 @@ use clap::Subcommand;
 
 // `ca::request`/`ca::join` (and their arg structs) live in the
 // unix-gated `ca` module.
-#[cfg(unix)]
 use super::ca;
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum Cmd {
     /// generate a private key + CSR locally, to be signed by a CA elsewhere
-    #[cfg(unix)]
     Request(ca::RequestArgs),
     /// request a certificate from an admin server's CA and install it
-    #[cfg(unix)]
     Join(ca::JoinArgs),
 }
 
 pub(crate) fn run(cmd: Cmd) -> Result<()> {
     match cmd {
-        #[cfg(unix)]
         Cmd::Request(p) => ca::request(p),
-        #[cfg(unix)]
         Cmd::Join(p) => ca::join(p),
     }
 }

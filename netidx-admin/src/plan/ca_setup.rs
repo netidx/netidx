@@ -10,19 +10,26 @@
 //! keytab) stay hard `bail!`s.
 
 use crate::{
-    admin_proto::{NodeKind, Role, Secret},
-    admin_server::AUTORENEW_ADMIN,
+    admin_proto::Role,
     answer::{Answerer, Field},
     atomic,
-    ca::{self, Ca, CaLifetimes, CaParams, IssueParams, IssuedFiles, SanEntry, Subject},
-    ca_store, ca_vault,
-    config_lock::ConfigDirLock,
     fingerprint::Fingerprint,
-    offline_ca,
-    ops::slots::ExternalPending,
-    paths,
-    plan::{enroll, server_setup, service::ServiceNeed},
+    plan::enroll,
     tls,
+};
+#[cfg(unix)]
+use crate::{
+    admin_proto::{NodeKind, Secret},
+    config_lock::ConfigDirLock,
+    paths,
+};
+#[cfg(unix)]
+use crate::{
+    admin_server::AUTORENEW_ADMIN,
+    ca::{self, Ca, CaLifetimes, CaParams, IssueParams, IssuedFiles, SanEntry, Subject},
+    ca_store, ca_vault, offline_ca,
+    ops::slots::ExternalPending,
+    plan::{server_setup, service::ServiceNeed},
 };
 use anyhow::{Context, Result, bail};
 use compact_str::format_compact;
@@ -32,6 +39,7 @@ use std::{
     path::{Path, PathBuf},
     time::Duration,
 };
+#[cfg(unix)]
 use zeroize::Zeroizing;
 
 /// A new CA directory that remains invisible at its configured path until
@@ -165,6 +173,7 @@ pub struct NewCaOpts {
 /// Sealed, the file is inert anywhere but this machine. A host with no
 /// TPM (or a flaky one — setup must not dead-end) falls back to the
 /// plaintext keytab with a note saying what that costs.
+#[cfg(unix)]
 pub async fn setup_autorenew_slot(
     ans: &mut dyn Answerer,
     cadir: &mut ca_store::CaDir,
@@ -243,6 +252,7 @@ pub async fn setup_autorenew_slot(
 /// Shared by the self-signed [`create_vaulted_ca`] and the external-sign
 /// bootstrap. On a mid-write failure, roll back whatever init committed so
 /// the dir isn't a keyless half-CA that blocks a clean retry.
+#[cfg(unix)]
 pub async fn seal_ca_recovery(
     config_lock: ConfigDirLock,
     dir: &Path,
@@ -274,6 +284,7 @@ pub async fn seal_ca_recovery(
     Ok((recovery_pw, cadir))
 }
 
+#[cfg(unix)]
 async fn staged_ca_lock(
     config_lock: &ConfigDirLock,
     stage_dir: &Path,
@@ -297,6 +308,7 @@ async fn staged_ca_lock(
 /// This function never offers the service itself; that's the caller's
 /// end-of-process step, so a resolver install can merge this need with
 /// its own and offer once.
+#[cfg(unix)]
 pub async fn create_vaulted_ca(
     ans: &mut dyn Answerer,
     config_lock: &ConfigDirLock,
@@ -468,6 +480,7 @@ pub async fn create_vaulted_ca(
 /// CSR is emitted, and the served-ca credentials are prepared, but no
 /// daemon is started until [`crate::ops::slots::external_install_cert`]
 /// installs the returned certificate.
+#[cfg(unix)]
 pub async fn create_vaulted_external_ca(
     ans: &mut dyn Answerer,
     config_lock: &ConfigDirLock,
@@ -574,6 +587,7 @@ pub async fn create_vaulted_external_ca(
 /// zero-prompt founding-admin policy: issue `*.<domain>`, place enrolled
 /// nodes in the `users` id-map group, and may enroll admin servers. Say
 /// what it is (and how to change it) with [`announce_founding_policy`].
+#[cfg(unix)]
 pub fn founding_ca_opts(
     dir: PathBuf,
     domain: String,
@@ -674,6 +688,7 @@ pub async fn tpm_gate(ans: &mut dyn Answerer, insecure_no_tpm: bool) -> Result<b
 /// [`Answerer::show_recovery_password`] seam (a CLI boxes it with a
 /// store-it-in-a-safe warning, a TUI forces acknowledgment). It is never
 /// persisted, so this is the only time it is shown.
+#[cfg(unix)]
 pub async fn show_recovery_password(ans: &mut dyn Answerer, pw: &str) -> Result<()> {
     let grouped = ca_vault::group_recovery_password(pw);
     ans.show_recovery_password(&grouped).await
@@ -693,6 +708,7 @@ pub async fn show_ca_identity(ans: &mut dyn Answerer, ca_dir: &Path) -> Result<(
 /// Prompt for a NEW admin password, then a confirmation, re-prompting until the
 /// two entries match. Interactive only — a non-interactive frontend supplies the
 /// value once (from `--password-file`), so it takes `field`'s value directly.
+#[cfg(unix)]
 async fn confirm_new_password(ans: &mut dyn Answerer, field: Field) -> Result<Secret> {
     if !ans.interactive() {
         return ans.secret(field, None).await;
@@ -716,6 +732,7 @@ async fn confirm_new_password(ans: &mut dyn Answerer, field: Field) -> Result<Se
 /// edits perms anywhere, and manages other admins — yet it wraps no master
 /// key, so its password can never unlock the CA. Only minted for a server
 /// CA (a role admin authenticates to the daemon).
+#[cfg(unix)]
 pub async fn setup_superuser(
     ans: &mut dyn Answerer,
     cadir: &mut ca_store::CaDir,
@@ -923,6 +940,7 @@ pub async fn gather_policy(
 /// True if the default CA location holds a usable CA — both the cert
 /// and the private key. (A cert with no key is a trust anchor we
 /// imported, not a CA we can sign with.)
+#[cfg(unix)]
 pub async fn default_ca_present() -> bool {
     match paths::user_ca_dir() {
         Ok(dir) => {
@@ -947,6 +965,7 @@ pub async fn default_ca_present() -> bool {
 ///
 /// `password = Some(p)` encrypts the on-disk private key with `p`
 /// (PKCS#8 + AES-256-CBC). `None` writes an unencrypted key.
+#[cfg(unix)]
 pub async fn issue_identity(
     config_lock: &ConfigDirLock,
     ca: &Ca,
@@ -970,6 +989,7 @@ pub async fn issue_identity(
 /// Inner form of [`issue_identity`] with the destination directory
 /// and key size as parameters — lets tests issue into a tempdir with
 /// a fast key.
+#[cfg(unix)]
 pub async fn issue_identity_into(
     config_lock: &ConfigDirLock,
     ca: &Ca,

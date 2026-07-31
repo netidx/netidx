@@ -22,9 +22,8 @@ use crate::{
     config_lock::ConfigDirLock,
     paths,
 };
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, bail};
 use std::{
-    net::IpAddr,
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -37,33 +36,7 @@ pub fn first_dns_san(san: &[SanEntry]) -> Option<String> {
     })
 }
 
-/// Parse `--san` strings (`<kind>:<value>`), defaulting to `dns:<fallback_cn>`
-/// when none are given.
-pub fn parse_sans(raw: &[String], fallback_cn: &str) -> Result<Vec<SanEntry>> {
-    if raw.is_empty() {
-        return Ok(vec![SanEntry::Dns(fallback_cn.to_string())]);
-    }
-    raw.iter().map(|s| parse_san_one(s)).collect()
-}
-
-/// Parse a single `<kind>:<value>` SAN string.
-pub fn parse_san_one(s: &str) -> Result<SanEntry> {
-    let (kind, val) = s
-        .split_once(':')
-        .ok_or_else(|| anyhow!("SAN must be in the form <kind>:<value>: {s:?}"))?;
-    if val.is_empty() {
-        bail!("SAN value must not be empty: {s:?}");
-    }
-    Ok(match kind {
-        "dns" => SanEntry::Dns(val.to_string()),
-        "ip" => SanEntry::Ip(
-            val.parse::<IpAddr>().map_err(|e| anyhow!("invalid SAN ip {val:?}: {e}"))?,
-        ),
-        "uri" => SanEntry::Uri(val.to_string()),
-        "email" => SanEntry::Email(val.to_string()),
-        other => bail!("unknown SAN kind {other:?}; expected dns / ip / uri / email"),
-    })
-}
+pub use crate::csr::{parse_san_one, parse_sans};
 
 /// Refuse to mint the admin server's reserved serving name from the local CLI,
 /// mirroring the admin domain sign path's refusal. The reserved name is the linchpin
@@ -83,39 +56,7 @@ pub fn ensure_san_not_reserved(san: &[SanEntry]) -> Result<()> {
     Ok(())
 }
 
-/// Make a CN safe to embed in a filename. CNs are usually hostnames (already
-/// safe), but the field is free-form text, so replace anything outside
-/// `[A-Za-z0-9._-]` with `_`. The result is always a single path component — no
-/// separators survive — so a defaulted output path can't traverse out of the
-/// cwd. Empty input collapses to `_` so we never produce a bare extension.
-pub fn sanitize_filename(s: &str) -> String {
-    let out: String = s
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_') {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect();
-    if out.is_empty() { "_".to_string() } else { out }
-}
-
-/// Default `request` CSR path: `./<cn>.csr`.
-pub fn default_csr_filename(cn: &str) -> PathBuf {
-    PathBuf::from(format!("{}.csr", sanitize_filename(cn)))
-}
-
-/// Default `sign` cert path: `./<csr-cn>.pem`, or `./certificate.pem` when the
-/// CSR carries no CN.
-pub fn default_cert_filename(csr_cn: Option<&str>) -> PathBuf {
-    let stem = match csr_cn {
-        Some(cn) => sanitize_filename(cn),
-        None => "certificate".to_string(),
-    };
-    PathBuf::from(format!("{stem}.pem"))
-}
+pub use crate::csr::{default_cert_filename, default_csr_filename, sanitize_filename};
 
 /// Record an offline (pre-daemon) issuance in the CA store, exactly as the
 /// daemon records its own — seeding the serial from, and committing back into,

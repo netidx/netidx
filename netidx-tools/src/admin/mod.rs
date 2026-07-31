@@ -9,48 +9,35 @@
 use anyhow::Result;
 use clap::Subcommand;
 
-// `activation` (edit + control the supervisor's units) drives the
-// activation supervisor and its local control transport, both available
-// on unix and Windows. The remote, admin-plane control path (`--server`)
-// is unix-only — it needs the openssl-backed CA admin auth — and is gated
-// inside `service_control`.
+// `activation` (edit + control the supervisor's units) drives the activation
+// supervisor: its local control socket on-box, or an admin server's over the
+// admin plane. Both are available on unix and Windows.
 #[cfg(any(unix, windows))]
 mod activation;
-// `ca` subcommand and its supporting CLI helpers depend on the
-// `netidx_admin::ca` engine module, which is unix-only (it pulls
-// openssl). On Windows the subcommand is simply not exposed.
 /// The strict-CLI `Answerer`: turns each subcommand into a non-interactive
 /// command that takes its values from flags or errors naming the flag.
 mod answer_cli;
 mod backup_restore;
-#[cfg(unix)]
 mod ca;
 mod client;
 mod component;
 // `discover` (browse mDNS for admin domains + print their glyphs) is a read-only
 // query over the cross-platform discovery + admin-client layers.
-mod discover;
-// `delegation` (resolver hierarchy add-parent / review-delegation) drives
-// the admin server's CA admin auth + the delegation queue, both unix-only.
 mod agent;
-#[cfg(unix)]
 mod delegation;
+mod discover;
 mod editor;
 mod id_map;
 mod init;
 mod lifecycle;
 mod perms;
 mod perms_admin;
-#[cfg(unix)]
 mod read_gate;
 mod resolver;
 mod roles;
-// `server` (the admin-server daemon CLI) depends on the
-// `netidx_admin` daemon implementation, which is unix-only (the
-// CA signer pulls openssl). On Windows, put a host on an admin domain by
-// installing a publisher client config (`netidx admin publisher
-// install`); the `workstation` role is unix-only too (Local auth +
-// activation supervisor) until full Windows support lands.
+// `server` runs the admin-server daemon, which holds the CA vault and the
+// local control socket. There is no daemon off unix; a Windows host joins an
+// admin domain as a client and administers a remote one over TLS.
 #[cfg(unix)]
 mod server;
 mod service;
@@ -88,7 +75,6 @@ pub(crate) enum Params {
     /// manage a local certificate authority
     // Unix-only — the engine module (`netidx_admin::ca`) needs
     // openssl, which we don't ship to Windows.
-    #[cfg(unix)]
     Ca {
         #[command(subcommand)]
         cmd: ca::Cmd,
@@ -126,7 +112,6 @@ pub(crate) fn run(p: Option<Params>) -> Result<()> {
         Params::Workstation { cmd } => roles::workstation::run(cmd),
         Params::Resolver { cmd } => roles::resolver::run(cmd),
         Params::Publisher { cmd } => roles::publisher::run(cmd),
-        #[cfg(unix)]
         Params::Ca { cmd } => ca::run(cmd),
         Params::Perms { cmd } => perms_admin::run(cmd),
         Params::Discover(a) => discover::run(a),
