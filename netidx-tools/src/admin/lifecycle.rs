@@ -1,7 +1,7 @@
 //! Lifecycle ops on an *already-installed* role: `status` (read-only) and
 //! `update`. Shared by the per-role command modules under [`super::roles`].
 //!
-//! Both are thin printers over [`netidx_admin_client::sync`], which is the
+//! Both are thin printers over [`netidx_admin::sync`], which is the
 //! one implementation — the same code the `admin-agent` runs on a timer.
 //! `update` is therefore not a maintenance chore but a way to force the
 //! refresh now; on a client the agent would get to it within the day.
@@ -14,7 +14,7 @@
 
 use anyhow::{Context, Result};
 use clap::Args;
-use netidx_admin_client::{
+use netidx_admin::{
     config_lock::ConfigDirLock,
     provenance::{InstallRecord, InstallRole},
     reconcile::EditPlan,
@@ -37,7 +37,7 @@ fn runtime() -> Result<tokio::runtime::Runtime> {
 /// Load this host's install record and the path it came from, or bail with
 /// a friendly message.
 fn require_record(want: InstallRole) -> Result<(InstallRecord, std::path::PathBuf)> {
-    let path = netidx_admin_client::paths::discover_install_record().ok();
+    let path = netidx_admin::paths::discover_install_record().ok();
     let rec = InstallRecord::load_default()?.context(
         "no install record (install.json) found — this host has no netidx \
          install managed by `netidx admin`, or the install predates the record",
@@ -81,7 +81,7 @@ fn print_local_config(role: InstallRole) -> Result<()> {
     if role == InstallRole::Publisher || role == InstallRole::Ca {
         return Ok(());
     }
-    let path = netidx_admin_client::paths::discover_resolver_config()
+    let path = netidx_admin::paths::discover_resolver_config()
         .context("no resolver config found at the standard locations")?;
     let cfg = ResolverConfig::load(&path)?;
     let file = cfg.as_file();

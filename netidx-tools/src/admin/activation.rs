@@ -4,7 +4,7 @@ use netidx::path::Path as NetidxPath;
 use netidx_activation::control::{
     ControlOp, ControlRequest, ControlResponse, UnitState, UnitStatus,
 };
-use netidx_admin_client::{
+use netidx_admin::{
     activation::{
         self, ActivationDir, Environment, ProcessCfgBuilder, Restart, Trigger,
         UnitBuilder,
@@ -20,7 +20,7 @@ use netidx_admin_proto::AdminServerId;
 // Remote, admin-plane control is unix-only (it needs the CA/openssl modules);
 // the local control path below is cross-platform.
 #[cfg(unix)]
-use netidx_admin_client::ops;
+use netidx_admin::ops;
 
 use super::answer_cli::RemoteAuthFlags;
 use clap::{Args, Subcommand};
@@ -452,7 +452,7 @@ fn add_id_map(a: IdMapAddArgs) -> Result<()> {
 fn install_unit(
     dir: Option<PathBuf>,
     name: &str,
-    unit: netidx_admin_client::activation::Unit,
+    unit: netidx_admin::activation::Unit,
 ) -> Result<()> {
     let ad = ActivationDir::open(dir.as_deref())?;
     let mut units = ad.list()?;
@@ -594,8 +594,7 @@ mod tests {
         let path = dir.path().join("id-map.unit");
         assert!(path.exists());
         let bytes = std::fs::read(&path).unwrap();
-        let u: netidx_admin_client::activation::Unit =
-            serde_json::from_slice(&bytes).unwrap();
+        let u: netidx_admin::activation::Unit = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(u.process.exe, "/usr/local/bin/netidx");
         // `-f` is mandatory under the activation supervisor; see the
         // regression note on `template::services::id_map::unit`.
@@ -635,8 +634,7 @@ mod tests {
         let path = dir.path().join("container.unit");
         assert!(path.exists());
         let bytes = std::fs::read(&path).unwrap();
-        let u: netidx_admin_client::activation::Unit =
-            serde_json::from_slice(&bytes).unwrap();
+        let u: netidx_admin::activation::Unit = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(u.process.exe, "/usr/local/bin/netidx");
         assert_eq!(
             u.process.args,

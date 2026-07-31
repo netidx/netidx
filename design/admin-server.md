@@ -9,17 +9,18 @@ the admin server rather than a separate daemon. The vault, signing
 engine, and join trust model from the CA-server design are unchanged
 and remain documented there.
 
-The implementation is split by where code runs:
+The implementation is split between the wire contract and the code that drives
+it:
 
 - `netidx-admin-proto` owns the wire types, framing, policies, identities,
   fingerprints, and the shared `admin-server.json` data model.
-- `netidx-admin-client` owns cross-platform transport, discovery, remote
-  operations, enrollment, configuration tooling, and service installation.
-- `netidx-admin-server` owns the Unix daemon, CA vault and stores, authority
-  operations, and CA/resolver authority provisioning.
+- `netidx-admin` owns everything that reads and writes them: cross-platform
+  transport, discovery, remote operations, enrollment, configuration tooling,
+  and service installation, plus — behind `#[cfg(unix)]` — the daemon, CA vault
+  and stores, authority operations, and CA/resolver authority provisioning.
 
-Dependencies point one way: protocol ← client ← server. `netidx-tools` is the
-composition root that selects client-only or Unix authority operations.
+Dependencies point one way: protocol ← admin. `netidx-tools` is the composition
+root that selects cross-platform or Unix authority operations.
 
 ## Why
 
@@ -443,7 +444,7 @@ machine credentials in plaintext.
   impersonate the admin domain), so it defaults on only for the founding
   admin and off for added admins.
 
-## Discovery (`netidx-admin-client/src/discovery.rs`)
+## Discovery (`netidx-admin/src/discovery.rs`)
 
 mDNS/DNS-SD via the pure-Rust `mdns-sd` crate (no avahi/Bonjour
 dependency; a Windows workstation browses with the same stack).

@@ -1,7 +1,7 @@
 use super::answer_cli::{FlagAnswerer, RemoteAuthFlags, parse_glyph};
 use anyhow::{Context, Result, bail};
 use clap::Args;
-use netidx_admin_client::{
+use netidx_admin::{
     answer::Answerer,
     paths,
     session_cache::{self, CachedSession},
@@ -15,7 +15,7 @@ fn local_admin_server() -> Option<SocketAddr> {
     #[cfg(unix)]
     {
         let path = paths::discover_admin_server_config().ok()?;
-        netidx_admin_client::admin_server_config::load(&path).ok().map(|cfg| cfg.listen)
+        netidx_admin::admin_server_config::load(&path).ok().map(|cfg| cfg.listen)
     }
     #[cfg(not(unix))]
     {

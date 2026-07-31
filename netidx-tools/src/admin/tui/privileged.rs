@@ -19,7 +19,7 @@ use crossterm::{
     },
 };
 use netidx_activation::runtime::default_units_dir;
-use netidx_admin_client::service::{self, ServiceParams, ServiceScope, ServiceStatus};
+use netidx_admin::service::{self, ServiceParams, ServiceScope, ServiceStatus};
 use std::{
     io::{Write, stdout},
     path::Path,
@@ -370,7 +370,7 @@ fn with_suspended<T>(
 mod tests {
     use super::{install_argv, sh_quote, system_install_outcome};
     use anyhow::anyhow;
-    use netidx_admin_client::service::ServiceStatus;
+    use netidx_admin::service::ServiceStatus;
     use std::path::Path;
 
     #[test]

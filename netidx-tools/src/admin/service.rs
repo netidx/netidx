@@ -1,5 +1,5 @@
 //! `netidx admin component service {install,uninstall,status}` — the CLI shell
-//! over `netidx_admin_client::service`. Handles sudo elevation for
+//! over `netidx_admin::service`. Handles sudo elevation for
 //! system-scope installs, and re-execs the same binary across the
 //! privilege boundary so the elevated child runs the binary the
 //! operator invoked.
@@ -10,7 +10,7 @@
 
 use anyhow::{Context, Result};
 use clap::{Args, Subcommand};
-use netidx_admin_client::service::{self, ServiceParams, ServiceScope, ServiceStatus};
+use netidx_admin::service::{self, ServiceParams, ServiceScope, ServiceStatus};
 use std::{io::IsTerminal, path::PathBuf};
 // `Command` only drives the unix sudo re-exec path.
 #[cfg(unix)]
@@ -19,9 +19,9 @@ use std::process::Command;
 /// The service-setup decision types live in the library so every frontend
 /// shares them; this module keeps the clap surface and the privileged doing
 /// ([`install_with_defaults`] + escalation). The offer *decision* is the
-/// library's async `netidx_admin_client::plan::service::offer`, driven through the
+/// library's async `netidx_admin::plan::service::offer`, driven through the
 /// `Answerer` seam by each flow (installs, `ca init`, `ca external install`).
-pub(crate) use netidx_admin_client::plan::service::ServiceNeed;
+pub(crate) use netidx_admin::plan::service::ServiceNeed;
 
 /// Env var that signals "I'm the elevated child" to skip
 /// post-install confirmations and just run the requested action.
@@ -248,14 +248,14 @@ pub(super) fn resolve_for_user(provided: Option<String>) -> Result<String> {
     {
         return Ok(s.to_string());
     }
-    Ok(netidx_admin_client::local_identity::current_user()?.to_string())
+    Ok(netidx_admin::local_identity::current_user()?.to_string())
 }
 
 #[cfg(windows)]
 pub(super) fn resolve_for_user(provided: Option<String>) -> Result<String> {
     match provided {
         Some(u) => Ok(u),
-        None => Ok(netidx_admin_client::local_identity::current_user()?.to_string()),
+        None => Ok(netidx_admin::local_identity::current_user()?.to_string()),
     }
 }
 
@@ -365,5 +365,5 @@ mod tests {
         assert_eq!(ScopeArg::from_str("System").unwrap(), ScopeArg::System);
         assert!(ScopeArg::from_str("admin").is_err());
     }
-    // `service_need_merge_ranks_*` moved to netidx_admin_client::plan::service tests.
+    // `service_need_merge_ranks_*` moved to netidx_admin::plan::service tests.
 }

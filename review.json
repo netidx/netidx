@@ -110,174 +110,6 @@
     "netidx-activation/src/shutdown.rs": {
       "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
     },
-    "netidx-admin-client/Cargo.toml": {
-      "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
-    },
-    "netidx-admin-client/src/activation.rs": {
-      "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
-    },
-    "netidx-admin-client/src/admin_server_config.rs": {
-      "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
-    },
-    "netidx-admin-client/src/agent.rs": {
-      "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
-    },
-    "netidx-admin-client/src/answer.rs": {
-      "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
-    },
-    "netidx-admin-client/src/atomic.rs": {
-      "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
-    },
-    "netidx-admin-client/src/client.rs": {
-      "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
-    },
-    "netidx-admin-client/src/cloud.rs": {
-      "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
-    },
-    "netidx-admin-client/src/config_lock.rs": {
-      "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
-    },
-    "netidx-admin-client/src/discovery.rs": {
-      "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
-    },
-    "netidx-admin-client/src/id_map.rs": {
-      "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
-    },
-    "netidx-admin-client/src/lib.rs": {
-      "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
-    },
-    "netidx-admin-client/src/local.rs": {
-      "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
-    },
-    "netidx-admin-client/src/local_identity.rs": {
-      "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
-    },
-    "netidx-admin-client/src/netshape.rs": {
-      "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
-    },
-    "netidx-admin-client/src/ops/delegation.rs": {
-      "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
-    },
-    "netidx-admin-client/src/ops/mod.rs": {
-      "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
-    },
-    "netidx-admin-client/src/ops/perms.rs": {
-      "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
-    },
-    "netidx-admin-client/src/ops/queue.rs": {
-      "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
-    },
-    "netidx-admin-client/src/ops/revoke.rs": {
-      "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
-    },
-    "netidx-admin-client/src/ops/roster.rs": {
-      "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
-    },
-    "netidx-admin-client/src/ops/servers.rs": {
-      "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
-    },
-    "netidx-admin-client/src/ops/service.rs": {
-      "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
-    },
-    "netidx-admin-client/src/paths.rs": {
-      "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
-    },
-    "netidx-admin-client/src/perms.rs": {
-      "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
-    },
-    "netidx-admin-client/src/plan/delegation.rs": {
-      "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
-    },
-    "netidx-admin-client/src/plan/enroll.rs": {
-      "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
-    },
-    "netidx-admin-client/src/plan/install/mod.rs": {
-      "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
-    },
-    "netidx-admin-client/src/plan/install/publisher.rs": {
-      "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
-    },
-    "netidx-admin-client/src/plan/install/workstation.rs": {
-      "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
-    },
-    "netidx-admin-client/src/plan/mod.rs": {
-      "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
-    },
-    "netidx-admin-client/src/plan/service.rs": {
-      "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
-    },
-    "netidx-admin-client/src/provenance.rs": {
-      "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
-    },
-    "netidx-admin-client/src/reconcile.rs": {
-      "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
-    },
-    "netidx-admin-client/src/renewd.rs": {
-      "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
-    },
-    "netidx-admin-client/src/resolver.rs": {
-      "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
-    },
-    "netidx-admin-client/src/resolver_probe.rs": {
-      "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
-    },
-    "netidx-admin-client/src/service/launchd.rs": {
-      "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
-    },
-    "netidx-admin-client/src/service/mod.rs": {
-      "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
-    },
-    "netidx-admin-client/src/service/schtask.rs": {
-      "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
-    },
-    "netidx-admin-client/src/service/systemd.rs": {
-      "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
-    },
-    "netidx-admin-client/src/session_cache.rs": {
-      "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
-    },
-    "netidx-admin-client/src/sync.rs": {
-      "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
-    },
-    "netidx-admin-client/src/template/mod.rs": {
-      "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
-    },
-    "netidx-admin-client/src/template/publisher.rs": {
-      "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
-    },
-    "netidx-admin-client/src/template/resolver.rs": {
-      "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
-    },
-    "netidx-admin-client/src/template/services/admin_agent.rs": {
-      "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
-    },
-    "netidx-admin-client/src/template/services/admin_server.rs": {
-      "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
-    },
-    "netidx-admin-client/src/template/services/container.rs": {
-      "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
-    },
-    "netidx-admin-client/src/template/services/id_map.rs": {
-      "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
-    },
-    "netidx-admin-client/src/template/services/mod.rs": {
-      "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
-    },
-    "netidx-admin-client/src/template/workstation.rs": {
-      "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
-    },
-    "netidx-admin-client/src/tls.rs": {
-      "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
-    },
-    "netidx-admin-client/src/tls_tofu.rs": {
-      "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
-    },
-    "netidx-admin-client/src/transport.rs": {
-      "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
-    },
-    "netidx-admin-client/src/uninstall.rs": {
-      "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
-    },
     "netidx-admin-proto/Cargo.toml": {
       "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
     },
@@ -296,122 +128,263 @@
     "netidx-admin-proto/src/server_config.rs": {
       "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
     },
-    "netidx-admin-server/Cargo.toml": {
+    "netidx-admin/src/activation.rs": {
       "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
     },
-    "netidx-admin-server/src/admin_domain.rs": {
+    "netidx-admin/src/admin_domain.rs": {
       "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
     },
-    "netidx-admin-server/src/admin_server/admins.rs": {
+    "netidx-admin/src/admin_server/admins.rs": {
       "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
     },
-    "netidx-admin-server/src/admin_server/auth.rs": {
+    "netidx-admin/src/admin_server/auth.rs": {
       "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
     },
-    "netidx-admin-server/src/admin_server/ca_ops.rs": {
+    "netidx-admin/src/admin_server/ca_ops.rs": {
       "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
     },
-    "netidx-admin-server/src/admin_server/enrollment.rs": {
+    "netidx-admin/src/admin_server/enrollment.rs": {
       "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
     },
-    "netidx-admin-server/src/admin_server/enrollment_tests.rs": {
+    "netidx-admin/src/admin_server/enrollment_tests.rs": {
       "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
     },
-    "netidx-admin-server/src/admin_server/issuance.rs": {
+    "netidx-admin/src/admin_server/issuance.rs": {
       "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
     },
-    "netidx-admin-server/src/admin_server/issuance_tests.rs": {
+    "netidx-admin/src/admin_server/issuance_tests.rs": {
       "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
     },
-    "netidx-admin-server/src/admin_server/mod.rs": {
+    "netidx-admin/src/admin_server/mod.rs": {
       "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
     },
-    "netidx-admin-server/src/admin_server/password_limiter.rs": {
+    "netidx-admin/src/admin_server/password_limiter.rs": {
       "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
     },
-    "netidx-admin-server/src/admin_server/permissions.rs": {
+    "netidx-admin/src/admin_server/permissions.rs": {
       "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
     },
-    "netidx-admin-server/src/admin_server/permissions_tests.rs": {
+    "netidx-admin/src/admin_server/permissions_tests.rs": {
       "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
     },
-    "netidx-admin-server/src/admin_server/queue.rs": {
+    "netidx-admin/src/admin_server/queue.rs": {
       "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
     },
-    "netidx-admin-server/src/admin_server/queue_tests.rs": {
+    "netidx-admin/src/admin_server/queue_tests.rs": {
       "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
     },
-    "netidx-admin-server/src/admin_server/read_gate.rs": {
+    "netidx-admin/src/admin_server/read_gate.rs": {
       "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
     },
-    "netidx-admin-server/src/admin_server/request.rs": {
+    "netidx-admin/src/admin_server/request.rs": {
       "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
     },
-    "netidx-admin-server/src/admin_server/request_tests.rs": {
+    "netidx-admin/src/admin_server/request_tests.rs": {
       "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
     },
-    "netidx-admin-server/src/admin_server/revocation.rs": {
-      "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
-    },
-    "netidx-admin-server/src/admin_server/revocation_tests.rs": {
-      "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
-    },
-    "netidx-admin-server/src/admin_server/runtime.rs": {
-      "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
-    },
-    "netidx-admin-server/src/admin_server/service_control.rs": {
-      "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
-    },
-    "netidx-admin-server/src/admin_server/service_control_tests.rs": {
-      "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
-    },
-    "netidx-admin-server/src/admin_server/test_support.rs": {
-      "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
-    },
-    "netidx-admin-server/src/admin_server/topology.rs": {
-      "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
-    },
-    "netidx-admin-server/src/admin_server/topology_tests.rs": {
-      "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
-    },
-    "netidx-admin-server/src/backup.rs": {
-      "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
-    },
-    "netidx-admin-server/src/ca.rs": {
-      "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
-    },
-    "netidx-admin-server/src/ca_store.rs": {
-      "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
-    },
-    "netidx-admin-server/src/ca_vault.rs": {
-      "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
-    },
-    "netidx-admin-server/src/delegation_store.rs": {
-      "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
-    },
-    "netidx-admin-server/src/install_bundle.rs": {
-      "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
-    },
-    "netidx-admin-server/src/offline_ca.rs": {
-      "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
-    },
-    "netidx-admin-server/src/ops/mod.rs": {
-      "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
-    },
-    "netidx-admin-server/src/ops/offline.rs": {
-      "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
-    },
-    "netidx-admin-server/src/ops/slots.rs": {
-      "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
-    },
-    "netidx-admin-server/src/plan/ca_setup.rs": {
+    "netidx-admin/src/admin_server/revocation.rs": {
       "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
     },
     "netidx-admin/src/admin_server/revocation_tests.rs": {
-      "reviewed_at": "6ef18bb3934db9b2168a0e8dbce045d6c434a198"
+      "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
+    },
+    "netidx-admin/src/admin_server/runtime.rs": {
+      "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
+    },
+    "netidx-admin/src/admin_server/service_control.rs": {
+      "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
+    },
+    "netidx-admin/src/admin_server/service_control_tests.rs": {
+      "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
+    },
+    "netidx-admin/src/admin_server/test_support.rs": {
+      "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
+    },
+    "netidx-admin/src/admin_server/topology.rs": {
+      "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
+    },
+    "netidx-admin/src/admin_server/topology_tests.rs": {
+      "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
     },
     "netidx-admin/src/admin_server_config.rs": {
-      "reviewed_at": "6ef18bb3934db9b2168a0e8dbce045d6c434a198"
+      "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
+    },
+    "netidx-admin/src/agent.rs": {
+      "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
+    },
+    "netidx-admin/src/answer.rs": {
+      "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
+    },
+    "netidx-admin/src/atomic.rs": {
+      "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
+    },
+    "netidx-admin/src/backup.rs": {
+      "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
+    },
+    "netidx-admin/src/ca.rs": {
+      "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
+    },
+    "netidx-admin/src/ca_store.rs": {
+      "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
+    },
+    "netidx-admin/src/ca_vault.rs": {
+      "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
+    },
+    "netidx-admin/src/client.rs": {
+      "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
+    },
+    "netidx-admin/src/cloud.rs": {
+      "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
+    },
+    "netidx-admin/src/config_lock.rs": {
+      "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
+    },
+    "netidx-admin/src/delegation_store.rs": {
+      "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
+    },
+    "netidx-admin/src/discovery.rs": {
+      "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
+    },
+    "netidx-admin/src/id_map.rs": {
+      "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
+    },
+    "netidx-admin/src/install_bundle.rs": {
+      "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
+    },
+    "netidx-admin/src/local.rs": {
+      "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
+    },
+    "netidx-admin/src/local_identity.rs": {
+      "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
+    },
+    "netidx-admin/src/netshape.rs": {
+      "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
+    },
+    "netidx-admin/src/offline_ca.rs": {
+      "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
+    },
+    "netidx-admin/src/ops/delegation.rs": {
+      "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
+    },
+    "netidx-admin/src/ops/offline.rs": {
+      "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
+    },
+    "netidx-admin/src/ops/perms.rs": {
+      "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
+    },
+    "netidx-admin/src/ops/queue.rs": {
+      "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
+    },
+    "netidx-admin/src/ops/revoke.rs": {
+      "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
+    },
+    "netidx-admin/src/ops/roster.rs": {
+      "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
+    },
+    "netidx-admin/src/ops/servers.rs": {
+      "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
+    },
+    "netidx-admin/src/ops/service.rs": {
+      "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
+    },
+    "netidx-admin/src/ops/slots.rs": {
+      "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
+    },
+    "netidx-admin/src/paths.rs": {
+      "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
+    },
+    "netidx-admin/src/perms.rs": {
+      "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
+    },
+    "netidx-admin/src/plan/ca_setup.rs": {
+      "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
+    },
+    "netidx-admin/src/plan/delegation.rs": {
+      "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
+    },
+    "netidx-admin/src/plan/enroll.rs": {
+      "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
+    },
+    "netidx-admin/src/plan/install/publisher.rs": {
+      "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
+    },
+    "netidx-admin/src/plan/install/workstation.rs": {
+      "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
+    },
+    "netidx-admin/src/plan/service.rs": {
+      "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
+    },
+    "netidx-admin/src/provenance.rs": {
+      "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
+    },
+    "netidx-admin/src/reconcile.rs": {
+      "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
+    },
+    "netidx-admin/src/renewd.rs": {
+      "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
+    },
+    "netidx-admin/src/resolver.rs": {
+      "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
+    },
+    "netidx-admin/src/resolver_probe.rs": {
+      "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
+    },
+    "netidx-admin/src/service/launchd.rs": {
+      "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
+    },
+    "netidx-admin/src/service/mod.rs": {
+      "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
+    },
+    "netidx-admin/src/service/schtask.rs": {
+      "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
+    },
+    "netidx-admin/src/service/systemd.rs": {
+      "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
+    },
+    "netidx-admin/src/session_cache.rs": {
+      "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
+    },
+    "netidx-admin/src/sync.rs": {
+      "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
+    },
+    "netidx-admin/src/template/mod.rs": {
+      "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
+    },
+    "netidx-admin/src/template/publisher.rs": {
+      "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
+    },
+    "netidx-admin/src/template/resolver.rs": {
+      "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
+    },
+    "netidx-admin/src/template/services/admin_agent.rs": {
+      "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
+    },
+    "netidx-admin/src/template/services/admin_server.rs": {
+      "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
+    },
+    "netidx-admin/src/template/services/container.rs": {
+      "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
+    },
+    "netidx-admin/src/template/services/id_map.rs": {
+      "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
+    },
+    "netidx-admin/src/template/services/mod.rs": {
+      "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
+    },
+    "netidx-admin/src/template/workstation.rs": {
+      "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
+    },
+    "netidx-admin/src/tls.rs": {
+      "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
+    },
+    "netidx-admin/src/tls_tofu.rs": {
+      "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
+    },
+    "netidx-admin/src/transport.rs": {
+      "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
+    },
+    "netidx-admin/src/uninstall.rs": {
+      "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
     },
     "netidx-archive/.gitignore": {
       "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"

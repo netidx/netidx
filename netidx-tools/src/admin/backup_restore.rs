@@ -10,7 +10,7 @@ use super::{
 };
 use anyhow::{Context, Result, bail};
 use clap::Args;
-use netidx_admin_client::{
+use netidx_admin::{
     config_lock::ConfigDirLock,
     paths,
     plan::AuthKind,
@@ -19,12 +19,12 @@ use netidx_admin_client::{
     service::{ServiceParams, ServiceScope, ServiceStatus},
     tls, transport,
 };
-use netidx_admin_proto::NodeKind;
 #[cfg(unix)]
-use netidx_admin_server::{
+use netidx_admin::{
     install_bundle::{self, BundleScope, Component, IdentityKind, ServiceIntent},
     plan::install::resolver::enroll_admin_server,
 };
+use netidx_admin_proto::NodeKind;
 #[cfg(unix)]
 use std::str::FromStr;
 use std::{
@@ -190,7 +190,7 @@ fn service_intent(a: &BackupArgs, record: &InstallRecord) -> Result<ServiceInten
         ServiceScope::User => None,
         ServiceScope::System => Some(service_cli::resolve_for_user(a.for_user.clone())?),
     };
-    let status = netidx_admin_client::service::status(&ServiceParams {
+    let status = netidx_admin::service::status(&ServiceParams {
         scope,
         for_user: for_user.clone(),
         binary: PathBuf::new(),
@@ -225,7 +225,7 @@ pub(crate) fn backup(a: BackupArgs) -> Result<()> {
             let cfg = root.join("admin-server.json");
             let inner = ca_tmp.path().join("ca");
             tokio::runtime::Runtime::new()?
-                .block_on(netidx_admin_client::local::backup(&cfg, &inner))?;
+                .block_on(netidx_admin::local::backup(&cfg, &inner))?;
             Some(inner)
         }
         #[cfg(not(unix))]
@@ -364,7 +364,7 @@ pub(super) fn identities_complete(
     manifest.identities.iter().all(|recipe| {
         if recipe.kind == IdentityKind::AdminServer {
             #[cfg(unix)]
-            return netidx_admin_client::admin_server_config::load(
+            return netidx_admin::admin_server_config::load(
                 &root.join("admin-server.json"),
             )
             .is_ok_and(|cfg| {
@@ -387,12 +387,12 @@ pub(super) fn identities_complete(
 }
 
 pub(super) async fn reenroll_data_identities(
-    ans: &mut dyn netidx_admin_client::answer::Answerer,
+    ans: &mut dyn netidx_admin::answer::Answerer,
     root: &Path,
     manifest: &install_bundle::Manifest,
     ca: SocketAddr,
     net: &DiscoveredAdminDomain,
-    key_protection: Option<netidx_admin_client::plan::enroll::KeyProtArg>,
+    key_protection: Option<netidx_admin::plan::enroll::KeyProtArg>,
 ) -> Result<()> {
     for recipe in
         manifest.identities.iter().filter(|i| i.kind != IdentityKind::AdminServer)
@@ -450,7 +450,7 @@ pub(super) async fn reenroll_data_identities(
 
 #[cfg(unix)]
 pub(super) async fn reenroll_satellite_admin(
-    ans: &mut dyn netidx_admin_client::answer::Answerer,
+    ans: &mut dyn netidx_admin::answer::Answerer,
     config_lock: &ConfigDirLock,
     root: &Path,
     manifest: &install_bundle::Manifest,
@@ -463,7 +463,7 @@ pub(super) async fn reenroll_satellite_admin(
         return Ok(());
     }
     let config_path = root.join("admin-server.json");
-    if let Ok(cfg) = netidx_admin_client::admin_server_config::load(&config_path)
+    if let Ok(cfg) = netidx_admin::admin_server_config::load(&config_path)
         && Some(cfg.server_id) != manifest.previous_admin_server
         && install_bundle::identity_files_usable(
             &cfg.serving_cert,
@@ -475,7 +475,7 @@ pub(super) async fn reenroll_satellite_admin(
         return Ok(());
     }
     let resolver_path = root.join("resolver.json");
-    let resolver = netidx_admin_client::resolver::ResolverConfig::load(&resolver_path)?;
+    let resolver = netidx_admin::resolver::ResolverConfig::load(&resolver_path)?;
     let resolver_listen = match (manifest.previous_admin_server, net.info.ca_addr) {
         (Some(old), Some(ca)) => {
             let map = transport::get_map_pinned(ca, NodeKind::AdminServer, &net.identity)
@@ -568,7 +568,7 @@ pub(super) async fn reconcile_restored_ca(
     use std::fmt::Write as _;
 
     let (operation_id, peers) =
-        netidx_admin_client::local::reconcile_ca(&root.join("admin-server.json")).await?;
+        netidx_admin::local::reconcile_ca(&root.join("admin-server.json")).await?;
     let mut failures: LPooled<String> = LPooled::take();
     for peer in peers {
         if let Some(error) = peer.error {
@@ -627,7 +627,7 @@ pub(crate) fn restore(a: RestoreArgs) -> Result<()> {
         let cfg = root.join("admin-server.json");
         if !install_bundle::ca_recovered(&bundle, &cfg)? {
             if !install_bundle::ca_snapshot_prepared(&bundle, &ca_dir, &cfg)? {
-                netidx_admin_server::backup::restore(
+                netidx_admin::backup::restore(
                     config_lock.as_ref().expect("restore lock held"),
                     &bundle.join(install_bundle::CA_DIR),
                     &ca_dir,
@@ -645,8 +645,8 @@ pub(crate) fn restore(a: RestoreArgs) -> Result<()> {
                 None,
             )?;
             let runtime = tokio::runtime::Runtime::new()?;
-            let lifetimes = netidx_admin_server::ca::CaLifetimes::load(&ca_dir)?;
-            let expired = netidx_admin_server::ca::ca_cert_needs_renewal(
+            let lifetimes = netidx_admin::ca::CaLifetimes::load(&ca_dir)?;
+            let expired = netidx_admin::ca::ca_cert_needs_renewal(
                 &ca_dir,
                 std::time::Duration::ZERO,
             );
@@ -661,17 +661,15 @@ pub(crate) fn restore(a: RestoreArgs) -> Result<()> {
                 if !lifetimes.externally_signed {
                     bail!("--external-cert was supplied for a self-signed netidx CA");
                 }
-                runtime.block_on(
-                    netidx_admin_server::ops::slots::external_install_cert(
-                        &mut recovery,
-                        config_lock.as_ref().expect("restore lock held"),
-                        ca_dir.clone(),
-                        signed,
-                        a.external_root.as_deref(),
-                    ),
-                )?;
+                runtime.block_on(netidx_admin::ops::slots::external_install_cert(
+                    &mut recovery,
+                    config_lock.as_ref().expect("restore lock held"),
+                    ca_dir.clone(),
+                    signed,
+                    a.external_root.as_deref(),
+                ))?;
             }
-            runtime.block_on(netidx_admin_server::ops::slots::recover_ca(
+            runtime.block_on(netidx_admin::ops::slots::recover_ca(
                 &mut recovery,
                 config_lock.as_ref().expect("restore lock held"),
                 ca_dir,
@@ -683,14 +681,14 @@ pub(crate) fn restore(a: RestoreArgs) -> Result<()> {
         }
         // The inner CA snapshot uses portable recovered-* role paths;
         // reconnect it to the complete role configs restored by the outer bundle.
-        let mut cfgv = netidx_admin_client::admin_server_config::load_for_recovery(&cfg)?;
+        let mut cfgv = netidx_admin::admin_server_config::load_for_recovery(&cfg)?;
         if let Some(role) = cfgv.roles.resolver.as_mut() {
             role.config = root.join("resolver.json");
         }
         if let Some(role) = cfgv.roles.id_map.as_mut() {
             role.map = root.join("id-map.json");
         }
-        netidx_admin_client::admin_server_config::save(
+        netidx_admin::admin_server_config::save(
             config_lock.as_ref().expect("restore lock held"),
             &cfg,
             &cfgv,

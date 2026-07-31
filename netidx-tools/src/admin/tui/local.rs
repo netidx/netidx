@@ -6,7 +6,7 @@
 
 use super::{action::Action, theme, widgets};
 use netidx_activation::runtime::default_units_dir;
-use netidx_admin_client::{
+use netidx_admin::{
     paths,
     provenance::{InstallRecord, InstallRole},
     reconcile::Change,
@@ -221,7 +221,7 @@ fn local_ca_paths(_config_dir: &Path) -> Option<LocalCa> {
 pub(super) async fn probe_local_cas(
     targets: Vec<(usize, PathBuf, Option<PathBuf>)>,
 ) -> Vec<(usize, CaProbe)> {
-    use netidx_admin_server::ops::slots;
+    use netidx_admin::ops::slots;
     let mut out = Vec::with_capacity(targets.len());
     for (index, ca_dir, cfg) in targets {
         let probed = async {
@@ -1241,7 +1241,7 @@ fn fmt_unix(secs: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use netidx_admin_client::provenance::AdminDomainIdentity;
+    use netidx_admin::provenance::AdminDomainIdentity;
     use ratatui::{Terminal, backend::TestBackend};
 
     // The Local tab renders the same plan the CLI previews, so it owes the

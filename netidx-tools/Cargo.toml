@@ -35,7 +35,6 @@ path = "src/bin/netidx-activation.rs"
 
 [target.'cfg(unix)'.dependencies]
 daemonize = { workspace = true }
-netidx-admin-server = { path = "../netidx-admin-server", version = "0.32.0" }
 nix = { workspace = true, features = ["term"] }
 
 [target.'cfg(windows)'.dependencies]
@@ -69,7 +68,7 @@ graphix-package-core = { workspace = true }
 hdrhistogram = { workspace = true }
 log = { workspace = true }
 netidx-activation = { path = "../netidx-activation", version = "0.32.0" }
-netidx-admin-client = { path = "../netidx-admin-client", version = "0.32.0", features = ["cloud-detect"] }
+netidx-admin = { path = "../netidx-admin", version = "0.32.0", features = ["cloud-detect"] }
 netidx-admin-proto = { path = "../netidx-admin-proto", version = "0.32.0" }
 netidx-id-map = { path = "../netidx-id-map", version = "0.32.0" }
 netidx-tpm = { path = "../netidx-tpm", version = "0.32.0" }

@@ -10,7 +10,7 @@
 //! every LAN) can never masquerade as a domain you trusted elsewhere.
 
 use futures::future::join_all;
-use netidx_admin_client::{paths, transport::fetch_identity};
+use netidx_admin::{paths, transport::fetch_identity};
 use netidx_admin_proto::{NodeKind, fingerprint::Fingerprint};
 use serde_derive::{Deserialize, Serialize};
 use std::{net::SocketAddr, path::PathBuf, time::Duration};
@@ -131,8 +131,7 @@ pub(super) fn seed_local_admin_domain(domains: &mut KnownAdminDomains) -> bool {
     // host enrolled against, recorded at join (a workstation / publisher runs no
     // admin server of its own). Either reaches the same CA; the on-entry poll
     // verifies the fingerprint live.
-    let Some(addr) = netidx_admin_client::ops::local_admin_server_listen().or(recorded)
-    else {
+    let Some(addr) = netidx_admin::ops::local_admin_server_listen().or(recorded) else {
         return false;
     };
     domains.upsert(&domain, addr, fp)
@@ -143,7 +142,7 @@ pub(super) fn seed_local_admin_domain(domains: &mut KnownAdminDomains) -> bool {
 /// any) — from its install record: the user-scope record, else the system one.
 #[cfg(unix)]
 fn local_admin_domain_identity() -> Option<(String, Fingerprint, Option<SocketAddr>)> {
-    use netidx_admin_client::provenance::InstallRecord;
+    use netidx_admin::provenance::InstallRecord;
     let user = paths::user_install_record().ok();
     let sys = paths::system_install_record();
     let records = [

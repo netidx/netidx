@@ -168,7 +168,7 @@ client consumes its own config directly.
 - `netidx/src/resolver_server/config.rs` — `file::Referral.addrs` / `MemberServer.addr` type, `check_addrs`, `check()` partition.
 - `netidx/src/resolver_client/read_client.rs` + `write_client.rs` — connect-time resolution + candidate merge.
 - `netidx/src/resolver_server/store.rs` / `mod.rs` — referral construction populating both lists.
-- `netidx-admin-client/src/client.rs`, `resolver.rs` (+ `template/`) — config tests/builders that use `"...".parse()` now target `ResolverAddr` (still works via `FromStr`); add hostname round-trip/validate tests.
+- `netidx-admin/src/client.rs`, `resolver.rs` (+ `template/`) — config tests/builders that use `"...".parse()` now target `ResolverAddr` (still works via `FromStr`); add hostname round-trip/validate tests.
 
 ## Verification
 

@@ -16,7 +16,7 @@
 //!
 //! The other half of this is that consecutive writes must not share a
 //! modification time. Linux stamps inodes from a clock that only advances once
-//! per timer tick, so `netidx-admin-client`'s atomic write settles for longer
+//! per timer tick, so `netidx-admin`'s atomic write settles for longer
 //! than a tick before returning; see `atomic::SETTLE`.
 
 use anyhow::{Context, Result};

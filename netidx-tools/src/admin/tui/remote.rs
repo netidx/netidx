@@ -1,6 +1,6 @@
 //! Tab 2 — **Admin domain**: connect to a (local or remote) admin server and
 //! drive its enrollment queue (and, in later slices, delegations, roster,
-//! perms, service control, revocation) over `netidx_admin_client::ops`.
+//! perms, service control, revocation) over `netidx_admin::ops`.
 //!
 //! The connection is established once (glyph confirm → CA verification
 //! → login) and cached in [`RemoteConn`]; every subsequent op reuses it — the cached
@@ -646,7 +646,7 @@ async fn connect(
     server: SocketAddr,
     expected_fp: Option<Fingerprint>,
 ) -> Result<super::action::Outcome> {
-    use netidx_admin_client::{
+    use netidx_admin::{
         answer::Answerer,
         ops,
         session_cache::{self, CachedSession},
@@ -718,7 +718,7 @@ async fn connect(
 
 #[cfg(unix)]
 async fn logout(conn: RemoteConn) -> Result<super::action::Outcome> {
-    use netidx_admin_client::{session_cache, transport};
+    use netidx_admin::{session_cache, transport};
     use netidx_admin_proto::NodeKind;
     let fingerprint = conn.confirmed_fp.text();
     let mut lines = Vec::new();
@@ -755,12 +755,12 @@ async fn logout(conn: RemoteConn) -> Result<super::action::Outcome> {
 /// toast to dismiss, just the list, like discovery everywhere else.
 #[cfg(unix)]
 async fn discover(ans: &mut TuiAnswerer) -> Result<super::action::Outcome> {
-    use netidx_admin_client::{
+    use netidx_admin::{
         answer::{Answerer, Progress, Stage},
         plan::enroll,
     };
     use netidx_admin_proto::NodeKind;
-    let timeout = netidx_admin_client::discovery::DISCOVERY_TIMEOUT;
+    let timeout = netidx_admin::discovery::DISCOVERY_TIMEOUT;
     ans.progress(Progress::timed(
         Stage::Discovering,
         "browsing for admin domains…",
@@ -849,7 +849,7 @@ async fn refresh(
 
 #[cfg(unix)]
 async fn queue_rows(ans: &mut TuiAnswerer, conn: &RemoteConn) -> Result<Vec<PanelRow>> {
-    use netidx_admin_client::ops::queue::list_queue;
+    use netidx_admin::ops::queue::list_queue;
     let items =
         list_queue(ans, Some(conn.server), None, Some(conn.admin.clone()), None).await?;
     Ok(items.iter().map(queue_row).collect())
@@ -857,7 +857,7 @@ async fn queue_rows(ans: &mut TuiAnswerer, conn: &RemoteConn) -> Result<Vec<Pane
 
 /// Format one queue item into a display row + its action code.
 #[cfg(unix)]
-fn queue_row(item: &netidx_admin_client::ops::queue::QueueItem) -> PanelRow {
+fn queue_row(item: &netidx_admin::ops::queue::QueueItem) -> PanelRow {
     let name = if let Some(listen) = item.enroll_listen {
         format!("admin-server enrollment @ {listen}")
     } else {
@@ -935,7 +935,7 @@ async fn approve(
     conn: RemoteConn,
     code: String,
 ) -> Result<super::action::Outcome> {
-    use netidx_admin_client::ops::queue::approve;
+    use netidx_admin::ops::queue::approve;
     let out = approve(
         ans,
         Some(conn.server),
@@ -963,7 +963,7 @@ async fn approve_renewals(
     ans: &mut TuiAnswerer,
     conn: RemoteConn,
 ) -> Result<super::action::Outcome> {
-    use netidx_admin_client::ops::queue::approve_renewals;
+    use netidx_admin::ops::queue::approve_renewals;
     let results =
         approve_renewals(ans, Some(conn.server), None, Some(conn.admin.clone()), None)
             .await?;
@@ -986,14 +986,9 @@ async fn deny(
     conn: RemoteConn,
     code: String,
 ) -> Result<super::action::Outcome> {
-    use netidx_admin_client::{answer::Answerer, ops::queue::deny};
+    use netidx_admin::{answer::Answerer, ops::queue::deny};
     let reason = ans
-        .text(
-            netidx_admin_client::answer::Field::RevokeReason,
-            None,
-            Some("denied"),
-            true,
-        )
+        .text(netidx_admin::answer::Field::RevokeReason, None, Some("denied"), true)
         .await?
         .unwrap_or_else(|| "denied".to_string());
     let name = deny(
@@ -1020,7 +1015,7 @@ async fn delegation_rows(
     ans: &mut TuiAnswerer,
     conn: &RemoteConn,
 ) -> Result<Vec<PanelRow>> {
-    use netidx_admin_client::ops::delegation::list_pending_delegations;
+    use netidx_admin::ops::delegation::list_pending_delegations;
     let items = list_pending_delegations(
         ans,
         Some(conn.server),
@@ -1034,9 +1029,7 @@ async fn delegation_rows(
 
 /// Format one pending or approved delegation into a display row + its action code.
 #[cfg(unix)]
-fn delegation_row(
-    item: &netidx_admin_client::ops::delegation::PendingDelegation,
-) -> PanelRow {
+fn delegation_row(item: &netidx_admin::ops::delegation::PendingDelegation) -> PanelRow {
     let parent =
         item.parent.iter().map(|a| a.addr.to_string()).collect::<Vec<_>>().join(", ");
     let child =
@@ -1063,7 +1056,7 @@ async fn approve_delegation(
     conn: RemoteConn,
     code: String,
 ) -> Result<super::action::Outcome> {
-    use netidx_admin_client::ops::delegation::approve_delegation;
+    use netidx_admin::ops::delegation::approve_delegation;
     let out = approve_delegation(
         ans,
         Some(conn.server),
@@ -1105,14 +1098,9 @@ async fn deny_delegation(
     conn: RemoteConn,
     code: String,
 ) -> Result<super::action::Outcome> {
-    use netidx_admin_client::{answer::Answerer, ops::delegation::deny_delegation};
+    use netidx_admin::{answer::Answerer, ops::delegation::deny_delegation};
     let reason = ans
-        .text(
-            netidx_admin_client::answer::Field::RevokeReason,
-            None,
-            Some("denied"),
-            true,
-        )
+        .text(netidx_admin::answer::Field::RevokeReason, None, Some("denied"), true)
         .await?
         .unwrap_or_else(|| "denied".to_string());
     let item = deny_delegation(
@@ -1139,7 +1127,7 @@ async fn revocation_rows(
     ans: &mut TuiAnswerer,
     conn: &RemoteConn,
 ) -> Result<Vec<PanelRow>> {
-    use netidx_admin_client::ops::revoke::issued;
+    use netidx_admin::ops::revoke::issued;
     let entries = issued(
         ans,
         Some(conn.server),
@@ -1180,17 +1168,12 @@ async fn revoke(
     serial: u64,
     glyph: Option<Fingerprint>,
 ) -> Result<super::action::Outcome> {
-    use netidx_admin_client::{
+    use netidx_admin::{
         answer::Answerer,
         ops::revoke::{RevokeSelector, revoke},
     };
     let reason = ans
-        .text(
-            netidx_admin_client::answer::Field::RevokeReason,
-            None,
-            Some("revoked"),
-            true,
-        )
+        .text(netidx_admin::answer::Field::RevokeReason, None, Some("revoked"), true)
         .await?
         .unwrap_or_else(|| "revoked".to_string());
     let out = revoke(
@@ -1231,8 +1214,8 @@ async fn revoke(
 async fn admin_target(
     ans: &mut TuiAnswerer,
     target: &PanelTarget,
-) -> Result<netidx_admin_client::ops::AdminTarget> {
-    use netidx_admin_client::ops::{AdminTarget, resolve_admin_target};
+) -> Result<netidx_admin::ops::AdminTarget> {
+    use netidx_admin::ops::{AdminTarget, resolve_admin_target};
     match target {
         PanelTarget::Local { cfg_path, .. } => {
             Ok(AdminTarget::Local { cfg_path: cfg_path.clone() })
@@ -1255,20 +1238,20 @@ async fn roster_rows(
     ans: &mut TuiAnswerer,
     target: &PanelTarget,
 ) -> Result<Vec<PanelRow>> {
-    use netidx_admin_client::ops::roster::list_admins;
+    use netidx_admin::ops::roster::list_admins;
     let at = admin_target(ans, target).await?;
     Ok(list_admins(&at).await?.iter().map(roster_row).collect())
 }
 
 #[cfg(unix)]
 async fn server_rows(ans: &mut TuiAnswerer, conn: &RemoteConn) -> Result<Vec<PanelRow>> {
-    use netidx_admin_client::ops::servers::list_servers;
+    use netidx_admin::ops::servers::list_servers;
     let servers = list_servers(ans, Some(conn.server), None).await?;
     Ok(servers.iter().map(server_row).collect())
 }
 
 #[cfg(unix)]
-fn server_row(server: &netidx_admin_client::ops::servers::ServerInfo) -> PanelRow {
+fn server_row(server: &netidx_admin::ops::servers::ServerInfo) -> PanelRow {
     let cluster = server.cluster_base.clone().unwrap_or_else(|| "(none)".to_string());
     let roles = server
         .roles
@@ -1290,7 +1273,7 @@ fn server_row(server: &netidx_admin_client::ops::servers::ServerInfo) -> PanelRo
             cluster,
             server.id,
             server.addr,
-            netidx_admin_client::ops::servers::read_gate_label(server.read_gate),
+            netidx_admin::ops::servers::read_gate_label(server.read_gate),
         ),
         key: RowKey::Server {
             id: server.id,
@@ -1321,7 +1304,7 @@ fn server_row(server: &netidx_admin_client::ops::servers::ServerInfo) -> PanelRo
             ("Enrollment state".to_string(), format!("{:?}", server.state)),
             (
                 "Read gate".to_string(),
-                netidx_admin_client::ops::servers::read_gate_detail(server.read_gate),
+                netidx_admin::ops::servers::read_gate_detail(server.read_gate),
             ),
             ("Roles".to_string(), if roles.is_empty() { "-".to_string() } else { roles }),
             (
@@ -1350,7 +1333,7 @@ async fn remove_server(
     conn: RemoteConn,
     server: AdminServerId,
 ) -> Result<super::action::Outcome> {
-    use netidx_admin_client::ops::servers;
+    use netidx_admin::ops::servers;
     let out = servers::remove_server(
         ans,
         Some(conn.server),
@@ -1453,7 +1436,7 @@ async fn set_read_gate(
     server: ServiceTarget,
     gate: ReadGate,
 ) -> Result<super::action::Outcome> {
-    use netidx_admin_client::ops::service;
+    use netidx_admin::ops::service;
     service::set_read_gate(
         ans,
         conn.server,
@@ -1496,7 +1479,7 @@ async fn reconcile_ca(
     ans: &mut TuiAnswerer,
     conn: RemoteConn,
 ) -> Result<super::action::Outcome> {
-    use netidx_admin_client::ops::servers;
+    use netidx_admin::ops::servers;
     let (operation_id, peers) = servers::reconcile_ca(
         ans,
         Some(conn.server),
@@ -1635,7 +1618,7 @@ async fn add_admin(
     ans: &mut TuiAnswerer,
     target: PanelTarget,
 ) -> Result<super::action::Outcome> {
-    use netidx_admin_client::{
+    use netidx_admin::{
         answer::{Answerer, Field},
         ops::roster::add_role_admin,
     };
@@ -1664,7 +1647,7 @@ async fn set_policy(
     target: PanelTarget,
     name: String,
 ) -> Result<super::action::Outcome> {
-    use netidx_admin_client::ops::roster::{list_admins, set_admin_policy};
+    use netidx_admin::ops::roster::{list_admins, set_admin_policy};
     let at = admin_target(ans, &target).await?;
     let current = list_admins(&at)
         .await?
@@ -1690,7 +1673,7 @@ async fn remove_admin(
     target: PanelTarget,
     name: String,
 ) -> Result<super::action::Outcome> {
-    use netidx_admin_client::ops::roster::remove_admin;
+    use netidx_admin::ops::roster::remove_admin;
     let at = admin_target(ans, &target).await?;
     remove_admin(&at, &name).await?;
     let rows = roster_rows(ans, &target).await?;
@@ -1711,7 +1694,7 @@ async fn show_perms_for(
     target: &PanelTarget,
     at: &str,
 ) -> Result<String> {
-    use netidx_admin_client::ops::perms::{show_perms, show_perms_local};
+    use netidx_admin::ops::perms::{show_perms, show_perms_local};
     match target {
         PanelTarget::Remote(conn) => {
             show_perms(ans, Some(conn.server), None, Some(conn.admin.clone()), None, at)
@@ -1730,12 +1713,8 @@ async fn list_resolver_clusters(
 ) -> Result<super::action::Outcome> {
     let bases = match &target {
         PanelTarget::Remote(conn) => {
-            netidx_admin_client::ops::perms::list_resolver_clusters(
-                ans,
-                Some(conn.server),
-                None,
-            )
-            .await?
+            netidx_admin::ops::perms::list_resolver_clusters(ans, Some(conn.server), None)
+                .await?
         }
         PanelTarget::Local { .. } => vec![local_own_base()],
     };
@@ -1764,7 +1743,7 @@ async fn edit_perms(
     target: PanelTarget,
     at: String,
 ) -> Result<super::action::Outcome> {
-    use netidx_admin_client::ops::perms::{
+    use netidx_admin::ops::perms::{
         edit_perms_local, edit_perms_with_session, open_perms_session, show_perms_local,
     };
     // Seed the editor with the admin domain's current perms, validate locally, then
@@ -1836,8 +1815,7 @@ async fn list_service_servers(
 ) -> Result<super::action::Outcome> {
     let conn = target.remote()?;
     let servers =
-        netidx_admin_client::ops::service::list_service_servers(ans, conn.server, None)
-            .await?;
+        netidx_admin::ops::service::list_service_servers(ans, conn.server, None).await?;
     let rows: Vec<ServiceServerRow> = servers
         .into_iter()
         .map(|s| ServiceServerRow {
@@ -1873,7 +1851,7 @@ async fn service_op(
     units: Vec<String>,
     op: netidx_activation::control::ControlOp,
 ) -> Result<Vec<netidx_admin_proto::ServiceUnit>> {
-    use netidx_admin_client::ops::service::control_remote;
+    use netidx_admin::ops::service::control_remote;
     control_remote(
         ans,
         conn.server,
@@ -2021,7 +1999,7 @@ const LOCAL_PANELS: [Panel; 2] = [Panel::Roster, Panel::Perms];
 /// perms edit is allowed to touch. Best-effort from the local resolver config,
 /// falling back to the root; the admin server enforces the confinement anyway.
 fn local_own_base() -> String {
-    netidx_admin_client::resolver::ResolverConfig::load_default()
+    netidx_admin::resolver::ResolverConfig::load_default()
         .map(|c| c.base_path())
         .unwrap_or_else(|_| "/".to_string())
 }
@@ -2465,7 +2443,7 @@ impl RemoteState {
             }
             KeyCode::Enter => {
                 let spec = format!("{}:{}", host.trim(), port.trim());
-                match netidx_admin_client::plan::resolve_admin_server_addr(&spec) {
+                match netidx_admin::plan::resolve_admin_server_addr(&spec) {
                     Ok(server) => {
                         self.screen = Screen::AdminDomains;
                         self.error = None;
@@ -2832,7 +2810,7 @@ impl RemoteState {
         choice: &mut ListState,
         until: &Option<String>,
     ) {
-        use netidx_admin_client::ops::servers::read_gate_detail;
+        use netidx_admin::ops::servers::read_gate_detail;
         if let Some(text) = until {
             render_form(
                 f,

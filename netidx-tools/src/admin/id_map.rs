@@ -14,7 +14,7 @@
 
 use anyhow::{Context, Result};
 use clap::Subcommand;
-use netidx_admin_client::{config_lock::ConfigDirLock, id_map};
+use netidx_admin::{config_lock::ConfigDirLock, id_map};
 use std::path::PathBuf;
 
 use super::editor;

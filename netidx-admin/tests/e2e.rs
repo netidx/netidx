@@ -38,18 +38,15 @@ use netidx::{
     resolver_server::{self, config as cfg_resolver},
     subscriber::{Event, SubscriberBuilder},
 };
-// `ca` (TLS test only) depends on openssl → unix-only. `id_map_engine` +
-// the id-map daemon are used only by the TLS test today, so gate them too
-// rather than warn about unused imports on Windows.
+// `ca` (TLS test only) depends on openssl → unix-only. `id_map_engine` + the
+// id-map daemon are used only by the TLS test today, and `WorkstationParams`
+// only by the Local-auth workstation test, so gate them too rather than warn
+// about unused imports on Windows.
 #[cfg(unix)]
-use netidx_admin_client::id_map as id_map_engine;
-#[cfg(unix)]
-use netidx_admin_server::ca;
-// `WorkstationParams` is referenced only by the Local-auth workstation
-// test (also unix-only).
-#[cfg(unix)]
-use netidx_admin_client::template::workstation::WorkstationParams;
-use netidx_admin_client::{
+use netidx_admin::{
+    ca, id_map as id_map_engine, template::workstation::WorkstationParams,
+};
+use netidx_admin::{
     config_lock::ConfigDirLock,
     template::{
         self, AuthChoice, ReferralAuth,
@@ -106,8 +103,7 @@ fn test_config_lock() -> &'static ConfigDirLock {
     static LOCK: OnceLock<ConfigDirLock> = OnceLock::new();
     ensure_xdg_redirect();
     LOCK.get_or_init(|| {
-        let root =
-            netidx_admin_client::paths::user_config_root().expect("test config root");
+        let root = netidx_admin::paths::user_config_root().expect("test config root");
         let lock = ConfigDirLock::acquire(root).expect("test config lock");
         std::fs::create_dir_all(lock.root()).expect("create test config root");
         lock
@@ -346,7 +342,7 @@ async fn workstation_template_local_round_trip() -> Result<()> {
 ///   in-process here via `IdMapServer::start`, since there's no
 ///   activation supervisor in a tokio test).
 ///
-/// **Unix-only**: the test issues certs via `netidx_admin_server::ca`,
+/// **Unix-only**: the test issues certs via `netidx_admin::ca`,
 /// which depends on openssl (unix-only — we don't ship openssl to
 /// Windows). On Windows a TLS workstation install uses pre-issued
 /// certs supplied via explicit flags.
@@ -438,10 +434,9 @@ async fn resolver_template_tls_round_trip() -> Result<()> {
     // the handshake is rejected (the probe sends no client cert), so the
     // result depends on the TOFU verifier capturing the leaf before that
     // rejection and reading its DNS SAN.
-    let probed = netidx_admin_client::resolver_probe::probe_resolver_tls_name(
-        *server.local_addr(),
-    )
-    .await?;
+    let probed =
+        netidx_admin::resolver_probe::probe_resolver_tls_name(*server.local_addr())
+            .await?;
     assert_eq!(probed.as_deref(), Some("resolver.example.com"));
 
     // Path under `/users/resolver.example.com/` matches the auto-seed
@@ -467,7 +462,7 @@ async fn resolver_template_tls_round_trip() -> Result<()> {
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn revoked_certificate_is_refused_by_a_running_resolver() -> Result<()> {
-    use netidx_admin_server::ca_store;
+    use netidx_admin::ca_store;
     let _ = env_logger::try_init();
     ensure_xdg_redirect();
     let dir = test_dir()?;
@@ -584,9 +579,8 @@ async fn revoked_certificate_is_refused_by_a_running_resolver() -> Result<()> {
     assert!(revoked, "the issued serial should be live, then revoked");
     let ca_key = std::fs::read(ca_dir.join("private.key"))?;
     cadir.store.write_crl(&ca_key).await?;
-    let rcfg = netidx_admin_client::resolver::ResolverConfig::load(
-        dir.path().join("resolver.json"),
-    )?;
+    let rcfg =
+        netidx_admin::resolver::ResolverConfig::load(dir.path().join("resolver.json"))?;
     let mut installed = false;
     for member in &rcfg.0.member_servers {
         if let cfg_resolver::file::Auth::Tls { trusted, .. } = &member.auth {

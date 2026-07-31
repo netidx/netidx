@@ -8,7 +8,7 @@
 
 use anyhow::{Context, Result};
 use clap::Args;
-use netidx_admin_client::{
+use netidx_admin::{
     config_lock::ConfigDirLock,
     paths,
     provenance::InstallRecord,
@@ -341,7 +341,7 @@ fn config_root(p: &Params, scope: ServiceScope) -> Option<PathBuf> {
 /// admin-server daemon is, so only a unix host ever has one to deregister.
 #[cfg(unix)]
 fn deregister_admin_server(root: &std::path::Path, dry_run: bool) {
-    use netidx_admin_client::{admin_server_config, transport};
+    use netidx_admin::{admin_server_config, transport};
     let cfg = match admin_server_config::load(&root.join("admin-server.json")) {
         Ok(c) => c,
         Err(_) => return, // no admin server here (workstation/publisher/hand-rolled)
@@ -366,7 +366,7 @@ fn deregister_admin_server(root: &std::path::Path, dry_run: bool) {
         })?;
         let trusted = std::fs::read(&cfg.trusted)
             .with_context(|| format!("reading trust bundle {}", cfg.trusted.display()))?;
-        let roots = netidx_admin_server::load_roots(&trusted)?;
+        let roots = netidx_admin::load_roots(&trusted)?;
         let home_ca = transport::home_ca_from_chain(&cert)?;
         let client = transport::AuthenticatedPkiClient::from_pem(roots, &cert, &key)?;
         let rt = tokio::runtime::Runtime::new().context("starting tokio runtime")?;

@@ -3,7 +3,7 @@
 //!
 //! It talks **directly** to the local activation supervisor
 //! ([`netidx_activation::control`]) and unit directory
-//! ([`netidx_admin_client::activation::ActivationDir`]) — never through an admin
+//! ([`netidx_admin::activation::ActivationDir`]) — never through an admin
 //! server. That is deliberate and load-bearing: a unit is an arbitrary command
 //! line, so defining one is equivalent to running code on the box. **Unit
 //! definition (create / edit / delete) is therefore local-only** — this module
@@ -21,7 +21,7 @@ use crossterm::event::KeyCode;
 use netidx_activation::control::{
     ControlOp, ControlRequest, ControlResponse, UnitState, control,
 };
-use netidx_admin_client::activation::{
+use netidx_admin::activation::{
     ActivationDir, ProcessCfgBuilder, Unit, UnitBuilder, validate,
 };
 use ratatui::{

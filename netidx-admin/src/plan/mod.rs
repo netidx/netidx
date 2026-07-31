@@ -12,6 +12,10 @@ use netidx::config::DefaultAuthMech;
 use netidx_admin_proto::DEFAULT_PORT;
 use std::{net::SocketAddr, str::FromStr};
 
+/// Building a new CA: the vault, the recovery credential, the founding
+/// superuser role admin, and the bootstrap certificates the daemon serves under.
+#[cfg(unix)]
+pub mod ca_setup;
 /// The child half of resolver-hierarchy delegation (`delegate_under_parent`).
 pub mod delegation;
 /// Admin domain discovery + certificate enrollment — the keystone subgraph every
@@ -20,6 +24,9 @@ pub mod enroll;
 /// The role install cascades (`resolver` / `workstation` / `publisher`) and
 /// the shared tail they run.
 pub mod install;
+/// Standing up the admin-server daemon on a host that already has a CA to serve.
+#[cfg(unix)]
+pub mod server_setup;
 /// The OS-service setup decision seam (`ServiceNeed` / `offer`).
 pub mod service;
 

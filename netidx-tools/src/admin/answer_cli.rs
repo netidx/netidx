@@ -5,7 +5,7 @@
 //! the operator obtained out of band.
 
 use anyhow::{Context, Result, bail};
-use netidx_admin_client::{
+use netidx_admin::{
     answer::{AdminDomainChoice, AdminDomainOption, Answerer, Field, Progress},
     transport::CaIdentity,
 };

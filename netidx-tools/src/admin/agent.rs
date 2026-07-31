@@ -1,11 +1,11 @@
 //! `netidx admin component admin-agent …` — the client-side half of the
-//! admin plane. The engine lives in `netidx_admin_client::agent`; the
+//! admin plane. The engine lives in `netidx_admin::agent`; the
 //! templates install the `run` form as an activation unit on every client
 //! joined to an admin domain.
 
 use anyhow::{Context, Result};
 use clap::{Args, Subcommand};
-use netidx_admin_client::{agent, renewd, sync};
+use netidx_admin::{agent, renewd, sync};
 use std::{net::SocketAddr, time::Duration};
 
 #[derive(Subcommand, Debug)]

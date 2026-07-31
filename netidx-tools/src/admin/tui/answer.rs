@@ -13,7 +13,7 @@
 use super::{theme, widgets};
 use anyhow::{Result, anyhow};
 use crossterm::event::{KeyCode, KeyModifiers};
-use netidx_admin_client::{
+use netidx_admin::{
     answer::{AdminDomainChoice, AdminDomainOption, Answerer, Field, Progress},
     transport::CaIdentity,
 };
@@ -1124,8 +1124,8 @@ fn popup(f: &mut Frame, screen: Rect, title: &str, lines: Vec<Line<'static>>, w:
 #[cfg(test)]
 mod tests {
     use super::*;
+    use netidx_admin::{ca, plan::ca_setup};
     use netidx_admin_proto::Role;
-    use netidx_admin_server::{ca, plan::ca_setup};
     use ratatui::{Terminal, backend::TestBackend};
     use std::time::Duration;
 
@@ -1302,8 +1302,7 @@ mod tests {
         let mut ans = TuiAnswerer::new(tx);
         let opts = offline_ca_opts(ca_dir.clone());
         let config_lock =
-            netidx_admin_client::config_lock::ConfigDirLock::acquire(scratch.path())
-                .unwrap();
+            netidx_admin::config_lock::ConfigDirLock::acquire(scratch.path()).unwrap();
         let create = tokio::spawn(async move {
             ca_setup::create_vaulted_ca(&mut ans, &config_lock, opts).await
         });

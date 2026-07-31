@@ -594,8 +594,7 @@ pub async fn run_resolver(
         None if joining_a_serving_cluster => ReadGate::Until(
             Utc::now()
                 + chrono::Duration::seconds(
-                    (2 * netidx_admin_client::sync::DEFAULT_SYNC_INTERVAL.as_secs() + 120)
-                        as i64,
+                    (2 * crate::sync::DEFAULT_SYNC_INTERVAL.as_secs() + 120) as i64,
                 ),
         ),
         None => ReadGate::No,
@@ -1142,7 +1141,7 @@ fn edge_into_file(
     use netidx::resolver_server::config::file::{RefAuth, Referral};
     Referral {
         path: ArcStr::from(edge.path),
-        ttl: Some(netidx_admin_client::template::REFERRAL_TTL),
+        ttl: Some(crate::template::REFERRAL_TTL),
         addrs: edge
             .addrs
             .into_iter()

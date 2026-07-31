@@ -5,7 +5,7 @@ use anyhow::Result;
 use clap::Subcommand;
 
 use crate::admin::{init, lifecycle};
-use netidx_admin_client::provenance::InstallRole;
+use netidx_admin::provenance::InstallRole;
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum Cmd {

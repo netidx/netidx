@@ -116,7 +116,7 @@ const POLL_INTERVAL: Duration = Duration::from_secs(30);
 /// Two or three `stat`s twice a minute cannot go quietly deaf.
 ///
 /// Consecutive writes have to land on different timestamps for this to see
-/// them, which is why `netidx_admin_client::atomic` settles for longer than a
+/// them, which is why `netidx_admin::atomic` settles for longer than a
 /// filesystem timestamp tick before returning.
 ///
 /// Fills `into` rather than returning, so a poll that finds nothing allocates

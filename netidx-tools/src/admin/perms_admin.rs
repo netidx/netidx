@@ -1,5 +1,5 @@
 //! `netidx admin perms show|edit --at <path>` — remote permissions
-//! administration, a thin CLI over [`netidx_admin_client::ops::perms`]. The
+//! administration, a thin CLI over [`netidx_admin::ops::perms`]. The
 //! library reaches an admin server, glyph-confirms its CA, routes by the
 //! authoritative CA, and performs an authenticated read or write.
 //! `edit` runs the `$EDITOR` loop and local validation here — a frontend
@@ -7,7 +7,7 @@
 
 use anyhow::{Context, Result};
 use clap::{Args, Subcommand};
-use netidx_admin_client::{ops::perms as perms_ops, perms};
+use netidx_admin::{ops::perms as perms_ops, perms};
 use netidx_admin_proto::PeerResult;
 
 use super::{answer_cli::RemoteAuthFlags, editor};

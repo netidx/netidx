@@ -37,12 +37,16 @@ use std::{
 };
 
 pub mod delegation;
+#[cfg(unix)]
+pub mod offline;
 pub mod perms;
 pub mod queue;
 pub mod revoke;
 pub mod roster;
 pub mod servers;
 pub mod service;
+#[cfg(unix)]
+pub mod slots;
 
 /// A pinned, authenticated remote-admin session: the admin server to talk to,
 /// its confirmed identity (later connections verify against *this* CA, not a

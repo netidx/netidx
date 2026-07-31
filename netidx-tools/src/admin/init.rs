@@ -8,7 +8,7 @@ use netidx::resolver_server::config::ReadGate;
 // Qualified `admin_proto::` uses are all in the unix-only admin-server
 // enrollment path; the items below are cross-platform.
 use clap::Args;
-use netidx_admin_client::{
+use netidx_admin::{
     config_lock::ConfigDirLock,
     paths,
     plan::AuthKind,
@@ -18,7 +18,7 @@ use netidx_admin_client::{
 use netidx_admin_proto::{NodeKind, Role, fingerprint::ColorMode};
 // Re-exported so the sibling admin submodules keep calling
 // `init::resolve_admin_server_addr`; the impl now lives in the engine.
-pub(super) use netidx_admin_client::plan::resolve_admin_server_addr;
+pub(super) use netidx_admin::plan::resolve_admin_server_addr;
 use std::{net::SocketAddr, path::PathBuf, str::FromStr};
 
 use super::service;
@@ -185,10 +185,8 @@ struct CommonFlags {
 
 impl CommonFlags {
     /// The install-wide flags the library planner acts on.
-    fn install_common(
-        &self,
-    ) -> Result<netidx_admin_client::plan::install::InstallCommon> {
-        use netidx_admin_client::plan::install::{InstallCommon, InstallMode};
+    fn install_common(&self) -> Result<netidx_admin::plan::install::InstallCommon> {
+        use netidx_admin::plan::install::{InstallCommon, InstallMode};
         let mode = if self.dry_run {
             InstallMode::DryRun
         } else {
@@ -228,7 +226,7 @@ fn build_answerer(common: &CommonFlags) -> Result<super::answer_cli::FlagAnswere
 /// this call.
 fn finish_install(
     fut: impl std::future::Future<
-        Output = Result<Option<netidx_admin_client::service::ServiceScope>>,
+        Output = Result<Option<netidx_admin::service::ServiceScope>>,
     >,
 ) -> Result<()> {
     let rt = tokio::runtime::Runtime::new().context("starting tokio runtime")?;
@@ -243,8 +241,8 @@ fn finish_install(
 /// relocate in task 12); convert at the adapter boundary.
 pub(super) fn lib_kp(
     k: Option<KeyProtArg>,
-) -> Option<netidx_admin_client::plan::enroll::KeyProtArg> {
-    use netidx_admin_client::plan::enroll::KeyProtArg as L;
+) -> Option<netidx_admin::plan::enroll::KeyProtArg> {
+    use netidx_admin::plan::enroll::KeyProtArg as L;
     k.map(|k| match k {
         KeyProtArg::Seal => L::Seal,
         KeyProtArg::Password => L::Password,
@@ -328,14 +326,14 @@ pub(crate) struct WorkstationFlags {
 /// discovery/enrollment cascade and only erroring at template-render time.
 #[cfg(not(any(unix, windows)))]
 pub(crate) fn run_workstation(_f: WorkstationFlags) -> Result<()> {
-    bail!("{}", netidx_admin_client::template::workstation::UNSUPPORTED_MSG)
+    bail!("{}", netidx_admin::template::workstation::UNSUPPORTED_MSG)
 }
 
 #[cfg(any(unix, windows))]
 pub(crate) fn run_workstation(f: WorkstationFlags) -> Result<()> {
     let mut ans = build_answerer(&f.common)?;
     let input = workstation_input(f)?;
-    finish_install(netidx_admin_client::plan::install::workstation::run_workstation(
+    finish_install(netidx_admin::plan::install::workstation::run_workstation(
         &mut ans, input,
     ))
 }
@@ -343,8 +341,8 @@ pub(crate) fn run_workstation(f: WorkstationFlags) -> Result<()> {
 #[cfg(any(unix, windows))]
 fn workstation_input(
     f: WorkstationFlags,
-) -> Result<netidx_admin_client::plan::install::workstation::WorkstationInput> {
-    use netidx_admin_client::plan::install::workstation::WorkstationInput;
+) -> Result<netidx_admin::plan::install::workstation::WorkstationInput> {
+    use netidx_admin::plan::install::workstation::WorkstationInput;
     let explicit_parent =
         if f.parent.any_set() { f.parent.to_parent_ref(&f.base)? } else { None };
     let mut input = WorkstationInput::defaults(f.common.install_common()?);
@@ -411,19 +409,19 @@ pub(crate) fn run_workstation_join(f: WorkstationJoinFlags) -> Result<()> {
     let admin_server =
         f.admin_server.as_deref().map(resolve_admin_server_addr).transpose()?;
     let mode = if f.dry_run {
-        netidx_admin_client::plan::install::InstallMode::DryRun
+        netidx_admin::plan::install::InstallMode::DryRun
     } else {
-        netidx_admin_client::plan::install::InstallMode::Apply {
+        netidx_admin::plan::install::InstallMode::Apply {
             config_lock: ConfigDirLock::acquire(paths::user_config_root()?)?,
         }
     };
-    let input = netidx_admin_client::plan::install::workstation::WorkstationJoinInput {
+    let input = netidx_admin::plan::install::workstation::WorkstationJoinInput {
         mode,
         key_protection: lib_kp(f.key_protection),
         admin_server,
     };
     let rt = tokio::runtime::Runtime::new().context("starting tokio runtime")?;
-    rt.block_on(netidx_admin_client::plan::install::workstation::run_workstation_join(
+    rt.block_on(netidx_admin::plan::install::workstation::run_workstation_join(
         &mut ans, input,
     ))
 }
@@ -675,15 +673,13 @@ pub(crate) struct ResolverFlags {
 pub(crate) fn run_resolver(f: ResolverFlags) -> Result<()> {
     let mut ans = build_answerer(&f.common)?;
     let input = resolver_input(f)?;
-    finish_install(netidx_admin_server::plan::install::resolver::run_resolver(
-        &mut ans, input,
-    ))
+    finish_install(netidx_admin::plan::install::resolver::run_resolver(&mut ans, input))
 }
 
 fn resolver_input(
     f: ResolverFlags,
-) -> Result<netidx_admin_server::plan::install::resolver::ResolverInput> {
-    use netidx_admin_server::plan::install::resolver::ResolverInput;
+) -> Result<netidx_admin::plan::install::resolver::ResolverInput> {
+    use netidx_admin::plan::install::resolver::ResolverInput;
     // Route through `to_parent_ref` only when a `--parent-*` flag is set, so a
     // stray `--parent-spn` without `--parent-addr` hits the misuse bail there
     // rather than silently dropping into the discovery cascade.
@@ -788,15 +784,13 @@ pub(crate) struct PublisherFlags {
 pub(crate) fn run_publisher(f: PublisherFlags) -> Result<()> {
     let mut ans = build_answerer(&f.common)?;
     let input = publisher_input(f)?;
-    finish_install(netidx_admin_client::plan::install::publisher::run_publisher(
-        &mut ans, input,
-    ))
+    finish_install(netidx_admin::plan::install::publisher::run_publisher(&mut ans, input))
 }
 
 fn publisher_input(
     f: PublisherFlags,
-) -> Result<netidx_admin_client::plan::install::publisher::PublisherInput> {
-    Ok(netidx_admin_client::plan::install::publisher::PublisherInput {
+) -> Result<netidx_admin::plan::install::publisher::PublisherInput> {
+    Ok(netidx_admin::plan::install::publisher::PublisherInput {
         common: f.common.install_common()?,
         addrs: f.addrs,
         auth: f.auth,

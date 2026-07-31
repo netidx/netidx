@@ -1,27 +1,25 @@
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{Args, Subcommand};
-use netidx_admin_client::{
+use netidx_admin::{
     answer::{Answerer, Field},
     atomic,
+    ca::{self, SanEntry, Subject},
+    ca_vault,
     config_lock::ConfigDirLock,
     local,
+    offline_ca::{default_csr_filename, parse_san_one, parse_sans},
     ops::{
-        self, queue as ca_ops, revoke as revoke_ops, roster as roster_ops,
-        servers as server_ops,
+        self, offline as offline_ops, queue as ca_ops, revoke as revoke_ops,
+        roster as roster_ops, servers as server_ops, slots as slots_ops,
     },
-    paths, plan, tls, transport,
+    paths,
+    plan::{self, ca_setup},
+    tls, transport,
 };
 use netidx_admin_proto::{
     self as admin_proto, NodeKind,
     fingerprint::{ColorMode, Fingerprint},
     policy::{AdminInfo, Policy, SlotKind},
-};
-use netidx_admin_server::{
-    ca::{self, SanEntry, Subject},
-    ca_vault,
-    offline_ca::{default_csr_filename, parse_san_one, parse_sans},
-    ops::{offline as offline_ops, slots as slots_ops},
-    plan::ca_setup,
 };
 use std::{
     net::SocketAddr,
@@ -31,7 +29,7 @@ use std::{
 use zeroize::Zeroizing;
 
 #[cfg(test)]
-use netidx_admin_server::ca::{Ca, CaParams};
+use netidx_admin::ca::{Ca, CaParams};
 
 use super::{
     answer_cli::{RemoteAuthFlags, make_offline_answerer},
@@ -102,7 +100,7 @@ async fn matching_ca_config(ca_dir: &Path, supplied: Option<PathBuf>) -> Option<
 
 async fn config_owns_ca(config: &Path, ca_dir: &Path) -> bool {
     let Ok(config) =
-        netidx_admin_client::admin_server_config::load_for_recovery_async(config).await
+        netidx_admin::admin_server_config::load_for_recovery_async(config).await
     else {
         return false;
     };
@@ -881,7 +879,7 @@ fn install_ca(p: CaInstallArgs) -> Result<()> {
         with_service: p.with_service,
         no_service: p.no_service,
     };
-    let input = netidx_admin_server::plan::install::ca::CaInput {
+    let input = netidx_admin::plan::install::ca::CaInput {
         domain: p.domain,
         listen: p.listen,
         units_dir: None,
@@ -889,8 +887,8 @@ fn install_ca(p: CaInstallArgs) -> Result<()> {
         insecure_no_tpm: p.insecure_no_tpm,
         common,
     };
-    let scope = runtime()?
-        .block_on(netidx_admin_server::plan::install::ca::run_ca(&mut ans, input))?;
+    let scope =
+        runtime()?.block_on(netidx_admin::plan::install::ca::run_ca(&mut ans, input))?;
     if let Some(scope) = scope {
         service::install_with_defaults(scope.into())?;
     }
@@ -906,7 +904,7 @@ fn install_ca(p: CaInstallArgs) -> Result<()> {
 /// blast radius of a leaked keytab; the keytab itself lives outside
 /// the CA dir so CA-dir backups stay harmless on their own, and
 /// `--rotate` is the one-command kill-and-replace.
-pub(super) const AUTORENEW_ADMIN: &str = netidx_admin_server::AUTORENEW_ADMIN;
+pub(super) const AUTORENEW_ADMIN: &str = netidx_admin::AUTORENEW_ADMIN;
 
 /// Set up (or rotate) the autorenew slot and point this host's
 /// admin-server config at its keytab. Approval itself is the running
@@ -1423,7 +1421,7 @@ fn external_ca_config(ca_dir: &Path) -> Result<PathBuf> {
     let cfg_path = paths::discover_admin_server_config().context(
         "this externally-signed CA is configured as a CA, but no local admin-server config was found",
     )?;
-    let cfg = netidx_admin_client::admin_server_config::load(&cfg_path)?;
+    let cfg = netidx_admin::admin_server_config::load(&cfg_path)?;
     let configured = cfg
         .roles
         .ca
@@ -1442,7 +1440,7 @@ async fn report_external_install(
     ans: &mut dyn Answerer,
     out: slots_ops::ExternalInstallOutcome,
     gate: plan::service::ServiceGate,
-) -> Result<Option<netidx_admin_client::service::ServiceScope>> {
+) -> Result<Option<netidx_admin::service::ServiceScope>> {
     use slots_ops::ExternalInstallOutcome;
     match out {
         ExternalInstallOutcome::OfflineCa => {
@@ -1918,7 +1916,7 @@ fn show_ca_identity(ca_dir: &std::path::Path) -> Result<()> {
 /// `admin set-policy`). Empty if it can't be read — the prompt then has
 /// no domain to suggest.
 fn existing_ca_cn(dir: &Path) -> String {
-    netidx_admin_client::tls::extract_dns_san_from_pem(&dir.join("certificate.pem"))
+    netidx_admin::tls::extract_dns_san_from_pem(&dir.join("certificate.pem"))
         .unwrap_or_default()
 }
 
@@ -2028,7 +2026,7 @@ fn sign(mut p: SignArgs) -> Result<()> {
             IdMapChoice::Skip => None,
             IdMapChoice::Ask if !ans.interactive() => None,
             IdMapChoice::Register { .. } | IdMapChoice::Ask => {
-                let path = netidx_admin_client::id_map::user_id_map_path()?;
+                let path = netidx_admin::id_map::user_id_map_path()?;
                 Some(if ca_lock.contains(&path)? {
                     ca_lock.clone()
                 } else {
@@ -2422,7 +2420,7 @@ fn list() -> Result<()> {
     // Admin server.
     let cfg = paths::discover_admin_server_config()
         .ok()
-        .and_then(|p| netidx_admin_client::admin_server_config::load(&p).ok());
+        .and_then(|p| netidx_admin::admin_server_config::load(&p).ok());
     match cfg {
         Some(c) => println!("  server: configured (listen {})", c.listen),
         None => println!("  server: not configured"),
@@ -2745,12 +2743,11 @@ mod tests {
         let issued = runtime()
             .unwrap()
             .block_on(async {
-                let lock =
-                    netidx_admin_client::config_lock::ConfigDirLock::acquire_for_ca_dir(
-                        ca_dir.path(),
-                    )
-                    .await?;
-                netidx_admin_server::plan::ca_setup::issue_identity_into(
+                let lock = netidx_admin::config_lock::ConfigDirLock::acquire_for_ca_dir(
+                    ca_dir.path(),
+                )
+                .await?;
+                netidx_admin::plan::ca_setup::issue_identity_into(
                     &lock,
                     &ca,
                     "resolver.example.com",
@@ -2831,11 +2828,9 @@ mod tests {
             .unwrap()
             .block_on(async {
                 let lock =
-                    netidx_admin_client::config_lock::ConfigDirLock::acquire_for_ca_dir(
-                        &dir,
-                    )
-                    .await?;
-                netidx_admin_server::ca_store::CaDir::open(lock, &dir).await
+                    netidx_admin::config_lock::ConfigDirLock::acquire_for_ca_dir(&dir)
+                        .await?;
+                netidx_admin::ca_store::CaDir::open(lock, &dir).await
             })
             .unwrap();
         assert_eq!(

@@ -17,7 +17,7 @@ use clap::Subcommand;
 #[cfg(any(unix, windows))]
 mod activation;
 // `ca` subcommand and its supporting CLI helpers depend on the
-// `netidx_admin_server::ca` engine module, which is unix-only (it pulls
+// `netidx_admin::ca` engine module, which is unix-only (it pulls
 // openssl). On Windows the subcommand is simply not exposed.
 /// The strict-CLI `Answerer`: turns each subcommand into a non-interactive
 /// command that takes its values from flags or errors naming the flag.
@@ -50,7 +50,7 @@ mod perms_admin;
 mod resolver;
 mod roles;
 // `server` (the admin-server daemon CLI) depends on the
-// `netidx_admin_server` daemon implementation, which is unix-only (the
+// `netidx_admin` daemon implementation, which is unix-only (the
 // CA signer pulls openssl). On Windows, put a host on an admin domain by
 // installing a publisher client config (`netidx admin publisher
 // install`); the `workstation` role is unix-only too (Local auth +
@@ -90,7 +90,7 @@ pub(crate) enum Params {
         cmd: roles::publisher::Cmd,
     },
     /// manage a local certificate authority
-    // Unix-only — the engine module (`netidx_admin_server::ca`) needs
+    // Unix-only — the engine module (`netidx_admin::ca`) needs
     // openssl, which we don't ship to Windows.
     #[cfg(unix)]
     Ca {

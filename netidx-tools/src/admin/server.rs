@@ -1,14 +1,14 @@
 //! `netidx admin component server …` — run the admin-server daemon.
 //!
-//! The daemon itself lives in `netidx_admin_server`; this module is the
+//! The daemon itself lives in `netidx_admin`; this module is the
 //! CLI shell that runs it. Standing an admin server *up* (issuing its serving
 //! cert, writing its config, dropping its unit) lives in the library —
-//! `netidx_admin_server::plan::server_setup::setup_server` — shared by `ca init` and
+//! `netidx_admin::plan::server_setup::setup_server` — shared by `ca init` and
 //! the install flows.
 
 use anyhow::{Context, Result};
 use clap::{Args, Subcommand};
-use netidx_admin_client::paths;
+use netidx_admin::paths;
 use std::path::PathBuf;
 
 #[derive(Subcommand, Debug)]
@@ -43,5 +43,5 @@ fn run_server(p: RunArgs) -> Result<()> {
         None => paths::discover_admin_server_config()?,
     };
     let rt = tokio::runtime::Runtime::new().context("starting tokio runtime")?;
-    rt.block_on(netidx_admin_server::serve(cfg_path))
+    rt.block_on(netidx_admin::serve(cfg_path))
 }

@@ -10,7 +10,7 @@ use anyhow::{Context, Result};
 use chrono::Utc;
 use clap::{ArgGroup, Args};
 use netidx::resolver_server::config::ReadGate;
-use netidx_admin_client::ops;
+use netidx_admin::ops;
 use netidx_admin_proto::AdminServerId;
 
 #[derive(Args, Debug)]

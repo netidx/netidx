@@ -1,13 +1,13 @@
 //! `netidx admin resolver {add-parent, list-delegations, approve-delegation,
 //! deny-delegation}` — thin CLI adapters over
-//! [`netidx_admin_client::ops::delegation`]. The parent-admin review is a
+//! [`netidx_admin::ops::delegation`]. The parent-admin review is a
 //! query + action (code-as-id) split: `list-delegations` shows each pending
 //! request by its code; `approve-delegation <code>` / `deny-delegation <code>`
 //! act on the one whose recomputed code matches.
 
 use anyhow::{Context, Result};
 use clap::Args;
-use netidx_admin_client::{
+use netidx_admin::{
     config_lock::ConfigDirLock,
     ops::delegation::{self as ops, AddParentCompletion, ResolverClusterPropagation},
     paths,

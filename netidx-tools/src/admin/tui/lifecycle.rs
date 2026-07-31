@@ -1,4 +1,4 @@
-//! Async entry points to `netidx_admin_client::sync` for the Local tab.
+//! Async entry points to `netidx_admin::sync` for the Local tab.
 //!
 //! The CLI `lifecycle.rs` builds its own `tokio::runtime::Runtime` per call
 //! and prints, so it can't be called from inside the TUI's runtime (a nested
@@ -6,7 +6,7 @@
 //! returned instead of printed.
 
 use anyhow::{Context, Result, bail};
-use netidx_admin_client::{
+use netidx_admin::{
     provenance::{InstallRecord, InstallRole},
     sync::{self, SyncPlan},
 };
