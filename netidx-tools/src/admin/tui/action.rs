@@ -656,22 +656,21 @@ async fn finish_identities(
     manifest: &install_bundle::Manifest,
 ) -> Result<()> {
     if manifest.identities.is_empty()
-        || super::super::backup_restore::identities_complete(root, manifest)
+        || netidx_admin::plan::bundle::identities_complete(root, manifest)
     {
         return Ok(());
     }
-    let (ca, net) =
-        super::super::backup_restore::admin_domain_for_restore(manifest, None)
-            .await?
-            .context("the backup contains TLS identities but no admin domain")?;
-    super::super::backup_restore::reenroll_data_identities(
+    let (ca, net) = netidx_admin::plan::bundle::admin_domain_for_restore(manifest, None)
+        .await?
+        .context("the backup contains TLS identities but no admin domain")?;
+    netidx_admin::plan::bundle::reenroll_data_identities(
         ans, root, manifest, ca, &net, None,
     )
     .await?;
     #[cfg(unix)]
     if !manifest.components.contains(&install_bundle::Component::Ca) {
         let config_lock = ConfigDirLock::acquire_async(root).await?;
-        super::super::backup_restore::reenroll_satellite_admin(
+        netidx_admin::plan::bundle::reenroll_satellite_admin(
             ans,
             &config_lock,
             root,
@@ -929,14 +928,14 @@ async fn finish_restore(
     let manifest =
         install_bundle::restore_files_with_addresses(&bundle, &config_root, addresses)?;
     finish_identities(ans, &config_root, &manifest).await?;
-    super::super::backup_restore::start_restored_units(&config_root).await?;
+    netidx_admin::plan::bundle::start_restored_units(&config_root).await?;
     let lines =
         vec![format!("{} is installed and ready.", manifest.install.role.as_str())];
     #[cfg(unix)]
     let lines = if resolver_relocated {
         let mut lines = lines;
         let operation =
-            super::super::backup_restore::reconcile_restored_ca(&config_root).await?;
+            netidx_admin::plan::bundle::reconcile_restored_ca(&config_root).await?;
         lines.push(format!("Resolver hierarchy reconciled (operation {operation})."));
         lines
     } else {

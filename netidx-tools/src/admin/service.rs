@@ -238,27 +238,7 @@ pub(super) fn is_elevated() -> Result<bool> {
 /// `--for-user` if provided; otherwise reads `$SUDO_USER` (set by
 /// sudo to the original invoker) and finally falls back to the
 /// current uid → name lookup.
-#[cfg(unix)]
-pub(super) fn resolve_for_user(provided: Option<String>) -> Result<String> {
-    if let Some(u) = provided {
-        return Ok(u);
-    }
-    if let Some(s) = std::env::var_os("SUDO_USER")
-        && let Some(s) = s.to_str()
-        && !s.is_empty()
-    {
-        return Ok(s.to_string());
-    }
-    Ok(netidx_admin::local_identity::current_user()?.to_string())
-}
-
-#[cfg(windows)]
-pub(super) fn resolve_for_user(provided: Option<String>) -> Result<String> {
-    match provided {
-        Some(u) => Ok(u),
-        None => Ok(netidx_admin::local_identity::current_user()?.to_string()),
-    }
-}
+pub(super) use netidx_admin::service::resolve_for_user;
 
 /// Re-exec ourselves under sudo to do the install. We resolve
 /// `--for-user` *before* the escalation so the elevated child sees

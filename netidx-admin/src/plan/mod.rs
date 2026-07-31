@@ -12,6 +12,9 @@ use netidx::config::DefaultAuthMech;
 use netidx_admin_proto::DEFAULT_PORT;
 use std::{net::SocketAddr, str::FromStr};
 
+/// Capturing an installation into a bundle, and restoring one — the ceremony
+/// around [`crate::install_bundle`], driven through the [`crate::answer::Answerer`] seam.
+pub mod bundle;
 /// Building a new CA: the vault, the recovery credential, the founding
 /// superuser role admin, and the bootstrap certificates the daemon serves under.
 /// The vault half is `#[cfg(unix)]`; the naming, policy, and identity-display

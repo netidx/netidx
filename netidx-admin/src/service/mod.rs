@@ -158,6 +158,23 @@ pub fn status(p: &ServiceParams) -> Result<ServiceStatus> {
     platform::status(p)
 }
 
+/// The account a system-scope service should run as: the caller's choice,
+/// else the pre-escalation user (`SUDO_USER`, so a sudo re-exec doesn't
+/// silently install the service as root), else the current user.
+pub fn resolve_for_user(provided: Option<String>) -> Result<String> {
+    if let Some(u) = provided {
+        return Ok(u);
+    }
+    #[cfg(unix)]
+    if let Some(s) = std::env::var_os("SUDO_USER")
+        && let Some(s) = s.to_str()
+        && !s.is_empty()
+    {
+        return Ok(s.to_string());
+    }
+    Ok(crate::local_identity::current_user()?.to_string())
+}
+
 // ---- shared helpers --------------------------------------------------------
 
 /// Reject service names that would compromise the renderers below.
