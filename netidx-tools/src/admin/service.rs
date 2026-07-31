@@ -21,6 +21,7 @@ use std::process::Command;
 /// ([`install_with_defaults`] + escalation). The offer *decision* is the
 /// library's async `netidx_admin::plan::service::offer`, driven through the
 /// `Answerer` seam by each flow (installs, `ca init`, `ca external install`).
+#[cfg(unix)]
 pub(crate) use netidx_admin::plan::service::ServiceNeed;
 
 /// Env var that signals "I'm the elevated child" to skip

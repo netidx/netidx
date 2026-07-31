@@ -12,18 +12,15 @@ use anyhow::{Context, Result, bail};
 use clap::Args;
 use netidx_admin::{
     config_lock::ConfigDirLock,
+    install_bundle::{self, BundleScope, Component, IdentityKind, ServiceIntent},
     paths,
-    plan::AuthKind,
     plan::enroll::{self, DiscoveredAdminDomain},
     provenance::{InstallRecord, InstallRole},
     service::{ServiceParams, ServiceScope, ServiceStatus},
     tls, transport,
 };
 #[cfg(unix)]
-use netidx_admin::{
-    install_bundle::{self, BundleScope, Component, IdentityKind, ServiceIntent},
-    plan::install::resolver::enroll_admin_server,
-};
+use netidx_admin::{plan::AuthKind, plan::install::resolver::enroll_admin_server};
 use netidx_admin_proto::NodeKind;
 #[cfg(unix)]
 use std::str::FromStr;

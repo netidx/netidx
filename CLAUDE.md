@@ -20,6 +20,23 @@ cargo build -p netidx-tools
 cargo build --all-targets
 ```
 
+### Windows
+
+`netidx` and `netidx-tools` must compile for Windows. Nothing else in the repo
+checks this, and it has silently rotted before — a crate reorganization moved
+portable modules behind a unix gate and the Windows build stayed broken for
+months. Run this alongside the normal build whenever you touch the admin crates:
+
+```bash
+rustup target add x86_64-pc-windows-gnu   # once
+cargo check -p netidx-tools -p netidx-admin --target x86_64-pc-windows-gnu --all-targets
+```
+
+Baseline is zero errors and zero warnings. Gate an item `#[cfg(unix)]` only when
+it genuinely needs a unix-only facility (openssl, the `SO_PEERCRED` control
+socket, the daemon); gating something merely because its caller is gated pushes
+the boundary the wrong way.
+
 ### Testing
 ```bash
 # Run all tests

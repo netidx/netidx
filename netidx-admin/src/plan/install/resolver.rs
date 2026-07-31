@@ -10,14 +10,13 @@
 
 use super::{
     DEFAULT_RESOLVER_NAME, InstallCommon, admin_domain_provenance, detect_resolver_shape,
-    finish_with, install_agent_unit, prompt_ip_or_addr, prompt_resolver_own_tls_name,
-    resolve_netidx_binary, resolve_units_dir, warn_incomplete_resolver_address,
+    finish_with, prompt_ip_or_addr, prompt_resolver_own_tls_name, resolve_netidx_binary,
+    resolve_units_dir, warn_incomplete_resolver_address,
 };
 
 use crate::{
     admin_proto::{InfoAuth, NodeKind, ResolverClusterEdge},
     answer::{Answerer, Field},
-    paths,
     plan::{
         AuthKind,
         enroll::{self, AdminServers, DiscoveredAdminDomain, KeyProtArg},
@@ -41,7 +40,7 @@ use std::{
 // The unix-only tail: minting / opening a CA, standing up an admin server, and
 // delegating under a WAN parent all depend on unix-only modules.
 #[cfg(unix)]
-use super::DEFAULT_TLS_DOMAIN;
+use super::{DEFAULT_TLS_DOMAIN, install_agent_unit};
 #[cfg(unix)]
 use crate::{
     admin_proto::{ResolverAddr, Role},
@@ -49,7 +48,7 @@ use crate::{
     atomic,
     config_lock::ConfigDirLock,
     fingerprint::Fingerprint,
-    offline_ca,
+    offline_ca, paths,
     plan::{
         AdminPlane, admin_plane_decision, ca_setup, delegation, enroll::KeyProtection,
         server_setup,
@@ -700,6 +699,7 @@ pub async fn run_resolver(
             {
                 let _ = (&probe, kind, no_admin_server, with_admin_server, listen);
                 let _ = (resolver_config_actual, id_map_actual);
+                let _ = (ans, config_lock, post_apply_units_dir, netidx_ca);
             }
             // A resolver host normally runs an admin server, which does both
             // housekeeping jobs in-process — no agent unit, and no second

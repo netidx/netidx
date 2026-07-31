@@ -8,10 +8,9 @@
 //! so `confirm_identity` auto-accepts (still re-pinning per op), while the
 //! bearer session is read from the sealed or process-local session cache.
 //!
-//! `ops` is unix-only, so the op *bodies* ([`run`]) are `#[cfg(unix)]`;
-//! the state, action, and result types hold only cross-platform values (the ops
-//! render `ops` rows into plain [`PanelRow`]s), so the UI compiles
-//! everywhere and simply reports "unavailable" off unix.
+//! Everything here is cross-platform: the ops render rows into plain
+//! [`PanelRow`]s, and nothing in this module reaches for the CA vault or the
+//! control socket, so a Windows admin drives the same panels as a unix one.
 
 use super::{
     action::Action,
@@ -19,9 +18,7 @@ use super::{
     answer::TuiAnswerer,
     theme, widgets,
 };
-use anyhow::Result;
-#[cfg(unix)]
-use anyhow::{Context, bail};
+use anyhow::{Context, Result, bail};
 use crossterm::event::KeyCode;
 use netidx::resolver_server::config::ReadGate;
 use netidx_admin_proto::AdminServerId;
@@ -33,7 +30,9 @@ use ratatui::{
     text::{Line, Span},
     widgets::{List, ListItem, ListState, Paragraph, Wrap},
 };
-use std::{net::SocketAddr, path::PathBuf};
+use std::net::SocketAddr;
+#[cfg(unix)]
+use std::path::PathBuf;
 
 /// A pinned, authenticated remote-admin session, captured once at connect and
 /// reused by every panel op. All fields are cross-platform.
@@ -53,6 +52,7 @@ pub(super) struct RemoteConn {
 #[derive(Clone)]
 pub(super) enum PanelTarget {
     /// This box's own admin server over its `SO_PEERCRED` control socket.
+    #[cfg(unix)]
     Local {
         cfg_path: PathBuf,
     },
@@ -65,6 +65,7 @@ impl PanelTarget {
     fn glyph(&self) -> Option<Fingerprint> {
         match self {
             PanelTarget::Remote(c) => Some(c.confirmed_fp),
+            #[cfg(unix)]
             PanelTarget::Local { .. } => None,
         }
     }
@@ -73,6 +74,7 @@ impl PanelTarget {
     fn remote(&self) -> Result<&RemoteConn> {
         match self {
             PanelTarget::Remote(c) => Ok(c),
+            #[cfg(unix)]
             PanelTarget::Local { .. } => {
                 anyhow::bail!("this operation requires connecting to an admin domain")
             }
@@ -83,6 +85,7 @@ impl PanelTarget {
     fn into_remote(self) -> Result<RemoteConn> {
         match self {
             PanelTarget::Remote(c) => Ok(c),
+            #[cfg(unix)]
             PanelTarget::Local { .. } => {
                 anyhow::bail!("this operation requires connecting to an admin domain")
             }
@@ -93,6 +96,7 @@ impl PanelTarget {
     /// for the enrollment queue, delegations, revocation, or (yet) perms.
     fn panels(&self) -> &'static [Panel] {
         match self {
+            #[cfg(unix)]
             PanelTarget::Local { .. } => &LOCAL_PANELS,
             PanelTarget::Remote(_) => &PANELS,
         }
@@ -152,6 +156,7 @@ impl Panel {
     /// Whether this panel first needs a target netidx path (the map routes it to
     /// the admin domain owning that path). Only admin domain Perms — a resolver cluster pick from the
     /// map. Services picks an admin server (also from the map), not a path.
+    #[cfg(unix)]
     fn path_scoped(self) -> bool {
         matches!(self, Panel::Perms)
     }
@@ -572,8 +577,7 @@ pub(super) enum RemoteUpdate {
 
 // ---- op bodies (unix-only: they call ops) ---------------------------
 
-/// Run a remote-admin action to completion. The `ops` calls are unix-only.
-#[cfg(unix)]
+/// Run a remote-admin action to completion.
 pub(super) async fn run(
     ans: &mut TuiAnswerer,
     action: RemoteAction,
@@ -632,15 +636,6 @@ pub(super) async fn run(
     }
 }
 
-#[cfg(not(unix))]
-pub(super) async fn run(
-    _ans: &mut TuiAnswerer,
-    _action: RemoteAction,
-) -> Result<super::action::Outcome> {
-    anyhow::bail!("remote administration is only available on unix hosts")
-}
-
-#[cfg(unix)]
 async fn connect(
     ans: &mut TuiAnswerer,
     server: SocketAddr,
@@ -716,7 +711,6 @@ async fn connect(
     ))
 }
 
-#[cfg(unix)]
 async fn logout(conn: RemoteConn) -> Result<super::action::Outcome> {
     use netidx_admin::{session_cache, transport};
     use netidx_admin_proto::NodeKind;
@@ -753,7 +747,6 @@ async fn logout(conn: RemoteConn) -> Result<super::action::Outcome> {
 /// copy. Merges every reachable admin domain into the saved registry, then hands the
 /// list back so the landing screen re-polls and shows the verified ones — no
 /// toast to dismiss, just the list, like discovery everywhere else.
-#[cfg(unix)]
 async fn discover(ans: &mut TuiAnswerer) -> Result<super::action::Outcome> {
     use netidx_admin::{
         answer::{Answerer, Progress, Stage},
@@ -820,7 +813,6 @@ async fn discover(ans: &mut TuiAnswerer) -> Result<super::action::Outcome> {
     Ok(super::action::Outcome::remote_clusters(known.domains))
 }
 
-#[cfg(unix)]
 async fn refresh(
     ans: &mut TuiAnswerer,
     target: PanelTarget,
@@ -847,7 +839,6 @@ async fn refresh(
     Ok(super::action::Outcome::remote_rows(panel, rows))
 }
 
-#[cfg(unix)]
 async fn queue_rows(ans: &mut TuiAnswerer, conn: &RemoteConn) -> Result<Vec<PanelRow>> {
     use netidx_admin::ops::queue::list_queue;
     let items =
@@ -856,7 +847,6 @@ async fn queue_rows(ans: &mut TuiAnswerer, conn: &RemoteConn) -> Result<Vec<Pane
 }
 
 /// Format one queue item into a display row + its action code.
-#[cfg(unix)]
 fn queue_row(item: &netidx_admin::ops::queue::QueueItem) -> PanelRow {
     let name = if let Some(listen) = item.enroll_listen {
         format!("admin-server enrollment @ {listen}")
@@ -929,7 +919,6 @@ fn queue_row(item: &netidx_admin::ops::queue::QueueItem) -> PanelRow {
     row
 }
 
-#[cfg(unix)]
 async fn approve(
     ans: &mut TuiAnswerer,
     conn: RemoteConn,
@@ -958,7 +947,6 @@ async fn approve(
     Ok(super::action::Outcome::remote_after("Approved", lines, Panel::Queue, rows))
 }
 
-#[cfg(unix)]
 async fn approve_renewals(
     ans: &mut TuiAnswerer,
     conn: RemoteConn,
@@ -980,7 +968,6 @@ async fn approve_renewals(
     Ok(super::action::Outcome::remote_after("Renewals", lines, Panel::Queue, rows))
 }
 
-#[cfg(unix)]
 async fn deny(
     ans: &mut TuiAnswerer,
     conn: RemoteConn,
@@ -1010,7 +997,6 @@ async fn deny(
     ))
 }
 
-#[cfg(unix)]
 async fn delegation_rows(
     ans: &mut TuiAnswerer,
     conn: &RemoteConn,
@@ -1028,7 +1014,6 @@ async fn delegation_rows(
 }
 
 /// Format one pending or approved delegation into a display row + its action code.
-#[cfg(unix)]
 fn delegation_row(item: &netidx_admin::ops::delegation::PendingDelegation) -> PanelRow {
     let parent =
         item.parent.iter().map(|a| a.addr.to_string()).collect::<Vec<_>>().join(", ");
@@ -1050,7 +1035,6 @@ fn delegation_row(item: &netidx_admin::ops::delegation::PendingDelegation) -> Pa
     )
 }
 
-#[cfg(unix)]
 async fn approve_delegation(
     ans: &mut TuiAnswerer,
     conn: RemoteConn,
@@ -1092,7 +1076,6 @@ async fn approve_delegation(
     Ok(super::action::Outcome::remote_after("Approved", lines, Panel::Delegations, rows))
 }
 
-#[cfg(unix)]
 async fn deny_delegation(
     ans: &mut TuiAnswerer,
     conn: RemoteConn,
@@ -1122,7 +1105,6 @@ async fn deny_delegation(
     ))
 }
 
-#[cfg(unix)]
 async fn revocation_rows(
     ans: &mut TuiAnswerer,
     conn: &RemoteConn,
@@ -1143,7 +1125,6 @@ async fn revocation_rows(
 
 /// Format one issued certificate into a display row + its revoke key (serial +
 /// its per-key glyph, `None` when the stored glyph is empty/unparseable).
-#[cfg(unix)]
 fn revocation_row(e: &netidx_admin_proto::IssuedEntry) -> PanelRow {
     let glyph = Fingerprint::parse_text(&e.spki_fp).ok();
     let short = match &glyph {
@@ -1161,7 +1142,6 @@ fn revocation_row(e: &netidx_admin_proto::IssuedEntry) -> PanelRow {
     )
 }
 
-#[cfg(unix)]
 async fn revoke(
     ans: &mut TuiAnswerer,
     conn: RemoteConn,
@@ -1210,13 +1190,15 @@ async fn revoke(
     Ok(super::action::Outcome::remote_after("Revoked", lines, Panel::Revocation, rows))
 }
 
-#[cfg(unix)]
 async fn admin_target(
     ans: &mut TuiAnswerer,
     target: &PanelTarget,
 ) -> Result<netidx_admin::ops::AdminTarget> {
-    use netidx_admin::ops::{AdminTarget, resolve_admin_target};
+    #[cfg(unix)]
+    use netidx_admin::ops::AdminTarget;
+    use netidx_admin::ops::resolve_admin_target;
     match target {
+        #[cfg(unix)]
         PanelTarget::Local { cfg_path, .. } => {
             Ok(AdminTarget::Local { cfg_path: cfg_path.clone() })
         }
@@ -1233,7 +1215,6 @@ async fn admin_target(
     }
 }
 
-#[cfg(unix)]
 async fn roster_rows(
     ans: &mut TuiAnswerer,
     target: &PanelTarget,
@@ -1243,14 +1224,12 @@ async fn roster_rows(
     Ok(list_admins(&at).await?.iter().map(roster_row).collect())
 }
 
-#[cfg(unix)]
 async fn server_rows(ans: &mut TuiAnswerer, conn: &RemoteConn) -> Result<Vec<PanelRow>> {
     use netidx_admin::ops::servers::list_servers;
     let servers = list_servers(ans, Some(conn.server), None).await?;
     Ok(servers.iter().map(server_row).collect())
 }
 
-#[cfg(unix)]
 fn server_row(server: &netidx_admin::ops::servers::ServerInfo) -> PanelRow {
     let cluster = server.cluster_base.clone().unwrap_or_else(|| "(none)".to_string());
     let roles = server
@@ -1327,7 +1306,6 @@ fn server_row(server: &netidx_admin::ops::servers::ServerInfo) -> PanelRow {
     }
 }
 
-#[cfg(unix)]
 async fn remove_server(
     ans: &mut TuiAnswerer,
     conn: RemoteConn,
@@ -1429,7 +1407,6 @@ async fn remove_server(
 /// The panel is re-listed from the map afterwards rather than assuming the
 /// change took: the member reports its own gate, so what comes back is what
 /// that host says it is doing, not what we just asked for.
-#[cfg(unix)]
 async fn set_read_gate(
     ans: &mut TuiAnswerer,
     conn: RemoteConn,
@@ -1474,7 +1451,6 @@ async fn set_read_gate(
     Ok(super::action::Outcome::remote_after(title, vec![line], Panel::Servers, rows))
 }
 
-#[cfg(unix)]
 async fn reconcile_ca(
     ans: &mut TuiAnswerer,
     conn: RemoteConn,
@@ -1517,7 +1493,6 @@ async fn reconcile_ca(
 
 /// Format one roster entry. Reserved signing slots (recovery / autorenew) are
 /// display-only ([`RowKey::None`]) — the roster actions must never target them.
-#[cfg(unix)]
 fn roster_row(a: &netidx_admin_proto::policy::AdminInfo) -> PanelRow {
     use netidx_admin_proto::policy::{SlotKind, is_reserved_admin};
     let tier = match a.kind {
@@ -1540,7 +1515,6 @@ fn roster_row(a: &netidx_admin_proto::policy::AdminInfo) -> PanelRow {
 /// roster detail pane. A signing slot holds the CA master key, so its authority
 /// is total and the granular policy doesn't apply; a role admin is the sum of
 /// its explicit grants (an empty scope reads as "none", not "any").
-#[cfg(unix)]
 fn policy_detail(a: &netidx_admin_proto::policy::AdminInfo) -> Vec<(String, String)> {
     use netidx_admin_proto::policy::SlotKind;
     if matches!(a.kind, SlotKind::Signing) {
@@ -1588,7 +1562,6 @@ fn policy_detail(a: &netidx_admin_proto::policy::AdminInfo) -> Vec<(String, Stri
 
 /// The `$EDITOR` validator for a policy JSON blob: it must parse as a `Policy`;
 /// returns the normalized (pretty) JSON to store.
-#[cfg(unix)]
 fn policy_validator() -> super::answer::EditValidator {
     Box::new(|s: &str| {
         let p: netidx_admin_proto::policy::Policy =
@@ -1599,7 +1572,6 @@ fn policy_validator() -> super::answer::EditValidator {
 
 /// A starter policy for a new role admin — every field present (all grants off)
 /// so the editor shows exactly what can be granted.
-#[cfg(unix)]
 fn policy_template() -> netidx_admin_proto::policy::Policy {
     netidx_admin_proto::policy::Policy {
         allowed_san: vec![],
@@ -1613,7 +1585,6 @@ fn policy_template() -> netidx_admin_proto::policy::Policy {
     }
 }
 
-#[cfg(unix)]
 async fn add_admin(
     ans: &mut TuiAnswerer,
     target: PanelTarget,
@@ -1641,7 +1612,6 @@ async fn add_admin(
     ))
 }
 
-#[cfg(unix)]
 async fn set_policy(
     ans: &mut TuiAnswerer,
     target: PanelTarget,
@@ -1667,7 +1637,6 @@ async fn set_policy(
     ))
 }
 
-#[cfg(unix)]
 async fn remove_admin(
     ans: &mut TuiAnswerer,
     target: PanelTarget,
@@ -1688,25 +1657,26 @@ async fn remove_admin(
 /// Read the perms of the admin domain mounted at `at`, for either target. A remote
 /// target authenticates to its verified CA; a local target uses the
 /// protected control socket and is confined to this host's own resolver cluster.
-#[cfg(unix)]
 async fn show_perms_for(
     ans: &mut TuiAnswerer,
     target: &PanelTarget,
     at: &str,
 ) -> Result<String> {
-    use netidx_admin::ops::perms::{show_perms, show_perms_local};
+    use netidx_admin::ops::perms::show_perms;
+    #[cfg(unix)]
+    use netidx_admin::ops::perms::show_perms_local;
     match target {
         PanelTarget::Remote(conn) => {
             show_perms(ans, Some(conn.server), None, Some(conn.admin.clone()), None, at)
                 .await
         }
+        #[cfg(unix)]
         PanelTarget::Local { cfg_path, .. } => show_perms_local(cfg_path, at).await,
     }
 }
 
 /// Fetch the admin domain's resolver clusters (by base path) and open the resolver cluster
 /// picker for the Perms panel — the admin domain-scope replacement for typing a path.
-#[cfg(unix)]
 async fn list_resolver_clusters(
     ans: &mut TuiAnswerer,
     target: PanelTarget,
@@ -1716,12 +1686,12 @@ async fn list_resolver_clusters(
             netidx_admin::ops::perms::list_resolver_clusters(ans, Some(conn.server), None)
                 .await?
         }
+        #[cfg(unix)]
         PanelTarget::Local { .. } => vec![local_own_base()],
     };
     Ok(super::action::Outcome::resolver_clusters(Panel::Perms, bases))
 }
 
-#[cfg(unix)]
 async fn perms_rows(
     ans: &mut TuiAnswerer,
     target: &PanelTarget,
@@ -1737,15 +1707,14 @@ async fn perms_rows(
     Ok(rows)
 }
 
-#[cfg(unix)]
 async fn edit_perms(
     ans: &mut TuiAnswerer,
     target: PanelTarget,
     at: String,
 ) -> Result<super::action::Outcome> {
-    use netidx_admin::ops::perms::{
-        edit_perms_local, edit_perms_with_session, open_perms_session, show_perms_local,
-    };
+    #[cfg(unix)]
+    use netidx_admin::ops::perms::{edit_perms_local, show_perms_local};
+    use netidx_admin::ops::perms::{edit_perms_with_session, open_perms_session};
     // Seed the editor with the admin domain's current perms, validate locally, then
     // hand the normalized result to the CA (which re-validates + propagates).
     let (session, current) = match &target {
@@ -1761,6 +1730,7 @@ async fn edit_perms(
             .await?;
             (Some(session), current)
         }
+        #[cfg(unix)]
         PanelTarget::Local { cfg_path, .. } => {
             (None, show_perms_local(cfg_path, &at).await?)
         }
@@ -1778,6 +1748,7 @@ async fn edit_perms(
             )
             .await?
         }
+        #[cfg(unix)]
         PanelTarget::Local { cfg_path, .. } => {
             edit_perms_local(cfg_path, &at, &edited).await?
         }
@@ -1808,7 +1779,6 @@ async fn edit_perms(
 /// The admin domain's admin servers, from the map — the service-control server
 /// picker (the first pick). Each row preserves the immutable ID that a control op uses;
 /// its address is display-only routing context.
-#[cfg(unix)]
 async fn list_service_servers(
     ans: &mut TuiAnswerer,
     target: PanelTarget,
@@ -1829,7 +1799,6 @@ async fn list_service_servers(
 /// The selected server's units as shared [`ServiceRow`]s (state + definition),
 /// so the remote panel renders identically to the Local Services surface. A
 /// status query to that one server (`units` empty ⇒ all).
-#[cfg(unix)]
 async fn fetch_service_rows(
     ans: &mut TuiAnswerer,
     conn: &RemoteConn,
@@ -1843,7 +1812,6 @@ async fn fetch_service_rows(
 /// One-shot service-control RPC against a single admin server, forwarding to
 /// `ops::service::control_remote`. Returns each unit's state + (from the
 /// member) its definition.
-#[cfg(unix)]
 async fn service_op(
     ans: &mut TuiAnswerer,
     conn: &RemoteConn,
@@ -1865,7 +1833,6 @@ async fn service_op(
     .await
 }
 
-#[cfg(unix)]
 async fn service_control(
     ans: &mut TuiAnswerer,
     conn: RemoteConn,
@@ -1993,11 +1960,13 @@ const PANELS: [Panel; 7] = [
 /// daemon authorizes the local superuser and confines both to its own resolver cluster).
 /// The queue, delegations, and revocation have no no-auth local backend and
 /// stay Admin domain-only.
+#[cfg(unix)]
 const LOCAL_PANELS: [Panel; 2] = [Panel::Roster, Panel::Perms];
 
 /// This host's own resolver base — the single resolver cluster a local (control-socket)
 /// perms edit is allowed to touch. Best-effort from the local resolver config,
 /// falling back to the root; the admin server enforces the confinement anyway.
+#[cfg(unix)]
 fn local_own_base() -> String {
     netidx_admin::resolver::ResolverConfig::load_default()
         .map(|c| c.base_path())
@@ -2043,6 +2012,7 @@ impl RemoteState {
     /// menu) — the Local tab's split "Admins" / "Permissions" items. For the
     /// path-scoped Perms panel there is no path prompt: local perms are confined
     /// to this host's own resolver base. Returns the initial refresh op to run.
+    #[cfg(unix)]
     pub(super) fn local_panel(
         cfg_path: PathBuf,
         panel: Panel,
@@ -2189,6 +2159,7 @@ impl RemoteState {
             // A Local surface (Local tab) closes back to the tab; a Remote one
             // disconnects.
             Screen::Menu => match self.target {
+                #[cfg(unix)]
                 Some(PanelTarget::Local { .. }) => "↑/↓ · Enter open · Esc back",
                 Some(PanelTarget::Remote(_)) | None => {
                     "↑/↓ · Enter open · L logout · Esc disconnect"
@@ -3057,6 +3028,7 @@ impl RemoteState {
     fn render_menu(&self, f: &mut Frame, area: Rect) {
         let title = match &self.target {
             Some(PanelTarget::Remote(c)) => format!(" {} — {} ", c.domain, c.admin),
+            #[cfg(unix)]
             Some(PanelTarget::Local { .. }) => " Local admin server ".to_string(),
             None => " Admin domain ".to_string(),
         };

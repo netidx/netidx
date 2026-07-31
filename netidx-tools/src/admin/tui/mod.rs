@@ -411,6 +411,7 @@ impl App {
         match action {
             // Open the Local tab's local admin panel surface directly on the
             // requested panel (Admins / Permissions), kicking off its refresh.
+            #[cfg(unix)]
             Action::ManageLocalAdmins { cfg_path, panel } => {
                 self.local.open_admin(cfg_path, panel)
             }
@@ -1364,6 +1365,7 @@ mod render_tests {
         assert!(s.contains("resolver.example.com"), "help tail truncated: {s:?}");
     }
 
+    #[cfg(unix)]
     #[test]
     fn local_admin_surface_opens_on_chosen_panel() {
         // The split "Admins" / "Permissions" items open the local admin surface

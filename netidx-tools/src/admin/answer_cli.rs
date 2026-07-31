@@ -38,6 +38,7 @@ pub(crate) fn make_flag_answerer(
 /// `--recovery-password-file` / `--recovery-password-stdin` (never argv), and
 /// there is no admin server to glyph-confirm. The flag names are threaded into
 /// the answerer so a missing-secret error cites the right flags.
+#[cfg(unix)]
 pub(crate) fn make_offline_answerer(
     recovery_password_file: Option<&Path>,
     recovery_password_stdin: bool,
@@ -140,6 +141,7 @@ struct SecretSlot {
 impl SecretSlot {
     /// A slot with no supplied value; a `secret()` call on it errors, naming
     /// `flags`. For a purpose this command doesn't accept a secret for.
+    #[cfg(unix)]
     fn none(flags: (&'static str, &'static str)) -> Self {
         SecretSlot { value: None, flags }
     }
@@ -212,6 +214,7 @@ impl FlagAnswerer {
     /// The offline CA-vault answerer: the single secret is the recovery password
     /// (cited as `--recovery-password-file`), which also unlocks a legacy
     /// encrypted key.
+    #[cfg(unix)]
     pub(crate) fn offline(recovery: Option<Zeroizing<String>>) -> Self {
         FlagAnswerer {
             key: SecretSlot { value: recovery.clone(), flags: RECOVERY_FLAGS },

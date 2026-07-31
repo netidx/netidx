@@ -5,11 +5,14 @@
 //! runtime panics). Everything below is the same library call with a plan
 //! returned instead of printed.
 
-use anyhow::{Context, Result, bail};
+#[cfg(unix)]
+use anyhow::Context;
+use anyhow::{Result, bail};
 use netidx_admin::{
     provenance::{InstallRecord, InstallRole},
     sync::{self, SyncPlan},
 };
+#[cfg(unix)]
 use netidx_admin_proto::{AdminDomainMap, NodeKind};
 use std::path::Path;
 
@@ -36,6 +39,7 @@ pub(super) async fn sync_plan(config_root: &Path, role: InstallRole) -> Result<S
 /// Fetch the admin domain map as this host, pinned to the CA identity recorded at
 /// install — for map-driven UI (the parent picker). Errors if this host isn't
 /// part of an admin domain or no admin server answers with the pinned identity.
+#[cfg(unix)]
 pub(super) async fn fetch_local_map(config_root: &Path) -> Result<AdminDomainMap> {
     let rec = InstallRecord::load(&config_root.join("install.json"))?;
     let net_id = rec

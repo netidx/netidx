@@ -20,11 +20,9 @@ use crossterm::{
 };
 use netidx_activation::runtime::default_units_dir;
 use netidx_admin::service::{self, ServiceParams, ServiceScope, ServiceStatus};
-use std::{
-    io::{Write, stdout},
-    path::Path,
-    process::Command,
-};
+#[cfg(unix)]
+use std::{io::Write, process::Command};
+use std::{io::stdout, path::Path};
 
 /// Register the OS service at `scope`, returning a human summary line.
 ///

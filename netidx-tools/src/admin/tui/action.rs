@@ -16,10 +16,11 @@ use anyhow::{Result, bail};
 use netidx_admin::{
     answer::{Answerer, Field, Progress, Stage},
     config_lock::ConfigDirLock,
-    paths,
+    install_bundle, paths,
     plan::install::{
         InstallCommon, InstallMode,
         publisher::{PublisherInput, run_publisher},
+        resolver::{ResolverInput, run_resolver},
     },
     provenance::InstallRole,
     renewd,
@@ -27,11 +28,8 @@ use netidx_admin::{
 };
 #[cfg(unix)]
 use netidx_admin::{
-    atomic, install_bundle, local, offline_ca,
-    plan::install::{
-        ca::{CaInput, run_ca},
-        resolver::{ResolverInput, run_resolver},
-    },
+    atomic, local, offline_ca,
+    plan::install::ca::{CaInput, run_ca},
 };
 use std::{
     net::{IpAddr, SocketAddr},
@@ -293,8 +291,10 @@ pub(super) enum Action {
     },
     /// Rotate (or first-enable) this box's local admin server auto-approve
     /// credential — a local, no-auth CA op over the control socket.
+    #[cfg(unix)]
     AutoApprove { rotate: bool, ca_dir: PathBuf, cfg: Option<PathBuf> },
     /// Mint a fresh CA recovery password on this box (local, no-auth).
+    #[cfg(unix)]
     RecoveryRotate { ca_dir: PathBuf, cfg: Option<PathBuf> },
     /// Back up the complete managed installation. A CA component is
     /// captured through its protected local control socket.
@@ -308,8 +308,10 @@ pub(super) enum Action {
         addresses: install_bundle::RestoreAddresses,
     },
     /// Re-emit a renewal CSR for this box's externally-signed CA (local).
+    #[cfg(unix)]
     ExternalEmitCsr { ca_dir: PathBuf },
     /// Install an externally-signed CA certificate on this box (local).
+    #[cfg(unix)]
     ExternalInstall { ca_dir: PathBuf },
     /// Open the Local tab's Services surface over the local activation
     /// supervisor's control socket (no auth). Pure navigation — the UI loop opens
@@ -322,6 +324,7 @@ pub(super) enum Action {
     /// Open the Local tab's local admin-server panel surface (roster, perms) over
     /// the control socket, landing directly on `panel`. Pure navigation — handled
     /// by the UI loop, not an op.
+    #[cfg(unix)]
     ManageLocalAdmins { cfg_path: PathBuf, panel: super::remote::Panel },
 }
 
@@ -345,20 +348,25 @@ impl Action {
             Action::AddParent { .. } => "Adding a parent".to_string(),
             Action::Remote(ra) => ra.label(),
             Action::Uninstall { .. } => "Uninstalling".to_string(),
+            #[cfg(unix)]
             Action::AutoApprove { rotate, .. } => if *rotate {
                 "Rotating auto-approve credential"
             } else {
                 "Enabling auto-approve"
             }
             .to_string(),
+            #[cfg(unix)]
             Action::RecoveryRotate { .. } => "Rotating recovery password".to_string(),
             Action::Backup { .. } => "Backing up this install".to_string(),
             Action::Restore => "Restoring an install".to_string(),
             Action::FinishRestore { .. } => "Finishing restore".to_string(),
+            #[cfg(unix)]
             Action::ExternalEmitCsr { .. } => "Emitting renewal CSR".to_string(),
+            #[cfg(unix)]
             Action::ExternalInstall { .. } => "Installing signed certificate".to_string(),
             Action::OpenServices { .. } => "Services".to_string(),
             Action::Services(sa) => sa.label(),
+            #[cfg(unix)]
             Action::ManageLocalAdmins { .. } => "Managing admins".to_string(),
         }
     }
@@ -384,18 +392,21 @@ impl Action {
             | Action::Update { .. }
             | Action::Join { .. }
             | Action::AddParent { .. }
-            | Action::AutoApprove { rotate: false, .. }
             | Action::Backup { .. }
             | Action::Restore
-            | Action::FinishRestore { .. }
+            | Action::FinishRestore { .. } => None,
+            #[cfg(unix)]
+            Action::AutoApprove { rotate: false, .. }
             | Action::ExternalEmitCsr { .. }
             | Action::ExternalInstall { .. }
             | Action::ManageLocalAdmins { .. } => None,
+            #[cfg(unix)]
             Action::AutoApprove { rotate: true, .. } => Some(
                 "Rotate the auto-approve credential? The current keytab stops \
                  working; the admin server re-mints and re-seals it."
                     .to_string(),
             ),
+            #[cfg(unix)]
             Action::RecoveryRotate { .. } => Some(
                 "Rotate the CA recovery password? The current recovery password \
                  stops working and a new one is shown once — save it."
@@ -445,12 +456,14 @@ pub(super) async fn run_owned(mut ans: TuiAnswerer, action: Action) -> Result<Ou
         Action::Uninstall { .. } => {
             bail!("internal error: uninstall is not an op future")
         }
+        #[cfg(unix)]
         Action::ManageLocalAdmins { .. } => {
             bail!("internal error: manage-local-admins is navigation, not an op future")
         }
         Action::OpenServices { .. } => {
             bail!("internal error: open-services is navigation, not an op future")
         }
+        #[cfg(unix)]
         a @ (Action::AutoApprove { .. }
         | Action::RecoveryRotate { .. }
         | Action::ExternalEmitCsr { .. }
@@ -479,11 +492,6 @@ async fn local_ca_op(ans: &mut TuiAnswerer, action: Action) -> Result<Outcome> {
         Action::ExternalInstall { ca_dir } => external_install(ans, ca_dir).await,
         _ => unreachable!("local_ca_op called with a non-CA action"),
     }
-}
-
-#[cfg(not(unix))]
-async fn local_ca_op(_ans: &mut TuiAnswerer, _action: Action) -> Result<Outcome> {
-    bail!("local admin-server CA operations are only available on unix hosts")
 }
 
 /// Rotate/enable the local admin server's auto-approve credential.

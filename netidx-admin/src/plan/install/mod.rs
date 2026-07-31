@@ -31,7 +31,6 @@ use std::{
 pub mod ca;
 /// role install cascades.
 pub mod publisher;
-#[cfg(unix)]
 pub mod resolver;
 pub mod workstation;
 

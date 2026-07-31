@@ -35,6 +35,7 @@ pub(super) type EditValidator = Box<dyn Fn(&str) -> Result<String> + Send>;
 
 /// One selectable resolver in the parent picker — display only; the caller holds
 /// the parallel address data (the `ResolverAddr` + owning admin) by index.
+#[cfg(unix)]
 pub(super) struct ParentRow {
     /// e.g. `resolver-eu-a  10.0.60.15:4564`.
     pub(super) label: String,
@@ -43,6 +44,7 @@ pub(super) struct ParentRow {
 }
 
 /// The operator's pick from the parent picker.
+#[cfg(unix)]
 pub(super) enum ParentSelection {
     /// The ticked resolver rows (indices into the offered slice).
     Resolvers(Vec<usize>),
@@ -77,6 +79,7 @@ pub(super) enum UiRequest {
     },
     /// Multi-select the parent's resolver servers (each with its resolver cluster base), or the
     /// trailing "enter an address manually" option.
+    #[cfg(unix)]
     SelectParent {
         rows: Vec<ParentRow>,
         reply: oneshot::Sender<Result<ParentSelection>>,
@@ -165,6 +168,7 @@ impl TuiAnswerer {
     /// Multi-select the parent's resolver servers from the admin domain map, or fall
     /// back to a typed address. Inherent (TUI-only), like [`Self::edit`] — the
     /// strict CLI takes an explicit `--parent-*` instead.
+    #[cfg(unix)]
     pub(super) async fn select_parent(
         &self,
         rows: Vec<ParentRow>,
@@ -324,6 +328,7 @@ pub(super) enum Modal {
     /// Multi-select parent resolvers (checkbox per row) with a trailing
     /// manual-entry row. `checked` parallels `rows`; the cursor index
     /// `rows.len()` is the manual row.
+    #[cfg(unix)]
     SelectParent {
         rows: Vec<ParentRow>,
         checked: Vec<bool>,
@@ -402,6 +407,7 @@ impl Modal {
                     reply: Some(reply),
                 })
             }
+            #[cfg(unix)]
             UiRequest::SelectParent { rows, reply } => {
                 let mut state = ListState::default();
                 state.select(Some(0));
@@ -443,8 +449,9 @@ impl Modal {
             Modal::Text { field, .. }
             | Modal::Choice { field, .. }
             | Modal::Confirm { field, .. } => Some(*field),
+            #[cfg(unix)]
+            Modal::SelectParent { .. } => None,
             Modal::SelectAdminDomain { .. }
-            | Modal::SelectParent { .. }
             | Modal::Identity { .. }
             | Modal::Announce { .. }
             | Modal::AnnounceIdentity { .. }
@@ -454,7 +461,7 @@ impl Modal {
 
     /// Handle a key. Returns `true` when the modal has resolved (answer sent)
     /// and should be removed.
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(super) fn on_key(&mut self, code: KeyCode) -> bool {
         self.on_key_with_modifiers(code, KeyModifiers::NONE)
     }
@@ -574,6 +581,7 @@ impl Modal {
             // rows.len() rows + one trailing manual row; Space ticks a resolver,
             // Enter confirms the ticked set (or the cursor row if none ticked),
             // Enter on the manual row picks Manual.
+            #[cfg(unix)]
             Modal::SelectParent { rows, checked, state, reply } => match code {
                 KeyCode::Esc => {
                     if let Some(tx) = reply.take() {
@@ -888,6 +896,7 @@ impl Modal {
                     cols[1],
                 );
             }
+            #[cfg(unix)]
             Modal::SelectParent { rows, checked, state, .. } => {
                 const MANUAL: &str = "Enter an address manually…";
                 let w = 76u16.min(screen.width.saturating_sub(4)).max(48);
@@ -1121,7 +1130,7 @@ fn popup(f: &mut Frame, screen: Rect, title: &str, lines: Vec<Line<'static>>, w:
     f.render_widget(body, area);
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use netidx_admin::{ca, plan::ca_setup};

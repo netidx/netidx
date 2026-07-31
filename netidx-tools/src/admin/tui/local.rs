@@ -126,6 +126,9 @@ struct Detected {
 /// once a background probe has answered. The paths are derived from local
 /// files; the state is not, so it is filled in asynchronously (see
 /// [`CaProbe`]).
+/// Off unix there is no local CA, so `local_ca_paths` always answers `None` and
+/// nothing below is ever built — the types stay compiled so the UI is one shape.
+#[cfg_attr(not(unix), allow(dead_code))]
 struct LocalCa {
     ca_dir: PathBuf,
     cfg: Option<PathBuf>,
@@ -140,6 +143,7 @@ struct LocalCa {
 /// UI task froze the whole TUI behind a wedged daemon, so it lives here on the
 /// same background-fill pattern as [`SyncState`].
 #[derive(Clone)]
+#[cfg_attr(not(unix), allow(dead_code))]
 pub(super) enum CaProbe {
     /// Not yet probed; the event loop launches one.
     Unprobed,
@@ -151,6 +155,7 @@ pub(super) enum CaProbe {
 }
 
 #[derive(Clone, Copy)]
+#[cfg_attr(not(unix), allow(dead_code))]
 pub(super) struct CaCredentials {
     /// The auto-approve (autorenew) credential slot exists.
     auto_approve_present: bool,
@@ -164,6 +169,7 @@ pub(super) struct CaCredentials {
     external_installed: bool,
 }
 
+#[cfg_attr(not(unix), allow(dead_code))]
 impl LocalCa {
     fn credentials(&self) -> Option<&CaCredentials> {
         match &self.probe {
@@ -373,6 +379,7 @@ impl LocalState {
     /// Open the local admin-server panel surface (control socket, no auth)
     /// directly on `panel` — the split "Admins" / "Permissions" entries. Takes
     /// over the Local tab until closed; returns the initial panel-refresh op.
+    #[cfg(unix)]
     pub(super) fn open_admin(
         &mut self,
         cfg_path: PathBuf,
@@ -457,6 +464,7 @@ impl LocalState {
                 *state = SyncState::Unchecked;
             }
         }
+        #[cfg(unix)]
         for install in &mut self.installs {
             if let Some(local_ca) = install.local_ca.as_mut()
                 && matches!(local_ca.probe, CaProbe::Failed(_))
@@ -797,14 +805,17 @@ fn action_desc(action: &Action) -> &'static str {
         Uninstall { remove_ca: true, .. } => {
             "Remove this install and destroy its certificate authority. Irreversible."
         }
+        #[cfg(unix)]
         AutoApprove { rotate: true, .. } => {
             "Rotate this admin server's auto-renew credential. The auto-renew service \
              automatically renews expiring certificates for the admin domain's members."
         }
+        #[cfg(unix)]
         AutoApprove { rotate: false, .. } => {
             "Enable the auto-renew service, which automatically renews expiring \
              certificates for the admin domain's members, without an admin approving each one."
         }
+        #[cfg(unix)]
         RecoveryRotate { .. } => {
             "Mint a fresh CA recovery password. Use this if you lost or forgot the old \
              one — it retires the old password. Works only locally, on the CA machine."
@@ -815,9 +826,11 @@ fn action_desc(action: &Action) -> &'static str {
         }
         Restore => "Restore a complete installation from a verified backup bundle.",
         FinishRestore { .. } => "Finish re-enrolling roles after CA startup.",
+        #[cfg(unix)]
         ExternalEmitCsr { .. } => {
             "Write a subordinate-CA CSR for your external PKI to sign."
         }
+        #[cfg(unix)]
         ExternalInstall { .. } => {
             "Install the externally-signed CA certificate returned by your PKI."
         }
@@ -828,9 +841,11 @@ fn action_desc(action: &Action) -> &'static str {
         // Never a menu item (dispatched from within the Services surface); present
         // only for exhaustiveness.
         Services(_) => "",
+        #[cfg(unix)]
         ManageLocalAdmins { panel: super::remote::Panel::Perms, .. } => {
             "View and edit this host's permissions."
         }
+        #[cfg(unix)]
         ManageLocalAdmins { .. } => "Manage this admin server's admins and their scopes.",
     }
 }
@@ -934,6 +949,7 @@ fn action_items(d: &Detected) -> Vec<(String, Action)> {
     }
     // Local admin-server CA tools — no auth (control socket), only for a node
     // that owns a CA. Most nodes have no `local_ca` and skip this entirely.
+    #[cfg(unix)]
     if let Some(lca) = &d.local_ca {
         // The admin roster and this host's own permissions over the local control
         // socket, when an admin server is configured on this box.

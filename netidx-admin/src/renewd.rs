@@ -96,6 +96,7 @@ enum Outcome {
 
 /// This host's admin-server config: the caller's override, else the
 /// standard search order.
+#[cfg(unix)]
 fn admin_server_config(override_: Option<&Path>) -> Option<PathBuf> {
     match override_ {
         Some(path) => Some(path.to_path_buf()),

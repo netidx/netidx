@@ -32,6 +32,7 @@ mod component;
 mod discover;
 // `delegation` (resolver hierarchy add-parent / review-delegation) drives
 // the admin server's CA admin auth + the delegation queue, both unix-only.
+mod agent;
 #[cfg(unix)]
 mod delegation;
 mod editor;
@@ -39,14 +40,9 @@ mod id_map;
 mod init;
 mod lifecycle;
 mod perms;
+mod perms_admin;
 #[cfg(unix)]
 mod read_gate;
-// `perms` admin (remote, map-routed perms show/edit) drives the admin
-// server's CA admin auth + resolver cluster push, both unix-only (the engine
-// pulls openssl), same as `delegation`.
-mod agent;
-#[cfg(unix)]
-mod perms_admin;
 mod resolver;
 mod roles;
 // `server` (the admin-server daemon CLI) depends on the
@@ -99,8 +95,6 @@ pub(crate) enum Params {
     },
     /// remotely show or edit a resolver cluster's permissions through the admin
     /// server, routed by the admin domain map (no SSH).
-    // Unix-only — like `ca`/`delegation`, the admin path needs openssl.
-    #[cfg(unix)]
     Perms {
         #[command(subcommand)]
         cmd: perms_admin::Cmd,
@@ -134,7 +128,6 @@ pub(crate) fn run(p: Option<Params>) -> Result<()> {
         Params::Publisher { cmd } => roles::publisher::run(cmd),
         #[cfg(unix)]
         Params::Ca { cmd } => ca::run(cmd),
-        #[cfg(unix)]
         Params::Perms { cmd } => perms_admin::run(cmd),
         Params::Discover(a) => discover::run(a),
         Params::Uninstall(p) => uninstall::run(p),

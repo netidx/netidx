@@ -61,7 +61,6 @@ pub mod delegation_store;
 pub mod discovery;
 pub mod id_map;
 /// The bundle a joining host is handed to install itself from.
-#[cfg(unix)]
 pub mod install_bundle;
 /// Local control-socket client: the on-box `ca` CLI drives the running admin
 /// daemon over its `0600` unix socket (no TLS / no password — the daemon
