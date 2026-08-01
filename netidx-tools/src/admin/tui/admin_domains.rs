@@ -1,6 +1,13 @@
 //! The Admin Domain tab's registry of known admin domains: the ones this
-//! machine has connected to or discovered, persisted to the config dir so
-//! commonly-used domains reappear without retyping an address.
+//! machine has connected to or discovered, persisted so commonly-used domains
+//! reappear without retyping an address.
+//!
+//! This is a bookmark list — the operator's convenience, not part of the
+//! netidx installation — so it lives in this program's own config directory
+//! (`${config_dir}/netidx-admin-tui/`) rather than among the files the engine
+//! manages. Nothing reads it but the TUI, and deleting it costs nothing: it
+//! rebuilds from discovery, from connecting, and from this host's own install
+//! record.
 //!
 //! An admin domain is identified by its **CA fingerprint** (one CA identity,
 //! reachable at one or more admin-server addresses). Before a saved domain is
@@ -9,8 +16,9 @@
 //! *different* CA on a different network (`192.168.1.1:4565` is the same on
 //! every LAN) can never masquerade as a domain you trusted elsewhere.
 
+use anyhow::Context;
 use futures::future::join_all;
-use netidx_admin::{paths, transport::fetch_identity};
+use netidx_admin::{atomic, transport::fetch_identity};
 use netidx_admin_proto::{NodeKind, fingerprint::Fingerprint};
 use serde_derive::{Deserialize, Serialize};
 use std::{net::SocketAddr, path::PathBuf, time::Duration};
@@ -48,7 +56,9 @@ pub(super) struct KnownAdminDomains {
 
 impl KnownAdminDomains {
     fn path() -> anyhow::Result<PathBuf> {
-        Ok(paths::user_config_root()?.join("admin-domains.json"))
+        let dir = dirs::config_dir()
+            .context("no user configuration directory on this platform")?;
+        Ok(dir.join("netidx-admin-tui").join("admin-domains.json"))
     }
 
     /// Load the saved admin domains, or an empty set if the file is missing or
@@ -61,22 +71,13 @@ impl KnownAdminDomains {
         }
     }
 
-    /// Persist atomically: write a sibling temp file, then rename over.
     pub(super) fn save(&self) -> anyhow::Result<()> {
-        use anyhow::Context;
         let path = Self::path()?;
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)
                 .with_context(|| format!("creating {}", dir.display()))?;
         }
-        let tmp = path.with_extension("json.tmp");
-        let body =
-            serde_json::to_vec_pretty(self).context("serializing known admin domains")?;
-        std::fs::write(&tmp, &body)
-            .with_context(|| format!("writing {}", tmp.display()))?;
-        std::fs::rename(&tmp, &path)
-            .with_context(|| format!("renaming into {}", path.display()))?;
-        Ok(())
+        atomic::write_atomic_pretty_json(&path, self)
     }
 
     /// Record a confirmed admin domain: merge `addr` into the entry with a matching
@@ -121,7 +122,6 @@ impl KnownAdminDomains {
 /// is this host's own listen address (a CA host records no upstream one). The
 /// on-entry poll then verifies it live like any other saved admin domain. Returns
 /// whether the saved set changed (worth saving).
-#[cfg(unix)]
 pub(super) fn seed_local_admin_domain(domains: &mut KnownAdminDomains) -> bool {
     let Some((domain, fp, recorded)) = local_admin_domain_identity() else {
         return false;
@@ -139,26 +139,13 @@ pub(super) fn seed_local_admin_domain(domains: &mut KnownAdminDomains) -> bool {
 
 /// The admin domain this host belongs to — domain, CA fingerprint, and the
 /// admin-server address recorded at install (the upstream one it joined, if
-/// any) — from its install record: the user-scope record, else the system one.
-#[cfg(unix)]
+/// any) — from whichever install record this host has.
 fn local_admin_domain_identity() -> Option<(String, Fingerprint, Option<SocketAddr>)> {
-    use netidx_admin::provenance::InstallRecord;
-    let user = paths::user_install_record().ok();
-    let sys = paths::system_install_record();
-    let records = [
-        user.filter(|p| p.exists()).and_then(|p| InstallRecord::load(&p).ok()),
-        sys.exists().then(|| InstallRecord::load(&sys).ok()).flatten(),
-    ];
-    records.into_iter().flatten().find_map(|r| {
-        let net = r.admin_domain?;
-        let fp = Fingerprint::parse_text(&net.ca_fingerprint).ok()?;
-        Some((net.domain, fp, r.admin_servers.first().copied()))
-    })
-}
-
-#[cfg(not(unix))]
-pub(super) fn seed_local_admin_domain(_domains: &mut KnownAdminDomains) -> bool {
-    false
+    use netidx_admin::{paths, provenance::InstallRecord};
+    let record = InstallRecord::load(&paths::discover_install_record().ok()?).ok()?;
+    let net = record.admin_domain?;
+    let fp = Fingerprint::parse_text(&net.ca_fingerprint).ok()?;
+    Some((net.domain, fp, record.admin_servers.first().copied()))
 }
 
 /// Where an on-entry poll of a known admin domain landed.
@@ -237,5 +224,23 @@ mod tests {
         // A different CA identity is a distinct admin domain, even at a shared address.
         assert!(kc.upsert("eu.local", addr1, b));
         assert_eq!(kc.domains.len(), 2);
+    }
+
+    /// Bookmarks are this program's own state, not part of the netidx
+    /// installation. They used to land in the managed config root, where an
+    /// uninstall would sweep them up and a backup would carry them to another
+    /// machine as if they meant something there.
+    #[test]
+    fn bookmarks_live_in_this_programs_config_directory() {
+        let path = KnownAdminDomains::path().unwrap();
+        assert_eq!(path.file_name().unwrap(), "admin-domains.json");
+        assert_eq!(path.parent().unwrap().file_name().unwrap(), "netidx-admin-tui");
+        let managed = netidx_admin::paths::user_config_root().unwrap();
+        assert!(
+            !path.starts_with(&managed),
+            "{} is under {}",
+            path.display(),
+            managed.display()
+        );
     }
 }
