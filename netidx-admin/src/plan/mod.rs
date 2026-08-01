@@ -2,10 +2,9 @@
 //! driven through the [`crate::answer::Answerer`] seam so the strict CLI, the
 //! TUI, and Atlas all share it.
 //!
-//! This module is being grown incrementally out of the old
-//! `netidx-tools/src/admin/init.rs` cascade. It starts with the foundational
-//! types and pure decision helpers; the prompt-driven cascade moves in on top
-//! of the `Answerer` seam.
+//! Every decision lives here. A frontend supplies an `Answerer` and renders
+//! what comes back; it does not decide anything itself. See the layering rule
+//! in `CLAUDE.md` for where the line falls and why.
 
 use anyhow::{Context, Result, bail};
 use netidx::config::DefaultAuthMech;

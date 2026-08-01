@@ -521,10 +521,9 @@ operator answers the admin-server question at most once per install.
 
 The installer asks for *intent* (what auth scheme, what admin domain) and
 derives the components; it never offers a choice whose "no" produces a
-broken admin domain. The matrix is `conf_plane_decision` +
-`resolve_id_map_choice` in `netidx-tools/src/admin/init.rs` (both
-exhaustively tested there); this table mirrors them — change all three
-together.
+broken admin domain. The matrix is `resolve_id_map_choice` in
+`netidx-admin/src/plan/install/resolver.rs` (exhaustively tested there);
+this table mirrors it — change both together.
 
 The admin-server column applies to fresh admin domains and joins alike:
 enrolling on an existing admin domain queues for remote approval (the

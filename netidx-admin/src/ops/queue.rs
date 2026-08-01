@@ -216,13 +216,14 @@ pub async fn deny(
     admin: Option<String>,
     password: Option<Secret>,
     code: &str,
-    reason: &str,
+    reason: Option<&str>,
 ) -> Result<String> {
+    let reason = super::refusal_reason(ans, reason, "denied").await?;
     let sess = open_admin_session(ans, server, ca_dir, admin, password).await?;
     let items = fetch_queue(&sess).await?;
     let item = find_by_code(&items, code, |i| i.code)?;
     let (id, requested_name) = (item.id.clone(), item.requested_name.clone());
-    transport::deny(sess.server, sess.credential.clone(), &id, reason, &sess.identity)
+    transport::deny(sess.server, sess.credential.clone(), &id, &reason, &sess.identity)
         .await?;
     Ok(requested_name)
 }

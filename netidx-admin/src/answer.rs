@@ -48,8 +48,6 @@ pub enum Field {
     Bind,
     /// The publisher's required `BindCfg` routing/bind selection.
     PublisherBind,
-    /// The namespace base path this role owns.
-    Base,
     /// How the private key is protected (`seal` / `password` / `none`).
     KeyProtection,
     /// A typed password protecting a private key.
@@ -70,18 +68,12 @@ pub enum Field {
     SelectAdminDomain,
     /// id-map source for a resolver (`platform` / `netidx` / `none`).
     IdMapMode,
-    /// The owner principal a workstation grants admin over its subtree.
-    Owner,
-    /// OS service scope (`system` / `user`).
-    Scope,
     /// Whether to register netidx as an OS service now.
     Service,
     /// The CA's common name.
     CaCommonName,
     /// The SAN glob an admin may issue certificates for.
     AllowSan,
-    /// Whether an admin may enroll new admin servers.
-    MayEnrollServers,
     InsecureNoTpm,
     /// The resolver-server port.
     ResolverPort,
@@ -89,8 +81,6 @@ pub enum Field {
     TlsDomain,
     /// The admin domain's domain name (groups admin domains in discovery).
     AdminDomainName,
-    /// The domain name the admin domain's CA is named for (e.g. `ryu-oh.org`).
-    Domain,
     /// A publisher's resolver-server address(es).
     ResolverAddr,
     /// A publisher's local-auth unix socket path (auth `local`).
@@ -109,8 +99,6 @@ pub enum Field {
     // -- install: parent referral / delegation -------------------------------
     /// Parent resolver address for a referral.
     ParentAddr,
-    /// The subtree path handed to the parent referral.
-    ParentPath,
     /// The auth scheme a node uses to authenticate to its parent resolver.
     ParentAuth,
     /// Parent's local-auth unix socket path (parent-auth `local`).
@@ -131,10 +119,6 @@ pub enum Field {
     AdminPassword,
     /// The off-box CA recovery password (unlocks the CA key offline).
     RecoveryPassword,
-    /// The netidx path a perms / service-control operation acts on (`--at`).
-    TargetPath,
-    /// The name of an issued cert to revoke.
-    RevokeName,
     /// The human-readable reason recorded for a revocation.
     RevokeReason,
     /// The unix uid a newly signed offline identity maps to.
@@ -224,12 +208,6 @@ impl Field {
                        or local. The detected interface subnet is usually the \
                        right choice.",
             },
-            Base => FieldInfo {
-                flag: "--base",
-                label: "namespace base path",
-                help: "The root of the namespace this role owns (resolvers \
-                       default to /, workstations to /local).",
-            },
             KeyProtection => FieldInfo {
                 flag: "--key-protection",
                 label: "private-key protection",
@@ -293,18 +271,6 @@ impl Field {
                        (the OS), netidx (an identity map published in netidx), \
                        or none.",
             },
-            Owner => FieldInfo {
-                flag: "--owner",
-                label: "subtree owner",
-                help: "The principal granted admin over this workstation's \
-                       subtree; defaults to the installing user.",
-            },
-            Scope => FieldInfo {
-                flag: "--scope",
-                label: "service scope",
-                help: "Install the OS service system-wide (starts at boot) or \
-                       for the current user only.",
-            },
             Service => FieldInfo {
                 flag: "--with-service",
                 label: "register OS service?",
@@ -322,12 +288,6 @@ impl Field {
                 label: "issuable SAN glob",
                 help: "The certificate names this admin may issue, as a glob, \
                        e.g. *.example.com.",
-            },
-            MayEnrollServers => FieldInfo {
-                flag: "--may-enroll-servers",
-                label: "may enroll admin servers?",
-                help: "Whether this admin may approve new admin-server \
-                       enrollments — more privileged than any SAN glob.",
             },
             InsecureNoTpm => FieldInfo {
                 flag: "--insecure-no-tpm",
@@ -355,12 +315,6 @@ impl Field {
                 label: "admin domain name",
                 help: "The domain name this admin domain is discovered under, \
                        e.g. ryu-oh.org.",
-            },
-            Domain => FieldInfo {
-                flag: "--domain",
-                label: "admin domain name",
-                help: "The domain this admin domain's CA is named for, e.g. \
-                       example.com.",
             },
             ResolverAddr => FieldInfo {
                 flag: "--addr",
@@ -421,11 +375,6 @@ impl Field {
                        outside its own subtree — an IP (you'll be asked for the \
                        port) or a full host:port.",
             },
-            ParentPath => FieldInfo {
-                flag: "--parent-path",
-                label: "referral subtree",
-                help: "The subtree served under the parent referral.",
-            },
             ParentAuth => FieldInfo {
                 flag: "--parent-auth",
                 label: "parent auth scheme",
@@ -481,17 +430,6 @@ impl Field {
                        and locked in a safe. Unlocks the CA key to sign offline or \
                        rotate the box credential; supplied from a file/stdin for \
                        scripts, never echoed.",
-            },
-            TargetPath => FieldInfo {
-                flag: "--at",
-                label: "target path",
-                help: "The netidx path this operation acts on (routed to the \
-                       admin domain that owns it).",
-            },
-            RevokeName => FieldInfo {
-                flag: "--name",
-                label: "certificate name",
-                help: "The name of the issued certificate to revoke.",
             },
             RevokeReason => FieldInfo {
                 flag: "--reason",
@@ -921,5 +859,104 @@ pub(crate) mod testing {
         async fn show_recovery_password(&mut self, _password: &str) -> Result<()> {
             Ok(())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{fs, path::Path};
+
+    fn sources(dir: &Path, out: &mut Vec<(String, String)>) {
+        for entry in fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                sources(&path, out);
+            } else if path.extension().is_some_and(|e| e == "rs") {
+                let name = path.file_name().unwrap().to_string_lossy().into_owned();
+                out.push((name, fs::read_to_string(&path).unwrap()));
+            }
+        }
+    }
+
+    /// The variants declared in `pub enum Field`, read from this file rather
+    /// than a list someone has to remember to extend.
+    fn declared_variants(source: &str) -> Vec<String> {
+        let body = source
+            .split_once("pub enum Field {")
+            .expect("the Field enum")
+            .1
+            .split_once("\n}\n")
+            .expect("the end of the Field enum")
+            .0;
+        body.lines()
+            .filter_map(|line| line.strip_suffix(','))
+            .filter(|line| line.starts_with("    ") && !line.starts_with("     "))
+            .map(|line| line.trim().to_string())
+            .filter(|name| {
+                name.chars().next().is_some_and(char::is_uppercase)
+                    && name.chars().all(|c| c.is_ascii_alphanumeric())
+            })
+            .collect()
+    }
+
+    fn mentions(source: &str, variant: &str) -> bool {
+        let needle = format!("Field::{variant}");
+        let mut from = 0;
+        while let Some(at) = source[from..].find(&needle) {
+            let end = from + at + needle.len();
+            // `Field::Admin` must not match `Field::AdminName`.
+            let boundary = source[end..]
+                .chars()
+                .next()
+                .is_none_or(|c| !c.is_ascii_alphanumeric() && c != '_');
+            if boundary {
+                return true;
+            }
+            from = end;
+        }
+        false
+    }
+
+    /// Every question the engine can ask must be asked *by* the engine.
+    ///
+    /// A `Field` only a frontend ever passes means the library declared a
+    /// decision — with a flag name and help text — and then let someone else
+    /// own the ceremony around it privately. That is exactly how the eight
+    /// backup/restore variants came to be answered only by the TUI while the
+    /// strict CLI grew its own parallel implementation. The compiler cannot
+    /// see it, because a `pub enum` variant nobody constructs is not dead
+    /// code, so this reads the source instead.
+    #[test]
+    fn every_field_the_engine_declares_is_a_question_the_engine_asks() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut files = Vec::new();
+        sources(&root, &mut files);
+        let declaration = files
+            .iter()
+            .find(|(name, _)| name == "answer.rs")
+            .expect("answer.rs")
+            .1
+            .clone();
+        let variants = declared_variants(&declaration);
+        assert!(variants.len() > 30, "parsed only {:?}", variants);
+        // `select_admin_domain` is a trait method of its own, so the engine
+        // asks it without ever naming the variant; the variant exists to give
+        // the strict answerer a flag to name when it refuses.
+        const BY_TRAIT_METHOD: [&str; 1] = ["SelectAdminDomain"];
+        let orphans: Vec<_> = variants
+            .iter()
+            .filter(|variant| !BY_TRAIT_METHOD.contains(&variant.as_str()))
+            .filter(|variant| {
+                !files
+                    .iter()
+                    .any(|(name, src)| name != "answer.rs" && mentions(src, variant))
+            })
+            .collect();
+        assert!(
+            orphans.is_empty(),
+            "these Fields are declared here but asked only by a frontend: {orphans:?}\n\
+             Either the engine should own the ceremony that asks them, or the \
+             variant does not belong in this enum."
+        );
     }
 }

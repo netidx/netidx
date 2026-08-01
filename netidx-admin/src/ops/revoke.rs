@@ -92,8 +92,9 @@ pub async fn revoke(
     password: Option<Secret>,
     selector: RevokeSelector,
     assert_glyph: Option<Fingerprint>,
-    reason: &str,
+    reason: Option<&str>,
 ) -> Result<RevokeOutcome> {
+    let reason = super::refusal_reason(ans, reason, "revoked").await?;
     let sess = open_admin_session(ans, server, ca_dir, admin, password).await?;
     let entries =
         transport::list_issued(sess.server, sess.credential.clone(), &sess.identity)
@@ -128,7 +129,7 @@ pub async fn revoke(
         sess.server,
         sess.credential.clone(),
         serials,
-        reason,
+        &reason,
         &sess.identity,
     )
     .await?;

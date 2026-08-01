@@ -1014,7 +1014,7 @@ fn revoke(f: RevokeArgs) -> Result<()> {
         None,
         selector,
         assert_glyph,
-        &f.reason,
+        Some(&f.reason),
     ))?;
     println!(
         "revoked {} certificate(s); the daemon re-signed the CRL:",
@@ -2202,7 +2202,7 @@ fn deny(f: DenyArgs) -> Result<()> {
         f.auth.admin.clone(),
         None,
         &code,
-        &f.reason,
+        Some(&f.reason),
     ))?;
     println!("denied {name:?}.");
     Ok(())

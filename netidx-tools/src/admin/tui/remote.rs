@@ -875,21 +875,10 @@ async fn deny(
     conn: RemoteConn,
     code: String,
 ) -> Result<super::action::Outcome> {
-    use netidx_admin::{answer::Answerer, ops::queue::deny};
-    let reason = ans
-        .text(netidx_admin::answer::Field::RevokeReason, None, Some("denied"), true)
-        .await?
-        .unwrap_or_else(|| "denied".to_string());
-    let name = deny(
-        ans,
-        Some(conn.server),
-        None,
-        Some(conn.admin.clone()),
-        None,
-        &code,
-        &reason,
-    )
-    .await?;
+    use netidx_admin::ops::queue::deny;
+    let name =
+        deny(ans, Some(conn.server), None, Some(conn.admin.clone()), None, &code, None)
+            .await?;
     let rows = queue_rows(ans, &conn).await?;
     Ok(super::action::Outcome::remote_after(
         "Denied",
@@ -983,11 +972,7 @@ async fn deny_delegation(
     conn: RemoteConn,
     code: String,
 ) -> Result<super::action::Outcome> {
-    use netidx_admin::{answer::Answerer, ops::delegation::deny_delegation};
-    let reason = ans
-        .text(netidx_admin::answer::Field::RevokeReason, None, Some("denied"), true)
-        .await?
-        .unwrap_or_else(|| "denied".to_string());
+    use netidx_admin::ops::delegation::deny_delegation;
     let item = deny_delegation(
         ans,
         Some(conn.server),
@@ -995,7 +980,7 @@ async fn deny_delegation(
         Some(conn.admin.clone()),
         None,
         &code,
-        &reason,
+        None,
     )
     .await?;
     let rows = delegation_rows(ans, &conn).await?;
@@ -1050,14 +1035,7 @@ async fn revoke(
     serial: u64,
     glyph: Option<Fingerprint>,
 ) -> Result<super::action::Outcome> {
-    use netidx_admin::{
-        answer::Answerer,
-        ops::revoke::{RevokeSelector, revoke},
-    };
-    let reason = ans
-        .text(netidx_admin::answer::Field::RevokeReason, None, Some("revoked"), true)
-        .await?
-        .unwrap_or_else(|| "revoked".to_string());
+    use netidx_admin::ops::revoke::{RevokeSelector, revoke};
     let out = revoke(
         ans,
         Some(conn.server),
@@ -1066,7 +1044,7 @@ async fn revoke(
         None,
         RevokeSelector::Serial(serial),
         glyph, // assert the glyph we displayed (skipped for a legacy empty glyph)
-        &reason,
+        None,
     )
     .await?;
     let mut lines: Vec<String> = out

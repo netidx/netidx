@@ -37,6 +37,43 @@ it genuinely needs a unix-only facility (openssl, the `SO_PEERCRED` control
 socket, the daemon); gating something merely because its caller is gated pushes
 the boundary the wrong way.
 
+### The admin layering rule
+
+`netidx-admin` owns every decision. `netidx-tools/src/admin/` (the strict CLI)
+and `netidx-tools/src/admin/tui/` are presentation, and a third GUI frontend is
+planned, so anything implemented in a frontend has to be written again for it.
+
+When you are unsure which side something belongs on, ask:
+
+> Is this about the operator's convenience, or about the system?
+
+Convenience — bookmarks, which panel opens first, sort order, scroll position,
+what to render — is UI and stays in the frontend. Anything that reads or writes
+the netidx installation, decides what the system does, or states a rule about
+how the system behaves is library, **as data**: a danger rule returns a
+structured risk and the frontend renders the dialog; a computed default returns
+a value and the frontend shows it in a field. A default is a decision — it is
+the answer an unattended install uses — so defaults move. The exception is a
+default that is a property of the display.
+
+Staying in the frontend: `$EDITOR` invocation, sudo/su escalation, terminal
+suspend/resume, the two `Answerer` impls, clap flag declarations, every
+`println!` and widget, navigation and keymaps, and confirm-dialog *wording* (not
+the predicate behind it).
+
+Two things this went wrong through before, both of which have tests now:
+
+- A `Field` declared in `netidx-admin::answer` but only ever answered by a
+  frontend means the library named a decision and let someone else own the
+  ceremony around it. `every_field_the_engine_declares_is_a_question_the_engine_asks`
+  fails on that.
+- A constant written out at each use rather than referenced. 730 days was in
+  four places before anyone noticed.
+
+Method joins `Answerer` only if all three frontends must answer it *and* the
+strict CLI has a flag that could. Never add a generic select-from-rows,
+render-a-table, toast, or refresh hook; that turns `Answerer` into a UI toolkit.
+
 ### Testing
 ```bash
 # Run all tests

@@ -227,8 +227,9 @@ pub async fn deny_delegation(
     admin: Option<String>,
     password: Option<netidx_admin_proto::Secret>,
     code: &str,
-    reason: &str,
+    reason: Option<&str>,
 ) -> Result<PendingDelegation> {
+    let reason = super::refusal_reason(ans, reason, "denied").await?;
     let sess = open_admin_session(ans, server, ca_dir, admin, password).await?;
     let items: Vec<PendingDelegation> =
         transport::list_delegations(sess.server, sess.credential.clone(), &sess.identity)
@@ -241,7 +242,7 @@ pub async fn deny_delegation(
         sess.server,
         sess.credential.clone(),
         &item.id,
-        reason,
+        &reason,
         &sess.identity,
     )
     .await?;

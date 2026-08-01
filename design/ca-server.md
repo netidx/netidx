@@ -106,7 +106,7 @@ work; this design is a **standalone CA-signing daemon** only.
 > the netidx CA to an existing PKI, see *Externally-signed CA* at the end.
 
 Today the TLS "generate" path without a local CA on the joining box is
-`generate_csr_and_wait_for_cert` (`netidx-tools/src/admin/init.rs`): it
+the CSR-and-wait branch of `netidx-admin/src/plan/enroll.rs`: it
 writes a key + CSR locally, prints
 
 ```
@@ -483,8 +483,9 @@ netidx-admin/         rustls client transport, discovery, remote ops, config
 The dependency direction is protocol ← admin. The daemon and CA half is
 `#[cfg(unix)]`, so Windows builds do not depend on OpenSSL.
 
-CLI glue in `netidx-tools/src/admin/ca.rs` (subcommands) and
-`init.rs` (the `ca-server` branch of the TLS cascade).
+CLI glue in `netidx-tools/src/admin/ca.rs` (subcommands); the
+`ca-server` branch of the TLS cascade is
+`netidx-admin/src/plan/enroll.rs`.
 
 New workspace deps: `argon2` (Argon2id KDF), `sha2` (fingerprint,
 cross-platform), `zeroize` (wipe MK/KEK/passwords), `aes-gcm` (vault
@@ -551,7 +552,7 @@ Already present and reused: `rustls`, `tokio-rustls`, `rustls-pemfile`,
 The init UX change that this design relies on — asking for a
 resolver-server address as an **IP plus a separately-prompted port**
 (default 4564) so the operator types one IP and the CA-server prompt can
-reuse it — has already shipped in `netidx-tools/src/admin/init.rs` at
+reuse it — has already shipped in `netidx-admin/src/plan/install/` at
 every site that takes such an address: `run_resolver` (advertised
 address), `run_publisher` (resolver address), and `prompt_parent_referral`
 (the upstream-resolver address the workstation and a resolver-with-parent

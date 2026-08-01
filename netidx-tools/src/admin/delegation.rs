@@ -223,7 +223,7 @@ pub(crate) fn deny_delegation(f: DenyDelegationFlags) -> Result<()> {
         f.auth.admin.clone(),
         None,
         &code,
-        &f.reason,
+        Some(&f.reason),
     ))?;
     println!("denied delegation of {:?}.", d.proposed_path);
     Ok(())

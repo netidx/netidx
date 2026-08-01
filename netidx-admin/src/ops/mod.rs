@@ -172,6 +172,25 @@ pub async fn resolve_admin_target(
     }
 }
 
+/// Why a certificate or a queued request is being refused, recorded where an
+/// operator will read it later. Taking it here — rather than each frontend
+/// asking in its own way — is what keeps the wording, the default, and the
+/// "it must not be blank" rule from being three different things.
+pub async fn refusal_reason(
+    ans: &mut dyn Answerer,
+    provided: Option<&str>,
+    default: &str,
+) -> Result<String> {
+    ans.text(
+        crate::answer::Field::RevokeReason,
+        provided.map(str::to_string),
+        Some(default),
+        true,
+    )
+    .await?
+    .context("a reason is required")
+}
+
 /// The one shared remote preamble: resolve the admin server + confirm its
 /// identity, then collect the admin name (defaulting to the current OS user)
 /// and password. Every authenticated remote query and action starts here.
