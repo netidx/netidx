@@ -31,6 +31,7 @@ use crate::{
 use anyhow::{Context, Result, bail};
 use log::warn;
 use rand::{RngExt, rng, seq::SliceRandom};
+use std::path::Path;
 use std::{collections::HashMap, net::SocketAddr, path::PathBuf, time::Duration};
 
 /// The smallest sync interval we will honour. The actual wait is drawn from
@@ -263,6 +264,12 @@ impl SyncPlan {
         &self.record.admin_servers
     }
 
+    /// The record this plan reconciles — its role, base, and admin domain, for
+    /// a frontend to name what it is about to change.
+    pub fn record(&self) -> &InstallRecord {
+        &self.record
+    }
+
     /// Write it. The caller owns the lock so it can decide how to react to
     /// contention — an operator's command should fail loudly, a daemon
     /// should shrug and try again next cycle.
@@ -274,6 +281,102 @@ impl SyncPlan {
         }
         self.edits.apply(config_lock)
     }
+
+    /// Apply under this plan's own record-directory lock, taken now that the
+    /// network work is done — holding it across a round trip would fail a
+    /// concurrent command for the length of a network call.
+    ///
+    /// The directory comes from the record the plan was built from, so no
+    /// caller can lock a different one. Contention is an error here; the
+    /// timer-driven [`pass`] tolerates it instead.
+    pub async fn apply_locked(self) -> Result<()> {
+        let lock = ConfigDirLock::acquire_for_file_async(&self.record_path).await?;
+        self.apply(&lock)
+    }
+
+    /// What the operator must do for this plan to take effect. Nothing
+    /// re-reads its configuration at runtime, so every edit lands at the next
+    /// process start — which is why nothing here ever restarts a service.
+    pub fn restart_hint(&self) -> &'static str {
+        match self.record.role {
+            InstallRole::Ca => "The CA requires no resolver restart.",
+            InstallRole::Workstation => {
+                "No service was restarted. Restart the local resolver to serve the \
+                 new peers."
+            }
+            InstallRole::Resolver if self.edits.changes_resolver_config() => {
+                "No service was restarted. Restart this resolver manually at its \
+                 place in the resolver cluster's rolling sequence; re-run client \
+                 processes if their resolver addresses changed."
+            }
+            InstallRole::Resolver => {
+                "Re-run client processes to use the new resolver addresses; no \
+                 resolver service restart is needed."
+            }
+            InstallRole::Publisher => "Re-run publishers to use the new resolvers.",
+        }
+    }
+}
+
+/// How this host presents itself to an admin server, by what it runs.
+fn node_kind(role: InstallRole) -> NodeKind {
+    match role {
+        InstallRole::Publisher => NodeKind::Publisher,
+        InstallRole::Resolver => NodeKind::Resolver,
+        InstallRole::Ca | InstallRole::Workstation => NodeKind::Client,
+    }
+}
+
+/// Load the install record to reconcile, with the path it came from.
+///
+/// `config_root` names the install — the TUI enumerates both scopes and must
+/// write back to the one it read; `None` discovers it, which is what a one-shot
+/// command wants. The role is asserted rather than inferred: a plan writes to
+/// the record it was built from, so being handed the wrong one is an error.
+pub fn record_for(
+    role: InstallRole,
+    config_root: Option<&Path>,
+) -> Result<(InstallRecord, PathBuf)> {
+    let path = match config_root {
+        Some(root) => root.join("install.json"),
+        None => crate::paths::discover_install_record().context(
+            "no install record (install.json) found — this host has no netidx \
+             install managed by `netidx admin`, or the install predates the record",
+        )?,
+    };
+    let record = InstallRecord::load(&path)?;
+    if record.role != role {
+        bail!(
+            "this host is a {} install, not a {} — use `netidx admin {} …`",
+            record.role.as_str(),
+            role.as_str(),
+            record.role.as_str(),
+        );
+    }
+    if role == InstallRole::Ca {
+        bail!("the CA has no resolver configuration to reconcile");
+    }
+    Ok((record, path))
+}
+
+/// The admin domain map as this host sees it, pinned to the CA identity
+/// recorded at install — for map-driven UI such as the parent picker.
+pub async fn fetch_map_for(
+    role: InstallRole,
+    config_root: Option<&Path>,
+) -> Result<AdminDomainMap> {
+    let (record, _) = record_for(role, config_root)?;
+    let net_id = record
+        .admin_domain
+        .as_ref()
+        .context("this host is not part of an admin domain (local-only)")?;
+    fetch_map(net_id, node_kind(role)).await
+}
+
+/// [`record_for`] then [`plan`] — what both frontends' "update" does.
+pub async fn plan_for(role: InstallRole, config_root: Option<&Path>) -> Result<SyncPlan> {
+    let (record, path) = record_for(role, config_root)?;
+    plan(record, path).await
 }
 
 /// Fetch the map and work out everything this host would change. Does no
@@ -287,11 +390,7 @@ pub async fn plan(mut record: InstallRecord, record_path: PathBuf) -> Result<Syn
         .admin_domain
         .clone()
         .context("this host is local-only — it has not joined an admin domain")?;
-    let kind = match record.role {
-        InstallRole::Publisher => NodeKind::Publisher,
-        InstallRole::Resolver => NodeKind::Resolver,
-        InstallRole::Ca | InstallRole::Workstation => NodeKind::Client,
-    };
+    let kind = node_kind(record.role);
     let map = fetch_map(&net_id, kind).await?;
     let anchor = anchor_cluster(record.role, &map);
     let admin_servers_changed =
@@ -332,6 +431,23 @@ mod tests {
         AdminServerId, ResolverClusterEntry, ResolverClusterState, Role,
     };
     use uuid::Uuid;
+
+    /// A resolver whose own configuration is untouched needs no restart — only
+    /// its clients do. The hint is the thing an operator acts on, so it must
+    /// not send them to roll a cluster that has not changed.
+    #[test]
+    fn a_client_only_change_asks_for_no_resolver_restart() {
+        let plan = SyncPlan {
+            map: AdminDomainMap::empty(AdminServerId::new()),
+            record: InstallRecord::new(InstallRole::Resolver, "/", "tls", None, None),
+            record_path: PathBuf::from("/nonexistent/install.json"),
+            admin_servers_changed: false,
+            edits: EditPlan::default(),
+        };
+        let hint = plan.restart_hint();
+        assert!(hint.contains("no resolver service restart is needed"));
+        assert!(!hint.contains("Restart this resolver"));
+    }
 
     fn cluster(
         n: u128,

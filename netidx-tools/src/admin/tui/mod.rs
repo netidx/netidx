@@ -23,7 +23,6 @@
 mod action;
 mod admin_domains;
 mod answer;
-mod lifecycle;
 mod local;
 mod privileged;
 mod remote;

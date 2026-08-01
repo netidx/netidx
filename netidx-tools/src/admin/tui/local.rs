@@ -1209,7 +1209,7 @@ fn sync_lines(sync: &SyncState) -> Vec<Line<'static>> {
 
 /// Background admin domain-sync check for the given installs — the quiet counterpart
 /// of the Update action. Runs the same reconcile the CLI `status`/`update` does
-/// (via [`super::lifecycle::sync_plan`]) and maps each result to a
+/// (via [`netidx_admin::sync::plan_for`]) and maps each result to a
 /// [`SyncState`]. Self-contained (owns its inputs, borrows no UI state) so the
 /// event loop can poll it as a background future without a `spawn`.
 pub(super) async fn check_sync(
@@ -1217,7 +1217,7 @@ pub(super) async fn check_sync(
 ) -> Vec<(usize, SyncState)> {
     let mut out = Vec::with_capacity(pending.len());
     for (i, role, config_root) in pending {
-        let st = match super::lifecycle::sync_plan(&config_root, role).await {
+        let st = match netidx_admin::sync::plan_for(role, Some(&config_root)).await {
             Ok(plan) if plan.edits.is_empty() => SyncState::InSync,
             Ok(plan) => SyncState::OutOfSync(plan.edits.changes()),
             Err(e) => SyncState::Failed(format!("{e:#}")),

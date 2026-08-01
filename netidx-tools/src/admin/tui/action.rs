@@ -1039,7 +1039,7 @@ async fn update(
     // Plan first, lock second: the config-directory lock never waits, so
     // holding it across the admin domain round trip would fail a concurrent
     // command for the duration of a network call.
-    let plan = super::lifecycle::sync_plan(&config_root, role).await?;
+    let plan = netidx_admin::sync::plan_for(role, Some(&config_root)).await?;
     if plan.is_empty() {
         return Ok(Outcome::plain(
             "Up to date",
@@ -1049,11 +1049,8 @@ async fn update(
     }
     let mut lines: Vec<String> =
         plan.edits.describe().lines().map(str::to_string).collect();
-    let restart_hint =
-        crate::admin::lifecycle::restart_hint(role, &plan.edits).to_string();
-    let config_lock =
-        netidx_admin::config_lock::ConfigDirLock::acquire_async(&config_root).await?;
-    plan.apply(&config_lock)?;
+    let restart_hint = plan.restart_hint().to_string();
+    plan.apply_locked().await?;
     lines.push(String::new());
     lines.push(restart_hint);
     Ok(Outcome {
@@ -1140,7 +1137,12 @@ async fn add_parent(ans: &mut TuiAnswerer, config_root: PathBuf) -> Result<Outco
     // Candidate parents come from the admin domain map (each resolver + its resolver cluster base),
     // minus this host's own resolvers. If the map is unreachable or offers no
     // other resolver, fall back to typing an admin-server address.
-    let map = super::lifecycle::fetch_local_map(&config_root).await.ok();
+    // Only a resolver install can take a parent (local.rs offers the action
+    // for that role alone), and fetch_map_for asserts it.
+    let map =
+        netidx_admin::sync::fetch_map_for(InstallRole::Resolver, Some(&config_root))
+            .await
+            .ok();
     // netidx-admin owns the first advertisable member in this host's resolver
     // config (the same member GetInfo has always reported). Unlike excluding
     // the whole config roster, excluding only this identity still shows AP2
