@@ -3,7 +3,7 @@ use anyhow::anyhow;
 use anyhow::{Context, Result, bail};
 use clap::{Args, Subcommand};
 use netidx_admin::{
-    answer::{Answerer, Field},
+    answer::Answerer,
     atomic,
     csr::{self, Subject},
     ops::{
@@ -33,7 +33,6 @@ use std::{
     path::{Path, PathBuf},
     time::Duration,
 };
-use zeroize::Zeroizing;
 
 #[cfg(all(test, unix))]
 use netidx_admin::ca::{Ca, CaParams};
@@ -528,6 +527,12 @@ pub(crate) struct JoinArgs {
     /// Read the admin password from stdin.
     #[arg(long = "password-stdin", conflicts_with = "password_file")]
     pub password_stdin: bool,
+    /// Protection for the issued private key.
+    #[arg(long = "key-protection")]
+    pub key_protection: Option<netidx_admin::plan::enroll::KeyProtArg>,
+    /// Replace an identity of this name that is already installed.
+    #[arg(long)]
+    pub force: bool,
 }
 
 #[derive(Args, Debug)]
@@ -1763,56 +1768,29 @@ async fn join_async(ans: &mut dyn Answerer, p: JoinArgs) -> Result<()> {
             "CA identity was not confirmed (--accept-glyph mismatch); nothing was sent"
         );
     }
-    let name = ans
-        .text(Field::TlsName, p.name, None, true)
-        .await?
-        .context("--name (the TLS identity to request) is required")?;
-    let admin = ans
-        .text(Field::AdminName, p.admin, None, true)
-        .await?
-        .context("--admin is required")?;
-    let mut secret = ans.secret(Field::AdminPassword, None).await?;
-    let password = Zeroizing::new(std::mem::take(&mut secret.0));
-    // `--id-map-group ''` (a single empty entry) is the explicit "skip
-    // registration"; otherwise the per-kind default applies.
-    let groups = if p.id_map_groups.is_empty() {
-        enroll::parse_id_map_answer(enroll::default_id_map_groups(NodeKind::Client))
-    } else {
-        p.id_map_groups
-            .iter()
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .collect()
-    };
-    let issued = transport::request_cert(
-        server,
-        NodeKind::Client,
-        &name,
-        &admin,
-        password,
-        p.validity,
-        groups,
-        &identity,
+    let (joined, _staging) = enroll::join_admin_domain(
+        ans,
+        enroll::JoinRequest {
+            suggested_name: p.name.as_deref(),
+            key_protection: p.key_protection,
+            // With `--admin` this is the synchronous signed request it has
+            // always been; without one it queues and waits for a remote admin
+            // to approve, which it previously could not do at all.
+            admin: p.admin.clone(),
+            id_map_groups: &p.id_map_groups,
+            validity: Some(p.validity),
+            ..enroll::JoinRequest::new(server, NodeKind::Client, &identity)
+        },
     )
     .await?;
-    let dir = tls::identity_dir(&name)?;
-    std::fs::create_dir_all(&dir)
-        .with_context(|| format!("creating {}", dir.display()))?;
-    atomic::write_atomic(
-        &dir.join("certificate.pem"),
-        issued.cert_pem.as_bytes(),
-        0o644,
+    let installed = tls::install_identity_for_user(
+        &joined.name,
+        &joined.certificate,
+        &joined.private_key,
+        &joined.trusted,
+        p.force,
     )?;
-    atomic::write_atomic(
-        &dir.join("private.key"),
-        issued.private_key_pem.as_bytes(),
-        0o600,
-    )?;
-    atomic::write_atomic(&dir.join("trusted.pem"), issued.trusted_pem.as_bytes(), 0o644)?;
-    ans.note(&format!("installed identity {name:?} in {}", dir.display()));
-    for w in &issued.warnings {
-        ans.warn(w);
-    }
+    println!("installed identity {:?} in {}", joined.name, installed.directory.display());
     Ok(())
 }
 
@@ -2331,7 +2309,7 @@ fn list() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use clap::Parser;
+    use clap::{FromArgMatches, Parser};
     #[cfg(unix)]
     use netidx_admin_proto::policy::RECOVERY_ADMIN;
 
@@ -2785,5 +2763,23 @@ mod tests {
             );
         }
         assert_eq!(policy_template().max_validity, DEFAULT_LEAF_VALIDITY);
+    }
+
+    /// `tls join` gained the enrollment ceremony every other join already
+    /// used, so its surface has to offer the two choices that ceremony makes.
+    #[test]
+    fn tls_join_offers_key_protection_and_refuses_to_clobber_by_default() {
+        let cmd = <JoinArgs as clap::Args>::augment_args(clap::Command::new("join"));
+        let longs: Vec<_> = cmd.get_arguments().filter_map(|a| a.get_long()).collect();
+        assert!(longs.contains(&"key-protection"), "{longs:?}");
+        assert!(longs.contains(&"force"), "{longs:?}");
+        let parsed = JoinArgs::from_arg_matches(
+            &cmd.clone()
+                .try_get_matches_from(["join", "--server", "10.0.0.1:4565"])
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(!parsed.force, "replacing an identity must be asked for");
+        assert!(parsed.admin.is_none(), "no --admin means queue for approval");
     }
 }

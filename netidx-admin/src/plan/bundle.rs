@@ -554,14 +554,14 @@ pub async fn reenroll_data_identities(
                     old_certificate.display()
                 )
             })?;
-        let (identity, _staging) = enroll::join_admin_domain_replacing(
+        let (identity, _staging) = enroll::join_admin_domain(
             ans,
-            ca,
-            node_kind(recipe.kind),
-            Some(&recipe.name),
-            key_protection,
-            Some(replaces_serial),
-            &net.identity,
+            enroll::JoinRequest {
+                suggested_name: Some(&recipe.name),
+                key_protection,
+                replaces_serial: Some(replaces_serial),
+                ..enroll::JoinRequest::new(ca, node_kind(recipe.kind), &net.identity)
+            },
         )
         .await?;
         let destination = root

@@ -1213,11 +1213,11 @@ async fn resolver_auth_from_admin_domain(
             };
             let (j, staging) = enroll::join_admin_domain(
                 ans,
-                ca_addr,
-                NodeKind::Resolver,
-                Some(&suggested),
-                input.key_protection,
-                &net.identity,
+                enroll::JoinRequest {
+                    suggested_name: Some(&suggested),
+                    key_protection: input.key_protection,
+                    ..enroll::JoinRequest::new(ca_addr, NodeKind::Resolver, &net.identity)
+                },
             )
             .await?;
             Ok(ResolvedAuth {

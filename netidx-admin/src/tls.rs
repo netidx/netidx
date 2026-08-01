@@ -187,6 +187,22 @@ pub fn installed_files_in(dest_dir: &Path) -> [PathBuf; 3] {
     ]
 }
 
+/// The don't-clobber rule, separated from where the destination comes from so
+/// it can be checked without a real home directory. A certificate or a private
+/// key is enough to refuse: half an identity is still an identity someone is
+/// in the middle of installing.
+fn refuse_to_clobber(cn: &str, dest_dir: &Path) -> Result<()> {
+    let [certificate, private_key, _] = installed_files_in(dest_dir);
+    if certificate.exists() || private_key.exists() {
+        anyhow::bail!(
+            "a TLS identity for {cn:?} is already installed in {}; pass --force to \
+             replace it",
+            dest_dir.display()
+        );
+    }
+    Ok(())
+}
+
 /// Where this identity lives by convention: `${user_tls_dir}/<cn>`.
 pub fn identity_dir(cn: &str) -> Result<PathBuf> {
     identity_dir_in(&paths::user_tls_dir()?, cn)
@@ -197,15 +213,23 @@ pub(crate) fn identity_dir_in(tls_dir: &Path, cn: &str) -> Result<PathBuf> {
     Ok(tls_dir.join(cn))
 }
 
-/// Convenience: same as [`install_identity`] but resolves the
-/// destination directory automatically to `${user_tls_dir}/<cn>/`.
+/// Same as [`install_identity`] but resolves the destination directory
+/// automatically to `${user_tls_dir}/<cn>/`.
+///
+/// Refuses to replace an identity already installed there unless `force`.
+/// Silently overwriting is how a working credential is lost to a mistyped
+/// name, and a re-enrollment that means to replace one can say so.
 pub fn install_identity_for_user(
     cn: &str,
     certificate_src: &Path,
     private_key_src: &Path,
     trusted_src: &Path,
+    force: bool,
 ) -> Result<InstalledIdentity> {
     let dest_dir = identity_dir(cn)?;
+    if !force {
+        refuse_to_clobber(cn, &dest_dir)?;
+    }
     install_identity(&InstallIdentity {
         cn,
         dest_dir: &dest_dir,
@@ -657,5 +681,25 @@ mod tests {
             netidx_admin_proto::CA_ROLE_URI.to_string(),
         ]);
         assert!(admin_cert_identity_from_der(&duplicate_role).is_err());
+    }
+
+    /// A re-run of `netidx admin tls join` with the same name used to write
+    /// a fresh key straight over a working identity, with no guard at all.
+    #[test]
+    fn an_installed_identity_is_not_replaced_without_being_asked() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("alice.example.com");
+        std::fs::create_dir_all(&dest).unwrap();
+        assert!(refuse_to_clobber("alice.example.com", &dest).is_ok());
+
+        write(&dest.join("certificate.pem"), b"cert");
+        let e = refuse_to_clobber("alice.example.com", &dest).unwrap_err();
+        assert!(format!("{e:#}").contains("--force"), "{e:#}");
+
+        // A key with no certificate is a half-finished install, and replacing
+        // it silently loses the key just as thoroughly.
+        std::fs::remove_file(dest.join("certificate.pem")).unwrap();
+        write(&dest.join("private.key"), b"key");
+        assert!(refuse_to_clobber("alice.example.com", &dest).is_err());
     }
 }

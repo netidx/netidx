@@ -45,7 +45,7 @@ const DISCOVERY_SETTLE: Duration = Duration::from_secs(3);
 const IDENTITY_FETCH_TIMEOUT: Duration = Duration::from_secs(3);
 /// Validity requested from the CA. The server caps it to the admin's
 /// policy, so this is just an upper bound.
-const JOIN_VALIDITY: Duration = Duration::from_secs(730 * 86400);
+const JOIN_VALIDITY: Duration = crate::plan::ca_setup::DEFAULT_LEAF_VALIDITY;
 /// How often a waiting enrollee polls its queued request. Each poll is one
 /// short pinned connection, so waiting holds nothing open.
 const POLL_INTERVAL: Duration = Duration::from_secs(5);
@@ -779,11 +779,11 @@ pub async fn admin_domain_addrs_and_identity(
         } else {
             let (j, staging) = join_admin_domain(
                 ans,
-                ca_addr,
-                kind,
-                suggested.as_deref(),
-                kp,
-                &net.identity,
+                JoinRequest {
+                    suggested_name: suggested.as_deref(),
+                    key_protection: kp,
+                    ..JoinRequest::new(ca_addr, kind, &net.identity)
+                },
             )
             .await?;
             tls_identities.push(joined_to_spec(j));
@@ -808,8 +808,15 @@ pub async fn maybe_join_ca_server(
     let Some((ca_addr, identity)) = selected_ca_server(ans, probe, kind).await? else {
         return Ok(None);
     };
-    let joined =
-        join_admin_domain(ans, ca_addr, kind, suggested_name, kp, &identity).await?;
+    let joined = join_admin_domain(
+        ans,
+        JoinRequest {
+            suggested_name,
+            key_protection: kp,
+            ..JoinRequest::new(ca_addr, kind, &identity)
+        },
+    )
+    .await?;
     Ok(Some(joined))
 }
 
@@ -893,57 +900,108 @@ pub async fn await_issuance(
     Ok(settled)
 }
 
-/// Obtain a cert from an **already confirmed** admin domain — every connection pins
-/// to `identity`. Returns the issued identity staged in a tempdir (the
-/// template's `--force`-gated `apply()` installs it).
+/// Everything a join needs beyond the admin domain identity the caller has
+/// already confirmed. [`JoinRequest::new`] fills in every default, so a caller
+/// names only what it means to change.
+pub struct JoinRequest<'a> {
+    /// The admin server to enroll with.
+    pub addr: SocketAddr,
+    /// What kind of node this identity is for.
+    pub kind: NodeKind,
+    /// Pre-fill for the identity name. `None` derives one.
+    pub suggested_name: Option<&'a str>,
+    /// How to protect the issued private key.
+    pub key_protection: Option<KeyProtArg>,
+    /// The certificate this one replaces, so the CA can revoke it.
+    pub replaces_serial: Option<u64>,
+    /// Request the certificate synchronously as this admin, rather than
+    /// queueing it for remote approval. A scripted caller holding an admin
+    /// credential says so here; without it an interactive operator is asked
+    /// and a scripted one queues.
+    pub admin: Option<String>,
+    /// id-map groups to register the identity with. Empty asks, or takes the
+    /// per-kind default when nobody is there to ask.
+    pub id_map_groups: &'a [String],
+    /// The certificate lifetime to request. `None` asks for the standard one.
+    pub validity: Option<Duration>,
+    /// The confirmed CA identity every connection here pins to.
+    pub identity: &'a CaIdentity,
+}
+
+impl<'a> JoinRequest<'a> {
+    /// A join with every choice defaulted: derive the name, no key protection,
+    /// replace nothing, queue for approval, standard groups and lifetime.
+    pub fn new(addr: SocketAddr, kind: NodeKind, identity: &'a CaIdentity) -> Self {
+        JoinRequest {
+            addr,
+            kind,
+            suggested_name: None,
+            key_protection: None,
+            replaces_serial: None,
+            admin: None,
+            id_map_groups: &[],
+            validity: None,
+            identity,
+        }
+    }
+}
+
+/// Obtain a cert from an **already confirmed** admin domain — every connection
+/// pins to [`JoinRequest::identity`]. Returns the issued identity staged in a
+/// tempdir (the template's `--force`-gated `apply()`, or
+/// [`crate::tls::install_identity_for_user`], installs it).
 ///
 /// The default path queues a signing request and waits for an admin to approve
 /// it remotely (`netidx admin ca approve`): the enrollee shows a request code
 /// (the CSR key's fingerprint) the admin matches out of band. The synchronous
-/// path (an admin present at this machine types their password) remains one
-/// answer away; it's the only path where the id-map groups are chosen here.
+/// path — an admin is at this machine, or a script holds their credential —
+/// is one answer away; it is the only path where the id-map groups are chosen
+/// here.
 pub async fn join_admin_domain(
     ans: &mut dyn Answerer,
-    addr: SocketAddr,
-    kind: NodeKind,
-    suggested_name: Option<&str>,
-    kp: Option<KeyProtArg>,
-    identity: &CaIdentity,
+    req: JoinRequest<'_>,
 ) -> Result<(JoinedIdentity, TempDir)> {
-    join_admin_domain_replacing(ans, addr, kind, suggested_name, kp, None, identity).await
-}
-
-pub async fn join_admin_domain_replacing(
-    ans: &mut dyn Answerer,
-    addr: SocketAddr,
-    kind: NodeKind,
-    suggested_name: Option<&str>,
-    kp: Option<KeyProtArg>,
-    replaces_serial: Option<u64>,
-    identity: &CaIdentity,
-) -> Result<(JoinedIdentity, TempDir)> {
+    let JoinRequest {
+        addr,
+        kind,
+        suggested_name,
+        key_protection,
+        replaces_serial,
+        admin,
+        id_map_groups,
+        validity,
+        identity,
+    } = req;
+    let validity = validity.unwrap_or(JOIN_VALIDITY);
     let name = prompt_identity_name(ans, suggested_name).await?;
     // Key protection is decided before the request: the operator is here now,
     // and the queued path may wait on a remote admin for a long time after.
     let protection = choose_key_protection(
         ans,
-        kp,
+        key_protection,
         &tls::identity_dir(&name)?.join("private.key"),
         &name,
     )
     .await?;
-    // A non-interactive install has no admin standing by to type a password,
-    // so it always takes the queued (remote-approval) path.
-    let admin_here =
-        ans.interactive() && ans.confirm(Field::AdminHere, None, false).await?;
+    // A caller that already holds an admin credential *is* an admin standing
+    // by. One that does not and cannot prompt has nobody to type a password,
+    // so it takes the queued (remote-approval) path.
+    let admin_here = match &admin {
+        Some(_) => true,
+        None => ans.interactive() && ans.confirm(Field::AdminHere, None, false).await?,
+    };
     let issued = if admin_here {
         // The admin chooses the new identity's id-map groups here; the
         // per-admin policy is the allowed set the server validates against.
-        let groups = prompt_id_map_groups(ans, &[], default_id_map_groups(kind)).await?;
-        let admin = ans
-            .text(Field::AdminName, None, None, true)
-            .await?
-            .context("a CA admin name is required")?;
+        let groups =
+            prompt_id_map_groups(ans, id_map_groups, default_id_map_groups(kind)).await?;
+        let admin = match admin {
+            Some(admin) => admin,
+            None => ans
+                .text(Field::AdminName, None, None, true)
+                .await?
+                .context("a CA admin name is required")?,
+        };
         let mut pw_secret = ans.secret(Field::AdminPassword, None).await?;
         let password = Zeroizing::new(std::mem::take(&mut pw_secret.0));
         transport::request_cert_replacing(
@@ -952,7 +1010,7 @@ pub async fn join_admin_domain_replacing(
             &name,
             &admin,
             password,
-            JOIN_VALIDITY,
+            validity,
             groups,
             replaces_serial,
             identity,
@@ -962,18 +1020,11 @@ pub async fn join_admin_domain_replacing(
         let pending = match replaces_serial {
             Some(serial) => {
                 transport::enqueue_replacing(
-                    addr,
-                    kind,
-                    &name,
-                    JOIN_VALIDITY,
-                    serial,
-                    identity,
+                    addr, kind, &name, validity, serial, identity,
                 )
                 .await?
             }
-            None => {
-                transport::enqueue(addr, kind, &name, JOIN_VALIDITY, identity).await?
-            }
+            None => transport::enqueue(addr, kind, &name, validity, identity).await?,
         };
         match await_issuance(ans, addr, kind, &pending, identity).await? {
             PollOutcome::Issued(issued) => issued,
