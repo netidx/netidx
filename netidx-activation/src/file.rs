@@ -5,7 +5,7 @@
 //! are exposed (via `derive_builder`) so the schema can be constructed
 //! programmatically by configuration tooling.
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use derive_builder::Builder;
 use netidx_core::path::Path;
 use std::{
@@ -38,6 +38,48 @@ impl fmt::Display for Restart {
             Restart::No => write!(f, "no"),
             Restart::Yes => write!(f, "yes"),
             Restart::RateLimited(s) => write!(f, "rate-limited ({s}s)"),
+        }
+    }
+}
+
+impl std::str::FromStr for Restart {
+    type Err = anyhow::Error;
+
+    /// Accepts the flag form `rate-limited:<secs>` and the [`Display`] form
+    /// `rate-limited (<secs>s)`, so a policy read off a status listing can be
+    /// fed straight back to `--restart`.
+    ///
+    /// [`Display`]: fmt::Display
+    fn from_str(s: &str) -> Result<Self> {
+        let rate_limited = |secs: &str| -> Result<Self> {
+            let secs: f64 = secs
+                .trim()
+                .parse()
+                .map_err(|e| anyhow!("invalid rate-limit seconds {secs:?}: {e}"))?;
+            if !secs.is_finite() || secs <= 0.0 {
+                bail!("rate-limit seconds must be finite and positive, got {secs}");
+            }
+            Ok(Restart::RateLimited(secs))
+        };
+        match s.trim() {
+            "no" => Ok(Restart::No),
+            "yes" => Ok(Restart::Yes),
+            other => match other.strip_prefix("rate-limited") {
+                Some(rest) => match rest.trim_start().strip_prefix(':') {
+                    Some(secs) => rate_limited(secs),
+                    None => rest
+                        .trim()
+                        .strip_prefix('(')
+                        .and_then(|r| r.strip_suffix(')'))
+                        .and_then(|r| r.strip_suffix('s'))
+                        .context("expected `rate-limited:<seconds>`")
+                        .and_then(rate_limited),
+                },
+                None => bail!(
+                    "unknown restart policy {other:?}; expected `no`, `yes`, or \
+                     `rate-limited:<seconds>`"
+                ),
+            },
         }
     }
 }

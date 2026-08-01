@@ -16,14 +16,10 @@ use super::{
     answer::{EditValidator, TuiAnswerer},
     theme,
 };
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use crossterm::event::KeyCode;
-use netidx_activation::control::{
-    ControlOp, ControlRequest, ControlResponse, UnitState, control,
-};
-use netidx_admin::activation::{
-    ActivationDir, ProcessCfgBuilder, Unit, UnitBuilder, validate,
-};
+use netidx_activation::control::{ControlOp, UnitState};
+use netidx_admin::activation::{self, ActivationDir, Unit, validate};
 use ratatui::{
     Frame,
     layout::{Constraint, Layout, Rect},
@@ -32,7 +28,7 @@ use ratatui::{
     widgets::{List, ListItem, ListState, Paragraph, Wrap},
 };
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeMap,
     path::{Path, PathBuf},
 };
 
@@ -157,10 +153,7 @@ pub(super) async fn run(
         }
         ServicesAction::Control { units_dir, op, unit } => {
             let units: Vec<String> = unit.into_iter().collect();
-            match control(&units_dir, &ControlRequest { op, units }).await? {
-                ControlResponse::Ok { .. } => {}
-                ControlResponse::Err { reason } => bail!("{reason}"),
-            }
+            netidx_admin::activation::control_local(&units_dir, op, units).await?;
             let title = match op {
                 ControlOp::Start => "Service started",
                 ControlOp::Stop => "Service stopped",
@@ -171,13 +164,13 @@ pub(super) async fn run(
         }
         ServicesAction::Create { units_dir, name } => {
             let ad = ActivationDir::open(Some(&units_dir))?;
-            // The rest of the set, for the cross-unit trigger-conflict check.
-            let validate = unit_validator(ad.list()?, name.clone());
-            let edited = ans.edit(template_unit_json(), validate).await?;
+            let seed = serde_json::to_string_pretty(&activation::template_unit())
+                .context("serializing the unit template")?;
+            let edited =
+                ans.edit(seed, unit_validator(ad.others(&name)?, name.clone())).await?;
             let unit: Unit =
                 serde_json::from_str(&edited).context("parsing the edited unit")?;
-            ad.save(&name, &unit)?;
-            reload(&units_dir).await?;
+            ad.install(&name, &unit).await?;
             Ok(Outcome::services_after(
                 "Unit created",
                 vec![format!("Created unit {name:?}.")],
@@ -188,15 +181,11 @@ pub(super) async fn run(
             let ad = ActivationDir::open(Some(&units_dir))?;
             let seed = serde_json::to_string_pretty(&ad.get(&name)?)
                 .context("serializing the current unit")?;
-            // Exclude this unit's own (old) definition from the conflict check.
-            let mut others = ad.list()?;
-            others.remove(&name);
-            let validate = unit_validator(others, name.clone());
-            let edited = ans.edit(seed, validate).await?;
+            let edited =
+                ans.edit(seed, unit_validator(ad.others(&name)?, name.clone())).await?;
             let unit: Unit =
                 serde_json::from_str(&edited).context("parsing the edited unit")?;
-            ad.save(&name, &unit)?;
-            reload(&units_dir).await?;
+            ad.install(&name, &unit).await?;
             Ok(Outcome::services_after(
                 "Unit saved",
                 vec![format!("Saved unit {name:?}.")],
@@ -204,8 +193,7 @@ pub(super) async fn run(
             ))
         }
         ServicesAction::Delete { units_dir, name } => {
-            ActivationDir::open(Some(&units_dir))?.remove(&name)?;
-            reload(&units_dir).await?;
+            ActivationDir::open(Some(&units_dir))?.uninstall(&name).await?;
             Ok(Outcome::services_after(
                 "Unit deleted",
                 vec![format!("Deleted unit {name:?}.")],
@@ -215,58 +203,33 @@ pub(super) async fn run(
     }
 }
 
-/// The definitions (from disk) merged with live run-states (from the supervisor)
-/// into display rows. All I/O lives here, off the render frame.
+/// Display rows for the services surface, from the engine's merged view of
+/// what is defined and what is running.
 async fn svc_rows(units_dir: &Path) -> Result<Vec<ServiceRow>> {
-    let defs = ActivationDir::open(Some(units_dir))?.list()?;
-    let statuses = match control(
-        units_dir,
-        &ControlRequest { op: ControlOp::Status, units: Vec::new() },
-    )
-    .await?
-    {
-        ControlResponse::Ok { units } => units,
-        ControlResponse::Err { reason } => bail!("{reason}"),
-    };
-    let mut states: BTreeMap<String, UnitState> =
-        statuses.into_iter().map(|u| (u.unit, u.state)).collect();
-    let mut names: BTreeSet<String> = defs.keys().cloned().collect();
-    names.extend(states.keys().cloned());
-    let rows = names
+    Ok(activation::list_with_state(units_dir)
+        .await?
         .into_iter()
-        .map(|name| {
-            let def = defs.get(&name);
-            let (exe, args, trigger, restart) = match def {
-                Some(u) => (
-                    u.process.exe.clone(),
-                    u.process.args.clone(),
-                    u.trigger.to_string(),
-                    u.process.restart.to_string(),
+        .map(|u| {
+            let (exe, args, trigger, restart) = match &u.unit {
+                Some(d) => (
+                    d.process.exe.clone(),
+                    d.process.args.clone(),
+                    d.trigger.to_string(),
+                    d.process.restart.to_string(),
                 ),
                 None => (String::new(), Vec::new(), String::new(), String::new()),
             };
             ServiceRow {
-                defined: def.is_some(),
-                state: states.remove(&name),
-                name,
+                defined: u.unit.is_some(),
+                state: u.state,
+                name: u.name,
                 exe,
                 args,
                 trigger,
                 restart,
             }
         })
-        .collect();
-    Ok(rows)
-}
-
-/// Reload the supervisor so it picks up an on-disk unit change.
-async fn reload(units_dir: &Path) -> Result<()> {
-    match control(units_dir, &ControlRequest { op: ControlOp::Reload, units: Vec::new() })
-        .await?
-    {
-        ControlResponse::Ok { .. } => Ok(()),
-        ControlResponse::Err { reason } => bail!("{reason}"),
-    }
+        .collect())
 }
 
 /// The `$EDITOR` validator for a unit: parse the JSON, run the cross-unit
@@ -280,21 +243,6 @@ fn unit_validator(others: BTreeMap<String, Unit>, name: String) -> EditValidator
         validate(&set)?;
         serde_json::to_string_pretty(&unit).context("serializing unit")
     })
-}
-
-/// A generic unit template the create flow seeds the editor with. Built via the
-/// builders so it round-trips the `deny_unknown_fields` decoder.
-fn template_unit_json() -> String {
-    let unit = UnitBuilder::default()
-        .process(
-            ProcessCfgBuilder::default()
-                .exe("/path/to/executable")
-                .build()
-                .expect("template process cfg"),
-        )
-        .build()
-        .expect("template unit");
-    serde_json::to_string_pretty(&unit).expect("serializing template unit")
 }
 
 /// A row's bare status word + color for the Status pane (the pid is a separate

@@ -152,6 +152,104 @@ impl ActivationDir {
     pub fn unit_path(&self, name: &str) -> PathBuf {
         unit_path_in(&self.dir, name)
     }
+
+    /// Every unit in this directory *except* `name` — the set a candidate for
+    /// `name` is validated against, so an editor loop can re-check on each
+    /// re-edit without a unit conflicting with its own previous definition.
+    pub fn others(&self, name: &str) -> Result<BTreeMap<String, Unit>> {
+        let mut units = self.list()?;
+        units.remove(name);
+        Ok(units)
+    }
+
+    /// Install or replace `name`: check the whole resulting set for cross-unit
+    /// trigger conflicts, write it, then tell a running supervisor to re-read
+    /// the directory.
+    ///
+    /// The reload is not optional. The supervisor has no directory watch, so
+    /// without it a unit added to a live host sits inert until the next SIGHUP
+    /// — which is what `netidx admin component activation add` used to do.
+    /// `Ok(false)` means nothing was listening, the normal case at install time.
+    pub async fn install(&self, name: &str, unit: &Unit) -> Result<bool> {
+        let mut set = self.others(name)?;
+        set.insert(name.to_string(), unit.clone());
+        validate(&set)?;
+        self.save(name, unit)?;
+        reload(&self.dir).await
+    }
+
+    /// Remove `name` and reload, with the same meaning for `Ok(false)`.
+    pub async fn uninstall(&self, name: &str) -> Result<bool> {
+        self.remove(name)?;
+        reload(&self.dir).await
+    }
+}
+
+/// A unit definition merged with the run-state the supervisor reports.
+///
+/// The union of both sources, because a mismatch is exactly what an operator
+/// needs to see: a unit defined on disk the supervisor has not loaded, and one
+/// it reports with no file behind it, both get a row.
+pub struct UnitStatus {
+    pub name: String,
+    /// The on-disk definition, absent when only the supervisor knows this unit.
+    pub unit: Option<Unit>,
+    /// The live state, absent when the supervisor has not loaded it.
+    pub state: Option<netidx_activation::control::UnitState>,
+}
+
+/// Every unit this directory defines or the supervisor is running, by name.
+pub async fn list_with_state(units_dir: &Path) -> Result<Vec<UnitStatus>> {
+    use netidx_activation::control::{
+        ControlOp, ControlRequest, ControlResponse, control,
+    };
+    let defs = ActivationDir::open(Some(units_dir))?.list()?;
+    let req = ControlRequest { op: ControlOp::Status, units: Vec::new() };
+    let reported = match control(units_dir, &req).await? {
+        ControlResponse::Ok { units } => units,
+        ControlResponse::Err { reason } => bail!("{reason}"),
+    };
+    let mut states: BTreeMap<String, _> =
+        reported.into_iter().map(|u| (u.unit, u.state)).collect();
+    let mut names: std::collections::BTreeSet<String> = defs.keys().cloned().collect();
+    names.extend(states.keys().cloned());
+    Ok(names
+        .into_iter()
+        .map(|name| UnitStatus {
+            unit: defs.get(&name).cloned(),
+            state: states.remove(&name),
+            name,
+        })
+        .collect())
+}
+
+/// Drive this host's own supervisor over its control socket — start, stop,
+/// restart, or status one unit or all of them. The remote counterpart, over an
+/// admin server, is [`crate::ops::service::control_remote`].
+pub async fn control_local(
+    units_dir: &Path,
+    op: netidx_activation::control::ControlOp,
+    units: Vec<String>,
+) -> Result<Vec<netidx_activation::control::UnitStatus>> {
+    use netidx_activation::control::{ControlRequest, ControlResponse, control};
+    match control(units_dir, &ControlRequest { op, units }).await? {
+        ControlResponse::Ok { units } => Ok(units),
+        ControlResponse::Err { reason } => bail!("{reason}"),
+    }
+}
+
+/// The starter unit a create flow seeds an editor with. Built through the
+/// builders so it round-trips the `deny_unknown_fields` decoder.
+pub fn template_unit() -> Unit {
+    UnitBuilder::default()
+        .process(
+            ProcessCfgBuilder::default()
+                .exe("/path/to/executable")
+                .build()
+                .expect("template process cfg"),
+        )
+        .build()
+        .expect("template unit")
 }
 
 /// Free-function form of [`ActivationDir::unit_path`] for callers that
@@ -191,6 +289,42 @@ mod tests {
     use super::*;
     use netidx::path::Path as NetidxPath;
     use std::collections::BTreeSet;
+
+    /// Writing a unit tells a live supervisor to re-read the directory.
+    ///
+    /// There is no supervisor here, which is the case that must not be an
+    /// error: at install time nothing is listening yet, and the service reads
+    /// the directory when it starts. `netidx admin component activation add`
+    /// used to stop at the write, so on a host that *was* live the unit sat
+    /// inert until the next SIGHUP.
+    #[tokio::test]
+    async fn writing_a_unit_reloads_and_tolerates_no_supervisor() {
+        let dir = tempfile::tempdir().unwrap();
+        let ad = ActivationDir::open(Some(dir.path())).unwrap();
+        assert!(!ad.install("one", &unit("/bin/true")).await.unwrap());
+        assert!(ad.unit_path("one").is_file());
+        assert!(!ad.uninstall("one").await.unwrap());
+        assert!(!ad.unit_path("one").exists());
+    }
+
+    /// A unit is validated against the rest of the set, but not against its
+    /// own previous definition — re-saving a unit unchanged must not read as a
+    /// conflict with itself.
+    #[tokio::test]
+    async fn a_unit_does_not_conflict_with_its_own_previous_definition() {
+        let dir = tempfile::tempdir().unwrap();
+        let ad = ActivationDir::open(Some(dir.path())).unwrap();
+        let mut claim = unit("/bin/true");
+        claim.trigger = Trigger::OnAccess(
+            [NetidxPath::from("/a")].into_iter().collect::<BTreeSet<_>>(),
+        );
+        ad.install("mine", &claim).await.unwrap();
+        ad.install("mine", &claim).await.expect("re-saving is not a self-conflict");
+        // A *different* unit claiming the same path still is one.
+        let e = ad.install("other", &claim).await.unwrap_err();
+        assert!(format!("{e:#}").contains("conflicting OnAccess trigger"), "{e:#}");
+        assert!(!ad.unit_path("other").exists(), "a refused unit is not written");
+    }
 
     fn unit(exe: &str) -> Unit {
         UnitBuilder::default()

@@ -186,6 +186,10 @@ pub(crate) struct ContainerAddArgs {
     pub restart: Option<String>,
 }
 
+fn runtime() -> Result<tokio::runtime::Runtime> {
+    tokio::runtime::Runtime::new().context("starting tokio runtime")
+}
+
 pub(crate) fn run(cmd: Cmd) -> Result<()> {
     match cmd {
         Cmd::List { dir } => list(dir),
@@ -335,7 +339,7 @@ fn add_generic(a: GenericAddArgs) -> Result<()> {
         pb.stderr(p);
     }
     if let Some(r) = a.restart {
-        pb.restart(parse_restart(&r)?);
+        pb.restart(r.parse::<Restart>()?);
     }
     pb.environment(Environment::default());
     let process = pb.build()?;
@@ -362,7 +366,7 @@ fn add_container(a: ContainerAddArgs) -> Result<()> {
         bind: a.bind.map(ArcStr::from),
     })?;
     if let Some(r) = &a.restart {
-        unit.process.restart = parse_restart(r)?;
+        unit.process.restart = r.parse()?;
     }
     install_unit(a.dir, &a.name, unit)
 }
@@ -433,7 +437,7 @@ fn add_id_map(a: IdMapAddArgs) -> Result<()> {
         socket_mode,
     })?;
     if let Some(r) = &a.restart {
-        unit.process.restart = parse_restart(r)?;
+        unit.process.restart = r.parse()?;
     }
     install_unit(a.dir, &a.name, unit)
 }
@@ -444,40 +448,28 @@ fn install_unit(
     unit: netidx_admin::activation::Unit,
 ) -> Result<()> {
     let ad = ActivationDir::open(dir.as_deref())?;
-    let mut units = ad.list()?;
-    units.insert(name.to_string(), unit.clone());
-    activation::validate(&units)?;
-    ad.save(name, &unit)?;
+    let live = runtime()?.block_on(ad.install(name, &unit))?;
     println!("wrote {}/{}.unit", ad.dir().display(), name);
+    report_reload(live);
     Ok(())
 }
 
 fn remove(dir: Option<PathBuf>, name: String) -> Result<()> {
     let ad = ActivationDir::open(dir.as_deref())?;
-    ad.remove(&name)?;
+    let live = runtime()?.block_on(ad.uninstall(&name))?;
     println!("removed {}/{}.unit", ad.dir().display(), name);
+    report_reload(live);
     Ok(())
 }
 
-fn parse_restart(s: &str) -> Result<Restart> {
-    match s {
-        "no" => Ok(Restart::No),
-        "yes" => Ok(Restart::Yes),
-        other => {
-            if let Some(rest) = other.strip_prefix("rate-limited:") {
-                let secs: f64 = rest
-                    .parse()
-                    .map_err(|e| anyhow!("invalid rate-limit seconds {rest:?}: {e}"))?;
-                if !secs.is_finite() || secs <= 0.0 {
-                    bail!("rate-limit seconds must be finite and positive, got {secs}");
-                }
-                Ok(Restart::RateLimited(secs))
-            } else {
-                bail!(
-                    "unknown restart policy {other:?}; expected `no`, `yes`, or `rate-limited:<seconds>`"
-                )
-            }
-        }
+/// Say whether the change is already in effect. The supervisor has no
+/// directory watch, so a host with no supervisor listening simply picks the
+/// unit up when its service next starts.
+fn report_reload(live: bool) {
+    if live {
+        println!("the activation supervisor reloaded; the change is in effect");
+    } else {
+        println!("no activation supervisor is running; it will load on next start");
     }
 }
 
@@ -554,16 +546,23 @@ mod tests {
 
     #[test]
     fn parse_restart_round_trip() {
-        assert!(matches!(parse_restart("no").unwrap(), Restart::No));
-        assert!(matches!(parse_restart("yes").unwrap(), Restart::Yes));
-        match parse_restart("rate-limited:2.5").unwrap() {
+        let parse = |s: &str| s.parse::<Restart>();
+        assert!(matches!(parse("no").unwrap(), Restart::No));
+        assert!(matches!(parse("yes").unwrap(), Restart::Yes));
+        match parse("rate-limited:2.5").unwrap() {
             Restart::RateLimited(s) => assert_eq!(s, 2.5),
             _ => panic!("expected RateLimited"),
         }
-        assert!(parse_restart("rate-limited:nope").is_err());
-        assert!(parse_restart("rate-limited:-1").is_err());
-        assert!(parse_restart("rate-limited:0").is_err());
-        assert!(parse_restart("bogus").is_err());
+        assert!(parse("rate-limited:nope").is_err());
+        assert!(parse("rate-limited:-1").is_err());
+        assert!(parse("rate-limited:0").is_err());
+        assert!(parse("bogus").is_err());
+        // The Display form round-trips, so a policy read off a status
+        // listing can be fed straight back to --restart.
+        match parse(&Restart::RateLimited(2.5).to_string()).unwrap() {
+            Restart::RateLimited(s) => assert!((s - 2.5).abs() < f64::EPSILON),
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]
