@@ -924,6 +924,11 @@ pub struct JoinRequest<'a> {
     pub id_map_groups: &'a [String],
     /// The certificate lifetime to request. `None` asks for the standard one.
     pub validity: Option<Duration>,
+    /// Refuse, before asking the CA for anything, if this name already has an
+    /// identity installed in the canonical user directory. Only a caller that
+    /// installs *there* wants this — an install or a restore stages elsewhere
+    /// and is gated by its own `--force`.
+    pub refuse_if_installed: bool,
     /// The confirmed CA identity every connection here pins to.
     pub identity: &'a CaIdentity,
 }
@@ -941,6 +946,7 @@ impl<'a> JoinRequest<'a> {
             admin: None,
             id_map_groups: &[],
             validity: None,
+            refuse_if_installed: false,
             identity,
         }
     }
@@ -970,10 +976,17 @@ pub async fn join_admin_domain(
         admin,
         id_map_groups,
         validity,
+        refuse_if_installed,
         identity,
     } = req;
     let validity = validity.unwrap_or(JOIN_VALIDITY);
     let name = prompt_identity_name(ans, suggested_name).await?;
+    // Before the CA is asked for anything: an issued certificate this host
+    // then refuses to install is still live at the CA, and would block the
+    // retry the refusal recommends.
+    if refuse_if_installed {
+        tls::refuse_to_clobber_user_identity(&name)?;
+    }
     // Key protection is decided before the request: the operator is here now,
     // and the queued path may wait on a remote admin for a long time after.
     let protection = choose_key_protection(

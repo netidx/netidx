@@ -1779,6 +1779,7 @@ async fn join_async(ans: &mut dyn Answerer, p: JoinArgs) -> Result<()> {
             admin: p.admin.clone(),
             id_map_groups: &p.id_map_groups,
             validity: Some(p.validity),
+            refuse_if_installed: !p.force,
             ..enroll::JoinRequest::new(server, NodeKind::Client, &identity)
         },
     )

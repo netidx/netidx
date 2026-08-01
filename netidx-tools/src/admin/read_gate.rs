@@ -9,7 +9,7 @@ use super::answer_cli::RemoteAuthFlags;
 use anyhow::{Context, Result};
 use clap::{ArgGroup, Args};
 use netidx::resolver_server::config::ReadGate;
-use netidx_admin::{answer::Answerer, ops};
+use netidx_admin::ops;
 use netidx_admin_proto::AdminServerId;
 
 #[derive(Args, Debug)]
@@ -52,13 +52,9 @@ pub(crate) fn read_gate(f: ReadGateFlags) -> Result<()> {
     };
     let mut ans = f.auth.answerer()?;
     let rt = tokio::runtime::Runtime::new().context("starting tokio runtime")?;
-    // The strict CLI has no confirm ceremony, so the risk is a warning rather
-    // than a gate — but it is the same risk the TUI stops on, from the same
-    // rule. The member's current gate is not known here without a round trip
-    // this command does not make, so this is the direction-only half of it.
-    if let Some(risk) = ops::servers::read_gate_warning(f.target, None, gate, None) {
-        ans.warn(risk.split("\n\n").next().unwrap_or(&risk));
-    }
+    // The risk is stated by `set_read_gate`, which has the member's current
+    // gate. The strict CLI has no confirm ceremony, so it arrives as a warning
+    // rather than a gate — the same rule the TUI stops on.
     rt.block_on(ops::service::set_read_gate(
         &mut ans,
         server,

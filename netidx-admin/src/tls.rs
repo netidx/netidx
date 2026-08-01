@@ -191,7 +191,7 @@ pub fn installed_files_in(dest_dir: &Path) -> [PathBuf; 3] {
 /// it can be checked without a real home directory. A certificate or a private
 /// key is enough to refuse: half an identity is still an identity someone is
 /// in the middle of installing.
-fn refuse_to_clobber(cn: &str, dest_dir: &Path) -> Result<()> {
+pub(crate) fn refuse_to_clobber(cn: &str, dest_dir: &Path) -> Result<()> {
     let [certificate, private_key, _] = installed_files_in(dest_dir);
     if certificate.exists() || private_key.exists() {
         anyhow::bail!(
@@ -201,6 +201,15 @@ fn refuse_to_clobber(cn: &str, dest_dir: &Path) -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// Refuse if `cn` already has an identity installed in this user's canonical
+/// directory. Callers that install there check this *before* asking a CA to
+/// sign: a certificate issued and then not installed is one the CA still
+/// counts as live, so checking only at install time would make the retry the
+/// error recommends fail too.
+pub fn refuse_to_clobber_user_identity(cn: &str) -> Result<()> {
+    refuse_to_clobber(cn, &identity_dir(cn)?)
 }
 
 /// Where this identity lives by convention: `${user_tls_dir}/<cn>`.
@@ -701,5 +710,21 @@ mod tests {
         std::fs::remove_file(dest.join("certificate.pem")).unwrap();
         write(&dest.join("private.key"), b"key");
         assert!(refuse_to_clobber("alice.example.com", &dest).is_err());
+    }
+
+    /// The guard has to run before the CA is asked for anything. A refusal
+    /// after enrollment leaves a live certificate the operator never
+    /// installed, which then blocks the `--force` retry the refusal
+    /// recommends — so the check is exposed separately from the install.
+    #[test]
+    fn the_clobber_check_is_available_without_installing_anything() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("alice.example.com");
+        std::fs::create_dir_all(&dest).unwrap();
+        write(&dest.join("private.key"), b"key");
+        // Same rule, reachable with no certificate in hand.
+        assert!(refuse_to_clobber("alice.example.com", &dest).is_err());
+        let [cert, key, trusted] = installed_files_in(&dest);
+        assert!(!cert.exists() && key.exists() && !trusted.exists());
     }
 }

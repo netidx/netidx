@@ -64,7 +64,14 @@ pub(crate) fn logout(args: LogoutArgs) -> Result<()> {
         (false, None) => LogoutSelection::TheOnlyOne,
     };
     let runtime = tokio::runtime::Runtime::new().context("starting tokio runtime")?;
-    for out in runtime.block_on(ops::logout(select))? {
+    let sessions = runtime.block_on(ops::logout(select))?;
+    // Selecting by glyph reports its own "nothing was cached"; a bare logout
+    // that matched nothing must say so too, rather than exiting silently as
+    // though it had revoked something.
+    if sessions.is_empty() {
+        println!("no administrator session is cached");
+    }
+    for out in sessions {
         match out.outcome {
             LogoutOutcome::Revoked => {}
             LogoutOutcome::NotRevoked(e) => eprintln!(

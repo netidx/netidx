@@ -14,7 +14,7 @@ use crate::{
     answer::Answerer,
     transport,
 };
-use anyhow::Result;
+use anyhow::{Context, Result};
 use enumflags2::BitFlags;
 use netidx_activation::control::ControlOp;
 use std::{net::SocketAddr, path::PathBuf};
@@ -98,6 +98,27 @@ pub async fn set_read_gate(
     gate: netidx::resolver_server::config::ReadGate,
 ) -> Result<()> {
     let sess = open_admin_session(ans, Some(server), ca_dir, admin, password).await?;
+    // State the risk here, where the member's *current* gate is actually
+    // known. A caller that addresses a member by id has no way to compute it
+    // without this round trip, and the reading that matters most — opening one
+    // that is still filling — is invisible without it.
+    let map = transport::get_map_pinned(
+        sess.server,
+        netidx_admin_proto::NodeKind::Client,
+        &sess.identity,
+    )
+    .await
+    .context("fetching the admin domain map to describe the gate change")?;
+    if let Some(entry) = map.admin_servers.iter().find(|s| s.id == target_server)
+        && let Some(risk) = crate::ops::servers::read_gate_warning(
+            target_server,
+            Some(entry.addr),
+            gate,
+            entry.reported_read_gate,
+        )
+    {
+        ans.warn(risk.split("\n\n").next().unwrap_or(&risk));
+    }
     transport::set_read_gate(
         sess.server,
         netidx_admin_proto::NodeKind::Client,
