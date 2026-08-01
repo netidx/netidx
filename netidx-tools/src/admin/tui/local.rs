@@ -231,7 +231,7 @@ pub(super) async fn probe_local_cas(
     let mut out = Vec::with_capacity(targets.len());
     for (index, ca_dir, cfg) in targets {
         let probed = async {
-            let access = super::super::ca::ca_access(&ca_dir, cfg).await?;
+            let access = slots::CaAccess::open(&ca_dir, cfg).await?;
             slots::local_ca_status(&access, &ca_dir).await
         }
         .await;

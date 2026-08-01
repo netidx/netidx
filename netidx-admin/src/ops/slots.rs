@@ -42,6 +42,8 @@ use std::{
 };
 use zeroize::Zeroizing;
 
+/// How to reach the CA at a given directory: through the daemon that serves it,
+/// or directly under an installation guard.
 pub enum CaAccess {
     Running {
         config: PathBuf,
@@ -51,6 +53,90 @@ pub enum CaAccess {
         lock: ConfigDirLock,
         ca_alias_lock: Option<ConfigDirLock>,
     },
+}
+
+impl CaAccess {
+    /// Decide how to reach the CA at `ca_dir`.
+    ///
+    /// The daemon's control socket when a config that owns *this exact
+    /// directory* is live — it holds the vault open, so going around it would
+    /// contend with a running server. Otherwise an offline guard: the owning
+    /// config's directory lock plus, when the CA lives outside that directory,
+    /// the alias lock covering it.
+    ///
+    /// Ownership is re-checked once the locks are held. A config rewritten
+    /// between the first check and the acquire could otherwise hand us a guard
+    /// over the wrong tree, so a change is refused rather than acted on.
+    pub async fn open(ca_dir: &Path, config: Option<PathBuf>) -> Result<CaAccess> {
+        let config = matching_ca_config(ca_dir, config).await;
+        if let Some(config) = config.as_ref()
+            && local::daemon_running(config).await
+            && config_owns_ca(config, ca_dir).await
+        {
+            return Ok(CaAccess::Running { config: config.clone() });
+        }
+        let (lock, ca_alias_lock) = match config.as_ref() {
+            Some(path) => {
+                let lock = ConfigDirLock::acquire_for_file_async(path).await?;
+                lock.require_contained(ca_dir)?;
+                let alias = match lock.ca_alias_root(ca_dir)? {
+                    Some(root) => Some(ConfigDirLock::acquire_async(root).await?),
+                    None => None,
+                };
+                (lock, alias)
+            }
+            None => (ConfigDirLock::acquire_for_ca_dir(ca_dir).await?, None),
+        };
+        if let Some(config) = config.as_ref()
+            && !config_owns_ca(config, ca_dir).await
+        {
+            bail!(
+                "admin-server config {} changed while its configuration locks were \
+                 being acquired; no changes were made. Re-run the command",
+                config.display()
+            );
+        }
+        Ok(CaAccess::Offline { config, lock, ca_alias_lock })
+    }
+}
+
+/// The admin-server config that owns `ca_dir`: the supplied one if it does,
+/// else this host's user-scope config, else the system one. `None` when no
+/// config claims this CA, which selects the standalone offline guard.
+async fn matching_ca_config(ca_dir: &Path, supplied: Option<PathBuf>) -> Option<PathBuf> {
+    if let Some(path) = supplied.as_ref()
+        && config_owns_ca(path, ca_dir).await
+    {
+        return supplied;
+    }
+    if let Ok(path) = paths::user_admin_server_config()
+        && supplied.as_ref() != Some(&path)
+        && config_owns_ca(&path, ca_dir).await
+    {
+        return Some(path);
+    }
+    let path = paths::system_admin_server_config();
+    if supplied.as_ref() != Some(&path) && config_owns_ca(&path, ca_dir).await {
+        return Some(path);
+    }
+    None
+}
+
+/// Whether `config` holds the CA role for `ca_dir`. Compared canonically, so a
+/// symlinked or relative path still matches; any failure to read, parse, or
+/// canonicalize is "no", never a guess.
+async fn config_owns_ca(config: &Path, ca_dir: &Path) -> bool {
+    let Ok(config) = admin_server_config::load_for_recovery_async(config).await else {
+        return false;
+    };
+    let Some(role) = config.roles.ca else {
+        return false;
+    };
+    match (tokio::fs::canonicalize(role.dir).await, tokio::fs::canonicalize(ca_dir).await)
+    {
+        (Ok(configured), Ok(requested)) => configured == requested,
+        _ => false,
+    }
 }
 
 // -- CA auto-approve ---------------------------------------------------------

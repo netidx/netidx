@@ -48,84 +48,6 @@ fn runtime() -> Result<tokio::runtime::Runtime> {
     tokio::runtime::Runtime::new().context("starting tokio runtime")
 }
 
-#[cfg(unix)]
-pub(crate) async fn acquire_ca_lock(ca_dir: &Path) -> Result<ConfigDirLock> {
-    ConfigDirLock::acquire_for_ca_dir(ca_dir).await
-}
-
-#[cfg(unix)]
-pub(crate) async fn ca_access(
-    ca_dir: &Path,
-    config: Option<PathBuf>,
-) -> Result<slots_ops::CaAccess> {
-    let config = matching_ca_config(ca_dir, config).await;
-    if let Some(config) = config.as_ref()
-        && local::daemon_running(config).await
-        && config_owns_ca(config, ca_dir).await
-    {
-        return Ok(slots_ops::CaAccess::Running { config: config.clone() });
-    }
-    let (lock, ca_alias_lock) = match config.as_ref() {
-        Some(path) => {
-            let lock = ConfigDirLock::acquire_for_file_async(path).await?;
-            lock.require_contained(ca_dir)?;
-            let alias = match lock.ca_alias_root(ca_dir)? {
-                Some(root) => Some(ConfigDirLock::acquire_async(root).await?),
-                None => None,
-            };
-            (lock, alias)
-        }
-        None => (ConfigDirLock::acquire_for_ca_dir(ca_dir).await?, None),
-    };
-    if let Some(config) = config.as_ref()
-        && !config_owns_ca(config, ca_dir).await
-    {
-        bail!(
-            "admin-server config {} changed while its configuration locks were being \
-             acquired; no changes were made. Re-run the command",
-            config.display()
-        );
-    }
-    Ok(slots_ops::CaAccess::Offline { config, lock, ca_alias_lock })
-}
-
-#[cfg(unix)]
-async fn matching_ca_config(ca_dir: &Path, supplied: Option<PathBuf>) -> Option<PathBuf> {
-    if let Some(path) = supplied.as_ref()
-        && config_owns_ca(path, ca_dir).await
-    {
-        return supplied;
-    }
-    if let Ok(path) = paths::user_admin_server_config()
-        && supplied.as_ref() != Some(&path)
-        && config_owns_ca(&path, ca_dir).await
-    {
-        return Some(path);
-    }
-    let path = paths::system_admin_server_config();
-    if supplied.as_ref() != Some(&path) && config_owns_ca(&path, ca_dir).await {
-        return Some(path);
-    }
-    None
-}
-
-#[cfg(unix)]
-async fn config_owns_ca(config: &Path, ca_dir: &Path) -> bool {
-    let Ok(config) =
-        netidx_admin::admin_server_config::load_for_recovery_async(config).await
-    else {
-        return false;
-    };
-    let Some(role) = config.roles.ca else {
-        return false;
-    };
-    match (tokio::fs::canonicalize(role.dir).await, tokio::fs::canonicalize(ca_dir).await)
-    {
-        (Ok(configured), Ok(requested)) => configured == requested,
-        _ => false,
-    }
-}
-
 fn parse_server_role(value: &str) -> std::result::Result<admin_proto::Role, String> {
     match value.to_ascii_lowercase().replace('_', "-").as_str() {
         "resolver" => Ok(admin_proto::Role::Resolver),
@@ -951,7 +873,7 @@ fn auto_approve(p: AutoApproveArgs) -> Result<()> {
     let cfg = paths::discover_admin_server_config().ok();
     if p.status {
         let s = runtime()?.block_on(async {
-            let access = ca_access(&dir, cfg).await?;
+            let access = slots_ops::CaAccess::open(&dir, cfg).await?;
             Ok::<_, anyhow::Error>(
                 slots_ops::local_ca_status(&access, &dir).await?.auto_approve,
             )
@@ -974,7 +896,7 @@ fn auto_approve(p: AutoApproveArgs) -> Result<()> {
     }
     let mut ans = p.recovery.answerer()?;
     let out = runtime()?.block_on(async {
-        let access = ca_access(&dir, cfg).await?;
+        let access = slots_ops::CaAccess::open(&dir, cfg).await?;
         slots_ops::auto_approve(&mut ans, &access, dir, p.rotate, p.insecure_no_tpm).await
     })?;
     match out {
@@ -1313,7 +1235,7 @@ fn recovery(cmd: RecoveryCmd) -> Result<()> {
             let dir = ca_dir_for(a.ca_dir)?;
             let cfg = paths::discover_admin_server_config().ok();
             let s = runtime()?.block_on(async {
-                let access = ca_access(&dir, cfg).await?;
+                let access = slots_ops::CaAccess::open(&dir, cfg).await?;
                 Ok::<_, anyhow::Error>(
                     slots_ops::local_ca_status(&access, &dir).await?.recovery,
                 )
@@ -1342,7 +1264,7 @@ fn recovery_rotate(a: RecoveryRotateArgs) -> Result<()> {
     // FlagAnswerer (no secret) is all the CLI needs.
     let mut ans = make_offline_answerer(None, false)?;
     let out = runtime()?.block_on(async {
-        let access = ca_access(&dir, cfg).await?;
+        let access = slots_ops::CaAccess::open(&dir, cfg).await?;
         slots_ops::recovery_rotate(&mut ans, &access, dir).await
     })?;
     match out {
@@ -1397,7 +1319,7 @@ fn external_emit_csr(a: ExternalDirArgs) -> Result<()> {
     } else {
         let mut ans = a.recovery.answerer()?;
         runtime()?.block_on(async {
-            let lock = acquire_ca_lock(&dir).await?;
+            let lock = ConfigDirLock::acquire_for_ca_dir(&dir).await?;
             slots_ops::external_emit_csr(&mut ans, &lock, dir).await
         })?
     };
@@ -1438,7 +1360,7 @@ fn external_install(a: ExternalInstallArgs) -> Result<()> {
     };
     let rt = runtime()?;
     let scope = rt.block_on(async {
-        let lock = acquire_ca_lock(&dir).await?;
+        let lock = ConfigDirLock::acquire_for_ca_dir(&dir).await?;
         let out = slots_ops::external_install_cert(
             &mut ans,
             &lock,
@@ -1515,7 +1437,7 @@ fn external_status(a: ExternalDirArgs) -> Result<()> {
     let dir = ca_dir_for(a.ca_dir)?;
     let cfg = paths::discover_admin_server_config().ok();
     let s = runtime()?.block_on(async {
-        let access = ca_access(&dir, cfg).await?;
+        let access = slots_ops::CaAccess::open(&dir, cfg).await?;
         Ok::<_, anyhow::Error>(slots_ops::local_ca_status(&access, &dir).await?.external)
     })?;
     println!("external CA status:");
@@ -1982,7 +1904,7 @@ fn issue(p: IssueArgs) -> Result<()> {
     // unencrypted: callers here are doing manual cert issuance and don't
     // necessarily have a netidx config to receive the askpass.
     let out = runtime()?.block_on(async {
-        let lock = acquire_ca_lock(&directory).await?;
+        let lock = ConfigDirLock::acquire_for_ca_dir(&directory).await?;
         offline_ops::ca_issue(
             &mut ans, &lock, directory, subject, san, p.key_bits, p.validity, out_dir,
             None,
@@ -2059,7 +1981,7 @@ fn sign(mut p: SignArgs) -> Result<()> {
     let id_map = id_map_choice(&p);
     let mut ans = p.recovery.answerer()?;
     let out = runtime()?.block_on(async {
-        let ca_lock = acquire_ca_lock(&directory).await?;
+        let ca_lock = ConfigDirLock::acquire_for_ca_dir(&directory).await?;
         let id_map_lock = match &id_map {
             IdMapChoice::Skip => None,
             IdMapChoice::Ask if !ans.interactive() => None,

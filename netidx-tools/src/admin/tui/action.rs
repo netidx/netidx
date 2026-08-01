@@ -502,8 +502,10 @@ async fn auto_approve(
     ca_dir: PathBuf,
     cfg: Option<PathBuf>,
 ) -> Result<Outcome> {
-    use netidx_admin::ops::slots::{AutoApproveOutcome, AutorenewWiring, auto_approve};
-    let access = super::super::ca::ca_access(&ca_dir, cfg).await?;
+    use netidx_admin::ops::slots::{
+        AutoApproveOutcome, AutorenewWiring, CaAccess, auto_approve,
+    };
+    let access = CaAccess::open(&ca_dir, cfg).await?;
     let out = auto_approve(ans, &access, ca_dir, rotate, false).await?;
     let lines = match out {
         AutoApproveOutcome::HotSwapped { warning } => {
@@ -544,8 +546,8 @@ async fn recovery_rotate(
     ca_dir: PathBuf,
     cfg: Option<PathBuf>,
 ) -> Result<Outcome> {
-    use netidx_admin::ops::slots::{RecoveryRotateOutcome, recovery_rotate};
-    let access = super::super::ca::ca_access(&ca_dir, cfg).await?;
+    use netidx_admin::ops::slots::{CaAccess, RecoveryRotateOutcome, recovery_rotate};
+    let access = CaAccess::open(&ca_dir, cfg).await?;
     let out = recovery_rotate(ans, &access, ca_dir).await?;
     let lines = match out {
         RecoveryRotateOutcome::HotSwapped => vec![
@@ -958,7 +960,9 @@ async fn external_emit_csr(ans: &mut TuiAnswerer, ca_dir: PathBuf) -> Result<Out
             csr
         }
         Err(_) => {
-            let lock = super::super::ca::acquire_ca_lock(&ca_dir).await?;
+            let lock =
+                netidx_admin::config_lock::ConfigDirLock::acquire_for_ca_dir(&ca_dir)
+                    .await?;
             netidx_admin::ops::slots::external_emit_csr(ans, &lock, ca_dir).await?
         }
     };
@@ -1009,7 +1013,9 @@ async fn external_install(ans: &mut TuiAnswerer, ca_dir: PathBuf) -> Result<Outc
             use netidx_admin::ops::slots::{
                 ExternalInstallOutcome, external_install_cert,
             };
-            let lock = super::super::ca::acquire_ca_lock(&ca_dir).await?;
+            let lock =
+                netidx_admin::config_lock::ConfigDirLock::acquire_for_ca_dir(&ca_dir)
+                    .await?;
             match external_install_cert(
                 ans,
                 &lock,
@@ -1346,7 +1352,7 @@ async fn install(
     #[cfg(unix)]
     if !dry_run && matches!(role, InstallRole::Ca) && scope.is_none() {
         let ca_dir = paths::user_ca_dir()?;
-        let access = super::super::ca::ca_access(&ca_dir, None).await?;
+        let access = netidx_admin::ops::slots::CaAccess::open(&ca_dir, None).await?;
         let status = netidx_admin::ops::slots::local_ca_status(&access, &ca_dir).await?;
         if let Some((common_name, _)) = status.external.pending {
             let relative = offline_ca::default_csr_filename(&common_name);
