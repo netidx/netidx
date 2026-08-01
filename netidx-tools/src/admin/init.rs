@@ -15,11 +15,11 @@ use netidx_admin::{
     template::{ParentRef, ReferralAuth},
     transport,
 };
-use netidx_admin_proto::{NodeKind, Role, fingerprint::ColorMode};
+use netidx_admin_proto::{Role, fingerprint::ColorMode};
 // Re-exported so the sibling admin submodules keep calling
 // `init::resolve_admin_server_addr`; the impl now lives in the engine.
-pub(super) use netidx_admin::plan::resolve_admin_server_addr;
-use std::{net::SocketAddr, path::PathBuf, str::FromStr};
+pub(super) use netidx_admin::plan::{enroll::KeyProtArg, resolve_admin_server_addr};
+use std::{net::SocketAddr, path::PathBuf};
 
 use super::service;
 
@@ -236,20 +236,6 @@ fn finish_install(
     Ok(())
 }
 
-/// The clap `KeyProtArg` and the library's are structurally identical (the CLI
-/// keeps its own until the still-interactive `ca` duplicates that share it
-/// relocate in task 12); convert at the adapter boundary.
-pub(super) fn lib_kp(
-    k: Option<KeyProtArg>,
-) -> Option<netidx_admin::plan::enroll::KeyProtArg> {
-    use netidx_admin::plan::enroll::KeyProtArg as L;
-    k.map(|k| match k {
-        KeyProtArg::Seal => L::Seal,
-        KeyProtArg::Password => L::Password,
-        KeyProtArg::None => L::None,
-    })
-}
-
 // -- workstation --------------------------------------------------------------
 
 #[derive(Args, Debug)]
@@ -356,7 +342,7 @@ fn workstation_input(
     input.resolver_config_path = f.resolver_config_path;
     input.units_dir = f.units_dir;
     input.netidx_binary = f.netidx_binary;
-    input.key_protection = lib_kp(f.key_protection);
+    input.key_protection = f.key_protection;
     input.with_container = !f.no_container;
     input.owner = f.owner.map(ArcStr::from);
     input.with_perms_file = !f.no_perms;
@@ -417,7 +403,7 @@ pub(crate) fn run_workstation_join(f: WorkstationJoinFlags) -> Result<()> {
     };
     let input = netidx_admin::plan::install::workstation::WorkstationJoinInput {
         mode,
-        key_protection: lib_kp(f.key_protection),
+        key_protection: f.key_protection,
         admin_server,
     };
     let rt = tokio::runtime::Runtime::new().context("starting tokio runtime")?;
@@ -455,54 +441,6 @@ fn describe_roles(roles: enumflags2::BitFlags<Role>) -> String {
         })
         .collect::<Vec<_>>()
         .join(", ")
-}
-
-/// The id-map group default suggested at enrollment, by node kind:
-/// infrastructure identities (resolvers, admin servers) don't act as
-/// users, so they default to no registration.
-pub(super) fn default_id_map_groups(kind: NodeKind) -> &'static str {
-    match kind {
-        NodeKind::Resolver | NodeKind::AdminServer => "",
-        NodeKind::Publisher | NodeKind::Client | NodeKind::Workstation => "users",
-    }
-}
-
-/// Parse a typed id-map-groups answer into the group list. A bare `-`
-/// is the explicit "no groups" sentinel — blank input is taken by the
-/// prompt's default, so it can't double as "none"; otherwise the answer
-/// is the comma-separated list, trimmed of surrounding space and blanks.
-pub(super) fn parse_id_map_answer(answer: &str) -> Vec<String> {
-    if answer.trim() == "-" {
-        return Vec::new();
-    }
-    answer
-        .split(',')
-        .map(|s| s.trim())
-        .filter(|s| !s.is_empty())
-        .map(str::to_string)
-        .collect()
-}
-
-/// The `--key-protection` flag: like [`choose_key_protection`]'s
-/// interactive choice, but scriptable. `password` is inherently
-/// interactive (it prompts), so headless installs use seal or none.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum KeyProtArg {
-    Seal,
-    Password,
-    None,
-}
-
-impl FromStr for KeyProtArg {
-    type Err = anyhow::Error;
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "seal" => Ok(Self::Seal),
-            "password" => Ok(Self::Password),
-            "none" => Ok(Self::None),
-            _ => bail!("key-protection must be one of seal|password|none"),
-        }
-    }
 }
 
 // -- standalone-resolver ------------------------------------------------------
@@ -715,7 +653,7 @@ fn resolver_input(
         parent_admin_server: f.parent_admin_server,
         admin_server: f.admin_server,
         delegate_subtree: f.delegate_subtree,
-        key_protection: lib_kp(f.key_protection),
+        key_protection: f.key_protection,
         id_map_socket: f.id_map_socket,
         id_map_path: f.id_map_path,
         no_client: f.no_client,
@@ -803,6 +741,6 @@ fn publisher_input(
         config_path: f.config_path,
         bind: f.bind,
         units_dir: f.units_dir,
-        key_protection: lib_kp(f.key_protection),
+        key_protection: f.key_protection,
     })
 }

@@ -21,8 +21,8 @@ use super::{
 use anyhow::{Context, Result, bail};
 use crossterm::event::KeyCode;
 use netidx::resolver_server::config::ReadGate;
-use netidx_admin_proto::AdminServerId;
 use netidx_admin_proto::fingerprint::Fingerprint;
+use netidx_admin_proto::{AdminServerId, DEFAULT_PORT};
 use ratatui::{
     Frame,
     layout::{Constraint, Layout, Rect},
@@ -2363,7 +2363,7 @@ impl RemoteState {
                 self.error = None;
                 self.screen = Screen::Manual {
                     host: String::new(),
-                    port: DEFAULT_ADMIN_PORT.to_string(),
+                    port: DEFAULT_PORT.to_string(),
                     focus: ManualFocus::Host,
                 };
             }
@@ -3291,9 +3291,6 @@ pub(super) fn render_form(
         + (value.chars().count() as u16).min(field_row.width.saturating_sub(1));
     f.set_cursor_position((cx, field_row.y));
 }
-
-/// The conventional admin-server port, pre-filled in the manual-connect form.
-const DEFAULT_ADMIN_PORT: u16 = 4565;
 
 /// Pre-filled in the gate-duration form. Long enough to be a plausible answer,
 /// short enough that accepting it blindly is not the dangerous choice, and it

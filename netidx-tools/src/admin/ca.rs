@@ -11,7 +11,7 @@ use netidx_admin::{
         servers as server_ops,
     },
     paths,
-    plan::ca_setup,
+    plan::{ca_setup, enroll},
     tls, transport,
 };
 #[cfg(unix)]
@@ -1714,7 +1714,7 @@ fn policy_context(
         #[cfg(unix)]
         ops::AdminTarget::Local { .. } => {
             let dir = ca_dir.map(Path::to_path_buf).or_else(|| paths::user_ca_dir().ok());
-            let cn = dir.map(|d| existing_ca_cn(&d)).unwrap_or_default();
+            let cn = dir.map(|d| ca_setup::existing_ca_cn(&d)).unwrap_or_default();
             (cn, None)
         }
     }
@@ -1907,7 +1907,7 @@ async fn join_async(ans: &mut dyn Answerer, p: JoinArgs) -> Result<()> {
     // `--id-map-group ''` (a single empty entry) is the explicit "skip
     // registration"; otherwise the per-kind default applies.
     let groups = if p.id_map_groups.is_empty() {
-        init::parse_id_map_answer(init::default_id_map_groups(NodeKind::Client))
+        enroll::parse_id_map_answer(enroll::default_id_map_groups(NodeKind::Client))
     } else {
         p.id_map_groups
             .iter()
@@ -1957,16 +1957,6 @@ fn show_ca_identity(ca_dir: &std::path::Path) -> Result<()> {
     println!("  SHA256  {}", fp.text());
     println!("{}", fp.identicon(ColorMode::detect()));
     Ok(())
-}
-
-/// The DNS SAN on an existing CA's own cert, used to seed the policy
-/// suggestion when scoping admins on an already-built CA (`admin add` /
-/// `admin set-policy`). Empty if it can't be read — the prompt then has
-/// no domain to suggest.
-#[cfg(unix)]
-fn existing_ca_cn(dir: &Path) -> String {
-    netidx_admin::tls::extract_dns_san_from_pem(&dir.join("certificate.pem"))
-        .unwrap_or_default()
 }
 
 #[cfg(unix)]

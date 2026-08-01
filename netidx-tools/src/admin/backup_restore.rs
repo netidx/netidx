@@ -6,14 +6,17 @@
 //! service, which needs a terminal for the sudo prompt), and reports.
 
 use super::{
-    answer_cli, init,
+    answer_cli,
     service::{self as service_cli, ScopeArg},
 };
 use anyhow::{Context, Result};
 use clap::Args;
 use netidx_admin::{
     install_bundle::BundleScope,
-    plan::bundle::{self, BackupInput, Next, RestoreInput},
+    plan::{
+        bundle::{self, BackupInput, Next, RestoreInput},
+        enroll::KeyProtArg,
+    },
     service::ServiceScope,
 };
 use std::{
@@ -77,7 +80,7 @@ pub(crate) struct RestoreArgs {
     pub external_root: Option<PathBuf>,
     /// Protection for freshly enrolled non-ca TLS keys.
     #[arg(long = "key-protection")]
-    pub key_protection: Option<init::KeyProtArg>,
+    pub key_protection: Option<KeyProtArg>,
     /// Password for `--key-protection password`.
     #[arg(long = "key-password-file")]
     pub key_password_file: Option<PathBuf>,
@@ -120,7 +123,7 @@ impl RestoreArgs {
             old_ca_fenced: self.old_ca_fenced,
             external_cert: self.external_cert.clone(),
             external_root: self.external_root.clone(),
-            key_protection: init::lib_kp(self.key_protection),
+            key_protection: self.key_protection,
             admin_server: self.admin_server.clone(),
             with_service: self.with_service,
             no_service: self.no_service,

@@ -247,23 +247,6 @@ fn load_or_empty(file: &std::path::Path) -> Result<id_map::IdMap> {
     if file.exists() { id_map::load(file) } else { Ok(id_map::empty()) }
 }
 
-/// Next free id above the conventional Linux user floor of 1000 and
-/// any existing id. The resolver doesn't read these values for the
-/// id-map daemon's TLS/Kerberos path; an operator who needs a
-/// specific value passes the explicit `--uid` / `--gid` flag.
-fn next_id(existing: impl Iterator<Item = u32>) -> u32 {
-    let highest = existing.max().unwrap_or(0);
-    highest.max(999).saturating_add(1)
-}
-
-fn next_user_uid(m: &id_map::IdMap) -> u32 {
-    next_id(m.identities.values().map(|i| i.uid))
-}
-
-fn next_group_gid(m: &id_map::IdMap) -> u32 {
-    next_id(m.groups.values().map(|g| g.gid))
-}
-
 fn add_group(
     config_lock: &ConfigDirLock,
     file: PathBuf,
@@ -274,7 +257,7 @@ fn add_group(
     let mut m = load_or_empty(&file)?;
     let gid = gid
         .or_else(|| m.groups.get(name.as_str()).map(|g| g.gid))
-        .unwrap_or_else(|| next_group_gid(&m));
+        .unwrap_or_else(|| id_map::next_gid(&m));
     let prev = id_map::upsert_group(&mut m, &name, gid);
     id_map::save(&file, &m)?;
     match prev {
@@ -305,7 +288,7 @@ fn add_user(
     let mut m = load_or_empty(&file)?;
     let uid = uid
         .or_else(|| m.identities.get(name.as_str()).map(|i| i.uid))
-        .unwrap_or_else(|| next_user_uid(&m));
+        .unwrap_or_else(|| id_map::next_uid(&m));
     let group_refs: Vec<&str> = groups.iter().map(|s| s.as_str()).collect();
     let prev = id_map::upsert_identity(&mut m, &name, uid, &primary_group, &group_refs)?;
     id_map::save(&file, &m)?;
