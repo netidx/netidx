@@ -142,13 +142,12 @@ struct CommonFlags {
     #[arg(long = "no-units")]
     no_units: bool,
     /// After the templated install succeeds, also register netidx as
-    /// an OS service. Default (on a TTY) is to prompt; pass this to
-    /// install non-interactively. Mutually exclusive with
-    /// `--no-service`.
+    /// an OS service. This is the default; the flag only skips the
+    /// prompt on a TTY. Pass `--no-service` to opt out.
     #[arg(long = "with-service", conflicts_with = "no_service")]
     with_service: bool,
-    /// Skip the post-install service prompt. Default (on a TTY) is
-    /// to prompt; pass this to suppress the prompt entirely.
+    /// Do not register netidx as an OS service. Registering is the
+    /// default; run `netidx admin component service install` later.
     #[arg(long = "no-service")]
     no_service: bool,
     /// Read the leaf private-key encryption password (only under

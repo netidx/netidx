@@ -65,6 +65,27 @@ the 50/60/70 lab networks. Discover the management address with
 ssh eric@<windows-ip>
 ```
 
+The Windows VM needs **routes to the satellite networks** that the Linux HQ
+guests get from `/etc/network/if-up.d/netroutes`. Without them a Windows client
+reaches HQ but not EU/AP, and a referral walk off-site fails with a bare
+`oneshot canceled`. Add them once, from an elevated shell (they persist):
+
+```
+route -p add 192.168.60.0 mask 255.255.255.0 192.168.50.2
+route -p add 192.168.70.0 mask 255.255.255.0 192.168.50.2
+```
+
+Do **not** put the netidx binaries in `C:\netidx` — that is the Windows
+*system* config root (`paths::system_config_root`), and `netidx admin
+uninstall` sweeps it. `C:\bin` is a good home.
+
+To drive a publisher over SSH, keep the literal `path|type|value` line out of
+`cmd`'s hands — inside a `( )` block `^|` is eaten and the line is split:
+
+```
+(type C:\bin\publine.txt & ping -n 600 127.0.0.1 >nul) | netidx.exe publisher -c %APPDATA%\netidx\client.json
+```
+
 If an older `win11` definition has only the management NIC, attach the HQ NIC
 once (both live and persistent):
 

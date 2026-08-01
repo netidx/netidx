@@ -192,11 +192,14 @@ pub(crate) struct ExternalInstallArgs {
     #[arg(long)]
     pub ca_dir: Option<PathBuf>,
     /// When this install stands up the admin server (the first install of a
-    /// served external CA), also register netidx as an OS service without
-    /// asking. Mutually exclusive with `--no-service`.
+    /// served external CA), register netidx as an OS service. This is the
+    /// default; the flag only skips the prompt on a TTY. Pass `--no-service`
+    /// to opt out.
     #[arg(long = "with-service", conflicts_with = "no_service")]
     pub with_service: bool,
-    /// Skip the OS-service offer after standing up the admin server.
+    /// Do not register netidx as an OS service after standing up the admin
+    /// server. Registering is the default; run `netidx admin component
+    /// service install` later.
     #[arg(long = "no-service")]
     pub no_service: bool,
     #[command(flatten)]

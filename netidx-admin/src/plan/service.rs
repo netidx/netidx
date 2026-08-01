@@ -63,7 +63,9 @@ pub struct ServiceGate {
     pub dry_run: bool,
     /// `--no-service`: skip the offer silently.
     pub no_service: bool,
-    /// `--with-service`: register without asking.
+    /// `--with-service`: register without asking. Redundant for a scripted
+    /// caller, which already gets that; it suppresses the prompt for an
+    /// interactive one.
     pub with_service: bool,
 }
 
@@ -75,7 +77,8 @@ pub struct ServiceGate {
 /// - need is `NONE` ⇒ nothing to do.
 /// - `--dry-run` ⇒ note what would be offered, decide nothing.
 /// - `--no-service` ⇒ skip.
-/// - otherwise ⇒ `confirm` (default yes; `--with-service` pre-answers it).
+/// - otherwise ⇒ register. An interactive frontend is asked first, with
+///   default yes; `--with-service` skips that prompt.
 pub async fn offer(
     ans: &mut dyn Answerer,
     need: ServiceNeed,
@@ -95,8 +98,16 @@ pub async fn offer(
     if gate.no_service {
         return Ok(None);
     }
-    let install_now =
-        ans.confirm(Field::Service, gate.with_service.then_some(true), true).await?;
+    // Registering is the default. This point is only reached because the
+    // install produced units that need a supervisor, `--no-service` above is
+    // the explicit opt-out, and the interactive path has always defaulted to
+    // yes — so demanding a flag of a scripted caller asked for a decision
+    // whose answer was already made by installing at all.
+    let install_now = if gate.with_service || !ans.interactive() {
+        true
+    } else {
+        ans.confirm(Field::Service, None, true).await?
+    };
     if install_now {
         Ok(Some(scope))
     } else {
@@ -127,5 +138,130 @@ mod tests {
         assert_eq!(N::NONE.merge(N::NONE), N::NONE);
         // Idempotent.
         assert_eq!(sys.merge(sys), sys);
+    }
+
+    struct Frontend {
+        interactive: bool,
+        asked: bool,
+    }
+
+    #[async_trait::async_trait]
+    impl Answerer for Frontend {
+        fn interactive(&self) -> bool {
+            self.interactive
+        }
+        async fn confirm(
+            &mut self,
+            _f: Field,
+            _p: Option<bool>,
+            default: bool,
+        ) -> Result<bool> {
+            self.asked = true;
+            Ok(default)
+        }
+        async fn text(
+            &mut self,
+            _f: Field,
+            _p: Option<String>,
+            _d: Option<&str>,
+            _r: bool,
+        ) -> Result<Option<String>> {
+            unreachable!()
+        }
+        async fn choice(
+            &mut self,
+            _f: Field,
+            _p: Option<String>,
+            _c: &[&str],
+            _d: Option<&str>,
+        ) -> Result<String> {
+            unreachable!()
+        }
+        async fn select_admin_domain(
+            &mut self,
+            _d: &[crate::answer::AdminDomainOption],
+        ) -> Result<crate::answer::AdminDomainChoice> {
+            unreachable!()
+        }
+        async fn secret(
+            &mut self,
+            _f: Field,
+            _p: Option<crate::admin_proto::Secret>,
+        ) -> Result<crate::admin_proto::Secret> {
+            unreachable!()
+        }
+        async fn announce(&mut self, _t: &str, _b: &str) -> Result<()> {
+            Ok(())
+        }
+        async fn announce_identity(
+            &mut self,
+            _b: &str,
+            _c: &crate::fingerprint::Fingerprint,
+        ) -> Result<()> {
+            Ok(())
+        }
+        async fn confirm_identity(
+            &mut self,
+            _i: &crate::transport::CaIdentity,
+        ) -> Result<bool> {
+            unreachable!()
+        }
+        fn show_verification_code(
+            &mut self,
+            _p: &str,
+            _c: &crate::fingerprint::Fingerprint,
+        ) {
+        }
+        fn clear_verification_code(&mut self) {}
+        fn progress(&mut self, _p: crate::answer::Progress) {}
+        fn note(&mut self, _m: &str) {}
+        fn warn(&mut self, _m: &str) {}
+        async fn show_recovery_password(&mut self, _p: &str) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    fn gate(no_service: bool, with_service: bool) -> ServiceGate {
+        ServiceGate { dry_run: false, no_service, with_service }
+    }
+
+    /// An install that produced units wants a supervisor. A scripted caller
+    /// used to have to say so with a flag, and got a hard error otherwise —
+    /// after the install had already enrolled a certificate and written every
+    /// config file.
+    #[tokio::test]
+    async fn registering_is_the_default_and_only_a_person_is_asked() {
+        let need = ServiceNeed::at(ServiceScope::System);
+
+        let mut scripted = Frontend { interactive: false, asked: false };
+        let scope = offer(&mut scripted, need, gate(false, false)).await.unwrap();
+        assert_eq!(scope, Some(ServiceScope::System));
+        assert!(!scripted.asked, "a scripted caller must not be asked");
+
+        // --no-service is still the way out, and still asks nobody.
+        let mut scripted = Frontend { interactive: false, asked: false };
+        assert_eq!(offer(&mut scripted, need, gate(true, false)).await.unwrap(), None);
+        assert!(!scripted.asked);
+
+        // A person is asked, and the default is yes.
+        let mut person = Frontend { interactive: true, asked: false };
+        let scope = offer(&mut person, need, gate(false, false)).await.unwrap();
+        assert_eq!(scope, Some(ServiceScope::System));
+        assert!(person.asked, "an interactive frontend decides for itself");
+
+        // --with-service skips that prompt.
+        let mut person = Frontend { interactive: true, asked: false };
+        assert_eq!(
+            offer(&mut person, need, gate(false, true)).await.unwrap(),
+            Some(ServiceScope::System)
+        );
+        assert!(!person.asked);
+
+        // Nothing to supervise stays nothing to do.
+        let mut scripted = Frontend { interactive: false, asked: false };
+        assert_eq!(
+            offer(&mut scripted, ServiceNeed::NONE, gate(false, false)).await.unwrap(),
+            None
+        );
     }
 }
