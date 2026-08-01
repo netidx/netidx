@@ -194,7 +194,8 @@ pub struct UnitStatus {
     pub name: String,
     /// The on-disk definition, absent when only the supervisor knows this unit.
     pub unit: Option<Unit>,
-    /// The live state, absent when the supervisor has not loaded it.
+    /// The live state, absent when the supervisor has not loaded this unit —
+    /// or when there is no supervisor running at all.
     pub state: Option<netidx_activation::control::UnitState>,
 }
 
@@ -205,9 +206,14 @@ pub async fn list_with_state(units_dir: &Path) -> Result<Vec<UnitStatus>> {
     };
     let defs = ActivationDir::open(Some(units_dir))?.list()?;
     let req = ControlRequest { op: ControlOp::Status, units: Vec::new() };
-    let reported = match control(units_dir, &req).await? {
-        ControlResponse::Ok { units } => units,
-        ControlResponse::Err { reason } => bail!("{reason}"),
+    // A supervisor that is not running is a state to report, not an error:
+    // the definitions are on disk and editing them is exactly what an
+    // operator does while it is down. Only a supervisor that answers *with*
+    // an error is a failure. Same line `reload` draws.
+    let reported = match control(units_dir, &req).await {
+        Ok(ControlResponse::Ok { units }) => units,
+        Ok(ControlResponse::Err { reason }) => bail!("{reason}"),
+        Err(_) => Vec::new(),
     };
     let mut states: BTreeMap<String, _> =
         reported.into_iter().map(|u| (u.unit, u.state)).collect();
@@ -425,5 +431,24 @@ mod tests {
         units.insert("c".to_string(), unit("/bin/echo"));
 
         assert!(validate(&units).is_ok());
+    }
+
+    /// Editing units is exactly what an operator does while the supervisor is
+    /// down, so listing them must not require one. `state` is already an
+    /// Option; before this it could never carry the "no supervisor" case,
+    /// because the listing failed first — and that put create/edit/delete out
+    /// of reach in the one state they most needed to work.
+    #[tokio::test]
+    async fn units_are_listed_when_no_supervisor_is_running() {
+        let dir = tempfile::tempdir().unwrap();
+        let units = dir.path().join("activation");
+        let d = ActivationDir::open(Some(&units)).unwrap();
+        d.install("lonely", &template_unit()).await.unwrap();
+
+        let listed = list_with_state(&units).await.unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].name, "lonely");
+        assert!(listed[0].unit.is_some(), "the definition is on disk");
+        assert!(listed[0].state.is_none(), "no supervisor, so no live state");
     }
 }
