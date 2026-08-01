@@ -104,8 +104,6 @@ fn set(
     bits: String,
 ) -> Result<()> {
     let file = config_lock.require_contained(file)?;
-    netidx::resolver_server::auth::Permissions::try_from(bits.as_str())
-        .with_context(|| format!("validating bits {bits:?}"))?;
     let mut pmap = load_or_empty(&file)?;
     perms::add_entry(&mut pmap, &path, &entity, &bits)?;
     perms::save_perms(&file, &pmap)?;

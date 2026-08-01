@@ -584,7 +584,7 @@ async fn backup(
     };
     let for_user = match service_scope {
         ServiceScope::User => None,
-        ServiceScope::System => Some(super::super::service::resolve_for_user(None)?),
+        ServiceScope::System => Some(netidx_admin::service::resolve_for_user(None)?),
     };
     let service = netidx_admin::service::status(&netidx_admin::service::ServiceParams {
         scope: service_scope,

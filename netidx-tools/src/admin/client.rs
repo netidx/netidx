@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use clap::Subcommand;
-use netidx_admin::{client::ClientConfig, paths};
+use netidx_admin::{client::ClientConfig, config_lock::ConfigDirLock, paths};
 use std::path::PathBuf;
 
 use super::editor;
@@ -41,6 +41,11 @@ fn edit(file: Option<PathBuf>) -> Result<()> {
         Some(p) => p,
         None => paths::user_client_config()?,
     };
+    // The same guard `component resolver edit` takes over its own file: this
+    // writes into the managed config directory, so it must not race a
+    // concurrent `netidx admin` command any more than that one may.
+    let config_lock = ConfigDirLock::acquire_for_file(&target)?;
+    let target = config_lock.require_contained(target)?;
     let initial = if target.exists() {
         let cfg = ClientConfig::load(&target)?;
         serde_json::to_string_pretty(cfg.as_file())?

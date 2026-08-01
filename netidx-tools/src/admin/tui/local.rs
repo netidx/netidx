@@ -286,7 +286,7 @@ fn probe_service(record: &InstallRecord) -> ServiceStatus {
     let (scope, for_user) = match record.role {
         InstallRole::Workstation => (ServiceScope::User, None),
         InstallRole::Ca | InstallRole::Resolver | InstallRole::Publisher => {
-            (ServiceScope::System, super::super::service::resolve_for_user(None).ok())
+            (ServiceScope::System, netidx_admin::service::resolve_for_user(None).ok())
         }
     };
     let params = ServiceParams {

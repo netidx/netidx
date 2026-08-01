@@ -229,18 +229,7 @@ pub(super) async fn handle_read_perms(
 }
 
 async fn apply_perms_local(state: &Server, perms_json: &str) -> Result<()> {
-    let pmap: crate::perms::PMap =
-        serde_json::from_str(perms_json).context("parsing the new perms")?;
-    // Validate the permission bits before touching the file — `load_perms`
-    // and `validate_for_path` both keep bits as opaque strings, so without
-    // this an edit with unparseable bits (only `!swlpd` are valid) would be
-    // written and only blow up when the resolver next loads it.
-    for (p, e, bits) in crate::perms::iter(&pmap) {
-        netidx::resolver_server::auth::Permissions::try_from(bits.as_str())
-            .with_context(|| {
-                format!("invalid permission bits {bits:?} for {e:?} at {p:?}")
-            })?;
-    }
+    let pmap = crate::perms::validate(perms_json).context("parsing the new perms")?;
     let config_lock = state.config_lock.clone();
     state
         .write_async(async move |state| {

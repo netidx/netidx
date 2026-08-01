@@ -59,6 +59,35 @@ pub fn add_entry(p: &mut PMap, path: &str, entity: &str, perms: &str) -> Result<
     Ok(())
 }
 
+/// Parse perms JSON and check every entry's permission bits.
+///
+/// `load_perms` and `validate_for_path` keep bits as opaque strings, so without
+/// this an edit with unparseable bits would be written and only fail when the
+/// resolver next loaded it. One rule, so the CLI, the TUI, and the daemon
+/// refuse the same input with the same message.
+pub fn validate(edited: &str) -> Result<PMap> {
+    let pmap: PMap = serde_json::from_str(edited).context("not valid perms JSON")?;
+    for (path, entity, bits) in iter(&pmap) {
+        Permissions::try_from(bits.as_str()).with_context(|| {
+            format!("invalid permission bits {bits:?} for {entity} at {path}")
+        })?;
+    }
+    Ok(pmap)
+}
+
+/// [`validate`], then canonical JSON to send — what an editor loop wants, so
+/// the CA receives a normalized document rather than whatever was typed.
+pub fn normalize(edited: &str) -> Result<String> {
+    serde_json::to_string(&validate(edited)?).context("serializing perms")
+}
+
+/// Pretty-print perms JSON, for display or for seeding an editor.
+pub fn pretty(perms_json: &str) -> Result<String> {
+    let v: serde_json::Value =
+        serde_json::from_str(perms_json).context("parsing perms JSON")?;
+    serde_json::to_string_pretty(&v).context("formatting perms JSON")
+}
+
 /// Remove an entity's entry from a path. If removing the last entity
 /// under `path`, also removes the path entry. No-op when the entry
 /// doesn't exist.
@@ -156,6 +185,28 @@ pub fn default_seed(base: &str) -> PMap {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// One rule for edited perms, so the CLI, the TUI and the daemon refuse the
+    /// same input. Each used to check the bits itself; `x` is not in the
+    /// `!swlpd` alphabet and must be caught before anything is written, because
+    /// nothing downstream looks at the bits until a resolver loads the file.
+    #[test]
+    fn bits_outside_the_alphabet_are_refused_and_the_entry_is_named() {
+        let e = validate(r#"{"/eu": {"alice": "swlpdx"}}"#).unwrap_err();
+        let msg = format!("{e:#}");
+        assert!(msg.contains("swlpdx"), "names the bits: {msg}");
+        assert!(msg.contains("alice") && msg.contains("/eu"), "names where: {msg}");
+        assert!(validate("not json at all").is_err());
+    }
+
+    /// `normalize` is `validate` plus canonical JSON, so what reaches the CA is
+    /// a normalized document rather than whatever the operator's editor left.
+    #[test]
+    fn normalize_returns_canonical_json_for_a_valid_map() {
+        let out = normalize("{\n  \"/eu\"  :  {\"alice\":\"swlpd\"}\n}").unwrap();
+        assert_eq!(out, r#"{"/eu":{"alice":"swlpd"}}"#);
+        assert!(normalize(r#"{"/eu": {"alice": "nope"}}"#).is_err());
+    }
 
     #[test]
     fn default_seed_root_base_anchors_at_root() {

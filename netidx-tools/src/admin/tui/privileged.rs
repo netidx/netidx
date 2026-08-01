@@ -42,7 +42,7 @@ pub(super) fn install_service(
         ServiceScope::System => {
             let for_user = match &request.for_user {
                 Some(for_user) => for_user.clone(),
-                None => super::super::service::resolve_for_user(None)?,
+                None => netidx_admin::service::resolve_for_user(None)?,
             };
             let exe = current_exe()?;
             let activation_dir = activation_dir()?;
@@ -138,7 +138,7 @@ pub(super) fn uninstall(
     if needs_root {
         // Name the templated system service's instance user explicitly — under
         // `su` there is no $SUDO_USER for the child to infer it from.
-        let for_user = super::super::service::resolve_for_user(None)?;
+        let for_user = netidx_admin::service::resolve_for_user(None)?;
         args.push("--for-user".to_string());
         args.push(for_user);
     }
@@ -174,7 +174,7 @@ fn scope_flag(scope: ServiceScope) -> &'static str {
 fn user_params(service_name: &str) -> Result<ServiceParams> {
     Ok(ServiceParams {
         scope: ServiceScope::User,
-        for_user: Some(super::super::service::resolve_for_user(None)?),
+        for_user: Some(netidx_admin::service::resolve_for_user(None)?),
         binary: current_exe()?,
         service_name: service_name.to_string(),
         activation_dir: Some(activation_dir()?),

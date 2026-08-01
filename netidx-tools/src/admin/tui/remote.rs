@@ -1628,17 +1628,8 @@ async fn show_perms_for(
     target: &PanelTarget,
     at: &str,
 ) -> Result<String> {
-    use netidx_admin::ops::perms::show_perms;
-    #[cfg(unix)]
-    use netidx_admin::ops::perms::show_perms_local;
-    match target {
-        PanelTarget::Remote(conn) => {
-            show_perms(ans, Some(conn.server), None, Some(conn.admin.clone()), None, at)
-                .await
-        }
-        #[cfg(unix)]
-        PanelTarget::Local { cfg_path, .. } => show_perms_local(cfg_path, at).await,
-    }
+    let target = admin_target(ans, target).await?;
+    netidx_admin::ops::perms::show_perms(&target, at).await
 }
 
 /// Fetch the admin domain's resolver clusters (by base path) and open the resolver cluster
@@ -1647,14 +1638,8 @@ async fn list_resolver_clusters(
     ans: &mut TuiAnswerer,
     target: PanelTarget,
 ) -> Result<super::action::Outcome> {
-    let bases = match &target {
-        PanelTarget::Remote(conn) => {
-            netidx_admin::ops::perms::list_resolver_clusters(ans, Some(conn.server), None)
-                .await?
-        }
-        #[cfg(unix)]
-        PanelTarget::Local { .. } => vec![local_own_base()],
-    };
+    let at = admin_target(ans, &target).await?;
+    let bases = netidx_admin::ops::perms::list_resolver_clusters(&at).await?;
     Ok(super::action::Outcome::resolver_clusters(Panel::Perms, bases))
 }
 
@@ -1664,7 +1649,7 @@ async fn perms_rows(
     at: &str,
 ) -> Result<Vec<PanelRow>> {
     let json = show_perms_for(ans, target, at).await?;
-    let pretty = super::super::perms_admin::pretty(&json)?;
+    let pretty = netidx_admin::perms::pretty(&json)?;
     let mut rows: Vec<PanelRow> =
         pretty.lines().map(|l| PanelRow::plain(l.to_string(), RowKey::None)).collect();
     if rows.is_empty() {
@@ -1678,47 +1663,16 @@ async fn edit_perms(
     target: PanelTarget,
     at: String,
 ) -> Result<super::action::Outcome> {
-    #[cfg(unix)]
-    use netidx_admin::ops::perms::{edit_perms_local, show_perms_local};
-    use netidx_admin::ops::perms::{edit_perms_with_session, open_perms_session};
-    // Seed the editor with the admin domain's current perms, validate locally, then
-    // hand the normalized result to the CA (which re-validates + propagates).
-    let (session, current) = match &target {
-        PanelTarget::Remote(conn) => {
-            let (session, current) = open_perms_session(
-                ans,
-                Some(conn.server),
-                None,
-                Some(conn.admin.clone()),
-                None,
-                &at,
-            )
-            .await?;
-            (Some(session), current)
-        }
-        #[cfg(unix)]
-        PanelTarget::Local { cfg_path, .. } => {
-            (None, show_perms_local(cfg_path, &at).await?)
-        }
-    };
-    let seed = super::super::perms_admin::pretty(&current)?;
+    use netidx_admin::{ops::perms, perms as perms_file};
+    // One session for the read and the write, so a remote edit collects a
+    // password once and keeps it across the operator's think-time.
+    let resolved = admin_target(ans, &target).await?;
+    let current = perms::show_perms(&resolved, &at).await?;
+    let seed = perms_file::pretty(&current)?;
     let validate: super::answer::EditValidator =
-        Box::new(|s: &str| super::super::perms_admin::validate(s));
+        Box::new(|s: &str| perms_file::normalize(s));
     let edited = ans.edit(seed, validate).await?;
-    let peers = match &target {
-        PanelTarget::Remote(_) => {
-            edit_perms_with_session(
-                session.as_ref().expect("remote branch opened a session"),
-                &at,
-                &edited,
-            )
-            .await?
-        }
-        #[cfg(unix)]
-        PanelTarget::Local { cfg_path, .. } => {
-            edit_perms_local(cfg_path, &at, &edited).await?
-        }
-    };
+    let peers = perms::edit_perms(&resolved, &at, &edited).await?;
     let failed: Vec<_> = peers.iter().filter(|p| p.error.is_some()).collect();
     let lines = if failed.is_empty() {
         vec![format!(
@@ -1929,14 +1883,16 @@ const PANELS: [Panel; 7] = [
 #[cfg(unix)]
 const LOCAL_PANELS: [Panel; 2] = [Panel::Roster, Panel::Perms];
 
-/// This host's own resolver base — the single resolver cluster a local (control-socket)
-/// perms edit is allowed to touch. Best-effort from the local resolver config,
-/// falling back to the root; the admin server enforces the confinement anyway.
+/// This host's own resolver base — the single resolver cluster a local
+/// (control-socket) perms edit is allowed to touch, pre-filled so the operator
+/// need not type it.
+///
+/// `None` when the resolver config cannot be read. The daemon enforces the
+/// confinement either way, but offering `/` as the answer would tell the
+/// operator they were about to edit the root of the namespace.
 #[cfg(unix)]
-fn local_own_base() -> String {
-    netidx_admin::resolver::ResolverConfig::load_default()
-        .map(|c| c.base_path())
-        .unwrap_or_else(|_| "/".to_string())
+fn local_own_base() -> Option<String> {
+    netidx_admin::resolver::ResolverConfig::load_default().ok().map(|c| c.base_path())
 }
 
 /// Load the saved admin domain registry, ensuring this host's own admin domain (when it
@@ -1988,7 +1944,7 @@ impl RemoteState {
         s.target = Some(target.clone());
         // Local perms are always this host's own resolver cluster — no prompt, no picking
         // another resolver's permissions.
-        let path = panel.path_scoped().then(local_own_base);
+        let path = panel.path_scoped().then(local_own_base).flatten();
         s.panel_path = path.clone();
         s.screen = Screen::Panel(panel);
         let initial = Action::Remote(RemoteAction::Refresh { target, panel, path });

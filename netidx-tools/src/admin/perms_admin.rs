@@ -41,63 +41,41 @@ pub(crate) fn run(cmd: Cmd) -> Result<()> {
     }
 }
 
-fn show(f: Flags) -> Result<()> {
+/// Resolve which CA this command acts against: a pinned remote session, or
+/// this host's own daemon over its control socket when no `--server` is given.
+fn target(
+    rt: &tokio::runtime::Runtime,
+    f: &Flags,
+) -> Result<netidx_admin::ops::AdminTarget> {
     let mut ans = f.auth.answerer()?;
-    let server = f.auth.server_addr()?;
-    let perms_json = runtime()?.block_on(perms_ops::show_perms(
+    rt.block_on(netidx_admin::ops::resolve_admin_target(
         &mut ans,
-        server,
+        f.auth.server_addr()?,
         f.auth.ca_dir.clone(),
         f.auth.admin.clone(),
         None,
-        &f.at,
-    ))?;
-    println!("{}", pretty(&perms_json)?);
+    ))
+}
+
+fn show(f: Flags) -> Result<()> {
+    let rt = runtime()?;
+    let target = target(&rt, &f)?;
+    let perms_json = rt.block_on(perms_ops::show_perms(&target, &f.at))?;
+    println!("{}", perms::pretty(&perms_json)?);
     Ok(())
 }
 
 fn edit(f: Flags) -> Result<()> {
-    let mut ans = f.auth.answerer()?;
-    let server = f.auth.server_addr()?;
     let rt = runtime()?;
-    // Seed the editor with the resolver cluster's current perms, then hand the edited,
-    // locally-validated result to the library's authenticated write.
-    let (session, current) = rt.block_on(perms_ops::open_perms_session(
-        &mut ans,
-        server,
-        f.auth.ca_dir.clone(),
-        f.auth.admin.clone(),
-        None,
-        &f.at,
-    ))?;
-    let edited = editor::edit_with_validation(&pretty(&current)?, validate)?;
-    let peers =
-        rt.block_on(perms_ops::edit_perms_with_session(&session, &f.at, &edited))?;
+    let target = target(&rt, &f)?;
+    // Seed the editor with the resolver cluster's current perms, then hand the
+    // edited, locally-validated result to the library's authenticated write.
+    let current = rt.block_on(perms_ops::show_perms(&target, &f.at))?;
+    let edited =
+        editor::edit_with_validation(&perms::pretty(&current)?, perms::normalize)?;
+    let peers = rt.block_on(perms_ops::edit_perms(&target, &f.at, &edited))?;
     report_peers(&peers, &f.at);
     Ok(())
-}
-
-/// Validate edited perms JSON in the editor loop: it must parse as a PMap and
-/// every entry's bits must be valid. Returns the normalized JSON to send. The
-/// CA re-validates the whole resolver config server-side; this just gives a
-/// fast local re-edit on an obvious mistake. Shared with the TUI perms panel.
-pub(crate) fn validate(s: &str) -> Result<String> {
-    let pmap: perms::PMap = serde_json::from_str(s).context("not valid perms JSON")?;
-    for (path, entity, bits) in perms::iter(&pmap) {
-        netidx::resolver_server::auth::Permissions::try_from(bits.as_str())
-            .with_context(|| {
-                format!("invalid permission bits {bits:?} for {entity} at {path}")
-            })?;
-    }
-    serde_json::to_string(&pmap).context("serializing perms")
-}
-
-/// Pretty-print perms JSON for display / editor seeding. Shared with the TUI
-/// perms panel.
-pub(crate) fn pretty(perms_json: &str) -> Result<String> {
-    let v: serde_json::Value =
-        serde_json::from_str(perms_json).context("parsing perms JSON")?;
-    serde_json::to_string_pretty(&v).context("formatting perms JSON")
 }
 
 fn report_peers(peers: &[PeerResult], at: &str) {
