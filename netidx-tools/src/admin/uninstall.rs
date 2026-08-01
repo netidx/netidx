@@ -66,9 +66,19 @@ impl Params {
             for_user: self.for_user.clone(),
             config_dir: self.config_dir.clone(),
             remove_ca: self.with_ca,
+            ..Default::default()
         }
     }
 }
+
+/// Whether this process has any way to become root from where it stands. Unix
+/// re-execs under `sudo`/`su`; Windows has no equivalent — an elevated shell
+/// is a separate session the operator has to start. Both frontends consult
+/// this, so neither can decide differently about the same host.
+#[cfg(unix)]
+pub(crate) const CAN_ESCALATE: bool = true;
+#[cfg(not(unix))]
+pub(crate) const CAN_ESCALATE: bool = false;
 
 pub(crate) fn run(p: Params) -> Result<()> {
     match uninstall::plan(&p.input())? {
@@ -78,6 +88,28 @@ pub(crate) fn run(p: Params) -> Result<()> {
             Ok(())
         }
         Next::Apply(prepared) => finish(&p, prepared),
+        // Nothing here can become root, so the elevated step is not a step to
+        // perform — it is a fact to report. When it covers only the system
+        // service a user-scope install registered, the unprivileged half is
+        // still ours to finish, and refusing to would leave the install fully
+        // in place over a service we were never going to be able to remove.
+        Next::Escalate(escalation)
+            if !CAN_ESCALATE && escalation.covers == Covers::SystemServiceOnly =>
+        {
+            report_unremovable(&escalation);
+            let input = UninstallInput { cross_scope: false, ..p.input() };
+            match uninstall::plan(&input)? {
+                Next::Nothing(report) => {
+                    print_report(&report, false);
+                    println!("(nothing to do at user scope)");
+                    Ok(())
+                }
+                Next::Apply(prepared) => finish(&p, prepared),
+                Next::Escalate(_) => {
+                    anyhow::bail!("the user-scope teardown still reports needing root")
+                }
+            }
+        }
         Next::Escalate(escalation) => {
             let covers = escalation.covers;
             elevate(&p, escalation)?;
@@ -100,6 +132,20 @@ pub(crate) fn run(p: Params) -> Result<()> {
             }
         }
     }
+}
+
+/// Name a system-scope remnant this process cannot remove, and say what would.
+fn report_unremovable(escalation: &Escalation) {
+    println!();
+    println!(
+        "Detected a system-scope install this process cannot remove without \
+         administrator privileges:"
+    );
+    print_report(&escalation.plan, false);
+    println!(
+        "(open an elevated shell and run `netidx admin uninstall --scope system` \
+         to remove it; continuing with the user-scope teardown)"
+    );
 }
 
 /// Show what the engine resolved, gate it behind `--yes`, then apply.

@@ -125,7 +125,7 @@ impl ConfigRemoval {
 /// is resolved by [`plan`]: the scope from the install record, the service
 /// name from the platform default, whether root is needed from an actual
 /// probe rather than a guess about the role.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct UninstallInput {
     /// Tear down this scope only. `None` detects it from the install record.
     pub scope: Option<ServiceScope>,
@@ -138,6 +138,27 @@ pub struct UninstallInput {
     pub config_dir: Option<PathBuf>,
     /// Also destroy the CA private key. Irreversible.
     pub remove_ca: bool,
+    /// Also look for the system-scope service a *user*-scope install
+    /// registers. Default `true`.
+    ///
+    /// A caller sets this `false` only once it has reported a system-scope
+    /// remnant it has no way to remove — on a platform where this process
+    /// cannot become root, an unremovable service must not also cost the
+    /// operator the unprivileged half of the teardown.
+    pub cross_scope: bool,
+}
+
+impl Default for UninstallInput {
+    fn default() -> Self {
+        UninstallInput {
+            scope: None,
+            service_name: None,
+            for_user: None,
+            config_dir: None,
+            remove_ca: false,
+            cross_scope: true,
+        }
+    }
 }
 
 /// The elevated run a frontend must perform. Everything the elevated process
@@ -269,8 +290,10 @@ fn plan_with(
     let cross = match scope {
         // Never inherit a user-scope --config-dir override: it named the user
         // directory, not /etc.
-        ServiceScope::User => Some(params_for(input, ServiceScope::System, None)),
-        ServiceScope::System => None,
+        ServiceScope::User if input.cross_scope => {
+            Some(params_for(input, ServiceScope::System, None))
+        }
+        ServiceScope::User | ServiceScope::System => None,
     };
     let cross_plan = match &cross {
         Some(cross) => {
@@ -677,9 +700,8 @@ mod tests {
         UninstallInput {
             scope: Some(ServiceScope::User),
             service_name: Some(test_service_name()),
-            for_user: None,
             config_dir: Some(config_dir),
-            remove_ca: false,
+            ..Default::default()
         }
     }
 
@@ -989,5 +1011,39 @@ mod tests {
         assert_eq!(report.removed.len(), 2);
         assert_eq!(report.kept.len(), 1);
         assert_eq!(report.ca_destroyed, Some(PathBuf::from("/etc/netidx/ca")));
+    }
+
+    /// A host whose system-scope service cannot be removed — no way to become
+    /// root from here — must still be able to tear down its user scope.
+    /// Suppressing the cross-scope probe is how a frontend says so, and
+    /// without it a Windows workstation uninstall aborts over a service it was
+    /// never going to be able to remove.
+    #[test]
+    fn the_user_scope_can_be_torn_down_without_the_system_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("netidx");
+        populate_root(&root);
+        let system_service = |q: &UninstallParams| match q.scope {
+            ServiceScope::System => Ok(UninstallReport {
+                service_was_installed: true,
+                ..UninstallReport::default()
+            }),
+            ServiceScope::User => preview(q),
+        };
+
+        // With the probe on, an unprivileged caller is sent to escalate.
+        assert!(matches!(
+            plan_with(&input(root.clone()), false, system_service).unwrap(),
+            Next::Escalate(_)
+        ));
+
+        // With it off, the same caller gets the user-scope work it can do.
+        let alone = UninstallInput { cross_scope: false, ..input(root.clone()) };
+        let Next::Apply(prepared) = plan_with(&alone, false, system_service).unwrap()
+        else {
+            panic!("the user scope is removable without root")
+        };
+        assert!(prepared.cross_scope_plan().is_none());
+        assert!(!prepared.plan().removed.is_empty());
     }
 }

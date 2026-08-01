@@ -936,6 +936,37 @@ async fn uninstall(
             let report = uninstall::apply(ans, prepared).await?;
             Ok(Outcome::plain("Uninstalled", removal_lines(&report), true))
         }
+        // Nothing here can become root, so the elevated step is not a step to
+        // perform — it is a fact to report. The unprivileged half is still
+        // ours to finish.
+        uninstall::Next::Escalate(escalation)
+            if !super::super::uninstall::CAN_ESCALATE
+                && escalation.covers == uninstall::Covers::SystemServiceOnly =>
+        {
+            ans.warn(
+                "a system-scope install is present that this process cannot remove; \
+                 open an elevated shell and run `netidx admin uninstall --scope \
+                 system`. Continuing with the user-scope teardown.",
+            );
+            let report = uninstall::apply(
+                ans,
+                match uninstall::plan(&uninstall::UninstallInput {
+                    cross_scope: false,
+                    ..input
+                })? {
+                    uninstall::Next::Apply(prepared) => prepared,
+                    _ => {
+                        return Ok(Outcome::plain(
+                            "Uninstalled",
+                            vec!["Nothing to remove at user scope.".to_string()],
+                            true,
+                        ));
+                    }
+                },
+            )
+            .await?;
+            Ok(Outcome::plain("Uninstalled", removal_lines(&report), true))
+        }
         uninstall::Next::Escalate(escalation) => {
             // Only the elevated half needs the terminal. When it covers the
             // whole teardown there is nothing left; otherwise it removes the
