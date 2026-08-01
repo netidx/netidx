@@ -35,8 +35,8 @@ pub(crate) struct BackupArgs {
     #[arg(long = "config-dir")]
     pub config_dir: Option<PathBuf>,
     /// OS service name to record (default: netidx).
-    #[arg(long, default_value = "netidx")]
-    pub service_name: String,
+    #[arg(long)]
+    pub service_name: Option<String>,
     /// Account used by a system-scope service.
     #[arg(long)]
     pub for_user: Option<String>,
@@ -115,7 +115,7 @@ fn runtime() -> Result<tokio::runtime::Runtime> {
 impl RestoreArgs {
     fn input(&self) -> RestoreInput {
         RestoreInput {
-            bundle: self.bundle.clone(),
+            bundle: Some(self.bundle.clone()),
             config_dir: self.config_dir.clone(),
             listen: self.listen,
             resolver_listen: self.resolver_listen,
@@ -152,18 +152,13 @@ impl RestoreArgs {
 }
 
 pub(crate) fn backup(a: BackupArgs) -> Result<()> {
-    let target = if a.target.is_absolute() {
-        a.target.clone()
-    } else {
-        std::env::current_dir()?.join(&a.target)
-    };
     // Backup asks nothing: no key, no password, no identity to confirm.
     let mut ans =
         answer_cli::FlagAnswerer::install(None, false, None, false, None, false, None)?;
     let out = runtime()?.block_on(bundle::backup(
         &mut ans,
         BackupInput {
-            target,
+            target: Some(a.target),
             scope: a.scope.map(|s| match s {
                 ScopeArg::User => BundleScope::User,
                 ScopeArg::System => BundleScope::System,

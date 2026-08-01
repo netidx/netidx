@@ -17,7 +17,7 @@
 
 use crate::{
     admin_proto::NodeKind,
-    answer::Answerer,
+    answer::{Answerer, Field},
     config_lock::ConfigDirLock,
     install_bundle::{
         self, BackupOutcome, BundleScope, Component, IdentityKind, Manifest,
@@ -41,15 +41,17 @@ use crate::plan::{AuthKind, install::resolver::enroll_admin_server};
 use std::str::FromStr;
 
 /// Which install to capture, and how to describe its OS service in the bundle.
+#[derive(Default)]
 pub struct BackupInput {
-    /// Where to write the bundle. Must be absolute.
-    pub target: PathBuf,
+    /// Where to write the bundle. A relative path resolves against the current
+    /// directory; `None` asks. Existing paths are never overwritten.
+    pub target: Option<PathBuf>,
     /// Select the user or system install when both exist.
     pub scope: Option<BundleScope>,
     /// Override the managed configuration root.
     pub config_dir: Option<PathBuf>,
-    /// OS service name to record.
-    pub service_name: String,
+    /// OS service name to record. `None` records the default name.
+    pub service_name: Option<String>,
     /// Account used by a system-scope service.
     pub for_user: Option<String>,
 }
@@ -57,9 +59,10 @@ pub struct BackupInput {
 /// Everything a restore needs that isn't in the bundle: destination overrides,
 /// the credentials to unlock a recovered CA, and the operator's explicit
 /// attestation that the old CA is fenced.
+#[derive(Default)]
 pub struct RestoreInput {
-    /// The bundle directory, as produced by [`backup`].
-    pub bundle: PathBuf,
+    /// The bundle directory, as produced by [`backup`]. `None` asks.
+    pub bundle: Option<PathBuf>,
     /// Override the destination configuration root.
     pub config_dir: Option<PathBuf>,
     /// Override the restored admin-server listen address.
@@ -179,7 +182,11 @@ fn find_install(input: &BackupInput) -> Result<(PathBuf, BundleScope, InstallRec
     }
 }
 
-fn service_intent(input: &BackupInput, record: &InstallRecord) -> Result<ServiceIntent> {
+fn service_intent(
+    input: &BackupInput,
+    record: &InstallRecord,
+    service_name: &str,
+) -> Result<ServiceIntent> {
     let scope = match record.role {
         InstallRole::Workstation => ServiceScope::User,
         InstallRole::Ca | InstallRole::Resolver | InstallRole::Publisher => {
@@ -196,7 +203,7 @@ fn service_intent(input: &BackupInput, record: &InstallRecord) -> Result<Service
         scope,
         for_user: for_user.clone(),
         binary: PathBuf::new(),
-        service_name: input.service_name.clone(),
+        service_name: service_name.to_string(),
         activation_dir: None,
     })?;
     Ok(ServiceIntent {
@@ -204,7 +211,7 @@ fn service_intent(input: &BackupInput, record: &InstallRecord) -> Result<Service
             ServiceScope::User => BundleScope::User,
             ServiceScope::System => BundleScope::System,
         },
-        name: input.service_name.clone(),
+        name: service_name.to_string(),
         for_user,
         installed: status != ServiceStatus::NotInstalled,
     })
@@ -214,11 +221,27 @@ fn service_intent(input: &BackupInput, record: &InstallRecord) -> Result<Service
 /// present, is snapshotted through its protected local control socket so the
 /// inner bundle stays CA-signed and consistent.
 pub async fn backup(ans: &mut dyn Answerer, input: BackupInput) -> Result<BackupOutcome> {
-    // The only note comes from the CA snapshot, which is unix-only.
-    #[cfg(not(unix))]
-    let _ = &ans;
+    let target = match input.target.clone() {
+        Some(target) => target,
+        None => PathBuf::from(
+            ans.text(Field::BackupTarget, None, None, true)
+                .await?
+                .context("a backup target directory is required")?,
+        ),
+    };
+    let target = if target.is_absolute() {
+        target
+    } else {
+        std::env::current_dir()
+            .context("resolving a relative backup target")?
+            .join(target)
+    };
+    let service_name = input
+        .service_name
+        .clone()
+        .unwrap_or_else(|| ServiceParams::DEFAULT_NAME.to_string());
     let (root, scope, record) = find_install(&input)?;
-    let service = service_intent(&input, &record)?;
+    let service = service_intent(&input, &record, &service_name)?;
     let has_ca = root.join("ca").is_dir();
     #[cfg(unix)]
     let ca_tmp = tempfile::tempdir().context("creating ca-backup staging directory")?;
@@ -238,22 +261,104 @@ pub async fn backup(ans: &mut dyn Answerer, input: BackupInput) -> Result<Backup
     } else {
         None
     };
-    install_bundle::create(
-        &root,
-        record,
-        scope,
-        Some(service),
-        ca.as_deref(),
-        &input.target,
-    )
+    install_bundle::create(&root, record, scope, Some(service), ca.as_deref(), &target)
 }
 
-fn restore_addresses(
+fn restored_listen_default(original: SocketAddr, detected: Option<IpAddr>) -> SocketAddr {
+    SocketAddr::new(detected.unwrap_or_else(|| original.ip()), original.port())
+}
+
+fn restored_bind_default(
+    original: install_bundle::ResolverEndpoint,
+    detected: Option<IpAddr>,
+    detected_bind: Option<IpAddr>,
+    listen: SocketAddr,
+) -> IpAddr {
+    detected_bind.unwrap_or_else(|| match detected {
+        Some(_) => listen.ip(),
+        None if listen.ip() == original.listen.ip() => original.bind,
+        None => listen.ip(),
+    })
+}
+
+/// Offer this host's detected address with the bundle's port. Leaving the
+/// advertised address blank keeps the whole bundled endpoint — the bind IP is
+/// only meaningful relative to an advertised address, so there is nothing left
+/// to ask.
+async fn ask_resolver_endpoint(
+    ans: &mut dyn Answerer,
+    original: install_bundle::ResolverEndpoint,
+    detected: Option<IpAddr>,
+    detected_bind: Option<IpAddr>,
+) -> Result<Option<install_bundle::ResolverEndpoint>> {
+    let default = restored_listen_default(original.listen, detected).to_string();
+    let listen = ans
+        .text(Field::RestoreResolverListen, None, Some(&default), false)
+        .await?
+        .map(|a| a.parse::<SocketAddr>())
+        .transpose()
+        .context("the restored resolver address must be IP:port")?;
+    let Some(listen) = listen else { return Ok(None) };
+    let default =
+        restored_bind_default(original, detected, detected_bind, listen).to_string();
+    let bind = ans
+        .text(Field::RestoreResolverBind, None, Some(&default), false)
+        .await?
+        .map(|a| a.parse::<IpAddr>())
+        .transpose()
+        .context("the restored resolver bind address must be an IP")?
+        .unwrap_or_else(|| listen.ip());
+    Ok(Some(install_bundle::ResolverEndpoint { listen, bind }))
+}
+
+/// Where the restored install advertises itself. An explicit override always
+/// wins. An interactive operator is offered this host's detected address with
+/// the bundle's ports, because a restore usually lands on new hardware. A
+/// scripted restore that passes neither keeps the bundled addresses: saying
+/// nothing must not silently relocate a CA.
+async fn restore_addresses(
+    ans: &mut dyn Answerer,
     manifest: &Manifest,
     input: &RestoreInput,
 ) -> Result<RestoreAddresses> {
+    let has_ca = manifest.components.contains(&Component::Ca);
+    let ask = ans.interactive();
+    let shape = if ask && (has_ca || manifest.resolver_endpoint.is_some()) {
+        let shape = crate::plan::install::detect_resolver_shape().await;
+        crate::plan::install::warn_incomplete_resolver_address(ans, &shape);
+        Some(shape)
+    } else {
+        None
+    };
+    let detected = shape.as_ref().and_then(|shape| shape.advertised_ip);
+    let admin_listen = match input.listen {
+        Some(listen) => Some(listen),
+        None if has_ca && ask => {
+            let original = manifest.admin_listen.context(
+                "the CA backup has no recorded admin address; pass --listen <ip:port>",
+            )?;
+            let default = restored_listen_default(original, detected).to_string();
+            ans.text(Field::RestoreAdminListen, None, Some(&default), false)
+                .await?
+                .map(|a| a.parse::<SocketAddr>())
+                .transpose()
+                .context("the restored CA address must be IP:port")?
+        }
+        None => None,
+    };
     let resolver = match (input.resolver_listen, input.resolver_bind) {
-        (None, None) => None,
+        (None, None) => match manifest.resolver_endpoint.filter(|_| ask) {
+            Some(original) => {
+                ask_resolver_endpoint(
+                    ans,
+                    original,
+                    detected,
+                    shape.as_ref().and_then(|shape| shape.bind_override),
+                )
+                .await?
+            }
+            None => None,
+        },
         (listen, bind) => {
             let original = manifest.resolver_endpoint.context(
                 "--resolver-listen/--resolver-bind require a backup of a CA with a co-located resolver",
@@ -271,25 +376,39 @@ fn restore_addresses(
             })
         }
     };
-    Ok(RestoreAddresses { admin_listen: input.listen, resolver })
+    Ok(RestoreAddresses { admin_listen, resolver })
 }
 
-fn desired_service(manifest: &Manifest, input: &RestoreInput) -> Option<ServiceScope> {
+/// Whether to register the recorded OS service, and at what scope. A bundle
+/// whose source install had one restores it without asking; otherwise an
+/// interactive operator decides and a scripted one must say `--with-service`,
+/// so a restore never registers a service the source install didn't have.
+async fn desired_service(
+    ans: &mut dyn Answerer,
+    manifest: &Manifest,
+    input: &RestoreInput,
+) -> Result<Option<ServiceScope>> {
     if input.no_service {
-        return None;
+        return Ok(None);
     }
-    let wanted =
-        input.with_service || manifest.service.as_ref().is_some_and(|s| s.installed);
+    let recorded = manifest.service.as_ref().is_some_and(|s| s.installed);
+    let wanted = if input.with_service || recorded {
+        true
+    } else if ans.interactive() {
+        ans.confirm(Field::Service, None, true).await?
+    } else {
+        false
+    };
     if !wanted {
-        return None;
+        return Ok(None);
     }
-    Some(
+    Ok(Some(
         match manifest.service.as_ref().map(|s| s.scope).unwrap_or(manifest.config_scope)
         {
             BundleScope::User => ServiceScope::User,
             BundleScope::System => ServiceScope::System,
         },
-    )
+    ))
 }
 
 /// The service parameters a frontend needs to register the restored service:
@@ -614,25 +733,52 @@ pub async fn restore_stage(
     ans: &mut dyn Answerer,
     input: &RestoreInput,
 ) -> Result<Staged> {
-    let bundle = input.bundle.canonicalize().context("canonicalizing backup bundle")?;
+    let bundle = match input.bundle.clone() {
+        Some(bundle) => bundle,
+        None => PathBuf::from(
+            ans.text(Field::RestoreSource, None, None, true)
+                .await?
+                .context("a backup bundle directory is required")?,
+        ),
+    };
+    let bundle = bundle.canonicalize().context("canonicalizing backup bundle")?;
     let preflight = install_bundle::verify(&bundle)?;
     let has_ca = preflight.components.contains(&Component::Ca);
-    if has_ca && !input.old_ca_fenced {
-        bail!(
-            "CA restore requires --old-ca-fenced; do not continue until the old CA cannot run"
-        );
+    ans.announce(
+        "Restore plan",
+        &format!(
+            "Components: {:?}\nRole: {}\nFresh enrollment required for {} machine \
+             credential(s).\nThe destination must be a clean install or an identical \
+             interrupted restore.",
+            preflight.components,
+            preflight.install.role.as_str(),
+            preflight.identities.len(),
+        ),
+    )
+    .await?;
+    if has_ca {
+        let fenced = ans
+            .confirm(Field::FenceOldCa, input.old_ca_fenced.then_some(true), false)
+            .await
+            .context(
+                "a CA restore must not begin until the old CA cannot run: two copies \
+                 of one CA identity would break the admin domain's single-writer \
+                 boundary",
+            )?;
+        if !fenced {
+            bail!("CA restore cancelled until the old CA is fenced");
+        }
     }
     let root = match &input.config_dir {
         Some(root) => root.clone(),
         None => scope_root(preflight.config_scope)?,
     };
-    let mut lock = Some(ConfigDirLock::acquire_async(&root).await?);
-    let addresses = restore_addresses(&preflight, input)?;
+    let addresses = restore_addresses(ans, &preflight, input).await?;
     let resolver_relocated = addresses
         .resolver
         .zip(preflight.resolver_endpoint)
         .is_some_and(|(replacement, original)| replacement != original);
-    let service = desired_service(&preflight, input);
+    let service = desired_service(ans, &preflight, input).await?;
     if has_ca
         && (!preflight.identities.is_empty() || resolver_relocated)
         && service.is_none()
@@ -648,6 +794,9 @@ pub async fn restore_stage(
             preflight.identities.len()
         ));
     }
+    // Everything the operator decides is decided above: the lock is taken only
+    // once nothing is left to wait on but the work itself.
+    let mut lock = Some(ConfigDirLock::acquire_async(&root).await?);
     let manifest =
         install_bundle::restore_files_with_addresses(&bundle, &root, addresses)?;
 
@@ -719,16 +868,35 @@ async fn recover_bundled_ca(
             .context("restoring the verified CA state")?;
         }
         let lifetimes = crate::ca::CaLifetimes::load(&ca_dir)?;
-        let expired =
-            crate::ca::ca_cert_needs_renewal(&ca_dir, std::time::Duration::ZERO);
-        if lifetimes.externally_signed && expired && input.external_cert.is_none() {
-            bail!(
+        let expired = lifetimes.externally_signed
+            && crate::ca::ca_cert_needs_renewal(&ca_dir, std::time::Duration::ZERO);
+        let (signed, external_root) = match &input.external_cert {
+            Some(signed) => (Some(signed.clone()), input.external_root.clone()),
+            // The bundled certificate is past its end date, so the CA cannot
+            // sign anything until the external PKI re-signs this key.
+            None if expired && !ans.interactive() => bail!(
                 "the bundled external-CA certificate has expired; have the external \
                  PKI re-sign this CA key and repeat restore with --external-cert \
                  <certificate> [--external-root <certificate>]"
-            );
-        }
-        if let Some(signed) = &input.external_cert {
+            ),
+            None if expired => {
+                ans.note(
+                    "the bundled external-CA certificate has expired; have your \
+                     external PKI re-sign this CA key before continuing",
+                );
+                let signed = ans
+                    .text(Field::SignedCert, None, None, true)
+                    .await?
+                    .context("the renewed external-CA certificate is required")?;
+                let root = ans
+                    .text(Field::ExternalRoot, None, None, false)
+                    .await?
+                    .filter(|root| !root.trim().is_empty());
+                (Some(PathBuf::from(signed)), root.map(PathBuf::from))
+            }
+            None => (None, None),
+        };
+        if let Some(signed) = signed {
             if !lifetimes.externally_signed {
                 bail!("--external-cert was supplied for a self-signed netidx CA");
             }
@@ -736,8 +904,8 @@ async fn recover_bundled_ca(
                 ans,
                 config_lock,
                 ca_dir.clone(),
-                signed,
-                input.external_root.as_deref(),
+                &signed,
+                external_root.as_deref(),
             )
             .await?;
         }
@@ -818,4 +986,219 @@ pub async fn restore_finish(
         }
     };
     Ok(RestoreOutcome { role: staged.manifest.install.role, service_needed, reconciled })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        answer::testing::Scripted,
+        install_bundle::{FORMAT_VERSION, ResolverEndpoint},
+    };
+
+    fn ca_manifest(admin: &str, resolver: Option<ResolverEndpoint>) -> Manifest {
+        Manifest {
+            format_version: FORMAT_VERSION,
+            created_unix: 1,
+            install: InstallRecord::new(InstallRole::Ca, "/", "tls", None, None),
+            source_config_root: "/old/netidx".into(),
+            config_scope: BundleScope::System,
+            components: vec![Component::Ca, Component::Resolver],
+            service: None,
+            identities: vec![],
+            ca_bundle: true,
+            admin_listen: Some(admin.parse().unwrap()),
+            resolver_endpoint: resolver,
+            previous_admin_server: None,
+            files: vec![],
+        }
+    }
+
+    #[test]
+    fn a_restored_address_keeps_the_backed_up_port_on_this_host_ip() {
+        let old_admin: SocketAddr = "192.0.2.10:14565".parse().unwrap();
+        let old_resolver = ResolverEndpoint {
+            listen: "192.0.2.10:14564".parse().unwrap(),
+            bind: "10.0.0.10".parse().unwrap(),
+        };
+        let detected: IpAddr = "198.51.100.20".parse().unwrap();
+        assert_eq!(
+            restored_listen_default(old_admin, Some(detected)),
+            "198.51.100.20:14565".parse().unwrap()
+        );
+        let listen = restored_listen_default(old_resolver.listen, Some(detected));
+        assert_eq!(listen, "198.51.100.20:14564".parse().unwrap());
+        assert_eq!(
+            restored_bind_default(old_resolver, Some(detected), None, listen),
+            detected
+        );
+    }
+
+    #[test]
+    fn a_restored_resolver_takes_the_detected_nat_bind_or_the_backed_up_one() {
+        let original = ResolverEndpoint {
+            listen: "203.0.113.10:4564".parse().unwrap(),
+            bind: "10.0.0.10".parse().unwrap(),
+        };
+        let public: IpAddr = "203.0.113.20".parse().unwrap();
+        let private: IpAddr = "10.0.0.20".parse().unwrap();
+        let listen = restored_listen_default(original.listen, Some(public));
+        assert_eq!(
+            restored_bind_default(original, Some(public), Some(private), listen),
+            private
+        );
+        assert_eq!(restored_listen_default(original.listen, None), original.listen);
+        assert_eq!(
+            restored_bind_default(original, None, None, original.listen),
+            original.bind
+        );
+    }
+
+    #[tokio::test]
+    async fn a_scripted_restore_that_says_nothing_keeps_the_bundled_addresses() {
+        let resolver = ResolverEndpoint {
+            listen: "203.0.113.4:4564".parse().unwrap(),
+            bind: "10.1.0.4".parse().unwrap(),
+        };
+        let manifest = ca_manifest("203.0.113.4:4565", Some(resolver));
+        let mut ans = Scripted::strict();
+        let addresses = restore_addresses(&mut ans, &manifest, &RestoreInput::default())
+            .await
+            .unwrap();
+        // Silence must not relocate a CA onto whatever IP this host happens to
+        // have: `restore_files_with_addresses` keeps the bundled endpoints when
+        // both overrides are absent.
+        assert_eq!(addresses, RestoreAddresses::default());
+        assert!(ans.asked.is_empty(), "the strict frontend was asked {:?}", ans.asked);
+    }
+
+    #[tokio::test]
+    async fn an_interactive_restore_is_offered_this_host_and_may_decline() {
+        let resolver = ResolverEndpoint {
+            listen: "203.0.113.4:4564".parse().unwrap(),
+            bind: "10.1.0.4".parse().unwrap(),
+        };
+        let manifest = ca_manifest("203.0.113.4:4565", Some(resolver));
+        let mut ans = Scripted::interactive(
+            [Some("198.51.100.7:4565"), Some("198.51.100.7:4564"), None],
+            [],
+        );
+        let addresses = restore_addresses(&mut ans, &manifest, &RestoreInput::default())
+            .await
+            .unwrap();
+        assert_eq!(
+            ans.asked,
+            vec![
+                Field::RestoreAdminListen,
+                Field::RestoreResolverListen,
+                Field::RestoreResolverBind,
+            ]
+        );
+        assert_eq!(addresses.admin_listen, Some("198.51.100.7:4565".parse().unwrap()));
+        // A blank bind falls back to the advertised IP, not the bundled one:
+        // the old bind belongs to the machine the bundle came from.
+        assert_eq!(
+            addresses.resolver,
+            Some(ResolverEndpoint {
+                listen: "198.51.100.7:4564".parse().unwrap(),
+                bind: "198.51.100.7".parse().unwrap(),
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn clearing_the_resolver_address_keeps_the_whole_bundled_endpoint() {
+        let resolver = ResolverEndpoint {
+            listen: "203.0.113.4:4564".parse().unwrap(),
+            bind: "10.1.0.4".parse().unwrap(),
+        };
+        let manifest = ca_manifest("203.0.113.4:4565", Some(resolver));
+        let mut ans = Scripted::interactive([None, None], []);
+        let addresses = restore_addresses(&mut ans, &manifest, &RestoreInput::default())
+            .await
+            .unwrap();
+        assert_eq!(addresses, RestoreAddresses::default());
+        assert_eq!(
+            ans.asked,
+            vec![Field::RestoreAdminListen, Field::RestoreResolverListen]
+        );
+    }
+
+    #[tokio::test]
+    async fn an_override_wins_and_a_bare_bind_keeps_the_bundled_advertised_address() {
+        let resolver = ResolverEndpoint {
+            listen: "203.0.113.4:4564".parse().unwrap(),
+            bind: "10.1.0.4".parse().unwrap(),
+        };
+        let manifest = ca_manifest("203.0.113.4:4565", Some(resolver));
+        let mut ans = Scripted::strict();
+        let input = RestoreInput {
+            resolver_bind: Some("10.2.0.9".parse().unwrap()),
+            ..Default::default()
+        };
+        let addresses = restore_addresses(&mut ans, &manifest, &input).await.unwrap();
+        assert_eq!(
+            addresses.resolver,
+            Some(ResolverEndpoint {
+                listen: resolver.listen,
+                bind: "10.2.0.9".parse().unwrap(),
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn a_resolver_override_needs_a_bundle_that_has_a_resolver() {
+        let manifest = ca_manifest("203.0.113.4:4565", None);
+        let mut ans = Scripted::strict();
+        let input = RestoreInput {
+            resolver_listen: Some("198.51.100.7:4564".parse().unwrap()),
+            ..Default::default()
+        };
+        let e = restore_addresses(&mut ans, &manifest, &input).await.unwrap_err();
+        assert!(
+            format!("{e:#}").contains("co-located resolver"),
+            "unexpected error: {e:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_scripted_restore_registers_only_the_service_the_backup_had() {
+        let mut manifest = ca_manifest("203.0.113.4:4565", None);
+        let mut ans = Scripted::strict();
+        // Nothing recorded and no --with-service: a strict frontend must not be
+        // asked, because `confirm` with no flag is an error, not a default.
+        assert_eq!(
+            desired_service(&mut ans, &manifest, &RestoreInput::default()).await.unwrap(),
+            None
+        );
+        assert!(ans.asked.is_empty());
+        let input = RestoreInput { with_service: true, ..Default::default() };
+        assert_eq!(
+            desired_service(&mut ans, &manifest, &input).await.unwrap(),
+            Some(ServiceScope::System)
+        );
+        manifest.service = Some(ServiceIntent {
+            scope: BundleScope::User,
+            name: "netidx".into(),
+            for_user: None,
+            installed: true,
+        });
+        assert_eq!(
+            desired_service(&mut ans, &manifest, &RestoreInput::default()).await.unwrap(),
+            Some(ServiceScope::User)
+        );
+        let input = RestoreInput { no_service: true, ..Default::default() };
+        assert_eq!(desired_service(&mut ans, &manifest, &input).await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn an_interactive_restore_is_asked_about_a_service_the_backup_lacked() {
+        let manifest = ca_manifest("203.0.113.4:4565", None);
+        let mut ans = Scripted::interactive([], [false]);
+        assert_eq!(
+            desired_service(&mut ans, &manifest, &RestoreInput::default()).await.unwrap(),
+            None
+        );
+        assert_eq!(ans.asked, vec![Field::Service]);
+    }
 }

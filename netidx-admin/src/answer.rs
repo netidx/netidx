@@ -787,3 +787,139 @@ pub trait Answerer: Send {
     /// acknowledgment before continuing.
     async fn show_recovery_password(&mut self, password: &str) -> Result<()>;
 }
+
+/// A scripted [`Answerer`] for engine tests: it hands back queued answers and
+/// records which [`Field`]s were asked, so a test can assert both the value a
+/// rule produced *and* that the rule asked only what it should have. Any
+/// question it has no script for is a test failure, not a silent default.
+#[cfg(test)]
+pub(crate) mod testing {
+    use super::*;
+    use std::collections::VecDeque;
+
+    pub(crate) struct Scripted {
+        interactive: bool,
+        text: VecDeque<Option<String>>,
+        confirm: VecDeque<bool>,
+        /// Every field asked, in order.
+        pub(crate) asked: Vec<Field>,
+    }
+
+    impl Scripted {
+        /// A frontend that prompts, answering `text` then `confirm` in order.
+        pub(crate) fn interactive(
+            text: impl IntoIterator<Item = Option<&'static str>>,
+            confirm: impl IntoIterator<Item = bool>,
+        ) -> Self {
+            Self {
+                interactive: true,
+                text: text.into_iter().map(|t| t.map(str::to_string)).collect(),
+                confirm: confirm.into_iter().collect(),
+                asked: Vec::new(),
+            }
+        }
+
+        /// A strict frontend: every question is an error, as the CLI's is.
+        pub(crate) fn strict() -> Self {
+            Self {
+                interactive: false,
+                text: VecDeque::new(),
+                confirm: VecDeque::new(),
+                asked: Vec::new(),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Answerer for Scripted {
+        fn interactive(&self) -> bool {
+            self.interactive
+        }
+
+        async fn text(
+            &mut self,
+            field: Field,
+            provided: Option<String>,
+            _default: Option<&str>,
+            _required: bool,
+        ) -> Result<Option<String>> {
+            if let Some(provided) = provided {
+                return Ok(Some(provided));
+            }
+            self.asked.push(field);
+            self.text
+                .pop_front()
+                .ok_or_else(|| anyhow::anyhow!("unscripted question {field:?}"))
+        }
+
+        async fn choice(
+            &mut self,
+            field: Field,
+            _provided: Option<String>,
+            _choices: &[&str],
+            _default: Option<&str>,
+        ) -> Result<String> {
+            anyhow::bail!("unscripted choice {field:?}")
+        }
+
+        async fn select_admin_domain(
+            &mut self,
+            _domains: &[AdminDomainOption],
+        ) -> Result<AdminDomainChoice> {
+            anyhow::bail!("unscripted admin domain selection")
+        }
+
+        async fn confirm(
+            &mut self,
+            field: Field,
+            provided: Option<bool>,
+            _default: bool,
+        ) -> Result<bool> {
+            if let Some(provided) = provided {
+                return Ok(provided);
+            }
+            self.asked.push(field);
+            self.confirm
+                .pop_front()
+                .ok_or_else(|| anyhow::anyhow!("unscripted confirmation {field:?}"))
+        }
+
+        async fn secret(
+            &mut self,
+            field: Field,
+            _provided: Option<Secret>,
+        ) -> Result<Secret> {
+            anyhow::bail!("unscripted secret {field:?}")
+        }
+
+        async fn announce(&mut self, _title: &str, _body: &str) -> Result<()> {
+            Ok(())
+        }
+
+        async fn announce_identity(
+            &mut self,
+            _body: &str,
+            _code: &Fingerprint,
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        async fn confirm_identity(&mut self, _identity: &CaIdentity) -> Result<bool> {
+            anyhow::bail!("unscripted identity confirmation")
+        }
+
+        fn show_verification_code(&mut self, _purpose: &str, _code: &Fingerprint) {}
+
+        fn clear_verification_code(&mut self) {}
+
+        fn progress(&mut self, _progress: Progress) {}
+
+        fn note(&mut self, _message: &str) {}
+
+        fn warn(&mut self, _message: &str) {}
+
+        async fn show_recovery_password(&mut self, _password: &str) -> Result<()> {
+            Ok(())
+        }
+    }
+}

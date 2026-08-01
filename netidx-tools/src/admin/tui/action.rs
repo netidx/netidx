@@ -11,30 +11,34 @@
 //! the loop runs it directly rather than as an op future.
 
 use super::answer::TuiAnswerer;
+#[cfg(unix)]
 use anyhow::Context;
 use anyhow::{Result, bail};
+#[cfg(unix)]
 use netidx_admin::{
-    answer::{Answerer, Field, Progress, Stage},
+    answer::Field,
+    offline_ca,
+    plan::install::ca::{CaInput, run_ca},
+};
+use netidx_admin::{
+    answer::{Answerer, Progress, Stage},
     config_lock::ConfigDirLock,
     install_bundle, paths,
-    plan::install::{
-        InstallCommon, InstallMode,
-        publisher::{PublisherInput, run_publisher},
-        resolver::{ResolverInput, run_resolver},
+    plan::{
+        bundle,
+        install::{
+            InstallCommon, InstallMode,
+            publisher::{PublisherInput, run_publisher},
+            resolver::{ResolverInput, run_resolver},
+        },
     },
     provenance::InstallRole,
     renewd,
     service::ServiceScope,
 };
 #[cfg(unix)]
-use netidx_admin::{
-    local, offline_ca,
-    plan::install::ca::{CaInput, run_ca},
-};
-use std::{
-    net::{IpAddr, SocketAddr},
-    path::PathBuf,
-};
+use std::net::SocketAddr;
+use std::path::PathBuf;
 
 /// What the UI shows after an action completes.
 pub(super) struct Outcome {
@@ -301,12 +305,9 @@ pub(super) enum Action {
     Backup { config_root: PathBuf, scope: ServiceScope },
     /// Select and restore an installation bundle on a fresh machine.
     Restore,
-    /// Resume CA+resolver restore after the privileged service step.
-    FinishRestore {
-        bundle: PathBuf,
-        config_root: PathBuf,
-        addresses: install_bundle::RestoreAddresses,
-    },
+    /// Resume CA+resolver restore after the privileged service step, carrying
+    /// the engine's staged restore.
+    FinishRestore(Box<bundle::Staged>),
     /// Re-emit a renewal CSR for this box's externally-signed CA (local).
     #[cfg(unix)]
     ExternalEmitCsr { ca_dir: PathBuf },
@@ -359,7 +360,7 @@ impl Action {
             Action::RecoveryRotate { .. } => "Rotating recovery password".to_string(),
             Action::Backup { .. } => "Backing up this install".to_string(),
             Action::Restore => "Restoring an install".to_string(),
-            Action::FinishRestore { .. } => "Finishing restore".to_string(),
+            Action::FinishRestore(_) => "Finishing restore".to_string(),
             #[cfg(unix)]
             Action::ExternalEmitCsr { .. } => "Emitting renewal CSR".to_string(),
             #[cfg(unix)]
@@ -472,9 +473,7 @@ pub(super) async fn run_owned(mut ans: TuiAnswerer, action: Action) -> Result<Ou
             backup(&mut ans, config_root, scope).await
         }
         Action::Restore => restore(&mut ans).await,
-        Action::FinishRestore { bundle, config_root, addresses } => {
-            finish_restore(&mut ans, bundle, config_root, addresses).await
-        }
+        Action::FinishRestore(staged) => finish_restore(&mut ans, staged).await,
         Action::Services(sa) => super::services::run(&mut ans, sa).await,
     }
 }
@@ -567,68 +566,18 @@ async fn backup(
     config_root: PathBuf,
     scope: ServiceScope,
 ) -> Result<Outcome> {
-    let target = ans
-        .text(Field::BackupTarget, None, None, true)
-        .await?
-        .context("a backup target directory is required")?;
-    let target = PathBuf::from(target);
-    let target =
-        if target.is_absolute() { target } else { std::env::current_dir()?.join(target) };
-    let record =
-        netidx_admin::provenance::InstallRecord::load(&config_root.join("install.json"))?;
-    let service_scope = match record.role {
-        InstallRole::Workstation => ServiceScope::User,
-        InstallRole::Ca | InstallRole::Resolver | InstallRole::Publisher => {
-            ServiceScope::System
-        }
-    };
-    let for_user = match service_scope {
-        ServiceScope::User => None,
-        ServiceScope::System => Some(netidx_admin::service::resolve_for_user(None)?),
-    };
-    let service = netidx_admin::service::status(&netidx_admin::service::ServiceParams {
-        scope: service_scope,
-        for_user: for_user.clone(),
-        binary: PathBuf::new(),
-        service_name: netidx_admin::service::ServiceParams::DEFAULT_NAME.to_string(),
-        activation_dir: None,
-    })?;
-    let intent = install_bundle::ServiceIntent {
-        scope: match service_scope {
-            ServiceScope::User => install_bundle::BundleScope::User,
-            ServiceScope::System => install_bundle::BundleScope::System,
+    let out = bundle::backup(
+        ans,
+        bundle::BackupInput {
+            config_dir: Some(config_root),
+            scope: Some(match scope {
+                ServiceScope::User => install_bundle::BundleScope::User,
+                ServiceScope::System => install_bundle::BundleScope::System,
+            }),
+            ..Default::default()
         },
-        name: netidx_admin::service::ServiceParams::DEFAULT_NAME.to_string(),
-        for_user,
-        installed: service != netidx_admin::service::ServiceStatus::NotInstalled,
-    };
-    #[cfg(unix)]
-    let ca_tmp = tempfile::tempdir()?;
-    let inner: Option<PathBuf> = if config_root.join("ca").is_dir() {
-        #[cfg(unix)]
-        {
-            let inner = ca_tmp.path().join("ca");
-            local::backup(&config_root.join("admin-server.json"), &inner).await?;
-            Some(inner)
-        }
-        #[cfg(not(unix))]
-        {
-            bail!("CA backup is supported only on unix")
-        }
-    } else {
-        None
-    };
-    let out = install_bundle::create(
-        &config_root,
-        record,
-        match scope {
-            ServiceScope::User => install_bundle::BundleScope::User,
-            ServiceScope::System => install_bundle::BundleScope::System,
-        },
-        Some(intent),
-        inner.as_deref(),
-        &target,
-    )?;
+    )
+    .await?;
     Ok(Outcome::plain(
         "Installation backup created",
         vec![
@@ -645,307 +594,56 @@ async fn backup(
     ))
 }
 
-fn restore_root(manifest: &install_bundle::Manifest) -> Result<PathBuf> {
-    match manifest.config_scope {
-        install_bundle::BundleScope::User => paths::user_config_root(),
-        install_bundle::BundleScope::System => Ok(paths::system_config_root()),
-    }
-}
-
-async fn finish_identities(
-    ans: &mut TuiAnswerer,
-    root: &PathBuf,
-    manifest: &install_bundle::Manifest,
-) -> Result<()> {
-    if manifest.identities.is_empty()
-        || netidx_admin::plan::bundle::identities_complete(root, manifest)
-    {
-        return Ok(());
-    }
-    let (ca, net) = netidx_admin::plan::bundle::admin_domain_for_restore(manifest, None)
-        .await?
-        .context("the backup contains TLS identities but no admin domain")?;
-    netidx_admin::plan::bundle::reenroll_data_identities(
-        ans, root, manifest, ca, &net, None,
-    )
-    .await?;
-    #[cfg(unix)]
-    if !manifest.components.contains(&install_bundle::Component::Ca) {
-        let config_lock = ConfigDirLock::acquire_async(root).await?;
-        netidx_admin::plan::bundle::reenroll_satellite_admin(
-            ans,
-            &config_lock,
-            root,
-            manifest,
-            &net,
-            None,
-        )
-        .await?;
-    }
-    Ok(())
-}
-
-fn restored_listen_default(original: SocketAddr, detected: Option<IpAddr>) -> SocketAddr {
-    SocketAddr::new(detected.unwrap_or_else(|| original.ip()), original.port())
-}
-
-fn restored_bind_default(
-    original: install_bundle::ResolverEndpoint,
-    detected: Option<IpAddr>,
-    detected_bind: Option<IpAddr>,
-    listen: SocketAddr,
-) -> IpAddr {
-    detected_bind.unwrap_or_else(|| match detected {
-        Some(_) => listen.ip(),
-        None if listen.ip() == original.listen.ip() => original.bind,
-        None => listen.ip(),
-    })
-}
-
-async fn restore_addresses(
-    ans: &mut TuiAnswerer,
-    manifest: &install_bundle::Manifest,
-) -> Result<install_bundle::RestoreAddresses> {
-    let ca = manifest.components.contains(&install_bundle::Component::Ca);
-    let shape = if ca || manifest.resolver_endpoint.is_some() {
-        let shape = netidx_admin::plan::install::detect_resolver_shape().await;
-        netidx_admin::plan::install::warn_incomplete_resolver_address(ans, &shape);
-        Some(shape)
-    } else {
-        None
-    };
-    let detected = shape.as_ref().and_then(|shape| shape.advertised_ip);
-    let admin_listen = if ca {
-        let original = manifest
-            .admin_listen
-            .context("the CA backup has no recorded admin address")?;
-        let default = restored_listen_default(original, detected).to_string();
-        Some(
-            ans.text(Field::RestoreAdminListen, None, Some(&default), true)
-                .await?
-                .context("the restored CA address is required")?
-                .parse::<SocketAddr>()
-                .context("the restored CA address must be IP:port")?,
-        )
-    } else {
-        None
-    };
-    let resolver = match manifest.resolver_endpoint {
-        Some(original) => {
-            let default = restored_listen_default(original.listen, detected).to_string();
-            let listen = ans
-                .text(Field::RestoreResolverListen, None, Some(&default), true)
-                .await?
-                .context("the restored resolver address is required")?
-                .parse::<SocketAddr>()
-                .context("the restored resolver address must be IP:port")?;
-            let bind_default = restored_bind_default(
-                original,
-                detected,
-                shape.as_ref().and_then(|shape| shape.bind_override),
-                listen,
-            )
-            .to_string();
-            let bind = ans
-                .text(Field::RestoreResolverBind, None, Some(&bind_default), true)
-                .await?
-                .context("the restored resolver bind IP is required")?
-                .parse::<IpAddr>()
-                .context("the restored resolver bind address must be an IP")?;
-            Some(install_bundle::ResolverEndpoint { listen, bind })
-        }
-        None => None,
-    };
-    Ok(install_bundle::RestoreAddresses { admin_listen, resolver })
-}
-
 async fn restore(ans: &mut TuiAnswerer) -> Result<Outcome> {
-    let source = ans
-        .text(Field::RestoreSource, None, None, true)
-        .await?
-        .context("a backup bundle directory is required")?;
-    let bundle = PathBuf::from(source).canonicalize()?;
-    let preflight = install_bundle::verify(&bundle)?;
-    let ca = preflight.components.contains(&install_bundle::Component::Ca);
-    ans.announce(
-        "Restore plan",
-        &format!(
-            "Components: {:?}\nRole: {}\nFresh enrollment required for {} machine credential(s).\nThe destination must be a clean install or an identical interrupted restore.",
-            preflight.components,
-            preflight.install.role.as_str(),
-            preflight.identities.len(),
-        ),
-    )
-    .await?;
-    if ca && !ans.confirm(Field::FenceOldCa, None, false).await? {
-        bail!("CA restore cancelled until the old CA is fenced");
-    }
-    let addresses = restore_addresses(ans, &preflight).await?;
-    let resolver_relocated = addresses
-        .resolver
-        .zip(preflight.resolver_endpoint)
-        .is_some_and(|(replacement, original)| replacement != original);
-    let recorded = preflight.service.as_ref().is_some_and(|service| service.installed);
-    let install_service =
-        ans.confirm(Field::Service, recorded.then_some(true), true).await?;
-    let service_scope = install_service.then_some(
-        match preflight
-            .service
-            .as_ref()
-            .map(|service| service.scope)
-            .unwrap_or(preflight.config_scope)
-        {
-            install_bundle::BundleScope::User => ServiceScope::User,
-            install_bundle::BundleScope::System => ServiceScope::System,
-        },
-    );
-    let service_install = service_scope.map(|scope| match &preflight.service {
-        Some(intent) => ServiceInstall {
-            scope,
-            name: intent.name.clone(),
-            for_user: intent.for_user.clone(),
-        },
-        None => ServiceInstall::defaults(scope),
-    });
-    if ca
-        && (!preflight.identities.is_empty() || resolver_relocated)
-        && service_install.is_none()
-    {
-        bail!(
-            "a CA with co-located roles must run its service before restore can finish enrollment and hierarchy reconciliation"
-        );
-    }
-    let root = restore_root(&preflight)?;
-    let config_lock =
-        netidx_admin::config_lock::ConfigDirLock::acquire_async(&root).await?;
-    config_lock.require_contained(&root)?;
-    let manifest =
-        install_bundle::restore_files_with_addresses(&bundle, &root, addresses)?;
-    #[cfg(unix)]
-    if ca {
-        let ca_dir = root.join("ca");
-        let cfg_path = root.join("admin-server.json");
-        if !install_bundle::ca_recovered(&bundle, &cfg_path)? {
-            if !install_bundle::ca_snapshot_prepared(&bundle, &ca_dir, &cfg_path)? {
-                netidx_admin::backup::restore(
-                    &config_lock,
-                    &bundle.join(install_bundle::CA_DIR),
-                    &ca_dir,
-                    &cfg_path,
-                )?;
-            }
-            let lifetimes = netidx_admin::ca::CaLifetimes::load(&ca_dir)?;
-            if lifetimes.externally_signed
-                && netidx_admin::ca::ca_cert_needs_renewal(
-                    &ca_dir,
-                    std::time::Duration::ZERO,
-                )
-            {
-                let signed = ans
-                    .text(Field::SignedCert, None, None, true)
-                    .await?
-                    .context("the renewed external-CA certificate is required")?;
-                let root = ans.text(Field::ExternalRoot, None, None, false).await?;
-                netidx_admin::ops::slots::external_install_cert(
-                    ans,
-                    &config_lock,
-                    ca_dir.clone(),
-                    PathBuf::from(signed).as_path(),
-                    root.as_deref().filter(|s| !s.is_empty()).map(std::path::Path::new),
-                )
-                .await?;
-            }
-            netidx_admin::ops::slots::recover_ca(
-                ans,
-                &config_lock,
-                ca_dir,
-                cfg_path.clone(),
-                manifest.admin_listen,
-                addresses.resolver.map(|resolver| resolver.listen),
-                false,
-            )
-            .await?;
-        }
-        let mut cfg = netidx_admin::admin_server_config::load_for_recovery(&cfg_path)?;
-        if let Some(role) = cfg.roles.resolver.as_mut() {
-            role.config = root.join("resolver.json");
-        }
-        if let Some(role) = cfg.roles.id_map.as_mut() {
-            role.map = root.join("id-map.json");
-        }
-        netidx_admin::admin_server_config::save(&config_lock, &cfg_path, &cfg)?;
-        manifest.install.save_async(&config_lock, &root.join("install.json")).await?;
-    }
-    #[cfg(not(unix))]
-    if ca {
-        bail!("CA restore is supported only on unix")
-    }
-    if ca && (!manifest.identities.is_empty() || resolver_relocated) {
-        let service_install = service_install.expect("required before restore writes");
-        return Ok(Outcome {
+    let staged = bundle::restore_stage(ans, &bundle::RestoreInput::default()).await?;
+    match staged.next {
+        bundle::Next::Finish => finish_restore(ans, Box::new(staged)).await,
+        bundle::Next::ServiceThenFinish(scope) => Ok(Outcome {
             title: "CA restored".to_string(),
             lines: vec![
-                "Starting the CA before re-enrolling its co-located TLS roles…"
+                "Starting the CA before re-enrolling its co-located TLS roles\u{2026}"
                     .to_string(),
             ],
             refresh_local: false,
-            install_service: Some(service_install),
-            after_service: Some(Action::FinishRestore {
-                bundle,
-                config_root: root,
-                addresses,
-            }),
+            install_service: Some(restored_service(&staged.manifest, scope)),
+            after_service: Some(Action::FinishRestore(Box::new(staged))),
             remote: None,
             services: None,
             quiet: true,
-        });
+        }),
     }
-    finish_identities(ans, &root, &manifest).await?;
+}
+
+fn restored_service(
+    manifest: &install_bundle::Manifest,
+    scope: ServiceScope,
+) -> ServiceInstall {
+    let (name, for_user) = bundle::restored_service(manifest, None, None);
+    ServiceInstall { scope, name, for_user }
+}
+
+async fn finish_restore(
+    ans: &mut TuiAnswerer,
+    staged: Box<bundle::Staged>,
+) -> Result<Outcome> {
+    let manifest = staged.manifest.clone();
+    let out = bundle::restore_finish(ans, *staged).await?;
+    let mut lines = vec![format!("{} is installed and ready.", out.role.as_str())];
+    if let Some(operation) = out.reconciled {
+        lines.push(format!("Resolver hierarchy reconciled (operation {operation})."));
+    }
     Ok(Outcome {
         title: "Restore complete".to_string(),
-        lines: vec![format!(
-            "{} is installed and ready.",
-            manifest.install.role.as_str()
-        )],
+        lines,
         refresh_local: true,
-        install_service: service_install,
+        install_service: out
+            .service_needed
+            .map(|scope| restored_service(&manifest, scope)),
         after_service: None,
         remote: None,
         services: None,
         quiet: false,
     })
-}
-
-async fn finish_restore(
-    ans: &mut TuiAnswerer,
-    bundle: PathBuf,
-    config_root: PathBuf,
-    addresses: install_bundle::RestoreAddresses,
-) -> Result<Outcome> {
-    let preflight = install_bundle::verify(&bundle)?;
-    let resolver_relocated = addresses
-        .resolver
-        .zip(preflight.resolver_endpoint)
-        .is_some_and(|(replacement, original)| replacement != original);
-    let manifest =
-        install_bundle::restore_files_with_addresses(&bundle, &config_root, addresses)?;
-    finish_identities(ans, &config_root, &manifest).await?;
-    netidx_admin::plan::bundle::start_restored_units(&config_root).await?;
-    let lines =
-        vec![format!("{} is installed and ready.", manifest.install.role.as_str())];
-    #[cfg(unix)]
-    let lines = if resolver_relocated {
-        let mut lines = lines;
-        let operation =
-            netidx_admin::plan::bundle::reconcile_restored_ca(&config_root).await?;
-        lines.push(format!("Resolver hierarchy reconciled (operation {operation})."));
-        lines
-    } else {
-        lines
-    };
-    #[cfg(not(unix))]
-    let _ = resolver_relocated;
-    Ok(Outcome::plain("Restore complete", lines, true))
 }
 
 /// Re-emit a renewal CSR for an externally-signed CA.
@@ -1474,46 +1172,5 @@ mod tests {
         assert_eq!(input.base, "/local");
         assert!(input.with_perms_file);
         assert!(input.with_container);
-    }
-
-    #[test]
-    fn restore_uses_the_current_host_ip_and_the_backed_up_ports() {
-        let old_admin: SocketAddr = "192.0.2.10:14565".parse().unwrap();
-        let old_resolver = install_bundle::ResolverEndpoint {
-            listen: "192.0.2.10:14564".parse().unwrap(),
-            bind: "10.0.0.10".parse().unwrap(),
-        };
-        let detected: IpAddr = "198.51.100.20".parse().unwrap();
-
-        assert_eq!(
-            restored_listen_default(old_admin, Some(detected)),
-            "198.51.100.20:14565".parse().unwrap()
-        );
-        let listen = restored_listen_default(old_resolver.listen, Some(detected));
-        assert_eq!(listen, "198.51.100.20:14564".parse().unwrap());
-        assert_eq!(
-            restored_bind_default(old_resolver, Some(detected), None, listen),
-            detected
-        );
-    }
-
-    #[test]
-    fn restore_uses_the_detected_nat_bind_or_falls_back_to_the_backup() {
-        let original = install_bundle::ResolverEndpoint {
-            listen: "203.0.113.10:4564".parse().unwrap(),
-            bind: "10.0.0.10".parse().unwrap(),
-        };
-        let public: IpAddr = "203.0.113.20".parse().unwrap();
-        let private: IpAddr = "10.0.0.20".parse().unwrap();
-        let listen = restored_listen_default(original.listen, Some(public));
-        assert_eq!(
-            restored_bind_default(original, Some(public), Some(private), listen),
-            private
-        );
-        assert_eq!(restored_listen_default(original.listen, None), original.listen);
-        assert_eq!(
-            restored_bind_default(original, None, None, original.listen),
-            original.bind
-        );
     }
 }
