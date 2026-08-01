@@ -1291,38 +1291,13 @@ fn external(cmd: ExternalCmd) -> Result<()> {
 }
 
 #[cfg(unix)]
-/// Refuse the `external` ops on a CA that isn't externally-signed, with the
-/// same clear pointer the overloaded `renew` gave.
-fn ensure_externally_signed(dir: &Path) -> Result<()> {
-    if !ca::CaLifetimes::load(dir)?.externally_signed {
-        bail!(
-            "{} is not an externally-signed CA — create one with \
-             `netidx admin ca init --external-sign`",
-            dir.display()
-        );
-    }
-    Ok(())
-}
-
-#[cfg(unix)]
 fn external_emit_csr(a: ExternalDirArgs) -> Result<()> {
     let dir = ca_dir_for(a.ca_dir)?;
-    ensure_externally_signed(&dir)?;
-    let marker = slots_ops::ExternalPending::load(&dir)?;
-    let csr_path = if marker.setup_server && dir.join("certificate.pem").is_file() {
-        let cfg = external_ca_config(&dir)?;
-        let (common_name, csr) = runtime()?.block_on(local::external_ca_csr(&cfg))?;
-        let path = csr::default_csr_filename(&common_name);
-        atomic::write_atomic(&path, csr.as_bytes(), 0o644)
-            .with_context(|| format!("writing CSR to {}", path.display()))?;
-        path
-    } else {
-        let mut ans = a.recovery.answerer()?;
-        runtime()?.block_on(async {
-            let lock = ConfigDirLock::acquire_for_ca_dir(&dir).await?;
-            slots_ops::external_emit_csr(&mut ans, &lock, dir).await
-        })?
-    };
+    let mut ans = a.recovery.answerer()?;
+    let csr_path = runtime()?.block_on(async {
+        let access = slots_ops::CaAccess::open(&dir, None).await?;
+        slots_ops::external_csr(&mut ans, &access, dir).await
+    })?;
     println!("wrote {} — get it signed by your PKI, then run:", csr_path.display());
     println!("  netidx admin ca external install <signed-cert.pem> [--root <root.pem>]");
     Ok(())
@@ -1331,27 +1306,6 @@ fn external_emit_csr(a: ExternalDirArgs) -> Result<()> {
 #[cfg(unix)]
 fn external_install(a: ExternalInstallArgs) -> Result<()> {
     let dir = ca_dir_for(a.ca_dir)?;
-    ensure_externally_signed(&dir)?;
-    let marker = slots_ops::ExternalPending::load(&dir)?;
-    if marker.setup_server && dir.join("certificate.pem").is_file() {
-        let cfg = external_ca_config(&dir)?;
-        let signed = std::fs::read_to_string(&a.signed_cert)
-            .with_context(|| format!("reading {}", a.signed_cert.display()))?;
-        let root = a
-            .root
-            .as_ref()
-            .map(|p| {
-                std::fs::read_to_string(p)
-                    .with_context(|| format!("reading {}", p.display()))
-            })
-            .transpose()?;
-        let fingerprint =
-            runtime()?.block_on(local::external_ca_install(&cfg, signed, root))?;
-        println!(
-            "renewed the externally-signed CA without stopping it\n  identity: {fingerprint}"
-        );
-        return Ok(());
-    }
     let mut ans = a.recovery.answerer()?;
     let gate = plan::service::ServiceGate {
         dry_run: false,
@@ -1360,10 +1314,10 @@ fn external_install(a: ExternalInstallArgs) -> Result<()> {
     };
     let rt = runtime()?;
     let scope = rt.block_on(async {
-        let lock = ConfigDirLock::acquire_for_ca_dir(&dir).await?;
-        let out = slots_ops::external_install_cert(
+        let access = slots_ops::CaAccess::open(&dir, None).await?;
+        let out = slots_ops::external_install(
             &mut ans,
-            &lock,
+            &access,
             dir,
             &a.signed_cert,
             a.root.as_deref(),
@@ -1375,26 +1329,6 @@ fn external_install(a: ExternalInstallArgs) -> Result<()> {
         service::install_with_defaults(scope.into())?;
     }
     Ok(())
-}
-
-#[cfg(unix)]
-fn external_ca_config(ca_dir: &Path) -> Result<PathBuf> {
-    let cfg_path = paths::discover_admin_server_config().context(
-        "this externally-signed CA is configured as a CA, but no local admin-server config was found",
-    )?;
-    let cfg = netidx_admin::admin_server_config::load(&cfg_path)?;
-    let configured = cfg
-        .roles
-        .ca
-        .as_ref()
-        .context("the local admin-server config does not hold the CA role")?;
-    anyhow::ensure!(
-        configured.dir == ca_dir,
-        "the local CA owns CA directory {}, not {}",
-        configured.dir.display(),
-        ca_dir.display()
-    );
-    Ok(cfg_path)
 }
 
 #[cfg(unix)]
@@ -1425,8 +1359,16 @@ async fn report_external_install(
         ExternalInstallOutcome::Renewal => {
             ans.note(
                 "renewed the CA certificate — enrolled nodes adopt it on their \
-                 next renewal (glyph unchanged; existing certificates stay valid).",
+                 next renewal (glyph unchanged; existing certificates stay valid).\n\
+                 Its admin server was not running; start it to serve the new cert.",
             );
+            Ok(None)
+        }
+        ExternalInstallOutcome::HotRenewed { ca_fingerprint } => {
+            ans.note(&format!(
+                "renewed the externally-signed CA without stopping it\n  \
+                 identity: {ca_fingerprint}"
+            ));
             Ok(None)
         }
     }

@@ -737,6 +737,79 @@ async fn external_ca_key(
     Ok((unlocked.ca_key_pem, cadir))
 }
 
+/// Refuse an external-CA operation on a CA that is not externally signed,
+/// pointing at the flag that would have made one.
+async fn ensure_externally_signed(ca_dir: &Path) -> Result<()> {
+    if !CaLifetimes::load_async(ca_dir).await?.externally_signed {
+        bail!(
+            "{} is not an externally-signed CA — create one with \
+             `netidx admin ca init --external-sign`",
+            ca_dir.display()
+        );
+    }
+    Ok(())
+}
+
+/// (Re-)emit the CSR for an externally-signed CA's own certificate.
+///
+/// A CA whose daemon is up signs over the control socket, with the key that
+/// daemon already holds unlocked and without an outage; otherwise the vault is
+/// opened under the guard `access` holds. Returns the path written.
+pub async fn external_csr(
+    ans: &mut dyn Answerer,
+    access: &CaAccess,
+    ca_dir: PathBuf,
+) -> Result<PathBuf> {
+    ensure_externally_signed(&ca_dir).await?;
+    match access {
+        CaAccess::Running { config } => {
+            let (common_name, csr) = local::external_ca_csr(config).await?;
+            let path = offline_ca::default_csr_filename(&common_name);
+            atomic::write_atomic_async(&path, csr.as_bytes(), 0o644)
+                .await
+                .with_context(|| format!("writing CSR to {}", path.display()))?;
+            Ok(path)
+        }
+        CaAccess::Offline { lock, .. } => external_emit_csr(ans, lock, ca_dir).await,
+    }
+}
+
+/// Install an externally-signed CA certificate, routed like [`external_csr`].
+///
+/// The offline path is not a fallback for failure — it is how a served CA is
+/// renewed while its daemon is down, and it writes the same `certificate.pem`
+/// and `trusted.pem` the daemon would.
+pub async fn external_install(
+    ans: &mut dyn Answerer,
+    access: &CaAccess,
+    ca_dir: PathBuf,
+    signed: &Path,
+    root: Option<&Path>,
+) -> Result<ExternalInstallOutcome> {
+    ensure_externally_signed(&ca_dir).await?;
+    match access {
+        CaAccess::Running { config } => {
+            let signed_pem = tokio::fs::read_to_string(signed)
+                .await
+                .with_context(|| format!("reading {}", signed.display()))?;
+            let root_pem = match root {
+                Some(p) => Some(
+                    tokio::fs::read_to_string(p)
+                        .await
+                        .with_context(|| format!("reading {}", p.display()))?,
+                ),
+                None => None,
+            };
+            let ca_fingerprint =
+                local::external_ca_install(config, signed_pem, root_pem).await?;
+            Ok(ExternalInstallOutcome::HotRenewed { ca_fingerprint })
+        }
+        CaAccess::Offline { lock, .. } => {
+            external_install_cert(ans, lock, ca_dir, signed, root).await
+        }
+    }
+}
+
 /// (Re-)emit a CSR for the CA cert over the existing key — for renewing an
 /// externally-signed CA cert (same key ⇒ glyph unchanged). Returns the CSR path.
 pub async fn external_emit_csr(
@@ -793,8 +866,12 @@ pub enum ExternalInstallOutcome {
     /// First install of a served external CA: the served-CA tail ran; the
     /// caller offers `need` and reports `cfg_path`.
     FirstInstall { need: ServiceNeed, cfg_path: PathBuf },
-    /// A renewal of an already-served external CA.
+    /// A renewal of an already-served external CA, installed under the offline
+    /// guard because its daemon was not running. It takes effect when the
+    /// daemon next starts.
     Renewal,
+    /// Renewed through the running CA's control socket, with no outage.
+    HotRenewed { ca_fingerprint: String },
 }
 
 /// Install an externally-signed CA cert: validate it binds our key, is a CA
@@ -1012,6 +1089,76 @@ mod tests {
         admin_server::read_autorenew_password,
         ca::{CaParams, Subject},
     };
+
+    /// Write an admin-server config claiming the CA role over `ca_dir`.
+    fn config_claiming(at: &Path, ca_dir: &Path) {
+        use crate::admin_server_config::{CaRole, Roles};
+        let cfg = AdminServerConfig {
+            domain: "example.com".to_string(),
+            server_id: AdminServerId::new(),
+            home_ca_fingerprint: Fingerprint::of_der(b"routing test").text(),
+            listen: "10.0.0.10:4565".parse().unwrap(),
+            serving_cert: PathBuf::from("/unused/cert.pem"),
+            serving_key: PathBuf::from("/unused/key.pem"),
+            trusted: PathBuf::from("/unused/trusted.pem"),
+            roles: Roles {
+                ca: Some(CaRole {
+                    dir: ca_dir.to_path_buf(),
+                    autorenew: None,
+                    session_absolute_lifetime: None,
+                    session_idle_timeout: None,
+                }),
+                resolver: None,
+                id_map: None,
+            },
+            ca_addr: None,
+            peers: vec![],
+            mdns: false,
+            activation_units_dir: None,
+        };
+        std::fs::write(at, serde_json::to_vec(&cfg).unwrap()).unwrap();
+    }
+
+    /// Which config a CA operation routes through. A config is only allowed to
+    /// speak for a CA directory it actually claims — the TUI's external-CA path
+    /// used "any admin-server config is discoverable" instead, and so misrouted
+    /// on a host running an admin server for a *different* CA.
+    ///
+    /// The `Running` arm needs a live control socket and is covered by the lab;
+    /// everything here is the no-daemon half, where routing must land Offline.
+    #[tokio::test]
+    async fn routing_requires_a_config_that_claims_this_ca() {
+        // Returns the config the route adopted, dropping the guard it holds so
+        // the next case can take the same lock — these are real flocks.
+        async fn routed(ca_dir: &Path, supplied: Option<PathBuf>) -> Option<PathBuf> {
+            match CaAccess::open(ca_dir, supplied).await.unwrap() {
+                CaAccess::Offline { config, .. } => config,
+                CaAccess::Running { .. } => panic!("no daemon runs in this test"),
+            }
+        }
+        let root = tempfile::tempdir().unwrap();
+        let ca_dir = root.path().join("ca");
+        std::fs::create_dir_all(&ca_dir).unwrap();
+
+        // No config anywhere: the standalone offline guard.
+        assert_eq!(routed(&ca_dir, None).await, None);
+
+        // A config that claims a *different* directory must not be adopted,
+        // even though it was handed in explicitly.
+        let other = root.path().join("other-admin-server.json");
+        config_claiming(&other, &root.path().join("some-other-ca"));
+        assert_eq!(
+            routed(&ca_dir, Some(other)).await,
+            None,
+            "a config claiming another CA must not be adopted"
+        );
+
+        // A config that does claim this CA is adopted — and with no daemon
+        // listening the route is still offline, not a failed socket connect.
+        let ours = root.path().join("admin-server.json");
+        config_claiming(&ours, &ca_dir);
+        assert_eq!(routed(&ca_dir, Some(ours.clone())).await, Some(ours));
+    }
 
     struct CaFixture {
         _root: tempfile::TempDir,

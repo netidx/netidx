@@ -28,7 +28,7 @@ use netidx_admin::{
 };
 #[cfg(unix)]
 use netidx_admin::{
-    atomic, local, offline_ca,
+    local, offline_ca,
     plan::install::ca::{CaInput, run_ca},
 };
 use std::{
@@ -951,21 +951,9 @@ async fn finish_restore(
 /// Re-emit a renewal CSR for an externally-signed CA.
 #[cfg(unix)]
 async fn external_emit_csr(ans: &mut TuiAnswerer, ca_dir: PathBuf) -> Result<Outcome> {
-    let csr = match paths::discover_admin_server_config() {
-        Ok(cfg) => {
-            let (common_name, csr_pem) = local::external_ca_csr(&cfg).await?;
-            let csr = offline_ca::default_csr_filename(&common_name);
-            atomic::write_atomic(&csr, csr_pem.as_bytes(), 0o644)
-                .with_context(|| format!("writing CSR to {}", csr.display()))?;
-            csr
-        }
-        Err(_) => {
-            let lock =
-                netidx_admin::config_lock::ConfigDirLock::acquire_for_ca_dir(&ca_dir)
-                    .await?;
-            netidx_admin::ops::slots::external_emit_csr(ans, &lock, ca_dir).await?
-        }
-    };
+    use netidx_admin::ops::slots::{CaAccess, external_csr};
+    let access = CaAccess::open(&ca_dir, None).await?;
+    let csr = external_csr(ans, &access, ca_dir).await?;
     let csr = std::fs::canonicalize(&csr).unwrap_or(csr);
     Ok(Outcome::plain(
         "CSR emitted",
@@ -989,67 +977,52 @@ async fn external_install(ans: &mut TuiAnswerer, ca_dir: PathBuf) -> Result<Outc
         .text(Field::ExternalRoot, None, None, false)
         .await?
         .filter(|s| !s.trim().is_empty());
-    match paths::discover_admin_server_config() {
-        Ok(cfg) => {
-            let signed_pem = std::fs::read_to_string(&signed)
-                .with_context(|| format!("reading {signed}"))?;
-            let root_pem = root
-                .as_deref()
-                .map(std::fs::read_to_string)
-                .transpose()
-                .context("reading the external root certificate")?;
-            let fingerprint =
-                local::external_ca_install(&cfg, signed_pem, root_pem).await?;
-            Ok(Outcome::plain(
-                "Certificate renewed",
-                vec![
-                    "Renewed the externally-signed CA without stopping it.".to_string(),
-                    format!("CA identity: {fingerprint}"),
-                ],
-                true,
-            ))
-        }
-        Err(_) => {
-            use netidx_admin::ops::slots::{
-                ExternalInstallOutcome, external_install_cert,
-            };
-            let lock =
-                netidx_admin::config_lock::ConfigDirLock::acquire_for_ca_dir(&ca_dir)
-                    .await?;
-            match external_install_cert(
-                ans,
-                &lock,
-                ca_dir,
-                PathBuf::from(&signed).as_path(),
-                root.as_deref().map(std::path::Path::new),
-            )
-            .await?
-            {
-                ExternalInstallOutcome::FirstInstall { need, cfg_path } => Ok(Outcome {
-                    title: "CA certificate installed".to_string(),
-                    lines: vec![format!(
-                        "Installed the externally-signed CA certificate; CA configured at {}.",
-                        cfg_path.display()
-                    )],
-                    refresh_local: true,
-                    install_service: need.scope().map(ServiceInstall::defaults),
-                    after_service: None,
-                    remote: None,
-                    services: None,
-                    quiet: false,
-                }),
-                ExternalInstallOutcome::OfflineCa => Ok(Outcome::plain(
-                    "Certificate installed",
-                    vec![
-                        "Installed the externally-signed offline CA certificate.".into(),
-                    ],
-                    true,
-                )),
-                ExternalInstallOutcome::Renewal => {
-                    bail!("a served CA must be renewed over its local control socket")
-                }
-            }
-        }
+    use netidx_admin::ops::slots::{CaAccess, ExternalInstallOutcome, external_install};
+    let access = CaAccess::open(&ca_dir, None).await?;
+    let out = external_install(
+        ans,
+        &access,
+        ca_dir,
+        PathBuf::from(&signed).as_path(),
+        root.as_deref().map(std::path::Path::new),
+    )
+    .await?;
+    match out {
+        ExternalInstallOutcome::FirstInstall { need, cfg_path } => Ok(Outcome {
+            title: "CA certificate installed".to_string(),
+            lines: vec![format!(
+                "Installed the externally-signed CA certificate; CA configured at {}.",
+                cfg_path.display()
+            )],
+            refresh_local: true,
+            install_service: need.scope().map(ServiceInstall::defaults),
+            after_service: None,
+            remote: None,
+            services: None,
+            quiet: false,
+        }),
+        ExternalInstallOutcome::OfflineCa => Ok(Outcome::plain(
+            "Certificate installed",
+            vec!["Installed the externally-signed offline CA certificate.".into()],
+            true,
+        )),
+        ExternalInstallOutcome::Renewal => Ok(Outcome::plain(
+            "Certificate renewed",
+            vec![
+                "Renewed the CA certificate. Its admin server was not running; start \
+                 it to serve the new certificate."
+                    .to_string(),
+            ],
+            true,
+        )),
+        ExternalInstallOutcome::HotRenewed { ca_fingerprint } => Ok(Outcome::plain(
+            "Certificate renewed",
+            vec![
+                "Renewed the externally-signed CA without stopping it.".to_string(),
+                format!("CA identity: {ca_fingerprint}"),
+            ],
+            true,
+        )),
     }
 }
 
