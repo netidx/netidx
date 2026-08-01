@@ -1924,32 +1924,6 @@ fn sign(mut p: SignArgs) -> Result<()> {
     let mut ans = p.recovery.answerer()?;
     let out = runtime()?.block_on(async {
         let ca_lock = ConfigDirLock::acquire_for_ca_dir(&directory).await?;
-        let id_map_lock = match &id_map {
-            IdMapChoice::Skip => None,
-            IdMapChoice::Ask if !ans.interactive() => None,
-            IdMapChoice::Register { .. } | IdMapChoice::Ask => {
-                let path = netidx_admin::id_map::user_id_map_path()?;
-                Some(if ca_lock.contains(&path)? {
-                    ca_lock.clone()
-                } else {
-                    ConfigDirLock::acquire_for_file_async(&path).await?
-                })
-            }
-        };
-        let id_map = match (id_map, id_map_lock.as_ref()) {
-            (IdMapChoice::Skip, _) | (IdMapChoice::Ask, None) => {
-                offline_ops::IdMapAction::Skip
-            }
-            (IdMapChoice::Register { groups, uid }, Some(config_lock)) => {
-                offline_ops::IdMapAction::Register { config_lock, groups, uid }
-            }
-            (IdMapChoice::Ask, Some(config_lock)) => {
-                offline_ops::IdMapAction::Ask { config_lock }
-            }
-            (IdMapChoice::Register { .. }, None) => {
-                unreachable!("registering an id-map entry selects its lock")
-            }
-        };
         offline_ops::ca_sign(
             &mut ans,
             &ca_lock,
@@ -1988,22 +1962,16 @@ fn sign_san_choice(p: &SignArgs) -> Result<offline_ops::SignSan> {
 }
 
 /// Build the post-sign id-map action from `--no-id-map` / `--id-map-group` /
-/// `--uid` (`--uid` requires `--id-map-group`, enforced by clap).
+/// `--uid` (`--uid` requires `--id-map-group`, enforced by clap). Which guard
+/// the map is written under is the engine's call, not a flag's.
 #[cfg(unix)]
-enum IdMapChoice {
-    Skip,
-    Register { groups: Vec<String>, uid: Option<u32> },
-    Ask,
-}
-
-#[cfg(unix)]
-fn id_map_choice(p: &SignArgs) -> IdMapChoice {
+fn id_map_choice(p: &SignArgs) -> offline_ops::IdMapAction {
     if p.no_id_map {
-        IdMapChoice::Skip
+        offline_ops::IdMapAction::Skip
     } else if !p.id_map_group.is_empty() {
-        IdMapChoice::Register { groups: p.id_map_group.clone(), uid: p.uid }
+        offline_ops::IdMapAction::Register { groups: p.id_map_group.clone(), uid: p.uid }
     } else {
-        IdMapChoice::Ask
+        offline_ops::IdMapAction::Ask
     }
 }
 

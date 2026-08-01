@@ -8,7 +8,7 @@
 //! location is `${dirs::config_dir}/netidx/id-map.json` and the
 //! corresponding socket is `${dirs::config_dir}/netidx/id-map.sock`.
 
-use crate::atomic;
+use crate::{atomic, config_lock::ConfigDirLock};
 use anyhow::{Context, Result};
 use arcstr::ArcStr;
 use std::path::{Path, PathBuf};
@@ -85,6 +85,80 @@ pub async fn save_async<P: AsRef<Path>>(path: P, map: &IdMap) -> Result<()> {
     map.validate().context("id-map structural validation")?;
     let bytes = serde_json::to_vec_pretty(map).context("serialize id-map JSON")?;
     atomic::write_atomic_async(path.as_ref(), &bytes, 0o600).await
+}
+
+/// An id-map open for editing: the resolved path, the guard that makes the
+/// read-modify-write atomic against a concurrent `netidx admin` command, and
+/// the map itself.
+///
+/// Whether the file exists is decided once, here, under the guard — every
+/// caller used to probe with `exists()` first, which a create between the probe
+/// and the read can defeat.
+pub struct IdMapEdit {
+    path: PathBuf,
+    lock: ConfigDirLock,
+    map: IdMap,
+    existed: bool,
+}
+
+impl IdMapEdit {
+    /// Open `path` for editing, defaulting to this host's user id-map. A file
+    /// that does not exist opens as [`empty`].
+    ///
+    /// `covering` reuses a guard the caller already holds over this path rather
+    /// than acquiring a second — these are exclusive, so a caller that took one
+    /// for a wider tree would otherwise block on itself.
+    pub async fn open(
+        path: Option<PathBuf>,
+        covering: Option<&ConfigDirLock>,
+    ) -> Result<Self> {
+        let path = match path {
+            Some(p) => p,
+            None => user_id_map_path().context("resolving default id-map path")?,
+        };
+        let lock = match covering {
+            Some(held) if held.contains(&path)? => held.clone(),
+            _ => ConfigDirLock::acquire_for_file_async(&path).await?,
+        };
+        let path = lock.require_contained(path)?;
+        let (map, existed) = match load_async(&path).await {
+            Ok(map) => (map, true),
+            Err(_) if !tokio::fs::try_exists(&path).await.unwrap_or(false) => {
+                (empty(), false)
+            }
+            Err(e) => return Err(e),
+        };
+        Ok(IdMapEdit { path, lock, map, existed })
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// The guard held over this map, for a caller that must write something
+    /// else in the same directory under the same lock.
+    pub fn lock(&self) -> &ConfigDirLock {
+        &self.lock
+    }
+
+    /// Whether the file was already there when it was opened.
+    pub fn existed(&self) -> bool {
+        self.existed
+    }
+
+    pub fn map(&self) -> &IdMap {
+        &self.map
+    }
+
+    pub fn map_mut(&mut self) -> &mut IdMap {
+        &mut self.map
+    }
+
+    /// Validate and write. Consumes the session, so nothing can mutate the map
+    /// after the version that was checked went to disk.
+    pub async fn save(self) -> Result<()> {
+        save_async(&self.path, &self.map).await
+    }
 }
 
 /// Starter map with a single `users` group at gid 100 — matches the
@@ -289,6 +363,82 @@ pub fn parse_octal_mode(s: &str) -> Result<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn edit(dir: &Path) -> IdMapEdit {
+        IdMapEdit::open(Some(dir.join("id-map.json")), None).await.unwrap()
+    }
+
+    /// The whole edit cycle through the session type, including the referential
+    /// integrity `save` enforces: a group must exist before an identity can
+    /// name it, and must be unreferenced before it can go.
+    #[tokio::test]
+    async fn groups_and_identities_round_trip_through_a_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("id-map.json");
+
+        let mut m = edit(dir.path()).await;
+        assert!(!m.existed(), "a fresh directory has no id-map");
+        set_defaults(m.map_mut(), 65534, 65534);
+        upsert_group(m.map_mut(), "users", 100);
+        upsert_group(m.map_mut(), "wheel", 10);
+        m.save().await.unwrap();
+
+        let mut m = edit(dir.path()).await;
+        assert!(m.existed(), "the saved map is found on reopen");
+        upsert_identity(m.map_mut(), "alice.example.com", 1000, "users", &["wheel"])
+            .unwrap();
+        m.save().await.unwrap();
+
+        let loaded = load(&path).unwrap();
+        assert_eq!(loaded.lookup_by_name("alice.example.com").unwrap().uid, 1000);
+        assert_eq!(loaded.groups.len(), 2);
+
+        // Removing the primary group via membership must be refused — it would
+        // leave an identity pointing at a group it is no longer in.
+        let mut m = edit(dir.path()).await;
+        add_group_member(m.map_mut(), "alice.example.com", "wheel").unwrap();
+        assert!(
+            remove_group_member(m.map_mut(), "alice.example.com", "users").is_err(),
+            "removing the primary group via remove-member must error"
+        );
+        remove_identity(m.map_mut(), "alice.example.com").unwrap();
+        remove_group(m.map_mut(), "wheel").unwrap();
+        m.save().await.unwrap();
+
+        let loaded = load(&path).unwrap();
+        assert!(loaded.identities.is_empty());
+        assert_eq!(loaded.groups.len(), 1);
+    }
+
+    /// An identity naming a group that does not exist is refused, so a typo
+    /// cannot write a map the resolver would later fail to load.
+    #[tokio::test]
+    async fn an_identity_cannot_name_a_group_that_does_not_exist() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut m = edit(dir.path()).await;
+        let e = upsert_identity(m.map_mut(), "alice", 1000, "ghost", &[]).unwrap_err();
+        assert!(format!("{e:#}").contains("primary_group"), "got {e:#}");
+    }
+
+    /// The guard is exclusive, so a second session over the same directory is
+    /// refused rather than racing the first.
+    #[tokio::test]
+    async fn a_second_session_over_the_same_map_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let held = edit(dir.path()).await;
+        let e = IdMapEdit::open(Some(dir.path().join("id-map.json")), None)
+            .await
+            .err()
+            .map(|e| format!("{e:#}"))
+            .expect("the directory is already guarded");
+        assert!(e.contains("owns"), "got {e}");
+        // ...but a caller that already holds the guard reuses it.
+        let reused =
+            IdMapEdit::open(Some(dir.path().join("id-map.json")), Some(held.lock()))
+                .await
+                .unwrap();
+        assert_eq!(reused.path(), held.path());
+    }
 
     fn seed() -> IdMap {
         let mut m = empty();

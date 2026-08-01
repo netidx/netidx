@@ -36,14 +36,17 @@ pub enum SignSan {
 }
 
 /// What to do about registering the newly signed identity in the local id-map.
-pub enum IdMapAction<'a> {
+///
+/// The guard over the map is not a caller's decision: the signing guard may
+/// already cover it, and [`crate::id_map::IdMapEdit`] works that out.
+pub enum IdMapAction {
     /// `--no-id-map`: never register.
     Skip,
     /// `--id-map-group`: register with these groups (and `--uid`) non-interactively.
-    Register { config_lock: &'a ConfigDirLock, groups: Vec<String>, uid: Option<u32> },
+    Register { groups: Vec<String>, uid: Option<u32> },
     /// Neither flag: prompt interactively when a map exists; strict CLI skips
     /// (matching the old non-TTY behaviour — scripts register explicitly).
-    Ask { config_lock: &'a ConfigDirLock },
+    Ask,
 }
 
 /// The prior id-map record an [`IdMapResult::Registered`] replaced, if any.
@@ -102,7 +105,7 @@ pub async fn ca_sign(
     san: SignSan,
     validity: Duration,
     out: Option<PathBuf>,
-    id_map: IdMapAction<'_>,
+    id_map: IdMapAction,
 ) -> Result<SignOutcome> {
     let summary = tokio::task::spawn_blocking({
         let csr_pem = csr_pem.clone();
@@ -133,7 +136,7 @@ pub async fn ca_sign(
     atomic::write_atomic_async(&out, &cert_pem, 0o644)
         .await
         .with_context(|| format!("writing certificate to {}", out.display()))?;
-    let id_map = register_id_map(ans, &summary, &san, id_map).await?;
+    let id_map = register_id_map(ans, config_lock, &summary, &san, id_map).await?;
     Ok(SignOutcome { summary, san, name, out, id_map })
 }
 
@@ -181,22 +184,21 @@ async fn resolve_san(
 /// uid validity is enforced by [`id_map::upsert_identity`].
 async fn register_id_map(
     ans: &mut dyn Answerer,
+    config_lock: &ConfigDirLock,
     summary: &CsrSummary,
     san: &[SanEntry],
-    action: IdMapAction<'_>,
+    action: IdMapAction,
 ) -> Result<IdMapResult> {
     // `groups`/`uid` are `Some` when supplied by flags; `None` means "prompt"
     // (interactive) — `Ask` under a strict answerer has already returned above.
-    let (config_lock, flag_groups, flag_uid) = match action {
+    let (flag_groups, flag_uid) = match action {
         IdMapAction::Skip => return Ok(IdMapResult::NotRequested),
-        IdMapAction::Register { config_lock, groups, uid } => {
-            (config_lock, Some(groups), uid)
-        }
-        IdMapAction::Ask { config_lock } => {
+        IdMapAction::Register { groups, uid } => (Some(groups), uid),
+        IdMapAction::Ask => {
             if !ans.interactive() {
                 return Ok(IdMapResult::NotRequested);
             }
-            (config_lock, None, None)
+            (None, None)
         }
     };
     // The id-map identity name is what the resolver sees on the wire: the
@@ -209,11 +211,13 @@ async fn register_id_map(
         Some(n) => n,
         None => return Ok(IdMapResult::NoIdentityName),
     };
-    let map_path = config_lock.require_contained(id_map::user_id_map_path()?)?;
-    let mut map = match id_map::load_async(&map_path).await {
-        Ok(m) => m,
-        Err(_) => return Ok(IdMapResult::NoMap { path: map_path }),
-    };
+    // The signing guard usually already covers the id-map; `open` reuses it
+    // rather than deadlocking on a second acquire of the same directory.
+    let mut edit = id_map::IdMapEdit::open(None, Some(config_lock)).await?;
+    if !edit.existed() {
+        return Ok(IdMapResult::NoMap { path: edit.path().to_path_buf() });
+    }
+    let map = edit.map_mut();
     let groups: Vec<String> = match flag_groups {
         Some(g) => g,
         None => {
@@ -257,12 +261,13 @@ async fn register_id_map(
     let primary = groups[0].clone();
     let secondary: Vec<&str> = groups[1..].iter().map(|s| s.as_str()).collect();
     let previous =
-        id_map::upsert_identity(&mut map, &identity_name, uid, &primary, &secondary)?
-            .map(|old| PrevIdentity {
+        id_map::upsert_identity(map, &identity_name, uid, &primary, &secondary)?.map(
+            |old| PrevIdentity {
                 uid: old.uid,
                 primary_group: old.primary_group.to_string(),
-            });
-    id_map::save_async(&map_path, &map).await?;
+            },
+        );
+    edit.save().await?;
     Ok(IdMapResult::Registered(IdMapRegistration {
         name: identity_name,
         uid,
