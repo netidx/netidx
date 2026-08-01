@@ -75,10 +75,25 @@ impl CaInput {
 
 /// Install a CA without a resolver role. Resolver installation calls
 /// the same CA-creation brain when co-locating the two roles.
-pub async fn run_ca(
-    ans: &mut dyn Answerer,
-    input: CaInput,
-) -> Result<Option<ServiceScope>> {
+/// What a CA install left behind. A CA is the one role whose install has a
+/// second outcome: an externally-signed CA stops after emitting its CSR and
+/// registers no service until the external PKI returns, and the operator needs
+/// the path of that CSR. Reporting it here stops a frontend re-deriving it by
+/// reopening the CA it just created.
+pub struct CaInstalled {
+    /// An OS service the frontend must register, if any.
+    pub service: Option<ServiceScope>,
+    /// The subordinate-CA CSR awaiting an external signature.
+    pub pending_external: Option<PathBuf>,
+}
+
+impl CaInstalled {
+    fn service(service: Option<ServiceScope>) -> CaInstalled {
+        CaInstalled { service, pending_external: None }
+    }
+}
+
+pub async fn run_ca(ans: &mut dyn Answerer, input: CaInput) -> Result<CaInstalled> {
     let record_path = paths::user_install_record()?;
     if !input.common.mode.is_dry_run() && tokio::fs::try_exists(&record_path).await? {
         let existing = InstallRecord::load_async(&record_path)
@@ -120,18 +135,20 @@ pub async fn run_ca(
                 "[dry-run] OS-service registration would be deferred until the signed \
                  subordinate-CA certificate is installed",
             );
-            return Ok(None);
+            return Ok(CaInstalled::service(None));
         }
-        return offer(
-            ans,
-            crate::plan::service::ServiceNeed::at(ServiceScope::System),
-            ServiceGate {
-                dry_run: true,
-                no_service: input.common.no_service,
-                with_service: input.common.with_service,
-            },
-        )
-        .await;
+        return Ok(CaInstalled::service(
+            offer(
+                ans,
+                crate::plan::service::ServiceNeed::at(ServiceScope::System),
+                ServiceGate {
+                    dry_run: true,
+                    no_service: input.common.no_service,
+                    with_service: input.common.with_service,
+                },
+            )
+            .await?,
+        ));
     }
     if external_sign {
         let config_lock = input
@@ -149,14 +166,17 @@ pub async fn run_ca(
             units_dir,
         );
         opts.listen = input.listen;
-        ca_setup::create_vaulted_external_ca(ans, config_lock, opts).await?;
+        let csr = ca_setup::create_vaulted_external_ca(ans, config_lock, opts).await?;
         let record = InstallRecord::new(InstallRole::Ca, "/", "admin-tls", None, None);
         record.save_default_async(config_lock).await?;
         ans.note(
             "CA key and recovery material installed; the CA remains \
              pending until the external PKI returns and you install its certificate",
         );
-        return Ok(None);
+        return Ok(CaInstalled {
+            service: None,
+            pending_external: Some(std::fs::canonicalize(&csr).unwrap_or(csr)),
+        });
     }
     let config_lock = input
         .common
@@ -186,16 +206,18 @@ pub async fn run_ca(
     )
     .save_default_async(config_lock)
     .await?;
-    offer(
-        ans,
-        need,
-        ServiceGate {
-            dry_run: false,
-            no_service: input.common.no_service,
-            with_service: input.common.with_service,
-        },
-    )
-    .await
+    Ok(CaInstalled::service(
+        offer(
+            ans,
+            need,
+            ServiceGate {
+                dry_run: false,
+                no_service: input.common.no_service,
+                with_service: input.common.with_service,
+            },
+        )
+        .await?,
+    ))
 }
 
 #[cfg(test)]

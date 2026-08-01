@@ -35,6 +35,81 @@ pub fn info_to_referral_auth(a: &InfoAuth) -> ReferralAuth {
     }
 }
 
+/// A resolver this host could attach itself under: the admin server that
+/// speaks for it, its resolver endpoint, and the resolver cluster it serves.
+#[derive(Debug, Clone)]
+pub struct ParentCandidate {
+    /// The admin server to send the delegation request to.
+    pub admin: SocketAddr,
+    /// The resolver endpoint, as the child will record it in a referral.
+    pub resolver: ResolverAddr,
+    /// The resolver cluster this resolver belongs to. Every resolver in one
+    /// delegation must share it — see
+    /// [`crate::plan::delegation::selected_server_sets`], which enforces it.
+    pub cluster: crate::admin_proto::ResolverClusterId,
+    /// That cluster's base path, which is what an operator recognises.
+    pub base: String,
+}
+
+/// Every resolver in this host's admin domain that it could attach under:
+/// registered, serving a resolver cluster, and not this host's own.
+///
+/// Empty when the CA map is unreachable — a frontend then falls back to asking
+/// for a parent admin-server address directly, which is also all the strict
+/// CLI ever does. This is the *query*; the rules about which combinations are
+/// legal live in [`crate::plan::delegation::selected_server_sets`], and are
+/// not restated here.
+pub async fn parent_candidates(config_root: &Path) -> Result<Vec<ParentCandidate>> {
+    use crate::{
+        admin_proto::{Role, ServerState},
+        provenance::InstallRole,
+    };
+    // Only a resolver install can take a parent, and `fetch_map_for` asserts
+    // it. An unreachable map is not an error here: it means "no candidates".
+    let Ok(map) =
+        crate::sync::fetch_map_for(InstallRole::Resolver, Some(config_root)).await
+    else {
+        return Ok(Vec::new());
+    };
+    // netidx-admin owns the first advertisable member in this host's resolver
+    // config (the same member GetInfo has always reported). Excluding only
+    // that identity, rather than the whole config roster, still offers a
+    // sibling when this host is splitting a shared root into two sets.
+    let rpath = crate::paths::discover_resolver_config()?;
+    let local_member = ResolverConfig::load(&rpath)
+        .ok()
+        .and_then(|c| c.resolver_addrs().into_iter().next());
+    let local = local_member.as_ref().and_then(|local| {
+        map.admin_servers.iter().find(|s| s.resolver.as_ref() == Some(local))
+    });
+    if local.is_none() {
+        bail!(
+            "this resolver's locally owned member is absent from the CA admin domain map"
+        );
+    }
+    let mut candidates = Vec::new();
+    for server in map.admin_servers.iter().filter(|s| {
+        s.state == ServerState::Registered
+            && s.roles.contains(Role::Resolver)
+            && Some(s.id) != local.map(|local| local.id)
+    }) {
+        let (Some(cluster), Some(resolver)) = (server.cluster, server.resolver.clone())
+        else {
+            continue;
+        };
+        let Some(base) = map.resolver_clusters.iter().find(|c| c.id == cluster) else {
+            continue;
+        };
+        candidates.push(ParentCandidate {
+            admin: server.addr,
+            resolver,
+            cluster,
+            base: base.base.clone(),
+        });
+    }
+    Ok(candidates)
+}
+
 /// A pending or approved delegation request, keyed by its **code** (the delegation
 /// fingerprint recomputed locally from its path and server sets). `id` is the
 /// opaque server request id an action reuses — private, so callers address a

@@ -16,13 +16,11 @@ use anyhow::{Result, bail};
 #[cfg(unix)]
 use netidx_admin::{
     answer::Field,
-    offline_ca,
     plan::install::ca::{CaInput, run_ca},
 };
 use netidx_admin::{
     answer::{Answerer, Progress, Stage},
-    config_lock::ConfigDirLock,
-    install_bundle, paths,
+    install_bundle,
     plan::{
         bundle,
         install::{
@@ -781,9 +779,7 @@ async fn join(ans: &mut TuiAnswerer, dry_run: bool) -> Result<Outcome> {
     let mode = if dry_run {
         InstallMode::DryRun
     } else {
-        InstallMode::Apply {
-            config_lock: ConfigDirLock::acquire_async(paths::user_config_root()?).await?,
-        }
+        InstallMode::apply_user_config().await?
     };
     let input = WorkstationJoinInput { mode, key_protection: None, admin_server: None };
     run_workstation_join(ans, input).await?;
@@ -833,111 +829,51 @@ async fn add_parent(ans: &mut TuiAnswerer, config_root: PathBuf) -> Result<Outco
     use super::answer::{ParentRow, ParentSelection};
     use netidx_admin::{
         ops::delegation::{
-            AddParentCompletion, ResolverClusterPropagation, prepare_add_parent,
+            AddParentCompletion, ResolverClusterPropagation, parent_candidates,
+            prepare_add_parent,
         },
         paths,
         plan::delegation::DelegationSelection,
-        resolver::ResolverConfig,
     };
-    use netidx_admin_proto::{ResolverAddr, ResolverClusterId, ServerState};
     let rpath = paths::discover_resolver_config()?;
-
-    // Candidate parents come from the admin domain map (each resolver + its resolver cluster base),
-    // minus this host's own resolvers. If the map is unreachable or offers no
-    // other resolver, fall back to typing an admin-server address.
-    // Only a resolver install can take a parent (local.rs offers the action
-    // for that role alone), and fetch_map_for asserts it.
-    let map =
-        netidx_admin::sync::fetch_map_for(InstallRole::Resolver, Some(&config_root))
-            .await
-            .ok();
-    // netidx-admin owns the first advertisable member in this host's resolver
-    // config (the same member GetInfo has always reported). Unlike excluding
-    // the whole config roster, excluding only this identity still shows AP2
-    // when AP1 is splitting a four-peer root into US and /ap sets.
-    let local_member = ResolverConfig::load(&rpath)
-        .ok()
-        .and_then(|c| c.resolver_addrs().into_iter().next());
-    let local_server = map.as_ref().and_then(|map| {
-        let local = local_member.as_ref()?;
-        map.admin_servers.iter().find(|s| s.resolver.as_ref() == Some(local))
-    });
-    if map.is_some() && local_server.is_none() {
-        bail!(
-            "this resolver's locally owned member is absent from the CA admin domain map"
-        );
-    }
-    // (admin addr, resolver addr+auth, current admin domain, base)
-    // — the global source of truth for the picker.
-    let cand: Vec<(SocketAddr, ResolverAddr, ResolverClusterId, String)> = match &map {
-        Some(map) => {
-            let mut cand = Vec::new();
-            for server in map.admin_servers.iter().filter(|s| {
-                s.state == ServerState::Registered
-                    && s.roles.contains(netidx_admin_proto::Role::Resolver)
-                    && Some(s.id) != local_server.map(|local| local.id)
-            }) {
-                let (Some(cluster_id), Some(resolver)) =
-                    (server.cluster, server.resolver.clone())
-                else {
-                    continue;
-                };
-                let Some(cluster) =
-                    map.resolver_clusters.iter().find(|c| c.id == cluster_id)
-                else {
-                    continue;
-                };
-                cand.push((server.addr, resolver, cluster_id, cluster.base.clone()));
-            }
-            cand
-        }
-        None => Vec::new(),
-    };
-
-    // (parent admin-server addr, optional referral override) — the two things the
-    // delegation op needs.
-    let (parent, selection): (SocketAddr, Option<DelegationSelection>) = if cand
-        .is_empty()
-    {
-        (prompt_parent_admin(ans).await?, None)
-    } else {
-        loop {
-            let rows: Vec<ParentRow> = cand
-                .iter()
-                .map(|(_, resolver, _, base)| ParentRow {
-                    label: resolver.addr.to_string(),
-                    base: base.clone(),
-                })
-                .collect();
-            match ans.select_parent(rows).await? {
-                ParentSelection::Manual => break (prompt_parent_admin(ans).await?, None),
-                ParentSelection::Resolvers(idxs) => {
-                    let picked: Vec<_> =
-                        idxs.iter().filter_map(|&i| cand.get(i).cloned()).collect();
-                    if picked.is_empty() {
-                        continue;
+    let candidates = parent_candidates(&config_root).await?;
+    // (parent admin-server addr, optional referral override) — the two things
+    // the delegation op needs. With no candidates there is nothing to pick
+    // from, so fall back to typing an address, which is all the strict CLI
+    // ever does.
+    let (parent, selection): (SocketAddr, Option<DelegationSelection>) =
+        if candidates.is_empty() {
+            (prompt_parent_admin(ans).await?, None)
+        } else {
+            loop {
+                let rows: Vec<ParentRow> = candidates
+                    .iter()
+                    .map(|c| ParentRow {
+                        label: c.resolver.addr.to_string(),
+                        base: c.base.clone(),
+                    })
+                    .collect();
+                match ans.select_parent(rows).await? {
+                    ParentSelection::Manual => {
+                        break (prompt_parent_admin(ans).await?, None);
                     }
-                    let parent_cluster = picked[0].2;
-                    if picked.iter().any(|candidate| candidate.2 != parent_cluster) {
-                        ans.warn(
-                            "those resolvers aren't all in one parent admin domain — pick \
-                             resolvers served by a single admin domain",
+                    ParentSelection::Resolvers(idxs) => {
+                        let picked: Vec<_> =
+                            idxs.iter().filter_map(|&i| candidates.get(i)).collect();
+                        let Some(first) = picked.first() else { continue };
+                        break (
+                            first.admin,
+                            Some(DelegationSelection {
+                                parent_resolvers: picked
+                                    .iter()
+                                    .map(|c| c.resolver.addr)
+                                    .collect(),
+                            }),
                         );
-                        continue;
                     }
-                    break (
-                        picked[0].0,
-                        Some(DelegationSelection {
-                            parent_resolvers: picked
-                                .iter()
-                                .map(|candidate| candidate.1.addr)
-                                .collect(),
-                        }),
-                    );
                 }
             }
-        }
-    };
+        };
     let path =
         ans.text(Field::DelegateSubtree, None, None, true).await?.unwrap_or_default();
     let out = match prepare_add_parent(ans, &rpath, parent, &path, selection).await? {
@@ -1076,9 +1012,7 @@ async fn install(
     let mode = if dry_run {
         InstallMode::DryRun
     } else {
-        InstallMode::Apply {
-            config_lock: ConfigDirLock::acquire_async(paths::user_config_root()?).await?,
-        }
+        InstallMode::apply_user_config().await?
     };
     let common = InstallCommon {
         mode,
@@ -1089,34 +1023,29 @@ async fn install(
     };
     let scope = match role {
         #[cfg(unix)]
-        InstallRole::Ca => run_ca(ans, CaInput::defaults(common)).await?,
+        InstallRole::Ca => {
+            let out = run_ca(ans, CaInput::defaults(common)).await?;
+            if let Some(csr) = out.pending_external {
+                return Ok(Outcome::plain(
+                    "CA awaiting external signature",
+                    vec![
+                        "The CA is not running yet; no OS service was registered."
+                            .into(),
+                        format!("Subordinate-CA CSR: {}", csr.display()),
+                        "Have the external PKI sign that CSR, return to this TUI, and choose \"Install Signed Certificate (External CA)\"."
+                            .into(),
+                    ],
+                    true,
+                ));
+            }
+            out.service
+        }
         #[cfg(not(unix))]
         InstallRole::Ca => bail!("the CA role is supported only on unix"),
         InstallRole::Resolver => run_resolver(ans, resolver_input(common)).await?,
         InstallRole::Publisher => run_publisher(ans, publisher_input(common)).await?,
         InstallRole::Workstation => run_workstation(ans, common).await?,
     };
-    #[cfg(unix)]
-    if !dry_run && matches!(role, InstallRole::Ca) && scope.is_none() {
-        let ca_dir = paths::user_ca_dir()?;
-        let access = netidx_admin::ops::slots::CaAccess::open(&ca_dir, None).await?;
-        let status = netidx_admin::ops::slots::local_ca_status(&access, &ca_dir).await?;
-        if let Some((common_name, _)) = status.external.pending {
-            let relative = offline_ca::default_csr_filename(&common_name);
-            let csr = std::env::current_dir()?.join(relative);
-            return Ok(Outcome::plain(
-                "CA awaiting external signature",
-                vec![
-                    "The CA is not running yet; no OS service was registered."
-                        .into(),
-                    format!("Subordinate-CA CSR: {}", csr.display()),
-                    "Have the external PKI sign that CSR, return to this TUI, and choose \"Install Signed Certificate (External CA)\"."
-                        .into(),
-                ],
-                true,
-            ));
-        }
-    }
     Ok(install_outcome(role, dry_run, scope))
 }
 

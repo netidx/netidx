@@ -447,6 +447,43 @@ pub struct DiscoveredAdminDomainReport {
     pub identity: Result<CaIdentity, String>,
 }
 
+/// Why a discovery pass that heard beacons produced no usable admin domain.
+///
+/// `None` when at least one verified, or when nothing was advertised at all —
+/// the confusing case is specifically "something answered, none of it usable",
+/// which looks identical to "found nothing" unless the reasons are surfaced.
+/// The usual cause is an admin server advertising an address this host cannot
+/// reach.
+pub fn discovery_diagnosis(
+    reports: &[DiscoveredAdminDomainReport],
+) -> Option<Vec<String>> {
+    if reports.is_empty() || reports.iter().any(|r| r.identity.is_ok()) {
+        return None;
+    }
+    let mut lines = vec![format!(
+        "Found {} advertised admin server(s), but none answered with a CA identity:",
+        reports.len()
+    )];
+    for report in reports {
+        let addrs = report
+            .admin_servers
+            .iter()
+            .map(|a| a.to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        if let Err(why) = &report.identity {
+            lines.push(format!("{:?} at {addrs}: {why}", report.domain));
+        }
+    }
+    lines.push(String::new());
+    lines.push(
+        "The admin server may be advertising an address this host can't reach \
+         (check its listen address / firewall)."
+            .to_string(),
+    );
+    Some(lines)
+}
+
 /// Browse mDNS for netidx admin servers and, for each distinct admin domain, fetch
 /// the CA identity from the first reachable server. A pure read-only QUERY —
 /// no prompts, no decisions — so, unlike the interactive [`discover_admin_domain`]

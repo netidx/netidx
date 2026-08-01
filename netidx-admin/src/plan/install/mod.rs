@@ -196,6 +196,25 @@ pub enum InstallMode {
 }
 
 impl InstallMode {
+    /// Apply, holding the lock on this platform's user configuration root.
+    /// Every install that is not a dry run wants exactly this, so no caller
+    /// gets to choose a different directory to lock than the one it writes.
+    pub async fn apply_user_config() -> Result<InstallMode> {
+        Ok(InstallMode::Apply {
+            config_lock: ConfigDirLock::acquire_async(crate::paths::user_config_root()?)
+                .await?,
+        })
+    }
+
+    /// [`InstallMode::apply_user_config`] for a caller that is not inside a
+    /// runtime. Waiting for the lock blocks, which is why an async caller must
+    /// not use this one.
+    pub fn apply_user_config_blocking() -> Result<InstallMode> {
+        Ok(InstallMode::Apply {
+            config_lock: ConfigDirLock::acquire(crate::paths::user_config_root()?)?,
+        })
+    }
+
     pub fn is_dry_run(&self) -> bool {
         matches!(self, Self::DryRun)
     }

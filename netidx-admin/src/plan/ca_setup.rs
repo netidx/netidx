@@ -39,6 +39,44 @@ use std::{
     path::{Path, PathBuf},
     time::Duration,
 };
+
+/// How long a certificate this CA issues may live: two years, matching the
+/// shell scripts netidx's CA grew out of.
+///
+/// It lives here rather than next to the CA itself because [`crate::ca`] is
+/// unix-only and the frontends that offer this as a default must build on
+/// every platform. [`crate::ca::DEFAULT_LEAF_VALIDITY`] re-exports it, and
+/// `policy_template` and the `--max-validity` flags take it from here, so
+/// there is one number.
+pub const DEFAULT_LEAF_VALIDITY: Duration = Duration::from_secs(730 * 86400);
+
+/// A starter policy for a new role admin: every field present and every grant
+/// off, so an editor shows exactly what can be granted rather than what
+/// someone remembered to write down.
+pub fn policy_template() -> netidx_admin_proto::policy::Policy {
+    netidx_admin_proto::policy::Policy {
+        allowed_san: vec![],
+        max_validity: DEFAULT_LEAF_VALIDITY,
+        id_map_groups: vec![],
+        server_enroll_scopes: vec![],
+        server_enroll_roles: BitFlags::empty(),
+        perms_edit_scopes: vec![],
+        may_manage_admins: false,
+        service_control_scopes: vec![],
+    }
+}
+
+/// Parse an edited policy document. Unknown or malformed grants are refused
+/// here, before anything reaches the CA.
+pub fn parse_policy_json(text: &str) -> Result<netidx_admin_proto::policy::Policy> {
+    serde_json::from_str(text).context("not valid policy JSON")
+}
+
+/// Render a policy for editing.
+pub fn policy_json(policy: &netidx_admin_proto::policy::Policy) -> Result<String> {
+    serde_json::to_string_pretty(policy).context("serializing policy")
+}
+
 #[cfg(unix)]
 use zeroize::Zeroizing;
 

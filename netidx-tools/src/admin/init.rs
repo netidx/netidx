@@ -3,14 +3,11 @@
 
 use anyhow::{Context, Result};
 use arcstr::ArcStr;
-use chrono::Utc;
 use netidx::resolver_server::config::ReadGate;
 // Qualified `admin_proto::` uses are all in the unix-only admin-server
 // enrollment path; the items below are cross-platform.
 use clap::Args;
 use netidx_admin::{
-    config_lock::ConfigDirLock,
-    paths,
     plan::AuthKind,
     template::{ParentRef, ReferralAuth},
     transport,
@@ -190,9 +187,7 @@ impl CommonFlags {
         let mode = if self.dry_run {
             InstallMode::DryRun
         } else {
-            InstallMode::Apply {
-                config_lock: ConfigDirLock::acquire(paths::user_config_root()?)?,
-            }
+            InstallMode::apply_user_config_blocking()?
         };
         Ok(InstallCommon {
             mode,
@@ -397,9 +392,7 @@ pub(crate) fn run_workstation_join(f: WorkstationJoinFlags) -> Result<()> {
     let mode = if f.dry_run {
         netidx_admin::plan::install::InstallMode::DryRun
     } else {
-        netidx_admin::plan::install::InstallMode::Apply {
-            config_lock: ConfigDirLock::acquire(paths::user_config_root()?)?,
-        }
+        netidx_admin::plan::install::InstallMode::apply_user_config_blocking()?
     };
     let input = netidx_admin::plan::install::workstation::WorkstationJoinInput {
         mode,
@@ -642,9 +635,7 @@ fn resolver_input(
         id_map_mode: f.id_map_mode,
         read_gate: match (f.no_read_gate, f.read_gate) {
             (true, _) => Some(ReadGate::No),
-            (false, Some(d)) => {
-                Some(ReadGate::Until(Utc::now() + chrono::Duration::from_std(*d)?))
-            }
+            (false, Some(d)) => Some(netidx_admin::ops::servers::read_gate_for(*d)?),
             (false, None) => None,
         },
         no_admin_server: f.no_admin_server,

@@ -820,9 +820,7 @@ fn install_ca(p: CaInstallArgs) -> Result<()> {
     let mode = if p.dry_run {
         plan::install::InstallMode::DryRun
     } else {
-        plan::install::InstallMode::Apply {
-            config_lock: ConfigDirLock::acquire(paths::user_config_root()?)?,
-        }
+        plan::install::InstallMode::apply_user_config_blocking()?
     };
     let common = plan::install::InstallCommon {
         mode,
@@ -839,10 +837,17 @@ fn install_ca(p: CaInstallArgs) -> Result<()> {
         insecure_no_tpm: p.insecure_no_tpm,
         common,
     };
-    let scope =
+    let out =
         runtime()?.block_on(netidx_admin::plan::install::ca::run_ca(&mut ans, input))?;
-    if let Some(scope) = scope {
+    if let Some(scope) = out.service {
         service::install_with_defaults(scope.into())?;
+    }
+    if let Some(csr) = out.pending_external {
+        println!("subordinate-CA CSR: {}", csr.display());
+        println!(
+            "have your external PKI sign it, then run \
+             `netidx admin ca external install --signed-cert <certificate>`"
+        );
     }
     Ok(())
 }
@@ -2743,5 +2748,42 @@ mod tests {
         }));
         let msg = format!("{:#}", r.unwrap_err());
         assert!(msg.contains("add-role"), "must point at add-role: {msg}");
+    }
+
+    /// 730 days is what a netidx certificate may live. It used to be written
+    /// out three times — the clap defaults here, the CA's own constant, and
+    /// the TUI's policy template — which is exactly the shape a value drifts
+    /// in. There is one now; this fails if a fourth appears.
+    #[test]
+    fn every_max_validity_default_is_the_one_leaf_validity() {
+        use netidx_admin::plan::ca_setup::{DEFAULT_LEAF_VALIDITY, policy_template};
+        let of = |name: &'static str, augment: fn(clap::Command) -> clap::Command| {
+            (name, augment(clap::Command::new(name)))
+        };
+        for (name, cmd) in [
+            of("policy flags", <PolicyFlags as clap::Args>::augment_args),
+            of("admin add", <AdminAddArgs as clap::Args>::augment_args),
+            of("tls join", <JoinArgs as clap::Args>::augment_args),
+        ] {
+            let flag = cmd
+                .get_arguments()
+                .find(|a| a.get_long() == Some("max-validity"))
+                .or_else(|| {
+                    cmd.get_arguments().find(|a| a.get_long() == Some("validity"))
+                })
+                .expect("the validity flag");
+            let default = flag
+                .get_default_values()
+                .first()
+                .expect("a default")
+                .to_str()
+                .expect("utf8");
+            assert_eq!(
+                humantime::parse_duration(default).unwrap(),
+                DEFAULT_LEAF_VALIDITY,
+                "{name} default {default:?} disagrees with the engine"
+            );
+        }
+        assert_eq!(policy_template().max_validity, DEFAULT_LEAF_VALIDITY);
     }
 }

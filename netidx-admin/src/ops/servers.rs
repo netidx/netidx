@@ -73,6 +73,77 @@ fn round(d: std::time::Duration) -> std::time::Duration {
     std::time::Duration::from_secs(if secs >= 3600 { secs - secs % 60 } else { secs })
 }
 
+/// The gate a duration means: shut now, open then. Everything that takes a
+/// duration — `read-gate --until`, an install's `--read-gate`, the TUI's
+/// prompt, and the automatic gate a resolver joining a serving cluster gets —
+/// resolves it here, so "shut for 30m" cannot mean two things.
+pub fn read_gate_for(shut_for: std::time::Duration) -> Result<ReadGate> {
+    let d = chrono::Duration::from_std(shut_for)
+        .context("that read-gate duration is too long")?;
+    Ok(ReadGate::Until(Utc::now() + d))
+}
+
+/// What is risky about a gate change, or `None` when nothing is changing.
+///
+/// Both directions are worth stopping on, for opposite reasons. Shutting takes
+/// a member out of service for subscribers. Opening one that is still filling
+/// is the quieter mistake: it answers, but from a namespace that publishers
+/// have not finished rebuilding, and a path that is merely missing is
+/// indistinguishable from a path that does not exist. An interactive frontend
+/// makes this a confirmation; a scripted one prints it and proceeds.
+///
+/// `addr` names the member being gated when the caller knows it. A caller that
+/// addresses a member only by id — the strict CLI, which takes `--target` and
+/// never fetches the map — passes `None` rather than an address that means
+/// something else.
+pub fn read_gate_warning(
+    server: AdminServerId,
+    addr: Option<SocketAddr>,
+    gate: ReadGate,
+    current: Option<ReadGate>,
+) -> Option<String> {
+    let server = match addr {
+        Some(addr) => compact_str::format_compact!("{server} at {addr}"),
+        None => compact_str::format_compact!("{server}"),
+    };
+    let left = |t: chrono::DateTime<Utc>| {
+        humantime::format_duration(round(std::time::Duration::from_secs(
+            (t - Utc::now()).num_seconds().max(0) as u64,
+        )))
+        .to_string()
+    };
+    match (gate, current) {
+        (ReadGate::No, Some(ReadGate::Until(t))) if !ReadGate::Until(t).is_open() => {
+            Some(format!(
+                "Start {server} answering read clients {} early?\n\nIt is \
+                 waiting for publishers to find it. Anything that has not been \
+                 republished yet will look absent to subscribers resolving through \
+                 it.",
+                left(t)
+            ))
+        }
+        (ReadGate::No, Some(ReadGate::Yes)) => Some(format!(
+            "Start {server} answering read clients?\n\nIt will answer from \
+             whatever it holds now. If it was taken out of service, that may be a \
+             stale picture of the namespace."
+        )),
+        // Already open, or as good as: nothing to warn about.
+        (ReadGate::No, _) => None,
+        (ReadGate::Yes, _) => Some(format!(
+            "Stop {server} answering read clients?\n\nSubscribers stop \
+             resolving through it until someone opens the gate again. Publishers \
+             keep writing to it, so its records stay fresh — it just stops \
+             answering."
+        )),
+        (ReadGate::Until(t), _) => Some(format!(
+            "Stop {server} answering read clients for {}?\n\nSubscribers \
+             stop resolving through it until then. Publishers keep writing to it, so \
+             its records stay fresh — it just stops answering.",
+            left(t)
+        )),
+    }
+}
+
 /// List every server grant in the verified CA map, including enrolled
 /// (not currently routing) nodes and the CA itself.
 pub async fn list_servers(
@@ -204,5 +275,56 @@ mod tests {
             "{:?}",
             read_gate_detail(past)
         );
+    }
+
+    fn server() -> (AdminServerId, Option<SocketAddr>) {
+        (AdminServerId::new(), Some("10.0.0.1:4565".parse().unwrap()))
+    }
+
+    #[test]
+    fn a_duration_means_shut_now_open_then() {
+        let ReadGate::Until(t) =
+            read_gate_for(std::time::Duration::from_secs(1800)).unwrap()
+        else {
+            panic!("a duration is always a deadline")
+        };
+        let left = (t - Utc::now()).num_seconds();
+        assert!((1795..=1800).contains(&left), "{left}s left");
+    }
+
+    /// Both directions carry risk, for opposite reasons, and only a change
+    /// carries any. Opening one that is already open is the no-op that must
+    /// not raise a dialog.
+    #[test]
+    fn every_gate_change_is_explained_and_no_change_is_not() {
+        let (id, addr) = server();
+        assert_eq!(read_gate_warning(id, addr, ReadGate::No, None), None);
+        assert_eq!(read_gate_warning(id, addr, ReadGate::No, Some(ReadGate::No)), None);
+        // An expired deadline is open, so opening it changes nothing.
+        let expired = ReadGate::Until(Utc::now() - Duration::seconds(60));
+        assert_eq!(read_gate_warning(id, addr, ReadGate::No, Some(expired)), None);
+
+        let shut = read_gate_warning(id, addr, ReadGate::Yes, None).unwrap();
+        assert!(shut.contains("Subscribers stop"), "{shut}");
+        let early = read_gate_warning(
+            id,
+            addr,
+            ReadGate::No,
+            Some(ReadGate::Until(Utc::now() + Duration::seconds(1800))),
+        )
+        .unwrap();
+        // The quiet mistake: it answers, from a namespace still being rebuilt.
+        assert!(early.contains("early"), "{early}");
+        assert!(early.contains("look absent"), "{early}");
+        let stale =
+            read_gate_warning(id, addr, ReadGate::No, Some(ReadGate::Yes)).unwrap();
+        assert!(stale.contains("stale picture"), "{stale}");
+        assert!(stale.contains("at 10.0.0.1:4565"), "{stale}");
+
+        // A caller that knows only the id still gets the risk, without an
+        // address that would name the wrong machine.
+        let by_id = read_gate_warning(id, None, ReadGate::Yes, None).unwrap();
+        assert!(by_id.contains(&id.to_string()), "{by_id}");
+        assert!(!by_id.contains(" at "), "{by_id}");
     }
 }

@@ -51,8 +51,10 @@ pub const DEFAULT_KEY_BITS: u32 = 4096;
 pub const MIN_KEY_BITS: u32 = 2048;
 /// Default CA validity — matches the shell scripts (20 years).
 pub const DEFAULT_CA_VALIDITY: Duration = Duration::from_secs(7300 * 86400);
-/// Default leaf validity — matches the shell scripts (2 years).
-pub const DEFAULT_LEAF_VALIDITY: Duration = Duration::from_secs(730 * 86400);
+/// Default leaf validity. Defined in the portable [`crate::plan::ca_setup`]
+/// because the frontends that offer it as a `--max-validity` default and the
+/// policy template must build where this module does not.
+pub use crate::plan::ca_setup::DEFAULT_LEAF_VALIDITY;
 /// Default CA renewal threshold: renew once the CA can no longer cover a
 /// full default leaf validity plus a grace quarter (730 + 90 days), past
 /// which `sign_request`'s clamp starts shortening leaves.

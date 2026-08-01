@@ -29,7 +29,6 @@ use crate::{
 };
 use anyhow::{Context, Result, bail};
 use arcstr::ArcStr;
-use chrono::Utc;
 use compact_str::format_compact;
 use netidx::resolver_server::config::ReadGate;
 use std::{
@@ -590,12 +589,9 @@ pub async fn run_resolver(
         });
     let read_gated = match input.read_gate {
         Some(gate) => gate,
-        None if joining_a_serving_cluster => ReadGate::Until(
-            Utc::now()
-                + chrono::Duration::seconds(
-                    (2 * crate::sync::DEFAULT_SYNC_INTERVAL.as_secs() + 120) as i64,
-                ),
-        ),
+        None if joining_a_serving_cluster => crate::ops::servers::read_gate_for(
+            2 * crate::sync::DEFAULT_SYNC_INTERVAL + std::time::Duration::from_secs(120),
+        )?,
         None => ReadGate::No,
     };
     let params = template::resolver::ResolverParams {

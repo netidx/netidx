@@ -21,6 +21,7 @@ use super::{
 use anyhow::{Context, Result, bail};
 use crossterm::event::KeyCode;
 use netidx::resolver_server::config::ReadGate;
+use netidx_admin::plan::ca_setup;
 use netidx_admin_proto::fingerprint::Fingerprint;
 use netidx_admin_proto::{AdminServerId, DEFAULT_PORT};
 use ratatui::{
@@ -395,7 +396,12 @@ impl RemoteAction {
                 server.addr,
             )),
             RemoteAction::SetReadGate { server, gate, current, .. } => {
-                read_gate_confirm(server, *gate, *current)
+                netidx_admin::ops::servers::read_gate_warning(
+                    server.id,
+                    Some(server.addr),
+                    *gate,
+                    *current,
+                )
             }
             // Everything else runs without a prompt. Adding a destructive
             // action means adding it above, not here.
@@ -482,57 +488,6 @@ const GATE_CHOICES: [(&str, &str); 3] = [
     ("Shut", "Stop answering read clients until someone opens the gate again."),
     ("Shut until", "Stop answering read clients for a while, then start."),
 ];
-
-/// The confirmation for a gate change, or `None` when nothing is changing.
-///
-/// Both directions are worth stopping on, for opposite reasons. Shutting takes
-/// a member out of service for subscribers. Opening one that is still filling
-/// is the quieter mistake: it answers, but from a namespace that publishers
-/// have not finished rebuilding, and a path that is merely missing is
-/// indistinguishable from a path that does not exist.
-fn read_gate_confirm(
-    server: &ServiceTarget,
-    gate: ReadGate,
-    current: Option<ReadGate>,
-) -> Option<String> {
-    let (id, addr) = (server.id, server.addr);
-    let left = |t: chrono::DateTime<chrono::Utc>| {
-        humantime::format_duration(std::time::Duration::from_secs(
-            (t - chrono::Utc::now()).num_seconds().max(0) as u64 / 60 * 60,
-        ))
-        .to_string()
-    };
-    match (gate, current) {
-        (ReadGate::No, Some(ReadGate::Until(t))) if !ReadGate::Until(t).is_open() => {
-            Some(format!(
-                "Start {id} at {addr} answering read clients {} early?\n\nIt is \
-                 waiting for publishers to find it. Anything that has not been \
-                 republished yet will look absent to subscribers resolving through \
-                 it.",
-                left(t)
-            ))
-        }
-        (ReadGate::No, Some(ReadGate::Yes)) => Some(format!(
-            "Start {id} at {addr} answering read clients?\n\nIt will answer from \
-             whatever it holds now. If it was taken out of service, that may be a \
-             stale picture of the namespace."
-        )),
-        // Already open, or as good as: nothing to warn about.
-        (ReadGate::No, _) => None,
-        (ReadGate::Yes, _) => Some(format!(
-            "Stop {id} at {addr} answering read clients?\n\nSubscribers stop \
-             resolving through it until someone opens the gate again. Publishers \
-             keep writing to it, so its records stay fresh — it just stops \
-             answering."
-        )),
-        (ReadGate::Until(t), _) => Some(format!(
-            "Stop {id} at {addr} answering read clients for {}?\n\nSubscribers stop \
-             resolving through it until then. Publishers keep writing to it, so its \
-             records stay fresh — it just stops answering.",
-            left(t)
-        )),
-    }
-}
 
 /// The immutable identity selected for service control plus the address shown
 /// to the operator at selection time. Only `id` is authoritative.
@@ -729,54 +684,35 @@ async fn discover(ans: &mut TuiAnswerer) -> Result<super::action::Outcome> {
     // unlike the install flow's early-exit-on-first-found.
     let reports = enroll::discover_admin_domains(timeout, NodeKind::Client, None).await;
     let mut known = KnownAdminDomains::load();
-    let mut verified = 0usize;
-    let mut unverified: Vec<String> = Vec::new();
     for r in &reports {
         let addrs =
             r.admin_servers.iter().map(|a| a.to_string()).collect::<Vec<_>>().join(", ");
         match &r.identity {
             Ok(id) => {
-                verified += 1;
                 for addr in &r.admin_servers {
                     known.upsert(&r.domain, *addr, id.fingerprint);
                 }
                 ans.note(&format!("discovered admin domain {:?} at {addrs}", r.domain));
             }
-            Err(e) => {
-                ans.warn(&format!(
-                    "beacon for {:?} at [{addrs}] did not verify: {e}",
-                    r.domain
-                ));
-                unverified.push(format!("{:?} at {addrs}: {e}", r.domain));
-            }
+            Err(e) => ans.warn(&format!(
+                "beacon for {:?} at [{addrs}] did not verify: {e}",
+                r.domain
+            )),
         }
     }
     if let Err(e) = known.save() {
         ans.warn(&format!("could not save the admin domain list: {e:#}"));
     }
-    // Success is silent — the refreshed list is the result. But if beacons were
-    // seen yet none verified (the confusing empty-after-discover case), surface
-    // the addresses + reason so an unreachable advertised address is diagnosable
-    // instead of looking like "discovery found nothing".
-    if verified == 0 && !unverified.is_empty() {
-        let mut lines = vec![format!(
-            "Found {} advertised admin server(s), but none answered with a CA identity:",
-            unverified.len()
-        )];
-        lines.extend(unverified);
-        lines.push(String::new());
-        lines.push(
-            "The admin server may be advertising an address this host can't reach \
-             (check its listen address / firewall)."
-                .to_string(),
-        );
-        return Ok(super::action::Outcome::remote_toast(
+    // Success is silent — the refreshed list is the result. Only the confusing
+    // case gets an overlay, and what makes it confusing is the engine's to say.
+    match enroll::discovery_diagnosis(&reports) {
+        Some(lines) => Ok(super::action::Outcome::remote_toast(
             "Discovery",
             lines,
             RemoteUpdate::AdminDomains(known.domains),
-        ));
+        )),
+        None => Ok(super::action::Outcome::remote_clusters(known.domains)),
     }
-    Ok(super::action::Outcome::remote_clusters(known.domains))
 }
 
 async fn refresh(
@@ -1530,25 +1466,10 @@ fn policy_detail(a: &netidx_admin_proto::policy::AdminInfo) -> Vec<(String, Stri
 /// returns the normalized (pretty) JSON to store.
 fn policy_validator() -> super::answer::EditValidator {
     Box::new(|s: &str| {
-        let p: netidx_admin_proto::policy::Policy =
-            serde_json::from_str(s).context("not valid policy JSON")?;
-        serde_json::to_string_pretty(&p).context("serializing policy")
+        netidx_admin::plan::ca_setup::policy_json(
+            &netidx_admin::plan::ca_setup::parse_policy_json(s)?,
+        )
     })
-}
-
-/// A starter policy for a new role admin — every field present (all grants off)
-/// so the editor shows exactly what can be granted.
-fn policy_template() -> netidx_admin_proto::policy::Policy {
-    netidx_admin_proto::policy::Policy {
-        allowed_san: vec![],
-        max_validity: std::time::Duration::from_secs(730 * 86400),
-        id_map_groups: vec![],
-        server_enroll_scopes: vec![],
-        server_enroll_roles: enumflags2::BitFlags::empty(),
-        perms_edit_scopes: vec![],
-        may_manage_admins: false,
-        service_control_scopes: vec![],
-    }
 }
 
 async fn add_admin(
@@ -1564,9 +1485,9 @@ async fn add_admin(
         .await?
         .context("an admin name is required")?;
     let password = ans.secret(Field::AdminPassword, None).await?;
-    let seed = serde_json::to_string_pretty(&policy_template())?;
+    let seed = ca_setup::policy_json(&ca_setup::policy_template())?;
     let edited = ans.edit(seed, policy_validator()).await?;
-    let policy: netidx_admin_proto::policy::Policy = serde_json::from_str(&edited)?;
+    let policy = ca_setup::parse_policy_json(&edited)?;
     let at = admin_target(ans, &target).await?;
     add_role_admin(&at, &name, &password, policy).await?;
     let rows = roster_rows(ans, &target).await?;
@@ -1590,9 +1511,9 @@ async fn set_policy(
         .into_iter()
         .find(|a| a.admin == name)
         .with_context(|| format!("admin {name:?} not found in the roster"))?;
-    let seed = serde_json::to_string_pretty(&current.policy)?;
+    let seed = ca_setup::policy_json(&current.policy)?;
     let edited = ans.edit(seed, policy_validator()).await?;
-    let policy: netidx_admin_proto::policy::Policy = serde_json::from_str(&edited)?;
+    let policy = ca_setup::parse_policy_json(&edited)?;
     set_admin_policy(&at, &name, policy).await?;
     let rows = roster_rows(ans, &target).await?;
     Ok(super::action::Outcome::remote_after(
@@ -3229,8 +3150,7 @@ fn parse_gate_duration(text: &str) -> Result<ReadGate, String> {
     }
     let d: std::time::Duration =
         text.parse::<humantime::Duration>().map_err(|e| format!("{e}"))?.into();
-    let d = chrono::Duration::from_std(d).map_err(|_| "that is too long".to_string())?;
-    Ok(ReadGate::Until(chrono::Utc::now() + d))
+    netidx_admin::ops::servers::read_gate_for(d).map_err(|e| format!("{e:#}"))
 }
 
 /// Render a `label: [ value ]` form row (value masked when `secret`). Returns the
