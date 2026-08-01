@@ -851,11 +851,10 @@ fn install_ca(p: CaInstallArgs) -> Result<()> {
         service::install_with_defaults(scope.into())?;
     }
     if let Some(csr) = out.pending_external {
+        // The engine's note already said what to do with it; all this adds is
+        // where it actually landed, which that note gives only relative to the
+        // working directory.
         println!("subordinate-CA CSR: {}", csr.display());
-        println!(
-            "have your external PKI sign it, then run \
-             `netidx admin ca external install --signed-cert <certificate>`"
-        );
     }
     Ok(())
 }

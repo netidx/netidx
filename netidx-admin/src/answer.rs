@@ -472,7 +472,10 @@ impl Field {
                        match.",
             },
             SignedCert => FieldInfo {
-                flag: "--signed-cert",
+                // The only strict command that can reach this is `admin
+                // restore`; `ca external install` takes the certificate as a
+                // positional and never asks.
+                flag: "--external-cert",
                 label: "signed certificate path",
                 help: "Path to the CA certificate your external PKI signed from the \
                        emitted CSR.",
