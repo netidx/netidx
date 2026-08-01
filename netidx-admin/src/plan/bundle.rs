@@ -114,8 +114,13 @@ pub struct Staged {
     /// The restored manifest.
     pub manifest: Manifest,
     has_ca: bool,
+    /// Both are read only on unix — relocation reconcile and satellite-admin
+    /// re-enrollment are CA-host operations. The bundle records them on every
+    /// platform, so the type keeps one shape rather than growing a gate.
+    #[cfg_attr(not(unix), allow(dead_code))]
     resolver_relocated: bool,
     service: Option<ServiceScope>,
+    #[cfg_attr(not(unix), allow(dead_code))]
     listen: Option<SocketAddr>,
     admin_server: Option<String>,
     key_protection: Option<KeyProtArg>,
@@ -209,6 +214,9 @@ fn service_intent(input: &BackupInput, record: &InstallRecord) -> Result<Service
 /// present, is snapshotted through its protected local control socket so the
 /// inner bundle stays CA-signed and consistent.
 pub async fn backup(ans: &mut dyn Answerer, input: BackupInput) -> Result<BackupOutcome> {
+    // The only note comes from the CA snapshot, which is unix-only.
+    #[cfg(not(unix))]
+    let _ = &ans;
     let (root, scope, record) = find_install(&input)?;
     let service = service_intent(&input, &record)?;
     let has_ca = root.join("ca").is_dir();
