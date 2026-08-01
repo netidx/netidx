@@ -641,13 +641,8 @@ async fn connect(
     server: SocketAddr,
     expected_fp: Option<Fingerprint>,
 ) -> Result<super::action::Outcome> {
-    use netidx_admin::{
-        answer::Answerer,
-        ops,
-        session_cache::{self, CachedSession},
-        transport::{self, fetch_identity},
-    };
-    use netidx_admin_proto::{AdminCredential, NodeKind};
+    use netidx_admin::{answer::Answerer, ops, transport::fetch_identity};
+    use netidx_admin_proto::NodeKind;
     // Glyph first — always, before any credential. Fetch the live identity and,
     // when we saved this admin domain before, flag a fingerprint that has changed
     // since (a CA rotation, or a different admin domain reusing the address) so the
@@ -666,30 +661,13 @@ async fn connect(
     // only then asks for a password (unless a valid cache already exists).
     let session = ops::open_admin_session(ans, Some(server), None, None, None).await?;
     let admin = session.admin.clone();
-    if let AdminCredential::Password { admin, password } = session.credential {
-        let logged = transport::login(
-            session.server,
-            &session.identity,
-            &admin,
-            password.as_str(),
-        )
-        .await?;
-        let cached = CachedSession {
-            ca_fingerprint: session.identity.fingerprint.text(),
-            bootstrap: session.server,
-            admin: logged.admin,
-            token: logged.token,
-            issued_unix: logged.issued_unix,
-            absolute_deadline_unix: logged.absolute_deadline_unix,
-            idle_timeout_secs: logged.idle_timeout_secs,
-        };
-        if let Err(e) = session_cache::store(cached.clone()) {
-            session_cache::remember(cached)?;
-            ans.note(&format!(
-                "{}; this login will be retained only until the TUI exits",
-                e
-            ));
-        }
+    // The TUI outlives the login, so an unsealable token is still worth holding
+    // for the run rather than refusing to connect.
+    if let Some(logged) =
+        ops::cache_session(&session, ops::Retention::ProcessLifetime).await?
+        && let Some(why) = logged.unsealed
+    {
+        ans.note(&format!("{why}; this login will be retained only until the TUI exits"));
     }
     let conn = RemoteConn {
         server: session.server,
@@ -712,31 +690,19 @@ async fn connect(
 }
 
 async fn logout(conn: RemoteConn) -> Result<super::action::Outcome> {
-    use netidx_admin::{session_cache, transport};
-    use netidx_admin_proto::NodeKind;
-    let fingerprint = conn.confirmed_fp.text();
+    use netidx_admin::ops::{self, LogoutOutcome, LogoutSelection};
     let mut lines = Vec::new();
-    match session_cache::load(&fingerprint) {
-        Ok(Some(cached)) => {
-            let revoked = async {
-                let identity =
-                    transport::fetch_identity(conn.server, NodeKind::Client).await?;
-                if identity.fingerprint != conn.confirmed_fp || !identity.ca {
-                    anyhow::bail!("the cached CA identity changed");
-                }
-                transport::logout(conn.server, &identity, cached.token.as_str()).await
+    for done in ops::logout(LogoutSelection::Ca(conn.confirmed_fp)).await? {
+        match done.outcome {
+            LogoutOutcome::Revoked => {}
+            LogoutOutcome::NotRevoked(e) => {
+                lines.push(format!("Remote revocation was unavailable: {e}"))
             }
-            .await;
-            if let Err(e) = revoked {
-                lines.push(format!("Remote revocation was unavailable: {e:#}"));
+            LogoutOutcome::NotCached => {
+                lines.push("The local session was already absent.".to_string())
             }
-        }
-        Ok(None) => lines.push("The local session was already absent.".to_string()),
-        Err(e) => {
-            lines.push(format!("The local session cache could not be opened: {e:#}"))
         }
     }
-    session_cache::delete(&fingerprint)?;
     lines.push(format!("Logged out {}.", conn.admin));
     Ok(super::action::Outcome::remote_toast("Logged out", lines, RemoteUpdate::LoggedOut))
 }

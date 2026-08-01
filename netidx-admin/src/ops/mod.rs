@@ -66,12 +66,17 @@ pub struct AdminSession {
 /// when this host runs no admin server — the caller then requires `--server`.
 pub fn local_admin_server_listen() -> Option<SocketAddr> {
     let path = paths::discover_admin_server_config().ok()?;
-    let cfg = admin_server_config::load(&path).ok()?;
-    let mut addr = cfg.listen;
+    Some(reachable_listen(admin_server_config::load(&path).ok()?.listen))
+}
+
+/// The address a client *on this host* can actually dial. A server bound to all
+/// interfaces is reached over loopback; without this a host whose admin server
+/// listens on `0.0.0.0` would have its own commands connect to `0.0.0.0`.
+fn reachable_listen(mut addr: SocketAddr) -> SocketAddr {
     if addr.ip().is_unspecified() {
         addr.set_ip(IpAddr::V4(Ipv4Addr::LOCALHOST));
     }
-    Some(addr)
+    addr
 }
 
 /// Resolve which admin server to talk to and establish its identity — no auth
@@ -206,7 +211,13 @@ pub async fn open_admin_password_session(
     password_session(ans, server, ca_identity, admin, password).await
 }
 
-async fn resolve_ca(
+/// Resolve and verify the admin domain's authoritative CA, holding no secret.
+///
+/// Public because `admin login` prompts for its password itself and must do so
+/// *after* this returns: an operator who rejects the glyph should never have
+/// typed a password for it. Every other caller goes through
+/// [`open_admin_session`] or [`open_admin_password_session`].
+pub async fn resolve_ca(
     ans: &mut dyn Answerer,
     server: Option<SocketAddr>,
     ca_dir: Option<&Path>,
@@ -227,6 +238,164 @@ async fn resolve_ca(
         bail!("the map's CA candidate failed exact home-CA verification");
     }
     Ok((server, ca_identity))
+}
+
+/// Whether a login may fall back to process memory when this platform cannot
+/// seal it at rest. Both answers are correct; which one is right depends on how
+/// long the frontend asking lives, which only the frontend knows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Retention {
+    /// Refuse rather than leave a bearer token unprotected at rest. A one-shot
+    /// command gains nothing from an in-memory session — it keeps using
+    /// password authentication instead.
+    Sealed,
+    /// Fall back to process memory. A long-lived frontend already holds the
+    /// token in RAM, and losing it at exit is the whole guarantee.
+    ProcessLifetime,
+}
+
+/// What [`cache_session`] persisted, for a frontend to report.
+pub struct CachedLogin {
+    pub admin: String,
+    pub ca_fingerprint: String,
+    pub absolute_deadline_unix: u64,
+    /// Why the token could only be held in memory, when it could.
+    pub unsealed: Option<String>,
+}
+
+/// Exchange a password session for a bearer token and cache it, so later
+/// commands against this CA need no password. A session that already carries a
+/// token came from the cache and is left alone (`None`).
+pub async fn cache_session(
+    session: &AdminSession,
+    retention: Retention,
+) -> Result<Option<CachedLogin>> {
+    let AdminCredential::Password { admin, password } = &session.credential else {
+        return Ok(None);
+    };
+    let logged =
+        transport::login(session.server, &session.identity, admin, password.as_str())
+            .await?;
+    let ca_fingerprint = session.identity.fingerprint.text();
+    let cached = crate::session_cache::CachedSession {
+        ca_fingerprint: ca_fingerprint.clone(),
+        bootstrap: session.server,
+        admin: logged.admin.clone(),
+        token: logged.token,
+        issued_unix: logged.issued_unix,
+        absolute_deadline_unix: logged.absolute_deadline_unix,
+        idle_timeout_secs: logged.idle_timeout_secs,
+    };
+    let unsealed = match retention {
+        // No fallback to hold it for, so no second copy of the token is made.
+        Retention::Sealed => {
+            crate::session_cache::store(cached)?;
+            None
+        }
+        Retention::ProcessLifetime => match crate::session_cache::store(cached.clone()) {
+            Ok(()) => None,
+            Err(e) => {
+                crate::session_cache::remember(cached)?;
+                Some(format_compact!("{e:#}").to_string())
+            }
+        },
+    };
+    Ok(Some(CachedLogin {
+        admin: logged.admin,
+        ca_fingerprint,
+        absolute_deadline_unix: logged.absolute_deadline_unix,
+        unsealed,
+    }))
+}
+
+/// Which cached sessions [`logout`] acts on.
+pub enum LogoutSelection {
+    /// Every cached session.
+    All,
+    /// The session cached for this CA.
+    Ca(Fingerprint),
+    /// The only cached session; an error when more than one is cached, so a
+    /// bare `logout` can never revoke an admin domain the operator didn't name.
+    TheOnlyOne,
+}
+
+/// What became of one session in a [`logout`].
+pub enum LogoutOutcome {
+    /// Revoked at the CA and deleted locally.
+    Revoked,
+    /// Deleted locally; the CA could not be told.
+    NotRevoked(String),
+    /// Nothing usable was cached. Anything still on disk for this CA was
+    /// removed regardless — `load_all` skips an entry it cannot unseal, and a
+    /// logout must not leave one behind.
+    NotCached,
+}
+
+pub struct LoggedOut {
+    pub ca_fingerprint: String,
+    pub admin: Option<String>,
+    pub outcome: LogoutOutcome,
+}
+
+/// Revoke the selected sessions at their CA and delete them locally.
+///
+/// An unreachable CA never blocks the local delete: a token the operator can no
+/// longer present is better gone, and it expires on its own. The identity is
+/// re-fetched and matched against the one the session was cached under before
+/// the token is sent, so a reused address cannot collect it.
+pub async fn logout(select: LogoutSelection) -> Result<Vec<LoggedOut>> {
+    let cached = crate::session_cache::load_all()?;
+    let selected: Vec<_> = match &select {
+        LogoutSelection::All => cached,
+        LogoutSelection::Ca(fp) => {
+            let want = fp.text();
+            let found: Vec<_> =
+                cached.into_iter().filter(|s| s.ca_fingerprint == want).collect();
+            if found.is_empty() {
+                crate::session_cache::delete(&want)?;
+                return Ok(vec![LoggedOut {
+                    ca_fingerprint: want,
+                    admin: None,
+                    outcome: LogoutOutcome::NotCached,
+                }]);
+            }
+            found
+        }
+        LogoutSelection::TheOnlyOne => {
+            if cached.len() > 1 {
+                bail!(
+                    "more than one admin domain session is cached; name one with \
+                     --accept-glyph, or --all"
+                );
+            }
+            cached
+        }
+    };
+    let mut out = Vec::with_capacity(selected.len());
+    for session in selected {
+        let revoked = async {
+            let identity =
+                transport::fetch_identity(session.bootstrap, NodeKind::Client).await?;
+            if identity.fingerprint.text() != session.ca_fingerprint || !identity.ca {
+                bail!("the cached address now presents a different CA");
+            }
+            transport::logout(session.bootstrap, &identity, session.token.as_str()).await
+        }
+        .await;
+        crate::session_cache::delete(&session.ca_fingerprint)?;
+        out.push(LoggedOut {
+            ca_fingerprint: session.ca_fingerprint,
+            admin: Some(session.admin),
+            outcome: match revoked {
+                Ok(()) => LogoutOutcome::Revoked,
+                Err(e) => LogoutOutcome::NotRevoked(format_compact!("{e:#}").to_string()),
+            },
+        });
+    }
+    if matches!(select, LogoutSelection::All) {
+        crate::session_cache::delete_all()?;
+    }
+    Ok(out)
 }
 
 async fn password_session(
@@ -316,6 +485,21 @@ mod tests {
     fn fp(seed: &str) -> Fingerprint {
         // A distinct fingerprint per seed char, via a full 52-char base32 code.
         Fingerprint::parse_text(&seed.repeat(52)).unwrap()
+    }
+
+    /// A host whose admin server binds every interface must still dial a real
+    /// address. `netidx admin login` with no `--server` used to reach a copy of
+    /// this that dropped the adjustment, so it connected to `0.0.0.0:4565`.
+    #[test]
+    fn a_wildcard_bind_is_dialled_over_loopback() {
+        let adjusted = |s: &str| reachable_listen(s.parse().unwrap()).to_string();
+        assert_eq!(adjusted("0.0.0.0:4565"), "127.0.0.1:4565");
+        assert_eq!(adjusted("[::]:4565"), "127.0.0.1:4565");
+        // A concrete address is already dialable and must be left alone —
+        // including loopback itself and a v6 literal.
+        assert_eq!(adjusted("10.0.0.11:4565"), "10.0.0.11:4565");
+        assert_eq!(adjusted("127.0.0.1:4565"), "127.0.0.1:4565");
+        assert_eq!(adjusted("[::1]:4565"), "[::1]:4565");
     }
 
     #[test]
