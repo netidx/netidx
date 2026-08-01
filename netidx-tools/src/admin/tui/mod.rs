@@ -30,7 +30,7 @@ mod services;
 mod theme;
 mod widgets;
 
-use action::{Action, Outcome};
+use action::{Action, Outcome, Privileged};
 use answer::{Modal, TuiAnswerer, UiRequest};
 use anyhow::{Context, Result};
 use crossterm::event::{Event, EventStream, KeyCode, KeyEventKind, KeyModifiers};
@@ -430,24 +430,16 @@ impl App {
     /// / cancel); everything else is a plain yes/no (or runs immediately).
     fn arm_action(&mut self, action: Action) -> Option<Action> {
         match action {
-            Action::Uninstall {
-                config_scope,
-                config_dir,
-                needs_root,
-                remove_ca: false,
-            } if config_dir.join("ca").is_dir() => {
+            Action::Uninstall { config_scope, config_dir, remove_ca: false }
+                if config_dir.join("ca").is_dir() =>
+            {
                 let destroy = Action::Uninstall {
                     config_scope,
                     config_dir: config_dir.clone(),
-                    needs_root,
                     remove_ca: true,
                 };
-                let keep = Action::Uninstall {
-                    config_scope,
-                    config_dir,
-                    needs_root,
-                    remove_ca: false,
-                };
+                let keep =
+                    Action::Uninstall { config_scope, config_dir, remove_ca: false };
                 self.confirm = Some((
                     "This install holds the admin domain's certificate authority. Also \
                      destroy it? Destroying the CA is irreversible — every enrolled \
@@ -971,7 +963,7 @@ async fn run_app(terminal: &mut ratatui::DefaultTerminal) -> Result<()> {
                     Ok((outcome, Some(next))) => {
                         // The intermediate outcome is intentionally quiet; keep
                         // the progress surface up and continue the same restore.
-                        launch(terminal, &mut app, &ui_tx, &mut op, &mut events, next);
+                        launch(&mut app, &ui_tx, &mut op, next);
                         if !outcome.quiet {
                             app.finish_op(Ok(outcome));
                         }
@@ -988,7 +980,7 @@ async fn run_app(terminal: &mut ratatui::DefaultTerminal) -> Result<()> {
             } => match ev {
                 Ok(Event::Key(k)) if k.kind == KeyEventKind::Press => {
                     if let Some(action) = app.on_key(k.code, k.modifiers) {
-                        launch(terminal, &mut app, &ui_tx, &mut op, &mut events, action);
+                        launch(&mut app, &ui_tx, &mut op, action);
                     }
                 }
                 Ok(_) => {}
@@ -1064,51 +1056,23 @@ fn run_suspended<T>(events: &mut Option<Fuse<EventStream>>, f: impl FnOnce() -> 
     out
 }
 
-/// Start an action: op-future actions (install / renew) become the polled
-/// `op`; the privileged, synchronous uninstall runs inline (it owns the
-/// terminal to suspend for a password prompt).
+/// Start an action as the polled `op`. Every action is an op future; a step
+/// that needs the terminal comes back on the [`Outcome`] as a [`Privileged`]
+/// and is performed by [`complete_op`].
 fn launch(
-    terminal: &mut ratatui::DefaultTerminal,
     app: &mut App,
     ui_tx: &mpsc::UnboundedSender<UiRequest>,
     op: &mut Option<OpFuture>,
-    events: &mut Option<Fuse<EventStream>>,
     action: Action,
 ) {
     app.begin(action.label());
-    match action {
-        Action::Uninstall { config_scope, config_dir, needs_root, remove_ca } => {
-            let out = run_suspended(events, || {
-                privileged::uninstall(
-                    terminal,
-                    config_scope,
-                    config_dir,
-                    needs_root,
-                    remove_ca,
-                )
-            })
-            .map(|msg| Outcome {
-                title: "Uninstalled".to_string(),
-                lines: vec![msg],
-                refresh_local: true,
-                install_service: None,
-                after_service: None,
-                remote: None,
-                services: None,
-                quiet: false,
-            });
-            app.finish_op(out);
-        }
-        op_action => {
-            // Reuse the confirmed CA glyph for remote panel ops so they don't
-            // re-prompt for the identity on every call after connect.
-            let ans = match op_action.accept_glyph() {
-                Some(fp) => TuiAnswerer::with_glyph(ui_tx.clone(), fp),
-                None => TuiAnswerer::new(ui_tx.clone()),
-            };
-            *op = Some(Box::pin(action::run_owned(ans, op_action)));
-        }
-    }
+    // Reuse the confirmed CA glyph for remote panel ops so they don't re-prompt
+    // for the identity on every call after connect.
+    let ans = match action.accept_glyph() {
+        Some(fp) => TuiAnswerer::with_glyph(ui_tx.clone(), fp),
+        None => TuiAnswerer::new(ui_tx.clone()),
+    };
+    *op = Some(Box::pin(action::run_owned(ans, action)));
 }
 
 /// Fold an op's result: on success with a pending OS-service install, perform
@@ -1121,19 +1085,36 @@ fn complete_op(
     out: Result<Outcome>,
 ) -> Result<(Outcome, Option<Action>)> {
     let mut outcome = out?;
-    let mut service_ok = true;
-    if let Some(service) = outcome.install_service.take() {
-        app.log_line(Line::from("registering the OS service…"));
-        match run_suspended(events, || privileged::install_service(terminal, &service)) {
+    let mut ok = true;
+    if let Some(step) = outcome.privileged.take() {
+        let (what, ran) = match &step {
+            Privileged::InstallService(service) => {
+                app.log_line(Line::from("registering the OS service…"));
+                (
+                    "OS service registration",
+                    run_suspended(events, || {
+                        privileged::install_service(terminal, service)
+                    }),
+                )
+            }
+            Privileged::Uninstall(escalation) => {
+                app.log_line(Line::from("removing the system-scope install…"));
+                (
+                    "the elevated teardown",
+                    run_suspended(events, || privileged::uninstall(terminal, escalation)),
+                )
+            }
+        };
+        match ran {
             Ok(msg) => outcome.lines.push(msg),
             Err(e) => {
-                outcome.lines.push(format!("OS service registration failed: {e:#}"));
-                service_ok = false;
+                outcome.lines.push(format!("{what} failed: {e:#}"));
+                ok = false;
             }
         }
     }
-    let after = if service_ok { outcome.after_service.take() } else { None };
-    if !service_ok {
+    let after = if ok { outcome.after_privileged.take() } else { None };
+    if !ok {
         outcome.quiet = false;
     }
     Ok((outcome, after))

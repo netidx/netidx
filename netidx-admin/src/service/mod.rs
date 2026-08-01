@@ -175,6 +175,26 @@ pub fn resolve_for_user(provided: Option<String>) -> Result<String> {
     Ok(crate::local_identity::current_user()?.to_string())
 }
 
+/// The environment sentinel a privilege escalation sets on its child, so a
+/// re-exec'd process knows not to try escalating again.
+pub const ELEVATED_ENV: &str = "NETIDX_ELEVATED";
+
+/// Whether this process can perform system-scope work without escalating.
+#[cfg(unix)]
+pub fn is_elevated() -> Result<bool> {
+    Ok(nix::unistd::geteuid().is_root())
+}
+
+/// Whether this process can perform system-scope work without escalating.
+///
+/// Honours [`ELEVATED_ENV`] so a re-exec'd child doesn't loop through another
+/// elevation attempt. There is no token-elevation probe yet, so an
+/// Administrator shell is detected only through that sentinel.
+#[cfg(not(unix))]
+pub fn is_elevated() -> Result<bool> {
+    Ok(std::env::var_os(ELEVATED_ENV).is_some())
+}
+
 // ---- shared helpers --------------------------------------------------------
 
 /// Reject service names that would compromise the renderers below.

@@ -1,14 +1,13 @@
 //! Actions the TUI runs against the library, and the [`Outcome`] it shows when
 //! one finishes.
 //!
-//! Most actions are async library ops driven through a [`TuiAnswerer`](super::answer::TuiAnswerer):
-//! [`run_owned`] is the self-contained future the UI loop polls. The one
-//! privileged, terminal-owning follow-up (registering a system OS service) is
-//! handed back on the [`Outcome`] and performed by the loop, which can suspend
-//! the terminal for the password prompt — see [`super::privileged`].
-//!
-//! [`Action::Uninstall`] is the exception: it is privileged from the start, so
-//! the loop runs it directly rather than as an op future.
+//! Every action is an async library op driven through a
+//! [`TuiAnswerer`](super::answer::TuiAnswerer): [`run_owned`] is the
+//! self-contained future the UI loop polls. A step that needs the terminal —
+//! registering a system OS service, or escalating for a teardown — is handed
+//! back on the [`Outcome`] as a [`Privileged`] and performed by the loop,
+//! which can suspend the terminal for the password prompt; see
+//! [`super::privileged`].
 
 use super::answer::TuiAnswerer;
 #[cfg(unix)]
@@ -35,6 +34,7 @@ use netidx_admin::{
     provenance::InstallRole,
     renewd,
     service::ServiceScope,
+    uninstall,
 };
 #[cfg(unix)]
 use std::net::SocketAddr;
@@ -47,19 +47,29 @@ pub(super) struct Outcome {
     /// Re-detect local installs after showing this (an install changed on-disk
     /// state).
     pub(super) refresh_local: bool,
-    /// A privileged follow-up the UI loop performs with the terminal: register
-    /// the OS service at this scope. `None` ⇒ nothing to do.
-    pub(super) install_service: Option<ServiceInstall>,
-    /// Continue a multi-phase operation after the service registration has
-    /// completed (CA+resolver restore uses this to re-enroll local
-    /// identities against the newly started CA).
-    pub(super) after_service: Option<Action>,
+    /// A privileged, terminal-owning follow-up the UI loop performs — it can
+    /// suspend the terminal for a password prompt. `None` ⇒ nothing to do.
+    pub(super) privileged: Option<Privileged>,
+    /// Continue a multi-phase operation once the privileged step has
+    /// completed: CA+resolver restore re-enrolls local identities against the
+    /// newly started CA, and a user-scope teardown removes its configuration
+    /// after the elevated step took the system service down.
+    pub(super) after_privileged: Option<Action>,
     /// A result to apply to the Remote tab's state (connection / panel rows).
     pub(super) remote: Option<super::remote::RemoteUpdate>,
     /// A result to apply to the Local tab's Services surface (refreshed rows).
     pub(super) services: Option<super::services::ServicesUpdate>,
     /// Suppress the result overlay (used by silent panel re-queries).
     pub(super) quiet: bool,
+}
+
+/// A step that needs the terminal (a sudo / su password prompt), so the UI
+/// loop performs it between an op finishing and its continuation running.
+pub(super) enum Privileged {
+    /// Register the OS service at this scope.
+    InstallService(ServiceInstall),
+    /// Run the engine's elevated teardown step.
+    Uninstall(uninstall::Escalation),
 }
 
 #[derive(Debug, Clone)]
@@ -89,8 +99,8 @@ impl Outcome {
             title: title.into(),
             lines,
             refresh_local,
-            install_service: None,
-            after_service: None,
+            privileged: None,
+            after_privileged: None,
             remote: None,
             services: None,
             quiet: false,
@@ -107,8 +117,8 @@ impl Outcome {
             title: title.into(),
             lines,
             refresh_local: false,
-            install_service: None,
-            after_service: None,
+            privileged: None,
+            after_privileged: None,
             remote: Some(update),
             services: None,
             quiet: false,
@@ -125,8 +135,8 @@ impl Outcome {
             title: String::new(),
             lines: Vec::new(),
             refresh_local: false,
-            install_service: None,
-            after_service: None,
+            privileged: None,
+            after_privileged: None,
             remote: Some(super::remote::RemoteUpdate::AdminDomains(clusters)),
             services: None,
             quiet: true,
@@ -142,8 +152,8 @@ impl Outcome {
             title: String::new(),
             lines: Vec::new(),
             refresh_local: false,
-            install_service: None,
-            after_service: None,
+            privileged: None,
+            after_privileged: None,
             remote: Some(super::remote::RemoteUpdate::Rows { panel, rows }),
             services: None,
             quiet: true,
@@ -161,8 +171,8 @@ impl Outcome {
             title: title.into(),
             lines,
             refresh_local: false,
-            install_service: None,
-            after_service: None,
+            privileged: None,
+            after_privileged: None,
             remote: Some(super::remote::RemoteUpdate::Rows { panel, rows }),
             services: None,
             quiet: false,
@@ -178,8 +188,8 @@ impl Outcome {
             title: String::new(),
             lines: Vec::new(),
             refresh_local: false,
-            install_service: None,
-            after_service: None,
+            privileged: None,
+            after_privileged: None,
             remote: Some(super::remote::RemoteUpdate::ResolverClusters { panel, bases }),
             services: None,
             quiet: true,
@@ -195,8 +205,8 @@ impl Outcome {
             title: String::new(),
             lines: Vec::new(),
             refresh_local: false,
-            install_service: None,
-            after_service: None,
+            privileged: None,
+            after_privileged: None,
             remote: Some(super::remote::RemoteUpdate::ServiceServers { servers }),
             services: None,
             quiet: true,
@@ -211,8 +221,8 @@ impl Outcome {
             title: String::new(),
             lines: Vec::new(),
             refresh_local: false,
-            install_service: None,
-            after_service: None,
+            privileged: None,
+            after_privileged: None,
             remote: Some(super::remote::RemoteUpdate::ServiceRows { rows }),
             services: None,
             quiet: true,
@@ -229,8 +239,8 @@ impl Outcome {
             title: title.into(),
             lines,
             refresh_local: false,
-            install_service: None,
-            after_service: None,
+            privileged: None,
+            after_privileged: None,
             remote: Some(super::remote::RemoteUpdate::ServiceRows { rows }),
             services: None,
             quiet: false,
@@ -243,8 +253,8 @@ impl Outcome {
             title: String::new(),
             lines: Vec::new(),
             refresh_local: false,
-            install_service: None,
-            after_service: None,
+            privileged: None,
+            after_privileged: None,
             remote: None,
             services: Some(super::services::ServicesUpdate { rows }),
             quiet: true,
@@ -261,8 +271,8 @@ impl Outcome {
             title: title.into(),
             lines,
             refresh_local: false,
-            install_service: None,
-            after_service: None,
+            privileged: None,
+            after_privileged: None,
             remote: None,
             services: Some(super::services::ServicesUpdate { rows }),
             quiet: false,
@@ -284,15 +294,10 @@ pub(super) enum Action {
     AddParent { config_root: PathBuf },
     /// A Tab-2 remote-admin op (connect / list / approve / …).
     Remote(super::remote::RemoteAction),
-    /// Tear down an install (config + OS service). Terminal-owning; handled
-    /// directly by the UI loop, not as an op future. `needs_root` when a
-    /// system-scope service must be removed.
-    Uninstall {
-        config_scope: ServiceScope,
-        config_dir: PathBuf,
-        needs_root: bool,
-        remove_ca: bool,
-    },
+    /// Tear down an install (config + OS service). The engine decides what is
+    /// installed and whether root is needed; the loop performs only the
+    /// elevated step the engine hands back.
+    Uninstall { config_scope: ServiceScope, config_dir: PathBuf, remove_ca: bool },
     /// Rotate (or first-enable) this box's local admin server auto-approve
     /// credential — a local, no-auth CA op over the control socket.
     #[cfg(unix)]
@@ -454,8 +459,8 @@ pub(super) async fn run_owned(mut ans: TuiAnswerer, action: Action) -> Result<Ou
         Action::Join { dry_run } => join(&mut ans, dry_run).await,
         Action::AddParent { config_root } => add_parent(&mut ans, config_root).await,
         Action::Remote(ra) => super::remote::run(&mut ans, ra).await,
-        Action::Uninstall { .. } => {
-            bail!("internal error: uninstall is not an op future")
+        Action::Uninstall { config_scope, config_dir, remove_ca } => {
+            uninstall(&mut ans, config_scope, config_dir, remove_ca).await
         }
         #[cfg(unix)]
         Action::ManageLocalAdmins { .. } => {
@@ -605,8 +610,11 @@ async fn restore(ans: &mut TuiAnswerer) -> Result<Outcome> {
                     .to_string(),
             ],
             refresh_local: false,
-            install_service: Some(restored_service(&staged.manifest, scope)),
-            after_service: Some(Action::FinishRestore(Box::new(staged))),
+            privileged: Some(Privileged::InstallService(restored_service(
+                &staged.manifest,
+                scope,
+            ))),
+            after_privileged: Some(Action::FinishRestore(Box::new(staged))),
             remote: None,
             services: None,
             quiet: true,
@@ -636,10 +644,10 @@ async fn finish_restore(
         title: "Restore complete".to_string(),
         lines,
         refresh_local: true,
-        install_service: out
+        privileged: out
             .service_needed
-            .map(|scope| restored_service(&manifest, scope)),
-        after_service: None,
+            .map(|scope| Privileged::InstallService(restored_service(&manifest, scope))),
+        after_privileged: None,
         remote: None,
         services: None,
         quiet: false,
@@ -693,8 +701,10 @@ async fn external_install(ans: &mut TuiAnswerer, ca_dir: PathBuf) -> Result<Outc
                 cfg_path.display()
             )],
             refresh_local: true,
-            install_service: need.scope().map(ServiceInstall::defaults),
-            after_service: None,
+            privileged: need
+                .scope()
+                .map(|s| Privileged::InstallService(ServiceInstall::defaults(s))),
+            after_privileged: None,
             remote: None,
             services: None,
             quiet: false,
@@ -755,8 +765,8 @@ async fn update(
         title: "Updated".to_string(),
         lines,
         refresh_local: true,
-        install_service: None,
-        after_service: None,
+        privileged: None,
+        after_privileged: None,
         remote: None,
         services: None,
         quiet: false,
@@ -792,8 +802,8 @@ async fn join(ans: &mut TuiAnswerer, dry_run: bool) -> Result<Outcome> {
         title: title.to_string(),
         lines,
         refresh_local: !dry_run,
-        install_service: None,
-        after_service: None,
+        privileged: None,
+        after_privileged: None,
         remote: None,
         services: None,
         quiet: false,
@@ -952,8 +962,8 @@ async fn add_parent(ans: &mut TuiAnswerer, config_root: PathBuf) -> Result<Outco
         title: "Parent added".to_string(),
         lines,
         refresh_local: true,
-        install_service: None,
-        after_service: None,
+        privileged: None,
+        after_privileged: None,
         remote: None,
         services: None,
         quiet: false,
@@ -963,6 +973,70 @@ async fn add_parent(ans: &mut TuiAnswerer, config_root: PathBuf) -> Result<Outco
 #[cfg(not(unix))]
 async fn add_parent(_ans: &mut TuiAnswerer, _config_root: PathBuf) -> Result<Outcome> {
     bail!("adding a parent (delegation) is only available on unix hosts")
+}
+
+/// Tear down this host's install. The operator already confirmed (see
+/// `App::arm_action`), so all that is left is to let the engine resolve what
+/// is installed and either apply it here or hand back the one elevated step.
+async fn uninstall(
+    ans: &mut TuiAnswerer,
+    config_scope: ServiceScope,
+    config_dir: PathBuf,
+    remove_ca: bool,
+) -> Result<Outcome> {
+    let input = uninstall::UninstallInput {
+        scope: Some(config_scope),
+        config_dir: Some(config_dir.clone()),
+        remove_ca,
+        ..Default::default()
+    };
+    match uninstall::plan(&input)? {
+        uninstall::Next::Nothing(_) => Ok(Outcome::plain(
+            "Uninstalled",
+            vec!["Nothing to remove.".to_string()],
+            true,
+        )),
+        uninstall::Next::Apply(prepared) => {
+            let report = uninstall::apply(ans, prepared).await?;
+            Ok(Outcome::plain("Uninstalled", removal_lines(&report), true))
+        }
+        uninstall::Next::Escalate(escalation) => {
+            // Only the elevated half needs the terminal. When it covers the
+            // whole teardown there is nothing left; otherwise it removes the
+            // system-scope service a user-scope install registered and we
+            // plan again for the configuration.
+            let done = escalation.covers == uninstall::Covers::Everything;
+            Ok(Outcome {
+                title: "Uninstalling".to_string(),
+                lines: vec![
+                    "Administrator privileges are needed to remove the system service\u{2026}"
+                        .to_string(),
+                ],
+                refresh_local: done,
+                privileged: Some(Privileged::Uninstall(escalation)),
+                after_privileged: (!done).then(|| Action::Uninstall {
+                    config_scope,
+                    config_dir,
+                    remove_ca,
+                }),
+                remote: None,
+                services: None,
+                quiet: true,
+            })
+        }
+    }
+}
+
+fn removal_lines(report: &uninstall::UninstallReport) -> Vec<String> {
+    let mut lines = vec![format!(
+        "Removed {} path(s){}.",
+        report.removed.len(),
+        if report.service_was_installed { " and the OS service" } else { "" }
+    )];
+    for (path, why) in &report.kept {
+        lines.push(format!("Kept {} ({}).", path.display(), why.as_str()));
+    }
+    lines
 }
 
 async fn renew(_ans: &mut TuiAnswerer) -> Result<Outcome> {
@@ -1147,8 +1221,9 @@ fn install_outcome(
             title: format!("{} installed", role.as_str()),
             lines,
             refresh_local: true,
-            install_service: scope.map(ServiceInstall::defaults),
-            after_service: None,
+            privileged: scope
+                .map(|s| Privileged::InstallService(ServiceInstall::defaults(s))),
+            after_privileged: None,
             remote: None,
             services: None,
             quiet: false,

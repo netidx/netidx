@@ -1039,17 +1039,9 @@ fn action_items(d: &Detected) -> Vec<(String, Action)> {
 /// `remove_ca` additionally deletes the CA directory (only offered when this
 /// host actually holds one — see [`owns_ca`]).
 fn uninstall_action(d: &Detected, remove_ca: bool) -> Action {
-    // A resolver/publisher registers a system-scope service even with user-scope
-    // config, so removing it needs root.
-    let needs_root = d.scope == ServiceScope::System
-        || matches!(
-            d.record.role,
-            InstallRole::Ca | InstallRole::Resolver | InstallRole::Publisher
-        );
     Action::Uninstall {
         config_scope: d.scope,
         config_dir: d.config_dir.clone(),
-        needs_root,
         remove_ca,
     }
 }

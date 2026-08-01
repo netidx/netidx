@@ -19,8 +19,10 @@
 //! root and the canonical service-unit path.
 
 use crate::{
+    answer::Answerer,
     config_lock::ConfigDirLock,
     paths,
+    provenance::InstallRecord,
     service::{self, ServiceParams, ServiceScope, ServiceStatus},
 };
 use anyhow::{Context, Result};
@@ -65,7 +67,7 @@ impl KeepReason {
 }
 
 /// What an uninstall did, or what [`preview`] reports it would do.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct UninstallReport {
     /// Whether the OS service was found installed and we attempted
     /// teardown (or would have, under dry-run). False ⇒ nothing
@@ -76,6 +78,10 @@ pub struct UninstallReport {
     pub removed: Vec<PathBuf>,
     /// Paths intentionally kept, with the reason.
     pub kept: Vec<(PathBuf, KeepReason)>,
+    /// The CA directory this teardown destroys, when it destroys one.
+    /// Recorded where the decision is made, so no caller has to
+    /// re-derive it by matching a path's basename against `"ca"`.
+    pub ca_destroyed: Option<PathBuf>,
 }
 
 impl UninstallReport {
@@ -83,6 +89,13 @@ impl UninstallReport {
     /// gone — the uninstall had nothing to do.
     pub fn is_empty(&self) -> bool {
         !self.service_was_installed && self.removed.is_empty() && self.kept.is_empty()
+    }
+
+    fn absorb(&mut self, other: UninstallReport) {
+        self.service_was_installed |= other.service_was_installed;
+        self.removed.extend(other.removed);
+        self.kept.extend(other.kept);
+        self.ca_destroyed = self.ca_destroyed.take().or(other.ca_destroyed);
     }
 }
 
@@ -106,6 +119,361 @@ impl ConfigRemoval {
         config_lock.require_contained(&self.root)?;
         cleanup(&self.params, &self.root, self.report, CleanupMode::Apply(config_lock))
     }
+}
+
+/// A whole-host teardown, as the operator asked for it. Everything optional
+/// is resolved by [`plan`]: the scope from the install record, the service
+/// name from the platform default, whether root is needed from an actual
+/// probe rather than a guess about the role.
+#[derive(Debug, Clone, Default)]
+pub struct UninstallInput {
+    /// Tear down this scope only. `None` detects it from the install record.
+    pub scope: Option<ServiceScope>,
+    /// Service name to disable and remove. `None` ⇒
+    /// [`ServiceParams::DEFAULT_NAME`].
+    pub service_name: Option<String>,
+    /// The user a templated system-scope unit was instantiated as.
+    pub for_user: Option<String>,
+    /// Override the config root. `None` ⇒ the canonical root for the scope.
+    pub config_dir: Option<PathBuf>,
+    /// Also destroy the CA private key. Irreversible.
+    pub remove_ca: bool,
+}
+
+/// The elevated run a frontend must perform. Everything the elevated process
+/// needs is named here, so no frontend invents its own argument list.
+#[derive(Debug, Clone)]
+pub struct Escalation {
+    pub scope: ServiceScope,
+    pub service_name: String,
+    pub for_user: String,
+    pub config_dir: Option<PathBuf>,
+    pub remove_ca: bool,
+    /// How much of the teardown the elevated run performs.
+    pub covers: Covers,
+    /// What the elevated run will do, so the operator can see it first.
+    pub plan: UninstallReport,
+}
+
+/// How much of a teardown an [`Escalation`] performs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Covers {
+    /// The whole teardown. Nothing is left for the unprivileged caller.
+    Everything,
+    /// Only the system-scope service that a *user*-scope install registered
+    /// (the templated resolver / publisher layout). The caller must call
+    /// [`plan`] again afterwards to remove the user-scope configuration.
+    SystemServiceOnly,
+}
+
+/// What a frontend must do next.
+pub enum Next {
+    /// Nothing is installed at this scope; the report says so.
+    Nothing(UninstallReport),
+    /// Perform this elevated step, then call [`plan`] again with the same
+    /// input — the second pass sees its effect. Being told to escalate twice
+    /// means the elevated step did not take effect.
+    Escalate(Escalation),
+    /// Confirm this plan with the operator, then hand it to [`apply`].
+    Apply(Prepared),
+}
+
+/// This host's registration with the CA, which teardown must withdraw *before*
+/// deleting the credentials that authenticate the withdrawal.
+#[derive(Debug, Clone, Copy)]
+pub struct Deregistration {
+    /// The admin server leaving the map.
+    pub server: std::net::SocketAddr,
+    /// The CA it registered with.
+    pub ca: std::net::SocketAddr,
+}
+
+/// A verified teardown, ready to apply. Holding one means every question the
+/// engine can answer has been answered: what is installed, what root is
+/// needed, what will be destroyed. All that is left is the operator's consent.
+pub struct Prepared {
+    params: UninstallParams,
+    root: Option<PathBuf>,
+    record: Option<InstallRecord>,
+    plan: UninstallReport,
+    /// A system-scope service a user-scope install registered, removable
+    /// here because this process already holds root.
+    cross: Option<UninstallParams>,
+    cross_plan: Option<UninstallReport>,
+    deregister: Option<Deregistration>,
+}
+
+impl Prepared {
+    /// What this teardown will do at its primary scope.
+    pub fn plan(&self) -> &UninstallReport {
+        &self.plan
+    }
+
+    /// A system-scope service this run will also remove, when a user-scope
+    /// install registered one and this process holds root.
+    pub fn cross_scope_plan(&self) -> Option<&UninstallReport> {
+        self.cross_plan.as_ref()
+    }
+
+    /// The install being torn down, when it left a provenance marker.
+    pub fn record(&self) -> Option<&InstallRecord> {
+        self.record.as_ref()
+    }
+
+    /// The registration this teardown will withdraw from the CA.
+    pub fn deregistration(&self) -> Option<Deregistration> {
+        self.deregister
+    }
+
+    /// Whether applying destroys the CA private key — the one irreversible
+    /// thing an uninstall can do.
+    pub fn destroys_ca(&self) -> bool {
+        self.plan.ca_destroyed.is_some()
+            || self.cross_plan.as_ref().is_some_and(|p| p.ca_destroyed.is_some())
+    }
+}
+
+/// Resolve the teardown: what scope, what is installed, whether root is
+/// needed, and what will be destroyed. Writes nothing.
+pub fn plan(input: &UninstallInput) -> Result<Next> {
+    plan_with(input, service::is_elevated()?, preview)
+}
+
+fn plan_with(
+    input: &UninstallInput,
+    elevated: bool,
+    preview: impl Fn(&UninstallParams) -> Result<UninstallReport>,
+) -> Result<Next> {
+    let scope = match input.scope {
+        Some(scope) => scope,
+        None => detect_primary_scope(),
+    };
+    let params = params_for(input, scope, input.config_dir.clone());
+    // Elevate before previewing anything, so the plan the operator sees is the
+    // one root sees — an unprivileged process may not be able to list /etc.
+    if scope == ServiceScope::System && !elevated {
+        return Ok(Next::Escalate(escalation(
+            input,
+            &params,
+            Covers::Everything,
+            UninstallReport::default(),
+        )?));
+    }
+    let plan = preview(&params)?;
+    // A templated install (resolver, publisher) registers a *system*-scope
+    // service even though the config it writes is user-scope, so it never
+    // appears in the user-scope probe. A user-scope teardown must still catch
+    // it, or `install` then `uninstall` leaves the daemons running. Probe
+    // uncertainty is fatal: that service may be reading the configuration we
+    // are about to delete.
+    let cross = match scope {
+        // Never inherit a user-scope --config-dir override: it named the user
+        // directory, not /etc.
+        ServiceScope::User => Some(params_for(input, ServiceScope::System, None)),
+        ServiceScope::System => None,
+    };
+    let cross_plan = match &cross {
+        Some(cross) => {
+            let found = preview(cross).context(
+                "could not verify the system-scope service; refusing to remove user \
+                 configuration",
+            )?;
+            (!found.is_empty()).then_some(found)
+        }
+        None => None,
+    };
+    if let Some(cross_plan) = &cross_plan
+        && !elevated
+    {
+        return Ok(Next::Escalate(escalation(
+            input,
+            cross.as_ref().expect("a cross plan implies a cross probe"),
+            Covers::SystemServiceOnly,
+            cross_plan.clone(),
+        )?));
+    }
+    if plan.is_empty() && cross_plan.is_none() {
+        return Ok(Next::Nothing(plan));
+    }
+    let root = config_root(input, scope);
+    Ok(Next::Apply(Prepared {
+        record: root.as_deref().and_then(load_install_record),
+        deregister: root.as_deref().and_then(pending_deregistration),
+        cross: cross.filter(|_| cross_plan.is_some()),
+        cross_plan,
+        plan,
+        root,
+        params,
+    }))
+}
+
+/// Tear the install down, in the one order that works: stop every supervisor
+/// that may be reading the configuration, withdraw this host from the CA's map
+/// while the credentials that authenticate the withdrawal still exist, and
+/// only then delete the configuration.
+pub async fn apply(
+    ans: &mut dyn Answerer,
+    prepared: Prepared,
+) -> Result<UninstallReport> {
+    let Prepared { params, root, plan: _, cross, cross_plan: _, deregister, record: _ } =
+        prepared;
+    let mut report = UninstallReport::default();
+    if let Some(cross) = cross {
+        report.absorb(finish(&cross)?);
+    }
+    if let Some(deregister) = deregister {
+        deregister_admin_server(ans, root.as_deref(), deregister).await;
+    }
+    report.absorb(finish(&params)?);
+    Ok(report)
+}
+
+fn finish(params: &UninstallParams) -> Result<UninstallReport> {
+    match prepare(params)? {
+        PreparedUninstall::Complete(report) => Ok(report),
+        PreparedUninstall::RemoveConfig(removal) => {
+            let lock = ConfigDirLock::acquire(removal.root())?;
+            removal.finish(&lock)
+        }
+    }
+}
+
+fn params_for(
+    input: &UninstallInput,
+    scope: ServiceScope,
+    config_dir: Option<PathBuf>,
+) -> UninstallParams {
+    UninstallParams {
+        scope,
+        service_name: input
+            .service_name
+            .clone()
+            .unwrap_or_else(|| ServiceParams::DEFAULT_NAME.to_string()),
+        for_user: input.for_user.clone(),
+        config_dir,
+        remove_ca: input.remove_ca,
+    }
+}
+
+fn escalation(
+    input: &UninstallInput,
+    params: &UninstallParams,
+    covers: Covers,
+    plan: UninstallReport,
+) -> Result<Escalation> {
+    Ok(Escalation {
+        scope: ServiceScope::System,
+        service_name: params.service_name.clone(),
+        // Resolve the account *before* escalating: the elevated child sees
+        // root, not the user whose templated unit this is.
+        for_user: service::resolve_for_user(input.for_user.clone())?,
+        config_dir: params.config_dir.clone(),
+        remove_ca: input.remove_ca,
+        covers,
+        plan,
+    })
+}
+
+/// The scope to tear down when the operator named none: prefer a user-scope
+/// install record (the common templated case — user config plus a system
+/// service the cross-probe catches), else a system-scope record, else user.
+fn detect_primary_scope() -> ServiceScope {
+    let user_record = paths::user_config_root()
+        .map(|r| r.join("install.json").exists())
+        .unwrap_or(false);
+    if user_record {
+        return ServiceScope::User;
+    }
+    if paths::system_config_root().join("install.json").exists() {
+        return ServiceScope::System;
+    }
+    ServiceScope::User
+}
+
+/// The config root this teardown targets, honouring a `config_dir` override.
+fn config_root(input: &UninstallInput, scope: ServiceScope) -> Option<PathBuf> {
+    match &input.config_dir {
+        Some(d) => Some(d.clone()),
+        None => match scope {
+            ServiceScope::User => paths::user_config_root().ok(),
+            ServiceScope::System => Some(paths::system_config_root()),
+        },
+    }
+}
+
+/// The install provenance marker, when there is one. Reporting the role is a
+/// convenience, never a gate: a hand-rolled config simply has none.
+fn load_install_record(root: &Path) -> Option<InstallRecord> {
+    let path = root.join("install.json");
+    path.exists().then(|| InstallRecord::load(&path).ok()).flatten()
+}
+
+/// Whether this host has a registration to withdraw. A non-CA admin server
+/// registers its facts with the CA, so on teardown it should deregister or
+/// the CA keeps a dead entry until `admin ca remove-server`. The CA host owns
+/// the map and has nothing to deregister from. Unix-only: the admin-server
+/// daemon is, so only a unix host ever has one.
+#[cfg(unix)]
+fn pending_deregistration(root: &Path) -> Option<Deregistration> {
+    let cfg = crate::admin_server_config::load(&root.join("admin-server.json")).ok()?;
+    if cfg.roles.ca.is_some() {
+        return None;
+    }
+    Some(Deregistration { server: cfg.listen, ca: cfg.ca_addr? })
+}
+
+#[cfg(not(unix))]
+fn pending_deregistration(_root: &Path) -> Option<Deregistration> {
+    None
+}
+
+/// Withdraw this host from the CA's map. Best-effort and reported, never
+/// fatal: a CA that cannot be reached must not strand an operator with a
+/// half-removed install.
+#[cfg(unix)]
+async fn deregister_admin_server(
+    ans: &mut dyn Answerer,
+    root: Option<&Path>,
+    what: Deregistration,
+) {
+    use crate::transport;
+    let result = async {
+        let root = root.context("deregistration requires a config root")?;
+        let cfg = crate::admin_server_config::load(&root.join("admin-server.json"))?;
+        let cert = std::fs::read(&cfg.serving_cert).with_context(|| {
+            format!("reading serving cert {}", cfg.serving_cert.display())
+        })?;
+        let key = std::fs::read(&cfg.serving_key).with_context(|| {
+            format!("reading serving key {}", cfg.serving_key.display())
+        })?;
+        let trusted = std::fs::read(&cfg.trusted)
+            .with_context(|| format!("reading trust bundle {}", cfg.trusted.display()))?;
+        let roots = crate::load_roots(&trusted)?;
+        let home_ca = transport::home_ca_from_chain(&cert)?;
+        let client = transport::AuthenticatedPkiClient::from_pem(roots, &cert, &key)?;
+        transport::deregister(&client, what.ca, home_ca).await?;
+        anyhow::Ok(())
+    }
+    .await;
+    match result {
+        Ok(()) => ans.note(&format!(
+            "admin server: deregistered {} from the CA at {}",
+            what.server, what.ca
+        )),
+        Err(e) => ans.warn(&format!(
+            "admin server: could not deregister from the CA at {} ({e:#}); the CA will \
+             keep this server in its map until `netidx admin ca remove-server`",
+            what.ca
+        )),
+    }
+}
+
+#[cfg(not(unix))]
+async fn deregister_admin_server(
+    _ans: &mut dyn Answerer,
+    _root: Option<&Path>,
+    _what: Deregistration,
+) {
 }
 
 pub fn preview(p: &UninstallParams) -> Result<UninstallReport> {
@@ -208,10 +576,12 @@ fn cleanup(
         .collect::<Result<_>>()?;
 
     for path in entries {
-        let is_ca = path.file_name().and_then(|s| s.to_str()) == Some("ca");
-        if is_ca && !p.remove_ca {
-            report.kept.push((path, KeepReason::CaPreserved));
-            continue;
+        if path.file_name().and_then(|s| s.to_str()) == Some("ca") {
+            if !p.remove_ca {
+                report.kept.push((path, KeepReason::CaPreserved));
+                continue;
+            }
+            report.ca_destroyed = Some(path.clone());
         }
         if matches!(mode, CleanupMode::Apply(_)) {
             remove_any(&path)?;
@@ -257,6 +627,7 @@ fn remove_any(path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::provenance::InstallRole;
     use std::fs;
 
     /// Build a fake config root populated with the files / dirs a
@@ -299,12 +670,16 @@ mod tests {
     }
 
     fn apply(p: &UninstallParams) -> Result<UninstallReport> {
-        match prepare(p)? {
-            PreparedUninstall::Complete(report) => Ok(report),
-            PreparedUninstall::RemoveConfig(removal) => {
-                let lock = ConfigDirLock::acquire(removal.root())?;
-                removal.finish(&lock)
-            }
+        finish(p)
+    }
+
+    fn input(config_dir: PathBuf) -> UninstallInput {
+        UninstallInput {
+            scope: Some(ServiceScope::User),
+            service_name: Some(test_service_name()),
+            for_user: None,
+            config_dir: Some(config_dir),
+            remove_ca: false,
         }
     }
 
@@ -469,5 +844,150 @@ mod tests {
         assert!(result.is_err());
         assert!(root.join("resolver.json").exists());
         assert!(root.join("ca/private.key").exists());
+    }
+
+    /// Nothing else in the system-scope probe is under test, so drive `plan`
+    /// with a stub that reports a clean /etc — otherwise the result depends on
+    /// whether the machine running the tests happens to have netidx installed.
+    fn nothing_at_system_scope(
+        p: &UninstallParams,
+    ) -> impl Fn(&UninstallParams) -> Result<UninstallReport> + use<> {
+        let primary = p.clone();
+        move |q: &UninstallParams| {
+            if q.config_dir == primary.config_dir {
+                preview(q)
+            } else {
+                Ok(UninstallReport::default())
+            }
+        }
+    }
+
+    #[test]
+    fn a_teardown_that_keeps_the_ca_does_not_claim_to_destroy_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("netidx");
+        populate_root(&root);
+
+        let keep = input(root.clone());
+        let stub = nothing_at_system_scope(&params(root.clone()));
+        let Next::Apply(prepared) = plan_with(&keep, true, &stub).unwrap() else {
+            panic!("a populated root has something to remove")
+        };
+        assert!(!prepared.destroys_ca());
+        assert_eq!(prepared.plan().ca_destroyed, None);
+
+        let mut destroy = keep;
+        destroy.remove_ca = true;
+        let Next::Apply(prepared) = plan_with(&destroy, true, &stub).unwrap() else {
+            panic!("a populated root has something to remove")
+        };
+        // Recorded where the decision was made, so nothing has to re-derive it
+        // by matching a path's basename.
+        assert!(prepared.destroys_ca());
+        assert_eq!(prepared.plan().ca_destroyed, Some(root.join("ca")));
+    }
+
+    #[test]
+    fn an_empty_host_has_nothing_to_tear_down() {
+        let dir = tempfile::tempdir().unwrap();
+        let absent = input(dir.path().join("never-existed"));
+        let stub = nothing_at_system_scope(&params(dir.path().join("never-existed")));
+        let Next::Nothing(report) = plan_with(&absent, true, &stub).unwrap() else {
+            panic!("an absent root has nothing to remove")
+        };
+        assert!(report.is_empty());
+    }
+
+    #[test]
+    fn a_teardown_names_the_role_it_is_removing() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("netidx");
+        populate_root(&root);
+        let record = InstallRecord::new(InstallRole::Resolver, "/", "tls", None, None);
+        fs::write(root.join("install.json"), serde_json::to_vec(&record).unwrap())
+            .unwrap();
+
+        let stub = nothing_at_system_scope(&params(root.clone()));
+        let Next::Apply(prepared) = plan_with(&input(root), true, &stub).unwrap() else {
+            panic!("a populated root has something to remove")
+        };
+        assert_eq!(prepared.record().map(|r| r.role), Some(InstallRole::Resolver));
+    }
+
+    /// A templated resolver writes user-scope config but registers a
+    /// system-scope service, and only root can remove that service. The
+    /// engine learns this from the probe, not from the role: a workstation
+    /// with the same role would not escalate, and a hand-rolled publisher
+    /// with no system service must not either.
+    #[test]
+    fn root_is_required_because_a_system_service_is_there_not_because_of_the_role() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("netidx");
+        populate_root(&root);
+        let system_service = |q: &UninstallParams| match q.scope {
+            ServiceScope::System => Ok(UninstallReport {
+                service_was_installed: true,
+                ..UninstallReport::default()
+            }),
+            ServiceScope::User => preview(q),
+        };
+
+        let Next::Escalate(escalation) =
+            plan_with(&input(root.clone()), false, system_service).unwrap()
+        else {
+            panic!("an unprivileged teardown must escalate for a system service")
+        };
+        assert_eq!(escalation.covers, Covers::SystemServiceOnly);
+        assert_eq!(escalation.scope, ServiceScope::System);
+        // The elevated run must not inherit the user-scope --config-dir: it
+        // named the user directory, not /etc.
+        assert_eq!(escalation.config_dir, None);
+
+        // Already root: the same host removes both scopes in one pass.
+        let Next::Apply(prepared) =
+            plan_with(&input(root), true, system_service).unwrap()
+        else {
+            panic!("a root teardown removes the system service directly")
+        };
+        assert!(prepared.cross_scope_plan().is_some());
+    }
+
+    #[test]
+    fn a_system_scope_teardown_escalates_before_it_previews_anything() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut system = input(dir.path().join("netidx"));
+        system.scope = Some(ServiceScope::System);
+        let Next::Escalate(escalation) = plan_with(&system, false, |_| {
+            panic!("previewing before escalation shows the unprivileged view")
+        })
+        .unwrap() else {
+            panic!("an unprivileged system-scope teardown must escalate")
+        };
+        assert_eq!(escalation.covers, Covers::Everything);
+    }
+
+    /// The report a caller sees after a teardown that spans two scopes must
+    /// account for both, or the operator is told less was removed than was.
+    #[test]
+    fn a_combined_report_accounts_for_every_scope() {
+        let mut report = UninstallReport {
+            service_was_installed: false,
+            removed: vec![PathBuf::from("/etc/netidx")],
+            kept: vec![],
+            ca_destroyed: None,
+        };
+        report.absorb(UninstallReport {
+            service_was_installed: true,
+            removed: vec![PathBuf::from("/home/u/.config/netidx")],
+            kept: vec![(
+                PathBuf::from("/home/u/.config/netidx/ca"),
+                KeepReason::CaPreserved,
+            )],
+            ca_destroyed: Some(PathBuf::from("/etc/netidx/ca")),
+        });
+        assert!(report.service_was_installed);
+        assert_eq!(report.removed.len(), 2);
+        assert_eq!(report.kept.len(), 1);
+        assert_eq!(report.ca_destroyed, Some(PathBuf::from("/etc/netidx/ca")));
     }
 }

@@ -26,8 +26,10 @@ pub(crate) use netidx_admin::plan::service::ServiceNeed;
 
 /// Env var that signals "I'm the elevated child" to skip
 /// post-install confirmations and just run the requested action.
-/// Public so the install-flow can read it (`std::env::var_os`).
-pub(super) const ELEVATED_ENV: &str = "NETIDX_ELEVATED";
+/// Only the unix re-exec paths set it; on Windows the library reads it
+/// directly to decide [`is_elevated`].
+#[cfg(unix)]
+pub(super) use netidx_admin::service::ELEVATED_ENV;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ScopeArg {
@@ -215,24 +217,7 @@ fn status(a: CommonArgs) -> Result<()> {
 
 /// True if we're already running as root (uid 0). The system-scope
 /// install path skips sudo when this is true.
-#[cfg(unix)]
-pub(super) fn is_elevated() -> Result<bool> {
-    Ok(nix::unistd::geteuid().is_root())
-}
-
-#[cfg(windows)]
-pub(super) fn is_elevated() -> Result<bool> {
-    // Honour the explicit sentinel — a re-exec'd child must not loop
-    // through another elevation attempt.
-    if std::env::var_os(ELEVATED_ENV).is_some() {
-        return Ok(true);
-    }
-    // Probe by writing a dummy file under %SYSTEMROOT%. Cheap, doesn't
-    // depend on the windows-api crate. A real implementation would
-    // check token elevation via the SCM API, but this is a stub-grade
-    // probe and Windows install is a stub anyway.
-    Ok(false)
-}
+pub(super) use netidx_admin::service::is_elevated;
 
 /// Determine the username the service should run as. Honours
 /// `--for-user` if provided; otherwise reads `$SUDO_USER` (set by

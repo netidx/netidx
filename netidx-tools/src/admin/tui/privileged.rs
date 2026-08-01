@@ -109,44 +109,23 @@ fn system_install_outcome(
     }
 }
 
-/// Tear down an install whose config lives at `config_scope` in `config_dir`.
+/// Perform the one elevated step a teardown needs, as the engine described it.
 ///
-/// Runs the full `netidx admin uninstall` command so its cross-scope logic
-/// applies — a resolver/publisher writes **user** config but registers a
-/// **system** service, so a user-scope teardown must also drop that templated
-/// service (which needs root; `needs_root` says so). A workstation (user config
-/// + user service) needs no root. `--config-dir` is passed explicitly so it
-/// still targets the right directory when run as root, and `--for-user` names
-/// the system-service instance.
+/// The engine already decided *that* root is required, from an actual probe of
+/// what is installed; this only becomes root and runs the same
+/// `netidx admin uninstall` the strict CLI would — the argument list comes
+/// from [`elevated_argv`](super::super::uninstall::elevated_argv), so the two
+/// frontends cannot spawn different commands.
 pub(super) fn uninstall(
     terminal: &mut ratatui::DefaultTerminal,
-    config_scope: ServiceScope,
-    config_dir: std::path::PathBuf,
-    needs_root: bool,
-    remove_ca: bool,
+    escalation: &netidx_admin::uninstall::Escalation,
 ) -> Result<String> {
     let exe = current_exe()?;
-    let mut args = vec![
-        "admin".to_string(),
-        "uninstall".to_string(),
-        "--scope".to_string(),
-        scope_flag(config_scope).to_string(),
-        "--config-dir".to_string(),
-        config_dir.display().to_string(),
-        "--yes".to_string(),
-    ];
-    if needs_root {
-        // Name the templated system service's instance user explicitly — under
-        // `su` there is no $SUDO_USER for the child to infer it from.
-        let for_user = netidx_admin::service::resolve_for_user(None)?;
-        args.push("--for-user".to_string());
-        args.push(for_user);
-    }
-    if remove_ca {
-        args.push("--with-ca".to_string());
-    }
-    run_privileged(terminal, &exe, &args, needs_root, "tear down the install")?;
-    Ok("removed the install".to_string())
+    let mut args = super::super::uninstall::elevated_argv(escalation);
+    // The operator confirmed in the TUI; the elevated child must not prompt.
+    args.push("--yes".to_string());
+    run_privileged(terminal, &exe, &args, true, "tear down the install")?;
+    Ok("removed the system-scope install".to_string())
 }
 
 /// Suspend the TUI and drop the operator into their `$EDITOR` on `seed`,
@@ -161,14 +140,6 @@ pub(super) fn edit_in_terminal(
     with_suspended(terminal, || {
         super::super::editor::edit_with_validation(seed, |s| validate(s))
     })
-}
-
-/// The `--scope` flag value for a scope.
-fn scope_flag(scope: ServiceScope) -> &'static str {
-    match scope {
-        ServiceScope::User => "user",
-        ServiceScope::System => "system",
-    }
 }
 
 fn user_params(service_name: &str) -> Result<ServiceParams> {
