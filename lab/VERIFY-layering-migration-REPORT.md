@@ -1,6 +1,6 @@
 # Lab verification report — the netidx-admin layering migration
 
-Covers `93c95e4e`..`ef82e15e` on the 3-site WAN lab, from a clean slate,
+Covers `93c95e4e`..`80790626` on the 3-site WAN lab, from a clean slate,
 through the installed OS service. Plan: `VERIFY-layering-migration.md`.
 
 Four complete build-outs, each a two-level hierarchy with cross-site data:
@@ -18,8 +18,10 @@ domain's data-plane scheme, so a krb5 repeat exercises nothing new.
 
 ## Findings
 
-Ten, all found by running the plan, all fixed on the branch with a test
+Eleven, all found by running the plan, all fixed on the branch with a test
 where a test could have caught it. Each was reproduced before it was called.
+Number 11 was raised as an observation rather than a defect and became a
+finding once Eric ruled on it.
 
 | # | Commit | What |
 |---|---|---|
@@ -33,6 +35,7 @@ where a test could have caught it. Each was reproduced before it was called.
 | 8 | `310c6558` | The Admin Domain tab refused the whole of Windows for a reason that stopped being true three commits before the migration started |
 | 9 | `0aa8ae2e` | `$EDITOR` unset fell back to `vi`, which is not on a Windows host |
 | 10 | `ef82e15e` | The perms auto-seed wrote a group grant that `--id-map-mode none` can never match |
+| 11 | `80790626` | A delegated subtree's auth prompt defaulted to `tls` whatever its parent ran |
 
 Two of them — 6 and 8 — are the same shape: a commit fixed something behind
 a door nobody could open. Worth watching for; the fix in both cases was to
@@ -40,7 +43,7 @@ open the door, not to redo the fix.
 
 ## Behaviour bullets
 
-Every `Behaviour:` bullet in the 21 commits, with how it was verified.
+Every `Behaviour:` bullet in the 22 commits, with how it was verified.
 `git log --grep='^Behaviour:' 93c95e4e..HEAD` enumerates the same set.
 
 ### `6000d75e` one login ceremony
@@ -180,6 +183,11 @@ Every `Behaviour:` bullet in the 21 commits, with how it was verified.
   editor-backed panel was driven on Windows in this run. The nearest
   thing verified is that the panels are now *reachable* there.
 
+### `80790626` a delegated child is offered its parent's auth scheme
+- **exercised** (AP host, against the TUI-built krb5 hierarchy) the
+  delegated-subtree prompt comes up with `krb5` selected; `tls` and
+  `anonymous` are still one keystroke away.
+
 ### `ef82e15e` don't seed a group grant where there are no groups
 - **exercised** (Pass C, CLI) same install twice on one host:
   `--id-map-mode none` ⇒ `id_map_type: DoNotMap`, no `users` row, warning
@@ -206,15 +214,6 @@ Every `Behaviour:` bullet in the 21 commits, with how it was verified.
 
 ## Not findings — checked and left alone
 
-- **A delegated child's auth-scheme default is `tls`, even under a krb5
-  parent.** A peer member imports its domain's scheme and is never asked;
-  a delegated child is asked, and defaults to `tls`. That is deliberate
-  and documented at `plan/install/resolver.rs:214` — "a /eu subtree may
-  run krb5 under a TLS parent — so only the admin-domain/CA decision
-  comes from the parent, never its auth". Defaulting to the parent's
-  scheme would make the common case one keystroke, but it is a UX
-  preference against a documented decision with no correctness
-  consequence. Left for Eric to rule on.
 - **A torn-down publisher / workstation leaves its leaf certificate live
   at the CA.** Deregistration is an admin-server concern; a leaf identity
   is revoked by an admin (`ca revoke`), which is why reinstalling under a
