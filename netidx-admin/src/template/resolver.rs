@@ -68,10 +68,12 @@ pub struct ResolverParams {
     /// `None` AND [`Self::with_perms_file`] is `true` (the default),
     /// the template auto-seeds via
     /// [`crate::perms::default_seed`] — full rights for the
-    /// authenticated user under `/users/$[user]`, read+write for the
-    /// `users` group under `/users`. That gives a fresh install a
-    /// working "per-user playground" without forcing the operator to
-    /// hand-author a perms map up front.
+    /// authenticated user under `/users/$[user]`, and read+write for the
+    /// `users` group at the base wherever group names resolve at all
+    /// ([`IdMapMode::None`] has no groups, so that entry is omitted and a
+    /// warning says so). That gives a fresh install a working "per-user
+    /// playground" without forcing the operator to hand-author a perms map
+    /// up front.
     ///
     /// To skip emitting a perms file entirely, set `with_perms_file`
     /// to `false`.
@@ -221,12 +223,15 @@ pub fn resolver(p: &ResolverParams) -> Result<RenderedTemplate> {
         .bind_addr(bind_addr)
         .auth(resolver_auth_from(&p.auth, &tls_dest))
         .read_gated(p.read_gated);
+    // Perms keyed on the raw identity string — no daemon, no `/bin/id`, and
+    // so no group memberships either. Decided once: the member config and the
+    // perms seed below must not disagree about whether groups exist.
+    let do_not_map = id_map_socket_path.is_none() && matches!(p.id_map, IdMapMode::None);
     if let Some(sock) = &id_map_socket_path {
         member_builder
             .id_map_type(IdMapType::Socket)
             .id_map_command(ArcStr::from(sock.to_string_lossy().as_ref()));
-    } else if matches!(p.id_map, IdMapMode::None) {
-        // Perms keyed on the raw identity string — no daemon, no `/bin/id`.
+    } else if do_not_map {
         member_builder.id_map_type(IdMapType::DoNotMap);
     }
     // else: the builder default (`id_map_type: Command`, no command ⇒
@@ -274,8 +279,15 @@ pub fn resolver(p: &ResolverParams) -> Result<RenderedTemplate> {
             _ if p.base.is_empty() => "/",
             _ => p.base.as_str(),
         };
-        let mut seed =
-            p.perms_seed.clone().unwrap_or_else(|| crate::perms::default_seed(base_str));
+        let groups = if do_not_map {
+            crate::perms::Groups::DoNotResolve
+        } else {
+            crate::perms::Groups::Resolve
+        };
+        let mut seed = p
+            .perms_seed
+            .clone()
+            .unwrap_or_else(|| crate::perms::default_seed(base_str, groups));
         if let Some(entity) = resolver_self_entity(&p.auth) {
             crate::perms::add_entry(&mut seed, base_str, entity, "swlpd").with_context(
                 || format!("seeding resolver self perms ({base_str} → {entity} → swlpd)"),
@@ -285,6 +297,19 @@ pub fn resolver(p: &ResolverParams) -> Result<RenderedTemplate> {
     } else {
         None
     };
+    // The seed's shared grant is a group entry, and without id mapping there
+    // are no groups to be a member of. Leaving it out is right, but silence
+    // would leave the operator wondering why identities that authenticate
+    // fine can reach nothing but their own subtree.
+    if do_not_map && p.perms_seed.is_none() && perms_file.is_some() {
+        warnings.push(arcstr::literal!(
+            "id-map mode `none` keys permissions on the raw identity string, \
+             so there are no groups — the usual shared `users` grant was not \
+             seeded and each identity can reach only its own subtree under \
+             `users/`. Grant wider access by naming identities directly with \
+             `netidx admin component perms set`"
+        ));
+    }
     // Don't silently drop an explicitly-supplied seed on the anonymous
     // path — say why it wasn't written.
     if anonymous && p.perms_seed.is_some() {
@@ -775,12 +800,18 @@ mod tests {
         };
         // `anon_params` uses base "/", so auto-seed should anchor at
         // root — that's what we compare against.
-        assert_eq!(collect(seeded), collect(&crate::perms::default_seed("/")));
+        assert_eq!(
+            collect(seeded),
+            collect(&crate::perms::default_seed("/", crate::perms::Groups::Resolve))
+        );
         // Validate the on-disk shape after apply — must parse back
         // into the same map.
         rt.apply_test(out.path()).unwrap();
         let loaded = crate::perms::load_perms(out.path().join("perms.json")).unwrap();
-        assert_eq!(collect(&loaded), collect(&crate::perms::default_seed("/")));
+        assert_eq!(
+            collect(&loaded),
+            collect(&crate::perms::default_seed("/", crate::perms::Groups::Resolve))
+        );
         // And the round-trip-through-resolver-validation step
         // accepts it (the $[user] dynamic entry shape can trip up
         // PMap::from_file if the seed is malformed).

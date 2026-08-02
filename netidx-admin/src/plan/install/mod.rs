@@ -791,7 +791,10 @@ mod tests {
             serde_json::from_str(&raw).unwrap();
         let mut rt = empty_rt();
         rt.resolver_config = Some((resolver_path.clone(), resolver.into()));
-        rt.perms_file = Some((perms_path.clone(), crate::perms::default_seed("/eu")));
+        rt.perms_file = Some((
+            perms_path.clone(),
+            crate::perms::default_seed("/eu", crate::perms::Groups::Resolve),
+        ));
 
         let err = rt.apply_test(dir.path()).unwrap_err();
         assert!(format!("{err:#}").contains("permission entry for child: /eu"));

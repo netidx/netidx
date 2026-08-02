@@ -129,10 +129,28 @@ pub fn empty() -> PMap {
     PMap(HashMap::new())
 }
 
+/// Whether the resolver a seed is being written for can resolve an
+/// identity's group memberships.
+///
+/// `IdMapType::DoNotMap` reports every identity as belonging to no group at
+/// all (`os::unix::Mapper::groups` returns the identity itself and an empty
+/// group list), so a perms entry naming a group is inert by construction
+/// there. Seeding one would write a rule that can never match — the operator
+/// reads a shared grant in their perms file and gets permission denied.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Groups {
+    /// Group names in perms resolve — an id-map daemon, `/bin/id` / nsswitch,
+    /// or unix uids behind local auth.
+    Resolve,
+    /// They do not: perms are keyed on the raw identity string.
+    DoNotResolve,
+}
+
 /// Sensible starter perms for a freshly-installed resolver. The
 /// `users`-group rule anchors at `base` — the resolver's own
 /// subtree — so the seed says "members of `users` can subscribe /
-/// write / list anywhere this resolver controls". The per-user
+/// write / list anywhere this resolver controls". It is omitted
+/// entirely when `groups` is [`Groups::DoNotResolve`]. The per-user
 /// playground lives at `<base>/users/$[user]` so it's always under a
 /// real directory: netidx's PMap loader (see
 /// `auth.rs::PMap::from_file`) rejects a `$[user]` entry whose
@@ -155,7 +173,7 @@ pub fn empty() -> PMap {
 /// `<base>/users`" out of the box. Operators who want a different
 /// default can override `perms_seed` on the template or edit the
 /// emitted `perms.json` directly.
-pub fn default_seed(base: &str) -> PMap {
+pub fn default_seed(base: &str, groups: Groups) -> PMap {
     use netidx::path::Path;
     let mut p = empty();
     // Normalise base to a canonical netidx path. `""` or unset bases
@@ -169,8 +187,10 @@ pub fn default_seed(base: &str) -> PMap {
     // group `users`. So this is just a normal entry whose entity
     // happens to be a group name; the resolver matches it when the
     // connecting principal is a member of that group.
-    add_entry(&mut p, base_path.as_ref(), "users", "swl")
-        .expect("static seed must validate");
+    if groups == Groups::Resolve {
+        add_entry(&mut p, base_path.as_ref(), "users", "swl")
+            .expect("static seed must validate");
+    }
     // Per-user playground under `<base>/users/$[user]`. The intermediate
     // `users` segment is mandatory: the PMap loader unwraps
     // `Path::dirname(...)` on `$[user]` paths, and dirname of a
@@ -210,7 +230,7 @@ mod tests {
 
     #[test]
     fn default_seed_root_base_anchors_at_root() {
-        let p = default_seed("/");
+        let p = default_seed("/", Groups::Resolve);
         // Users group `swl` at the resolver's base (`/` here).
         assert_eq!(lookup(&p, "/", "users").map(|s| s.as_str()), Some("swl"));
         // Per-user dynamic entry under `<base>/users/$[user]` —
@@ -223,13 +243,31 @@ mod tests {
         );
     }
 
+    /// A resolver that does not map ids reports every identity as belonging
+    /// to no group, so the shared `users` grant could never match — the seed
+    /// wrote a rule that read like access and denied it. The per-user
+    /// playground stays: `$[user]` is the raw identity, which is exactly what
+    /// this mode keys on.
+    #[test]
+    fn without_id_mapping_the_seed_has_no_group_it_could_mean() {
+        let p = default_seed("/", Groups::DoNotResolve);
+        assert!(
+            lookup(&p, "/", "users").is_none(),
+            "a group grant is inert without id mapping and must not be seeded"
+        );
+        assert_eq!(
+            lookup(&p, "/users/$[user]", "$[user]").map(|s| s.as_str()),
+            Some("swlpd"),
+        );
+    }
+
     #[test]
     fn default_seed_child_base_anchors_under_base() {
         // A workstation-style resolver attached at /local should
         // anchor the seed entries at /local and /local/users/$[user]
         // — not the old root-level /users paths, which sit in a
         // different subtree and are useless to this resolver.
-        let p = default_seed("/local");
+        let p = default_seed("/local", Groups::Resolve);
         assert_eq!(lookup(&p, "/local", "users").map(|s| s.as_str()), Some("swl"),);
         assert_eq!(
             lookup(&p, "/local/users/$[user]", "$[user]").map(|s| s.as_str()),
@@ -244,7 +282,7 @@ mod tests {
     fn default_seed_empty_base_collapses_to_root() {
         // Defensive: an empty `base` arg should be treated as `/`
         // so callers don't have to special-case it.
-        let p = default_seed("");
+        let p = default_seed("", Groups::Resolve);
         assert_eq!(lookup(&p, "/", "users").map(|s| s.as_str()), Some("swl"));
         assert_eq!(
             lookup(&p, "/users/$[user]", "$[user]").map(|s| s.as_str()),
@@ -259,7 +297,7 @@ mod tests {
         // future drift in `default_seed` here rather than at first
         // resolver-start.
         use netidx::resolver_server::config;
-        let p = default_seed("/");
+        let p = default_seed("/", Groups::Resolve);
         let file = config::file::ConfigBuilder::default()
             .member_servers(vec![
                 config::file::MemberServerBuilder::default()
