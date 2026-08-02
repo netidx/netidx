@@ -122,6 +122,22 @@ stood at `mark`. The renderer models only what ratatui emits and does not track
 partial redraws, so read newly-drawn regions and ignore leftovers from an
 earlier frame.
 
+## Satellites have no internet
+
+`netidx-eu` and `netidx-ap` are isolated — the router is their only path off
+subnet, and it does not NAT them out. `apt-get install` on an EU/AP guest
+fails to resolve `deb.debian.org`. Relay from an HQ guest instead:
+
+```sh
+ssh root@192.168.50.12 'cd /tmp && apt-get download tmux libutempter0'
+ssh root@192.168.50.12 'tar cf - -C /tmp tmux_*.deb libutempter0_*.deb' \
+  | ssh root@192.168.60.15 'tar xf - -C /tmp && dpkg -i /tmp/*.deb'
+```
+
+`dpkg -i` will not pull dependencies, so a shared library the package needs
+may have to be copied the same way (`tar` it out of
+`/usr/lib/x86_64-linux-gnu` and `ldconfig` on the far side).
+
 ## Clean
 
 VMs are throwaway (snapshot/discard). Per-host reset over SSH (root key-auth):
