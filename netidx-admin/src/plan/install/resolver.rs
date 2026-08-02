@@ -211,18 +211,13 @@ pub async fn run_resolver(
             input.base = subtree;
         }
     }
-    // A delegated child (`--parent-admin-server`) keeps the data-plane auth
-    // the operator chose — a /eu subtree may run krb5 under a TLS parent —
-    // so only the admin-domain/CA decision comes from the parent, never its
-    // auth. A plain discovered peer still imports its admin domain's scheme. The
-    // auth *choice* itself is deferred until after the control plane (below):
-    // founding a new admin domain sets up the CA first, then asks how the data
-    // plane authenticates.
-    let imported_auth = if input.parent_admin_server.is_some() {
-        None
-    } else {
-        probe.have().and_then(admin_domain_auth_kind)
-    };
+    // The auth *choice* itself is deferred until after the control plane
+    // (below): founding a new admin domain sets up the CA first, then asks how
+    // the data plane authenticates.
+    let AuthFromAdminDomain { imported, suggested } = auth_from_admin_domain(
+        input.parent_admin_server.is_some(),
+        probe.have().and_then(admin_domain_auth_kind),
+    );
     // Founding a brand-new admin domain stands up the control plane (CA + admin
     // server) up front — before the data-plane auth is chosen (see the control
     // plane block below, after this host's address is resolved).
@@ -341,7 +336,7 @@ pub async fn run_resolver(
     // chosen now that the control plane exists) and the resolver's own identity
     // for it. On the founding TLS path the CA was created above, so
     // `resolver_self_auth` only issues this resolver's certificate from it.
-    let kind: AuthKind = match imported_auth {
+    let kind: AuthKind = match imported {
         Some(k) => {
             ans.note(&format_compact!(
                 "importing auth scheme from the admin domain: {}",
@@ -349,12 +344,14 @@ pub async fn run_resolver(
             ));
             k
         }
+        // `admin_domain_auth_kind` only reports a scheme a resolver can
+        // expose, so a suggestion is always one of these three.
         None => ans
             .choice(
                 Field::Auth,
                 input.auth.map(|k| k.as_str().to_string()),
                 &["anonymous", "krb5", "tls"],
-                Some("tls"),
+                Some(suggested.map_or("tls", |k| k.as_str())),
             )
             .await?
             .parse()?,
@@ -1104,6 +1101,34 @@ async fn resolver_tls_generate(
 /// The auth scheme a discovered admin domain's resolvers use (the first resolver's).
 /// `None` when the admin domain reported no resolvers; the caller falls back to
 /// prompting.
+/// How the data-plane auth question is settled against an admin domain this
+/// install is joining.
+struct AuthFromAdminDomain {
+    /// Settled without asking — the answer *is* the admin domain's.
+    imported: Option<AuthKind>,
+    /// Still asked, but this is what the question offers.
+    suggested: Option<AuthKind>,
+}
+
+/// A plain peer of an existing resolver cluster runs that cluster's scheme by
+/// definition, so it imports it and is never asked.
+///
+/// A delegated child is its own cluster and may legitimately differ — a `/eu`
+/// subtree can run krb5 under a TLS parent — so only the admin-domain/CA
+/// decision comes from the parent, never its auth. It is asked. But running
+/// what the parent runs is the ordinary case, so that is what the question
+/// defaults to; answering it is one keystroke and changing it is still there.
+fn auth_from_admin_domain(
+    delegated_child: bool,
+    admin_domain: Option<AuthKind>,
+) -> AuthFromAdminDomain {
+    if delegated_child {
+        AuthFromAdminDomain { imported: None, suggested: admin_domain }
+    } else {
+        AuthFromAdminDomain { imported: admin_domain, suggested: None }
+    }
+}
+
 fn admin_domain_auth_kind(net: &DiscoveredAdminDomain) -> Option<AuthKind> {
     net.info.resolvers.first().map(|r| match &r.auth {
         InfoAuth::Anonymous => AuthKind::Anonymous,
@@ -1615,4 +1640,31 @@ pub async fn enroll_admin_server(
         ));
     }
     Ok(true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A delegated child is asked, because it may legitimately differ from its
+    /// parent; the question defaults to the parent's scheme, because usually
+    /// it does not. It used to default to `tls` regardless, so pressing Enter
+    /// through a krb5 domain silently produced a TLS child.
+    #[test]
+    fn a_delegated_child_is_asked_and_offered_what_its_parent_runs() {
+        let child = auth_from_admin_domain(true, Some(AuthKind::Krb5));
+        assert_eq!(child.imported, None, "a child chooses for itself");
+        assert_eq!(child.suggested, Some(AuthKind::Krb5));
+
+        // A peer of an existing cluster runs that cluster's scheme by
+        // definition, so it is settled rather than offered.
+        let peer = auth_from_admin_domain(false, Some(AuthKind::Krb5));
+        assert_eq!(peer.imported, Some(AuthKind::Krb5));
+        assert_eq!(peer.suggested, None, "nothing to suggest, it was not asked");
+
+        // Founding a new admin domain: nothing to import or suggest, and the
+        // caller falls back to its own default.
+        let founding = auth_from_admin_domain(false, None);
+        assert_eq!((founding.imported, founding.suggested), (None, None));
+    }
 }
