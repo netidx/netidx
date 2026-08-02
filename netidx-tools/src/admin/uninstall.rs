@@ -97,22 +97,17 @@ pub(crate) fn run(p: Params) -> Result<()> {
             if !CAN_ESCALATE && escalation.covers == Covers::SystemServiceOnly =>
         {
             report_unremovable(&escalation);
-            let input = UninstallInput { cross_scope: false, ..p.input() };
-            match uninstall::plan(&input)? {
-                Next::Nothing(report) => {
-                    print_report(&report, false);
-                    println!("(nothing to do at user scope)");
-                    Ok(())
-                }
-                Next::Apply(prepared) => finish(&p, prepared),
-                Next::Escalate(_) => {
-                    anyhow::bail!("the user-scope teardown still reports needing root")
-                }
-            }
+            user_scope_only(&p)
         }
         Next::Escalate(escalation) => {
             let covers = escalation.covers;
-            elevate(&p, escalation)?;
+            // Nothing was elevated: `--dry-run`, or the `--yes` that
+            // authorizes a teardown was absent. The operator asked what this
+            // would do and has seen the half that needs root; the half that
+            // does not is the rest of the same answer, not a failure.
+            if !elevate(&p, escalation)? {
+                return user_scope_only(&p);
+            }
             if covers == Covers::Everything {
                 return Ok(());
             }
@@ -130,6 +125,26 @@ pub(crate) fn run(p: Params) -> Result<()> {
                     )
                 }
             }
+        }
+    }
+}
+
+/// The half of a teardown that needs no privileges, reached whenever the
+/// system-scope half was described rather than performed — because this
+/// platform cannot escalate, or because nothing has authorized the removal
+/// yet. Either way the unprivileged half is still ours to report on and,
+/// given `--yes`, to carry out.
+fn user_scope_only(p: &Params) -> Result<()> {
+    let input = UninstallInput { cross_scope: false, ..p.input() };
+    match uninstall::plan(&input)? {
+        Next::Nothing(report) => {
+            print_report(&report, false);
+            println!("(nothing to do at user scope)");
+            Ok(())
+        }
+        Next::Apply(prepared) => finish(p, prepared),
+        Next::Escalate(_) => {
+            anyhow::bail!("the user-scope teardown still reports needing root")
         }
     }
 }
@@ -233,10 +248,23 @@ fn print_report(r: &UninstallReport, applied: bool) {
     }
 }
 
+/// Whether an escalation gets *performed* rather than only described.
+///
+/// One covering the whole teardown re-execs immediately and lets the elevated
+/// child run its own `--yes` gate, with root's view of what is installed. A
+/// partial one is just the system service a user-scope install registered —
+/// this process still owns the rest, so it describes both halves and acts only
+/// once `--yes` authorizes it. The caller reads this rather than assuming, so
+/// "described" can never be mistaken for a failed elevated step.
+fn escalates(p: &Params, covers: Covers) -> bool {
+    covers == Covers::Everything || (p.yes && !p.dry_run)
+}
+
 /// Show what the elevated step would do, then re-exec under sudo. Without
 /// `--yes` we have shown the plan; point at the flag rather than escalating
-/// unbidden. sudo's own password prompt is the credential check.
-fn elevate(p: &Params, escalation: Escalation) -> Result<()> {
+/// unbidden. sudo's own password prompt is the credential check. Returns
+/// whether anything was actually elevated.
+fn elevate(p: &Params, escalation: Escalation) -> Result<bool> {
     if escalation.covers == Covers::SystemServiceOnly {
         println!();
         println!(
@@ -245,12 +273,10 @@ fn elevate(p: &Params, escalation: Escalation) -> Result<()> {
              user-scope):"
         );
         print_report(&escalation.plan, false);
-        if p.dry_run {
-            println!("(this would be removed too — sudo escalates for it)");
-            return Ok(());
-        }
-        if !p.yes {
-            if escalation.plan.ca_destroyed.is_some() {
+        if !escalates(p, escalation.covers) {
+            if p.dry_run {
+                println!("(this would be removed too — sudo escalates for it)");
+            } else if escalation.plan.ca_destroyed.is_some() {
                 println!(
                     "(DESTRUCTIVE: also destroys the CA private key — re-run with \
                      `--yes` to remove it)"
@@ -258,13 +284,14 @@ fn elevate(p: &Params, escalation: Escalation) -> Result<()> {
             } else {
                 println!("(re-run with `--yes` to remove the system-scope service too)");
             }
-            return Ok(());
+            return Ok(false);
         }
         println!(
             "removing the system-scope install (sudo may prompt for your password)…"
         );
     }
-    reexec(p, &escalation)
+    reexec(p, &escalation)?;
+    Ok(true)
 }
 
 #[cfg(unix)]
@@ -351,6 +378,36 @@ mod tests {
         assert!(args.windows(2).any(|a| a == ["--config-dir", "/etc/netidx"]));
         assert!(args.windows(2).any(|a| a == ["--scope", "system"]));
         assert!(args.iter().any(|a| a == "--with-ca"));
+    }
+
+    fn params(yes: bool, dry_run: bool) -> Params {
+        Params {
+            scope: None,
+            service_name: None,
+            for_user: None,
+            config_dir: None,
+            with_ca: false,
+            yes,
+            dry_run,
+        }
+    }
+
+    /// A plain `netidx admin uninstall` on a templated install — user config,
+    /// system service — described the privileged half and then reported the
+    /// elevated step as having failed, never showing the half it could have
+    /// done itself. Describing is not attempting.
+    #[test]
+    fn describing_the_privileged_half_is_not_a_failed_escalation() {
+        assert!(!escalates(&params(false, false), Covers::SystemServiceOnly));
+        assert!(!escalates(&params(false, true), Covers::SystemServiceOnly));
+        assert!(!escalates(&params(true, true), Covers::SystemServiceOnly));
+        assert!(escalates(&params(true, false), Covers::SystemServiceOnly));
+        // A teardown that covers everything always re-execs: the elevated
+        // child runs the same gate over the configuration only root can see.
+        for (yes, dry_run) in [(false, false), (true, false), (false, true), (true, true)]
+        {
+            assert!(escalates(&params(yes, dry_run), Covers::Everything));
+        }
     }
 
     #[test]
