@@ -103,6 +103,25 @@ cargo build -p netidx-tools \
   --bin netidx --bin netidx-activation --target x86_64-pc-windows-gnu
 ```
 
+Deploying over a running install fails with `scp: dest open ... Failure` — the
+running processes hold the image open. Stop them first, then start the logon
+task again:
+
+```
+schtasks /end /tn netidx & taskkill /f /im netidx.exe & taskkill /f /im netidx-activation.exe
+... scp ...
+schtasks /run /tn netidx
+```
+
+There is no tmux on the Windows guest, so the TUI is driven from a host-side
+pty instead. `scripts/win-tui-drive.py <rawlog> <steps>` opens `ssh -tt` on a
+50×200 pty, replays a step file (`sleep <secs>` / `send <literal>` /
+`mark <name>`) and records the raw stream; `scripts/win-tui-render.py <rawlog>
+[mark]` replays that stream into a screen buffer and prints the frame as it
+stood at `mark`. The renderer models only what ratatui emits and does not track
+partial redraws, so read newly-drawn regions and ignore leftovers from an
+earlier frame.
+
 ## Clean
 
 VMs are throwaway (snapshot/discard). Per-host reset over SSH (root key-auth):

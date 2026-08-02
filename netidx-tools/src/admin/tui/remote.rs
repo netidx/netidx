@@ -1996,9 +1996,6 @@ impl RemoteState {
     }
 
     pub(super) fn on_key(&mut self, code: KeyCode) -> Option<Action> {
-        if !cfg!(unix) {
-            return None;
-        }
         match &self.screen {
             Screen::AdminDomains => self.on_key_clusters(code),
             Screen::Manual { .. } => self.on_key_manual(code),
@@ -2559,20 +2556,6 @@ impl RemoteState {
     }
 
     pub(super) fn render(&mut self, f: &mut Frame, area: Rect) {
-        if !cfg!(unix) {
-            let msg = Paragraph::new(
-                "Remote administration is only available on unix hosts (it drives the \
-                 openssl-backed CA admin path).",
-            )
-            .wrap(Wrap { trim: true })
-            .style(theme::panel_style())
-            .block(
-                theme::panel_block()
-                    .title(Span::styled(" Admin domain ", theme::title_style())),
-            );
-            f.render_widget(msg, area);
-            return;
-        }
         match &self.screen {
             Screen::AdminDomains => self.render_clusters(f, area),
             Screen::Manual { host, port, focus } => {
@@ -3160,7 +3143,7 @@ fn labeled_field(
     })
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod tests {
     use super::*;
     use ratatui::{Terminal, backend::TestBackend};
