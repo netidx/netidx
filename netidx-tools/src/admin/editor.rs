@@ -1,7 +1,7 @@
 //! `visudo`-style editor loop. Renders the current value as JSON,
 //! drops it in a temp file, spawns the operator's `$VISUAL` / `$EDITOR`
-//! (fall back to `vi`), validates the result, and offers a re-edit
-//! prompt on failure.
+//! (falling back to the platform's own default), validates the result, and
+//! offers a re-edit prompt on failure.
 
 use anyhow::{Context, Result};
 use std::{
@@ -49,11 +49,18 @@ where
     }
 }
 
+/// The editor to use when the operator has named none. `vi` is the unix
+/// answer and is not on a Windows host at all, so falling back to it there
+/// turns "you did not set $EDITOR" into "vi: not found".
+fn default_editor() -> &'static str {
+    if cfg!(windows) { "notepad" } else { "vi" }
+}
+
 fn spawn_editor(path: &Path) -> Result<()> {
     let editor = std::env::var("VISUAL")
         .ok()
         .or_else(|| std::env::var("EDITOR").ok())
-        .unwrap_or_else(|| "vi".to_string());
+        .unwrap_or_else(|| default_editor().to_string());
     let mut parts = editor.split_whitespace();
     let cmd = parts.next().context("VISUAL/EDITOR is empty")?;
     let status = Command::new(cmd)
