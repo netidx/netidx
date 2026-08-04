@@ -1635,7 +1635,7 @@ pub async fn enroll_admin_server(
     } else {
         ans.note(&format_compact!(
             "  (--no-units: no activation unit written; run it yourself with\n\
-             \x20  netidx admin component server run -c {})",
+             \x20  netidx admin host server run -c {})",
             cfg_path.display()
         ));
     }

@@ -181,7 +181,7 @@ const ADMIN_FLAGS: (&str, &str) = ("--admin-password-file", "--admin-password-st
 const RECOVERY_FLAGS: (&str, &str) =
     ("--recovery-password-file", "--recovery-password-stdin");
 // The single-secret flag for commands that take exactly one password (remote
-// admin, `ca init`, `component tls join`) — no collapse is possible with one.
+// admin, `ca init`, `host tls join`) — no collapse is possible with one.
 const PASSWORD_FLAGS: (&str, &str) = ("--password-file", "--password-stdin");
 
 /// The strict-CLI answerer: three purpose-scoped secret slots plus the CA glyph
@@ -197,7 +197,7 @@ pub(crate) struct FlagAnswerer {
 impl FlagAnswerer {
     /// One password answers any `secret()` this command makes (cited as
     /// `--password-file`). For commands with a single distinct secret — remote
-    /// admin ops, `ca init` (the founding superuser), `component tls join` —
+    /// admin ops, `ca init` (the founding superuser), `host tls join` —
     /// where no collapse is possible because only one secret is ever needed.
     pub(crate) fn single(
         password: Option<Zeroizing<String>>,

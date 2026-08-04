@@ -1,10 +1,11 @@
 //! `netidx admin …` CLI surface. A thin presentation layer over
 //! `netidx-admin`.
 //!
-//! Two bases: **system roles** (`workstation` / `resolver` /
-//! `publisher`, each with `install` and lifecycle actions) plus `ca`,
-//! are top-level; the low-level single-component commands live under
-//! `component`. `uninstall` tears an install down.
+//! The split is by **scope**. Commands that act on the admin domain —
+//! `ca`, `perms`, `id-map`, the **system roles** (`workstation` /
+//! `resolver` / `publisher`, each with `install` and lifecycle actions) —
+//! are top-level. Commands that act on *this machine* live under `host`.
+//! `uninstall` tears an install down.
 
 use anyhow::Result;
 use clap::Subcommand;
@@ -19,7 +20,7 @@ mod activation;
 mod answer_cli;
 mod backup_restore;
 mod ca;
-mod component;
+mod host;
 // `discover` (browse mDNS for admin domains + print their glyphs) is a read-only
 // query over the cross-platform discovery + admin-client layers.
 mod agent;
@@ -98,10 +99,19 @@ pub(crate) enum Params {
     Discover(discover::DiscoverArgs),
     /// tear down a netidx install (config dir + OS service)
     Uninstall(uninstall::Params),
-    /// low-level single-component commands (units / server / tls / service)
-    Component {
+    /// act on THIS machine: its activation units, its admin-server daemon,
+    /// its TLS identity, its OS service. Everything else under `admin` acts
+    /// on the admin domain.
+    // The `component` alias is load-bearing. An install bakes this subcommand
+    // path into the argv of the admin-server and admin-agent activation units,
+    // and nothing rewrites those units when the binary is upgraded — so a host
+    // installed before the rename would stop starting its daemon. Hidden
+    // because it is a compatibility shim, not a second name to learn;
+    // `admin::host::tests` pins it.
+    #[command(alias = "component")]
+    Host {
         #[command(subcommand)]
-        cmd: component::Cmd,
+        cmd: host::Cmd,
     },
 }
 
@@ -123,6 +133,6 @@ pub(crate) fn run(p: Option<Params>) -> Result<()> {
         Params::IdMap { cmd } => id_map_admin::run(cmd),
         Params::Discover(a) => discover::run(a),
         Params::Uninstall(p) => uninstall::run(p),
-        Params::Component { cmd } => component::run(cmd),
+        Params::Host { cmd } => host::run(cmd),
     }
 }

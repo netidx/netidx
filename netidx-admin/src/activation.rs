@@ -10,7 +10,7 @@
 //! Naming: the on-disk file is `<name>.unit`; the API keys (in `list`'s
 //! returned map and in the `name` argument to `save` / `get` / `remove`)
 //! are bare basenames *without* the `.unit` suffix, which is what the
-//! CLI exposes (`netidx admin component activation add my-publisher …`).
+//! CLI exposes (`netidx admin host activation add my-publisher …`).
 
 use crate::{atomic, paths};
 use anyhow::{Context, Result};
@@ -168,7 +168,7 @@ impl ActivationDir {
     ///
     /// The reload is not optional. The supervisor has no directory watch, so
     /// without it a unit added to a live host sits inert until the next SIGHUP
-    /// — which is what `netidx admin component activation add` used to do.
+    /// — which is what `netidx admin host activation add` used to do.
     /// `Ok(false)` means nothing was listening, the normal case at install time.
     pub async fn install(&self, name: &str, unit: &Unit) -> Result<bool> {
         let mut set = self.others(name)?;
@@ -300,7 +300,7 @@ mod tests {
     ///
     /// There is no supervisor here, which is the case that must not be an
     /// error: at install time nothing is listening yet, and the service reads
-    /// the directory when it starts. `netidx admin component activation add`
+    /// the directory when it starts. `netidx admin host activation add`
     /// used to stop at the write, so on a host that *was* live the unit sat
     /// inert until the next SIGHUP.
     #[tokio::test]

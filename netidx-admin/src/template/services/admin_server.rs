@@ -27,7 +27,7 @@ pub struct AdminServerServiceParams {
 pub fn unit(p: &AdminServerServiceParams) -> Result<Unit> {
     let args: Vec<String> = vec![
         "admin".to_string(),
-        "component".to_string(),
+        "host".to_string(),
         "server".to_string(),
         "run".to_string(),
         "-c".to_string(),
@@ -56,7 +56,7 @@ mod tests {
             u.process.args,
             [
                 "admin",
-                "component",
+                "host",
                 "server",
                 "run",
                 "-c",

@@ -1,4 +1,4 @@
-//! `netidx admin component server …` — run the admin-server daemon.
+//! `netidx admin host server …` — run the admin-server daemon.
 //!
 //! The daemon itself lives in `netidx_admin`; this module is the
 //! CLI shell that runs it. Standing an admin server *up* (issuing its serving

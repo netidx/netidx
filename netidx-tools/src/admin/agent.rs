@@ -1,4 +1,4 @@
-//! `netidx admin component admin-agent …` — the client-side half of the
+//! `netidx admin host admin-agent …` — the client-side half of the
 //! admin plane. The engine lives in `netidx_admin::agent`; the
 //! templates install the `run` form as an activation unit on every client
 //! joined to an admin domain.

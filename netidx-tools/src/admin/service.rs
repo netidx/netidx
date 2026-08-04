@@ -1,4 +1,4 @@
-//! `netidx admin component service {install,uninstall,status}` — the CLI shell
+//! `netidx admin host service {install,uninstall,status}` — the CLI shell
 //! over `netidx_admin::service`. Handles sudo elevation for
 //! system-scope installs, and re-execs the same binary across the
 //! privilege boundary so the elevated child runs the binary the
@@ -237,7 +237,7 @@ fn escalate_for_install(a: &InstallArgs, binary: &std::path::Path) -> Result<()>
     cmd.arg("--preserve-env=NETIDX_ELEVATED")
         .arg(&exe)
         .arg("admin")
-        .arg("component")
+        .arg("host")
         .arg("service")
         .arg("install")
         .arg("--scope")
@@ -270,7 +270,7 @@ fn escalate_for_uninstall(a: &CommonArgs) -> Result<()> {
         .arg("--preserve-env=NETIDX_ELEVATED")
         .arg(&exe)
         .arg("admin")
-        .arg("component")
+        .arg("host")
         .arg("service")
         .arg("uninstall")
         .arg("--scope")

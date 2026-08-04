@@ -27,7 +27,7 @@ use std::{io::stdout, path::Path};
 /// Register the OS service at `scope`, returning a human summary line.
 ///
 /// User scope is unprivileged and runs in-process (no terminal takeover); system
-/// scope suspends the TUI and runs `netidx admin component service install` as
+/// scope suspends the TUI and runs `netidx admin host service install` as
 /// root.
 pub(super) fn install_service(
     terminal: &mut ratatui::DefaultTerminal,
@@ -164,7 +164,7 @@ fn install_argv(
 ) -> Vec<String> {
     vec![
         "admin".to_string(),
-        "component".to_string(),
+        "host".to_string(),
         "service".to_string(),
         "install".to_string(),
         "--scope".to_string(),

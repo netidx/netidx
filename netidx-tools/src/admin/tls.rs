@@ -1,9 +1,9 @@
-//! `netidx admin component tls …` — client-side TLS identity commands:
+//! `netidx admin host tls …` — client-side TLS identity commands:
 //! obtain a certificate for *this* host, either by generating a key + CSR
 //! for offline signing or by joining an admin server's CA over the network.
 //! CA-operator commands — issuing, signing, approving, revoking — live under
 //! `netidx admin ca`; keeping an installed certificate fresh is the admin
-//! agent's job (`netidx admin component admin-agent`).
+//! agent's job (`netidx admin host admin-agent`).
 //!
 //! A thin router: both commands are implemented in the (unix-only,
 //! openssl-backed) `ca` module — the certificate-operations engine shared by

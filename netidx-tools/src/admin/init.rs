@@ -147,7 +147,7 @@ struct CommonFlags {
     #[arg(long = "with-service", conflicts_with = "no_service")]
     with_service: bool,
     /// Do not register netidx as an OS service. Registering is the
-    /// default; run `netidx admin component service install` later.
+    /// default; run `netidx admin host service install` later.
     #[arg(long = "no-service")]
     no_service: bool,
     /// Read the leaf private-key encryption password (only under

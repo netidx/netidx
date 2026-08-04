@@ -1,5 +1,5 @@
 //! Admin-agent service template: an activation unit that runs
-//! `<netidx> admin component admin-agent run -f`.
+//! `<netidx> admin host admin-agent run -f`.
 //!
 //! Installed on every client joined to an admin domain — publisher or
 //! workstation, any data-plane auth. It keeps the host's admin-server list
@@ -24,7 +24,7 @@ pub struct AgentServiceParams {
 /// Render the admin-agent activation unit. `-f` keeps it in the foreground
 /// under the supervisor (same reasoning as the other daemon units).
 pub fn unit(p: &AgentServiceParams) -> Result<Unit> {
-    let args: Vec<String> = ["admin", "component", "admin-agent", "run", "-f"]
+    let args: Vec<String> = ["admin", "host", "admin-agent", "run", "-f"]
         .into_iter()
         .map(String::from)
         .collect();
@@ -47,7 +47,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             u.process.args,
-            ["admin", "component", "admin-agent", "run", "-f"]
+            ["admin", "host", "admin-agent", "run", "-f"]
                 .into_iter()
                 .map(String::from)
                 .collect::<Vec<_>>(),

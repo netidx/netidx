@@ -112,7 +112,7 @@ pub async fn offer(
         Ok(Some(scope))
     } else {
         ans.note(
-            "skipping OS-service registration (run `netidx admin component \
+            "skipping OS-service registration (run `netidx admin host \
              service install` later to register it)",
         );
         Ok(None)

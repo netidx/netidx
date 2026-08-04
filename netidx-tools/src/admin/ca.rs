@@ -198,7 +198,7 @@ pub(crate) struct ExternalInstallArgs {
     #[arg(long = "with-service", conflicts_with = "no_service")]
     pub with_service: bool,
     /// Do not register netidx as an OS service after standing up the admin
-    /// server. Registering is the default; run `netidx admin component
+    /// server. Registering is the default; run `netidx admin host
     /// service install` later.
     #[arg(long = "no-service")]
     pub no_service: bool,

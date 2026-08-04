@@ -675,7 +675,7 @@ mod tests {
     }
 
     /// Service name unlikely to clash with anything the developer has
-    /// actually installed via `netidx admin component service install`. The
+    /// actually installed via `netidx admin host service install`. The
     /// per-OS uninstall is best-effort + idempotent — with this name
     /// in a test environment it's a no-op.
     fn test_service_name() -> String {
