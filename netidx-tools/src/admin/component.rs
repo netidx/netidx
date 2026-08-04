@@ -1,11 +1,18 @@
 //! `netidx admin component …` — the low-level, single-component commands:
-//! show/edit one config file, manage activation units, run the
-//! admin-server daemon, or drive this host's TLS identity.
+//! manage activation units, run the admin-server daemon, or drive this
+//! host's TLS identity.
 //!
 //! The role templates (`workstation` / `resolver` / `publisher`) and
 //! `ca` wire these pieces together; reach for `component` when you want
 //! to operate on one piece directly. This is a pure grouping layer — the
 //! implementations live in the sibling modules it routes to.
+//!
+//! Nothing here edits an installation's config files in place. The admin
+//! server owns the client config, the resolver config, and the perms file:
+//! it writes them from the admin domain map and propagates to every member
+//! of a resolver cluster. A second, local writer is how two members come to
+//! disagree, so those editors are gone — see `admin perms` for the managed
+//! path, `resolver status` / `resolver update` for the config.
 
 use anyhow::Result;
 use clap::Subcommand;
@@ -14,20 +21,10 @@ use clap::Subcommand;
 use super::activation;
 #[cfg(unix)]
 use super::server;
-use super::{agent, client, id_map, resolver, service, tls};
+use super::{agent, id_map, service, tls};
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum Cmd {
-    /// show or edit the client config
-    Client {
-        #[command(subcommand)]
-        cmd: client::Cmd,
-    },
-    /// show or edit the resolver-server config
-    Resolver {
-        #[command(subcommand)]
-        cmd: resolver::Cmd,
-    },
     /// edit netidx-activation units
     #[cfg(any(unix, windows))]
     Activation {
@@ -65,8 +62,6 @@ pub(crate) enum Cmd {
 
 pub(crate) fn run(cmd: Cmd) -> Result<()> {
     match cmd {
-        Cmd::Client { cmd } => client::run(cmd),
-        Cmd::Resolver { cmd } => resolver::run(cmd),
         #[cfg(any(unix, windows))]
         Cmd::Activation { cmd } => activation::run(cmd),
         #[cfg(unix)]

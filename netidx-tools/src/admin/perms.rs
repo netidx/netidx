@@ -1,9 +1,17 @@
-//! `netidx admin perms show|edit --at <path>` — remote permissions
+//! `netidx admin perms show|edit|set|remove --at <path>` — permissions
 //! administration, a thin CLI over [`netidx_admin::ops::perms`]. The
 //! library reaches an admin server, glyph-confirms its CA, routes by the
 //! authoritative CA, and performs an authenticated read or write.
 //! `edit` runs the `$EDITOR` loop and local validation here — a frontend
-//! concern — between the library's authenticated read and write.
+//! concern — between the library's authenticated read and write; `set` and
+//! `remove` are the scriptable single-entry forms, where the library does
+//! the whole read-modify-write.
+//!
+//! Every form goes through the admin server, which authorizes the `--at`
+//! path, preflights the result against the resolver config, and propagates
+//! to every member of the resolver cluster. There is deliberately no
+//! command that edits a perms file in place: that is how two members of one
+//! resolver cluster come to disagree.
 
 use anyhow::{Context, Result};
 use clap::{Args, Subcommand};
@@ -22,6 +30,28 @@ pub(crate) enum Cmd {
     Show(Flags),
     /// edit the permissions of the resolver cluster mounted at <path> (admin)
     Edit(Flags),
+    /// set <bits> for <entity> at <path> in the resolver cluster mounted at
+    /// --at, then propagate to every member
+    Set {
+        /// Netidx path the entry applies to.
+        path: String,
+        /// User or group name the entry applies to.
+        entity: String,
+        /// Permission bits (e.g. `swlpd`).
+        bits: String,
+        #[command(flatten)]
+        flags: Flags,
+    },
+    /// remove <entity>'s entry at <path> in the resolver cluster mounted at
+    /// --at, then propagate to every member
+    Remove {
+        /// Netidx path the entry applies to.
+        path: String,
+        /// User or group name the entry applies to.
+        entity: String,
+        #[command(flatten)]
+        flags: Flags,
+    },
 }
 
 #[derive(Args, Debug)]
@@ -38,6 +68,8 @@ pub(crate) fn run(cmd: Cmd) -> Result<()> {
     match cmd {
         Cmd::Show(f) => show(f),
         Cmd::Edit(f) => edit(f),
+        Cmd::Set { path, entity, bits, flags } => set(flags, path, entity, bits),
+        Cmd::Remove { path, entity, flags } => remove(flags, path, entity),
     }
 }
 
@@ -74,11 +106,52 @@ fn edit(f: Flags) -> Result<()> {
     let edited =
         editor::edit_with_validation(&perms::pretty(&current)?, perms::normalize)?;
     let peers = rt.block_on(perms_ops::edit_perms(&target, &f.at, &edited))?;
-    report_peers(&peers, &f.at);
+    report_peers(&peers, &f.at, format_args!("perms edit --at {}", f.at));
     Ok(())
 }
 
-fn report_peers(peers: &[PeerResult], at: &str) {
+fn set(f: Flags, path: String, entity: String, bits: String) -> Result<()> {
+    // Refuse a malformed argument before resolving a target, which may prompt
+    // for a password and contact the CA. `set_entry` checks again — a library
+    // op can't trust its caller — but only after the round trip.
+    perms::validate_bits(&bits)?;
+    let rt = runtime()?;
+    let target = target(&rt, &f)?;
+    let edit =
+        rt.block_on(perms_ops::set_entry(&target, &f.at, &path, &entity, &bits))?;
+    if edit.changed {
+        println!("set {path}  {entity}  {bits}");
+    } else {
+        println!("{entity} already has {bits} at {path} — re-propagating unchanged");
+    }
+    report_peers(
+        &edit.peers,
+        &f.at,
+        format_args!("perms set --at {} {path} {entity} {bits}", f.at),
+    );
+    Ok(())
+}
+
+fn remove(f: Flags, path: String, entity: String) -> Result<()> {
+    let rt = runtime()?;
+    let target = target(&rt, &f)?;
+    let edit = rt.block_on(perms_ops::remove_entry(&target, &f.at, &path, &entity))?;
+    if edit.changed {
+        println!("removed {path}  {entity}");
+    } else {
+        println!(
+            "{entity} had no entry at {path} — nothing removed, re-propagating unchanged"
+        );
+    }
+    report_peers(
+        &edit.peers,
+        &f.at,
+        format_args!("perms remove --at {} {path} {entity}", f.at),
+    );
+    Ok(())
+}
+
+fn report_peers(peers: &[PeerResult], at: &str, retry: std::fmt::Arguments<'_>) {
     let failed: Vec<_> = peers.iter().filter(|p| p.error.is_some()).collect();
     if failed.is_empty() {
         println!(
@@ -98,6 +171,6 @@ fn report_peers(peers: &[PeerResult], at: &str) {
     }
     println!(
         "  the resolver cluster is INCONSISTENT. The edit is idempotent — re-run \
-         `perms edit --at {at}` once the member(s) are back to converge."
+         `{retry}` once the member(s) are back to converge."
     );
 }

@@ -19,7 +19,6 @@ mod activation;
 mod answer_cli;
 mod backup_restore;
 mod ca;
-mod client;
 mod component;
 // `discover` (browse mDNS for admin domains + print their glyphs) is a read-only
 // query over the cross-platform discovery + admin-client layers.
@@ -30,9 +29,8 @@ mod editor;
 mod id_map;
 mod init;
 mod lifecycle;
-mod perms_admin;
+mod perms;
 mod read_gate;
-mod resolver;
 mod roles;
 // `server` runs the admin-server daemon, which holds the CA vault and the
 // local control socket. There is no daemon off unix; a Windows host joins an
@@ -78,11 +76,13 @@ pub(crate) enum Params {
         #[command(subcommand)]
         cmd: ca::Cmd,
     },
-    /// remotely show or edit a resolver cluster's permissions through the admin
-    /// server, routed by the admin domain map (no SSH).
+    /// show or edit a resolver cluster's permissions through the admin server,
+    /// routed by the admin domain map (no SSH). Whole-document (`show` /
+    /// `edit`) or one entry at a time (`set` / `remove`); every form
+    /// propagates to the whole resolver cluster.
     Perms {
         #[command(subcommand)]
-        cmd: perms_admin::Cmd,
+        cmd: perms::Cmd,
     },
     /// discover netidx admin domains on the local network (mDNS) and print each
     /// one's admin-server address + CA glyph — a read-only query a script can
@@ -90,8 +90,8 @@ pub(crate) enum Params {
     Discover(discover::DiscoverArgs),
     /// tear down a netidx install (config dir + OS service)
     Uninstall(uninstall::Params),
-    /// low-level single-component commands (client / resolver config /
-    /// units / server / tls / id-map / service)
+    /// low-level single-component commands (units / server / tls / id-map /
+    /// service)
     Component {
         #[command(subcommand)]
         cmd: component::Cmd,
@@ -112,7 +112,7 @@ pub(crate) fn run(p: Option<Params>) -> Result<()> {
         Params::Resolver { cmd } => roles::resolver::run(cmd),
         Params::Publisher { cmd } => roles::publisher::run(cmd),
         Params::Ca { cmd } => ca::run(cmd),
-        Params::Perms { cmd } => perms_admin::run(cmd),
+        Params::Perms { cmd } => perms::run(cmd),
         Params::Discover(a) => discover::run(a),
         Params::Uninstall(p) => uninstall::run(p),
         Params::Component { cmd } => component::run(cmd),
