@@ -6,130 +6,130 @@
       "reviewed_at": "99c9e81f26e0c23fc30a2e5a53fd3f4ab0186e83"
     },
     "examples/Cargo.toml": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "examples/README.md": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "examples/examples/bidirectional.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "examples/examples/building_sensors_glob_subscriber.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "examples/examples/building_sensors_publisher.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "examples/examples/channel_client.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "examples/examples/channel_server.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "examples/examples/clustering.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "examples/examples/container_client.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "examples/examples/container_server.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "examples/examples/custom_type.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "examples/examples/embedded_archive.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "examples/examples/failover_publisher.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "examples/examples/failover_subscriber.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "examples/examples/load_balancing_publisher.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "examples/examples/load_balancing_subscriber.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "examples/examples/resilient_subscriptions.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "examples/examples/rpc_client.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "examples/examples/rpc_server.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "examples/examples/simple_publisher.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "examples/examples/simple_subscriber.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "examples/examples/table_dashboard.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "examples/examples/temperature_display.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "examples/examples/temperature_monitor.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "examples/examples/typed_channel_client.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "examples/examples/typed_channel_server.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-activation/Cargo.toml": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-activation/src/control.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-activation/src/file.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-activation/src/lib.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-activation/src/platform/mod.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-activation/src/platform/unix.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-activation/src/platform/windows.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-activation/src/runtime.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-activation/src/shutdown.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-admin-client/src/admin_server_config.rs": {
       "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
     },
     "netidx-admin-proto/Cargo.toml": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-admin-proto/src/fingerprint.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-admin-proto/src/identity.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-admin-proto/src/lib.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-admin-proto/src/policy.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-admin-proto/src/server_config.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-admin-server/Cargo.toml": {
       "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
@@ -141,367 +141,367 @@
       "reviewed_at": "650a7a95a7d40247b67d8ffbd7e85b1b66aeb464"
     },
     "netidx-admin/Cargo.toml": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-admin/src/activation.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-admin/src/admin_domain.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-admin/src/admin_server/admins.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-admin/src/admin_server/auth.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-admin/src/admin_server/ca_ops.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-admin/src/admin_server/enrollment.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-admin/src/admin_server/enrollment_tests.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-admin/src/admin_server/issuance.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-admin/src/admin_server/issuance_tests.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-admin/src/admin_server/mod.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-admin/src/admin_server/password_limiter.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-admin/src/admin_server/permissions.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-admin/src/admin_server/permissions_tests.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-admin/src/admin_server/queue.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-admin/src/admin_server/queue_tests.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-admin/src/admin_server/read_gate.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-admin/src/admin_server/request.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-admin/src/admin_server/request_tests.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-admin/src/admin_server/revocation.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-admin/src/admin_server/revocation_tests.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-admin/src/admin_server/runtime.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-admin/src/admin_server/service_control.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-admin/src/admin_server/service_control_tests.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-admin/src/admin_server/test_support.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-admin/src/admin_server/topology.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-admin/src/admin_server/topology_tests.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-admin/src/admin_server_config.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-admin/src/agent.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-admin/src/answer.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-admin/src/atomic.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-admin/src/backup.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-admin/src/ca.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-admin/src/ca_store.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-admin/src/ca_vault.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-admin/src/client.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-admin/src/cloud.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-admin/src/config_lock.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-admin/src/csr.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-admin/src/delegation_store.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-admin/src/discovery.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-admin/src/id_map.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-admin/src/install_bundle.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-admin/src/lib.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-admin/src/local.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-admin/src/local_identity.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-admin/src/netshape.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-admin/src/offline_ca.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-admin/src/ops/delegation.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-admin/src/ops/mod.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-admin/src/ops/offline.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-admin/src/ops/perms.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-admin/src/ops/queue.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-admin/src/ops/revoke.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-admin/src/ops/roster.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-admin/src/ops/servers.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-admin/src/ops/service.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-admin/src/ops/slots.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-admin/src/paths.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-admin/src/perms.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-admin/src/plan/bundle.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-admin/src/plan/ca_setup.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-admin/src/plan/delegation.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-admin/src/plan/enroll.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-admin/src/plan/install/ca.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-admin/src/plan/install/mod.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-admin/src/plan/install/publisher.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-admin/src/plan/install/resolver.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-admin/src/plan/install/workstation.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-admin/src/plan/mod.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-admin/src/plan/server_setup.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-admin/src/plan/service.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-admin/src/provenance.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-admin/src/reconcile.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-admin/src/renewd.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-admin/src/resolver.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-admin/src/resolver_probe.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-admin/src/service/launchd.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-admin/src/service/mod.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-admin/src/service/schtask.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-admin/src/service/systemd.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-admin/src/session.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-admin/src/session_cache.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-admin/src/sync.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-admin/src/template/mod.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-admin/src/template/publisher.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-admin/src/template/resolver.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-admin/src/template/services/admin_agent.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-admin/src/template/services/admin_server.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-admin/src/template/services/container.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-admin/src/template/services/id_map.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-admin/src/template/services/mod.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-admin/src/template/workstation.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-admin/src/tls.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-admin/src/tls_tofu.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-admin/src/transport.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-admin/src/uninstall.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-admin/tests/e2e.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-archive/.gitignore": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-archive/Cargo.toml": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-archive/src/config.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-archive/src/lib.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-archive/src/logfile/arraymap.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-archive/src/logfile/mod.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-archive/src/logfile/reader.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-archive/src/logfile/test.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-archive/src/logfile/writer.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-archive/src/logfile_collection/index.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-archive/src/logfile_collection/mod.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-archive/src/logfile_collection/reader.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-archive/src/logfile_collection/test.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-archive/src/logfile_collection/writer.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-archive/src/recorder/mod.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-archive/src/recorder/oneshot.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-archive/src/recorder/publish/controls.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-archive/src/recorder/publish/mod.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-archive/src/recorder/publish/session.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-archive/src/recorder/publish/session_shard.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-archive/src/recorder/record.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-archive/src/recorder_client.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-archive/src/test.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-archive/test-recorder/0/current": {
       "reviewed_at": "6b37287c3d83afc0b1977f6e499f91ac683fb798"
@@ -510,415 +510,427 @@
       "reviewed_at": "6b37287c3d83afc0b1977f6e499f91ac683fb798"
     },
     "netidx-container/Cargo.toml": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-container/src/db.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-container/src/lib.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-container/src/rpcs.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-container/src/stats.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-core/Cargo.toml": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-core/src/lib.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-core/src/pack.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-core/src/path.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-core/src/test.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-core/src/utils.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-derive/Cargo.toml": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-derive/src/lib.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-ffi/CMakeLists.txt": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-ffi/Cargo.toml": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-ffi/build.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-ffi/cbindgen.toml": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-ffi/examples/.clangd": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-ffi/examples/.gitignore": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-ffi/examples/Makefile": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-ffi/examples/channel_client.c": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-ffi/examples/channel_client.cpp": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-ffi/examples/channel_server.c": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-ffi/examples/channel_server.cpp": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-ffi/examples/publisher.c": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-ffi/examples/publisher.cpp": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-ffi/examples/rpc_client.c": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-ffi/examples/rpc_client.cpp": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-ffi/examples/rpc_server.c": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-ffi/examples/rpc_server.cpp": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-ffi/examples/stress.c": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-ffi/examples/stress.cpp": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-ffi/examples/subscriber.c": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-ffi/examples/subscriber.cpp": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-ffi/examples/subscriber_simple.c": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-ffi/examples/subscriber_simple.cpp": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-ffi/include/netidx/netidx.h": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-ffi/include/netidx/netidx.hpp": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-ffi/src/channel.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-ffi/src/config.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-ffi/src/error.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-ffi/src/lib.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-ffi/src/path.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-ffi/src/publisher.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-ffi/src/rpc.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-ffi/src/runtime.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-ffi/src/subscriber.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-ffi/src/value.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-id-map/Cargo.toml": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-id-map/src/file.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-id-map/src/lib.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-id-map/src/runtime.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-netproto/Cargo.toml": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-netproto/src/glob.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-netproto/src/lib.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-netproto/src/publisher.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-netproto/src/resolver.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-netproto/src/test.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-protocols/Cargo.toml": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-protocols/src/channel/client.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-protocols/src/channel/mod.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-protocols/src/channel/server.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-protocols/src/channel/test.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-protocols/src/cluster.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-protocols/src/lib.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-protocols/src/pack_channel/client.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-protocols/src/pack_channel/mod.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-protocols/src/pack_channel/server.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-protocols/src/pack_channel/test.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-protocols/src/rpc.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-tools-core/Cargo.toml": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-tools-core/src/lib.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-tools/Cargo.toml": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-tools/src/activation.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-tools/src/admin/activation.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-tools/src/admin/agent.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-tools/src/admin/answer_cli.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-tools/src/admin/backup_restore.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-tools/src/admin/ca.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-tools/src/admin/client.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-tools/src/admin/component.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-tools/src/admin/delegation.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-tools/src/admin/discover.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-tools/src/admin/editor.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-tools/src/admin/id_map.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
+    },
+    "netidx-tools/src/admin/init.rs": {
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
+    },
+    "netidx-tools/src/admin/lifecycle.rs": {
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
+    },
+    "netidx-tools/src/admin/perms.rs": {
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
+    },
+    "netidx-tools/src/admin/perms_admin.rs": {
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-tools/src/browser/browser.gx": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-tpm/Cargo.toml": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-tpm/examples/probe.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-tpm/src/lib.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-value/Cargo.toml": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-value/src/abstract_type.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-value/src/array.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-value/src/convert.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-value/src/error.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-value/src/lib.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-value/src/op.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-value/src/parser.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-value/src/pbuf.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-value/src/print.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-value/src/test.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-value/src/typ.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-wsproxy/Cargo.toml": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-wsproxy/example/index.html": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-wsproxy/example/netidx-ws.js": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-wsproxy/src/config.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-wsproxy/src/lib.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-wsproxy/src/protocol.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx-wsproxy/tests/test.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx/Cargo.toml": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx/src/batch_channel.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx/src/channel.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx/src/config/local_only.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx/src/config/mod.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx/src/config/watch.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx/src/config_file.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx/src/lib.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx/src/os/mod.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx/src/os/unix.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx/src/os/windows.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx/src/publisher/mod.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx/src/publisher/server.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx/src/resolver_client/common.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx/src/resolver_client/mod.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx/src/resolver_client/read_client.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx/src/resolver_client/write_client.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx/src/resolver_server/auth.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx/src/resolver_server/config.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx/src/resolver_server/mod.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx/src/resolver_server/secctx.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx/src/resolver_server/shard_store.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx/src/resolver_server/store.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx/src/resolver_server/test.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx/src/subscriber/connection.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx/src/subscriber/mod.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx/src/test.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx/src/test/kdc.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     },
     "netidx/src/tls.rs": {
-      "reviewed_at": "37d4dd5118664e6507486f6b010caf0964d858bd"
+      "reviewed_at": "51c08f4eb8e6cc01ab024cf07bc565e749c23410"
     }
   }
 }

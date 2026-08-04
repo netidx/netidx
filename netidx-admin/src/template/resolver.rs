@@ -307,7 +307,7 @@ pub fn resolver(p: &ResolverParams) -> Result<RenderedTemplate> {
              so there are no groups — the usual shared `users` grant was not \
              seeded and each identity can reach only its own subtree under \
              `users/`. Grant wider access by naming identities directly with \
-             `netidx admin component perms set`"
+             `netidx admin perms edit`"
         ));
     }
     // Don't silently drop an explicitly-supplied seed on the anonymous

@@ -88,19 +88,6 @@ pub fn pretty(perms_json: &str) -> Result<String> {
     serde_json::to_string_pretty(&v).context("formatting perms JSON")
 }
 
-/// Remove an entity's entry from a path. If removing the last entity
-/// under `path`, also removes the path entry. No-op when the entry
-/// doesn't exist.
-pub fn remove_entry(p: &mut PMap, path: &str, entity: &str) {
-    use std::collections::hash_map::Entry;
-    if let Entry::Occupied(mut e) = p.0.entry(ArcStr::from(path)) {
-        e.get_mut().remove(entity);
-        if e.get().is_empty() {
-            e.remove();
-        }
-    }
-}
-
 /// Look up the permission string for `(path, entity)`, if present.
 pub fn lookup<'a>(p: &'a PMap, path: &str, entity: &str) -> Option<&'a ArcStr> {
     p.0.get(path).and_then(|tbl| tbl.get(entity))
@@ -111,17 +98,6 @@ pub fn iter(p: &PMap) -> impl Iterator<Item = (&ArcStr, &ArcStr, &ArcStr)> {
     p.0.iter().flat_map(|(path, tbl)| {
         tbl.iter().map(move |(entity, perms)| (path, entity, perms))
     })
-}
-
-/// Iterate entries belonging to a single path.
-pub fn iter_path<'a>(
-    p: &'a PMap,
-    path: &str,
-) -> Box<dyn Iterator<Item = (&'a ArcStr, &'a ArcStr)> + 'a> {
-    match p.0.get(path) {
-        Some(tbl) => Box::new(tbl.iter()) as Box<dyn Iterator<Item = _>>,
-        None => Box::new(std::iter::empty::<(&'a ArcStr, &'a ArcStr)>()),
-    }
 }
 
 /// Convenience: an empty perms map.
@@ -314,7 +290,7 @@ mod tests {
     }
 
     #[test]
-    fn add_remove_round_trip() {
+    fn add_round_trip() {
         let mut p = empty();
         add_entry(&mut p, "/foo", "alice", "swlpd").unwrap();
         add_entry(&mut p, "/foo", "bob", "sl").unwrap();
@@ -323,14 +299,6 @@ mod tests {
         assert_eq!(lookup(&p, "/foo", "alice").map(|s| s.as_str()), Some("swlpd"));
         assert_eq!(lookup(&p, "/foo", "bob").map(|s| s.as_str()), Some("sl"));
         assert_eq!(lookup(&p, "/bar", "alice").map(|s| s.as_str()), Some("p"));
-
-        remove_entry(&mut p, "/foo", "alice");
-        assert!(lookup(&p, "/foo", "alice").is_none());
-        assert!(lookup(&p, "/foo", "bob").is_some());
-
-        // Removing the last entity under a path drops the path key too.
-        remove_entry(&mut p, "/foo", "bob");
-        assert!(p.0.get("/foo").is_none());
     }
 
     #[test]

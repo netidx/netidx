@@ -30,7 +30,6 @@ mod editor;
 mod id_map;
 mod init;
 mod lifecycle;
-mod perms;
 mod perms_admin;
 mod read_gate;
 mod resolver;
@@ -92,7 +91,7 @@ pub(crate) enum Params {
     /// tear down a netidx install (config dir + OS service)
     Uninstall(uninstall::Params),
     /// low-level single-component commands (client / resolver config /
-    /// perms / units / server / tls / id-map / service)
+    /// units / server / tls / id-map / service)
     Component {
         #[command(subcommand)]
         cmd: component::Cmd,
