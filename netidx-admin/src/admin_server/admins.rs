@@ -161,9 +161,9 @@ fn policy_within(
         ));
     }
     for g in id_map_groups {
-        if !caller_id_map_groups.contains(g) {
+        if !caller_id_map_groups.iter().any(|c| glob_covers(c, g)) {
             return Err(format!(
-                "cannot grant id-map group {g:?}: it is not in your own set \
+                "cannot grant id-map group {g:?}: it is not within your own set \
                  {caller_id_map_groups:?}"
             ));
         }
@@ -462,6 +462,7 @@ fn handle_list_admins_inner(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::admin_server::auth::name_permitted;
     use globset::Glob;
     use netidx_admin_proto::policy::Policy;
 
@@ -493,6 +494,21 @@ mod tests {
             may_manage_admins: false,
             service_control_scopes: vec![],
         }
+    }
+
+    /// The local control-socket superuser holds every capability, id-map
+    /// groups included. This was the one field `superuser_policy` left empty,
+    /// which denied the on-box admin every group operation while the doc
+    /// comment claimed full authority.
+    #[test]
+    fn the_superuser_holds_id_map_authority_like_every_other_capability() {
+        let su = netidx_admin_proto::policy::superuser_policy();
+        let mut granted = pol();
+        granted.id_map_groups = vec!["users".into(), "wheel".into()];
+        assert!(policy_within(&su, &granted).is_ok());
+        // And a concrete group is permitted by it — the check issuance and
+        // the id-map edits both make.
+        assert!(name_permitted("users", &su.id_map_groups).unwrap());
     }
 
     /// The no-escalation rule, one capability at a time. Every field of

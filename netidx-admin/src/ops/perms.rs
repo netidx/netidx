@@ -70,6 +70,72 @@ pub async fn edit_perms(
     }
 }
 
+/// The outcome of a single-entry edit: whether the document actually changed,
+/// and how the propagation to each resolver cluster member went.
+///
+/// `changed` is separate from the peer results because "the entry was already
+/// what you asked for" and "the entry was written" are different facts an
+/// operator needs, and neither is an error. A frontend that had only the peer
+/// list would have to claim it made a change it may not have made.
+pub struct PermsEdit {
+    /// Whether this edit altered the perms document at all.
+    pub changed: bool,
+    pub peers: Vec<PeerResult>,
+}
+
+/// Grant `entity` `bits` at `path`, inserting or replacing that one entry in
+/// the perms of the resolver cluster mounted at `at`.
+///
+/// Read-modify-write against the whole document, because that is the only
+/// shape the admin plane has: [`show_perms`], mutate, [`edit_perms`]. Doing it
+/// here rather than in a frontend keeps one implementation for all three, and
+/// keeps the JSON surgery away from code whose job is to print.
+pub async fn set_entry(
+    target: &AdminTarget,
+    at: &str,
+    path: &str,
+    entity: &str,
+    bits: &str,
+) -> Result<PermsEdit> {
+    crate::perms::validate_bits(bits)?;
+    let mut pmap = crate::perms::validate(&show_perms(target, at).await?)
+        .context("the resolver cluster's current perms are not valid")?;
+    let changed =
+        crate::perms::lookup(&pmap, path, entity).map(|b| b.as_str()) != Some(bits);
+    crate::perms::add_entry(&mut pmap, path, entity, bits)?;
+    Ok(PermsEdit { changed, peers: propagate(target, at, &pmap).await? })
+}
+
+/// Remove `entity`'s entry at `path` from the perms of the resolver cluster
+/// mounted at `at`.
+///
+/// An entry that was already absent is reported (`changed: false`), not
+/// refused. Refusing would break the one property every perms command has:
+/// that re-running it converges a resolver cluster left inconsistent by a
+/// partial propagation failure. The second run reads the member the removal
+/// already succeeded on, would find nothing to remove, and would error out
+/// with the other members still holding the entry.
+pub async fn remove_entry(
+    target: &AdminTarget,
+    at: &str,
+    path: &str,
+    entity: &str,
+) -> Result<PermsEdit> {
+    let mut pmap = crate::perms::validate(&show_perms(target, at).await?)
+        .context("the resolver cluster's current perms are not valid")?;
+    let changed = crate::perms::remove_entry(&mut pmap, path, entity);
+    Ok(PermsEdit { changed, peers: propagate(target, at, &pmap).await? })
+}
+
+async fn propagate(
+    target: &AdminTarget,
+    at: &str,
+    pmap: &crate::perms::PMap,
+) -> Result<Vec<PeerResult>> {
+    let edited = serde_json::to_string(pmap).context("serializing perms")?;
+    edit_perms(target, at, &edited).await
+}
+
 /// The exact `--at` targets a perms read or edit can route to.
 ///
 /// A remote admin may reach every active resolver cluster in the admin domain.

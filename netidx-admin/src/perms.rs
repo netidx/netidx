@@ -47,11 +47,20 @@ pub async fn save_perms_async<P: AsRef<Path>>(path: P, p: &PMap) -> Result<()> {
     atomic::write_atomic_pretty_json_async(path.as_ref(), p).await
 }
 
+/// Check a permission-bit string, so every caller refuses the same input
+/// with the same message — and so a caller that is about to spend a network
+/// round trip on an edit can refuse a typo before it starts.
+pub fn validate_bits(bits: &str) -> Result<()> {
+    Permissions::try_from(bits)
+        .with_context(|| format!("invalid permission bits {bits:?}"))?;
+    Ok(())
+}
+
 /// Insert or replace a (path, entity, perm-string) entry. Validates the
 /// perm string before mutating. Empty `entity` (`""`) is the conventional
 /// anonymous identity in the file format.
 pub fn add_entry(p: &mut PMap, path: &str, entity: &str, perms: &str) -> Result<()> {
-    Permissions::try_from(perms)?;
+    validate_bits(perms)?;
     let path = ArcStr::from(path);
     let entity = ArcStr::from(entity);
     let perms = ArcStr::from(perms);
@@ -68,9 +77,7 @@ pub fn add_entry(p: &mut PMap, path: &str, entity: &str, perms: &str) -> Result<
 pub fn validate(edited: &str) -> Result<PMap> {
     let pmap: PMap = serde_json::from_str(edited).context("not valid perms JSON")?;
     for (path, entity, bits) in iter(&pmap) {
-        Permissions::try_from(bits.as_str()).with_context(|| {
-            format!("invalid permission bits {bits:?} for {entity} at {path}")
-        })?;
+        validate_bits(bits).with_context(|| format!("for {entity} at {path}"))?;
     }
     Ok(pmap)
 }
@@ -86,6 +93,26 @@ pub fn pretty(perms_json: &str) -> Result<String> {
     let v: serde_json::Value =
         serde_json::from_str(perms_json).context("parsing perms JSON")?;
     serde_json::to_string_pretty(&v).context("formatting perms JSON")
+}
+
+/// Remove an entity's entry from a path, reporting whether there was one.
+/// If removing the last entity under `path`, also removes the path entry.
+///
+/// The bool is what lets a caller refuse to propagate a no-op: an edit that
+/// removes nothing would otherwise rewrite every resolver cluster member's
+/// perms and report success for a removal that never happened.
+pub fn remove_entry(p: &mut PMap, path: &str, entity: &str) -> bool {
+    use std::collections::hash_map::Entry;
+    match p.0.entry(ArcStr::from(path)) {
+        Entry::Vacant(_) => false,
+        Entry::Occupied(mut e) => {
+            let removed = e.get_mut().remove(entity).is_some();
+            if e.get().is_empty() {
+                e.remove();
+            }
+            removed
+        }
+    }
 }
 
 /// Look up the permission string for `(path, entity)`, if present.
@@ -290,7 +317,7 @@ mod tests {
     }
 
     #[test]
-    fn add_round_trip() {
+    fn add_remove_round_trip() {
         let mut p = empty();
         add_entry(&mut p, "/foo", "alice", "swlpd").unwrap();
         add_entry(&mut p, "/foo", "bob", "sl").unwrap();
@@ -299,6 +326,26 @@ mod tests {
         assert_eq!(lookup(&p, "/foo", "alice").map(|s| s.as_str()), Some("swlpd"));
         assert_eq!(lookup(&p, "/foo", "bob").map(|s| s.as_str()), Some("sl"));
         assert_eq!(lookup(&p, "/bar", "alice").map(|s| s.as_str()), Some("p"));
+
+        assert!(remove_entry(&mut p, "/foo", "alice"));
+        assert!(lookup(&p, "/foo", "alice").is_none());
+        assert!(lookup(&p, "/foo", "bob").is_some());
+
+        // Removing the last entity under a path drops the path key too.
+        assert!(remove_entry(&mut p, "/foo", "bob"));
+        assert!(p.0.get("/foo").is_none());
+    }
+
+    #[test]
+    fn remove_reports_whether_it_removed_anything() {
+        let mut p = empty();
+        add_entry(&mut p, "/foo", "alice", "swlpd").unwrap();
+        assert!(!remove_entry(&mut p, "/nosuch", "alice"));
+        assert!(!remove_entry(&mut p, "/foo", "nosuch"));
+        // A failed removal must not have disturbed the path it looked under.
+        assert!(lookup(&p, "/foo", "alice").is_some());
+        assert!(remove_entry(&mut p, "/foo", "alice"));
+        assert!(!remove_entry(&mut p, "/foo", "alice"));
     }
 
     #[test]

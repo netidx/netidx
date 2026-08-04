@@ -44,10 +44,11 @@ pub struct Policy {
     /// (`"730days"`, `"10m"`) in the vault and on the wire.
     #[serde(with = "humantime_serde")]
     pub max_validity: Duration,
-    /// id-map groups this admin **may assign** when signing — the
-    /// allowed set bounding the groups chosen at enrollment time in
-    /// the `SignRequest`. Empty ⇒ this admin's signs never register
-    /// identities.
+    /// id-map groups this admin **may assign** — glob patterns, matched the
+    /// same way as `allowed_san`, bounding both the groups chosen at
+    /// enrollment time in the `SignRequest` and the groups an id-map edit
+    /// may name. Empty ⇒ this admin's signs never register identities and it
+    /// may not edit an id-map.
     #[serde(default)]
     #[pack(default)]
     pub id_map_groups: Vec<String>,
@@ -152,7 +153,7 @@ pub fn superuser_policy() -> Policy {
     Policy {
         allowed_san: vec!["*".to_string()],
         max_validity: SIGNING_SLOT_MAX_VALIDITY,
-        id_map_groups: vec![],
+        id_map_groups: vec!["*".to_string()],
         server_enroll_scopes: vec!["/".to_string()],
         server_enroll_roles: Role::Resolver | Role::IdMap,
         perms_edit_scopes: vec!["/".to_string()],

@@ -342,7 +342,7 @@ async fn try_handle(
         gs
     };
     for g in &groups {
-        if !authd.policy.id_map_groups.iter().any(|a| a == g) {
+        if !name_permitted(g, &authd.policy.id_map_groups)? {
             return Ok(failed(reject(&format!(
                 "id-map group {g:?} is not permitted for admin {}; allowed: {:?}",
                 authd.admin, authd.policy.id_map_groups,
