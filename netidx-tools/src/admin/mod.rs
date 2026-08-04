@@ -26,7 +26,6 @@ mod agent;
 mod delegation;
 mod discover;
 mod editor;
-mod id_map;
 mod id_map_admin;
 mod init;
 mod lifecycle;
@@ -99,8 +98,7 @@ pub(crate) enum Params {
     Discover(discover::DiscoverArgs),
     /// tear down a netidx install (config dir + OS service)
     Uninstall(uninstall::Params),
-    /// low-level single-component commands (units / server / tls / id-map /
-    /// service)
+    /// low-level single-component commands (units / server / tls / service)
     Component {
         #[command(subcommand)]
         cmd: component::Cmd,

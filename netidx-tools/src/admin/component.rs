@@ -21,7 +21,7 @@ use clap::Subcommand;
 use super::activation;
 #[cfg(unix)]
 use super::server;
-use super::{agent, id_map, service, tls};
+use super::{agent, service, tls};
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum Cmd {
@@ -48,11 +48,6 @@ pub(crate) enum Cmd {
         #[command(subcommand)]
         cmd: tls::Cmd,
     },
-    /// edit the netidx id-map (TLS uid/group lookups)
-    IdMap {
-        #[command(subcommand)]
-        cmd: id_map::Cmd,
-    },
     /// install netidx as an OS service
     Service {
         #[command(subcommand)]
@@ -68,7 +63,6 @@ pub(crate) fn run(cmd: Cmd) -> Result<()> {
         Cmd::Server { cmd } => server::run(cmd),
         Cmd::AdminAgent { cmd } => agent::run(cmd),
         Cmd::Tls { cmd } => tls::run(cmd),
-        Cmd::IdMap { cmd } => id_map::run(cmd),
         Cmd::Service { cmd } => service::run(cmd),
     }
 }

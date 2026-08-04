@@ -53,7 +53,8 @@ verbatim so the resulting certs continue to load through the existing
 The id-mapper daemon shipped: `netidx id-map serve` listens on a unix
 socket, answers `IdMapType::Socket` queries from the resolver, and
 holds the parsed map in memory behind an `RwLock<Arc<IdMap>>` with
-SIGHUP-triggered reload. `netidx admin component id-map …` edits the JSON; the
+SIGHUP-triggered reload. `netidx admin id-map …` edits it through the admin
+server, which propagates each operation to every id-map host; the
 `standalone-resolver --auth tls` template auto-installs an `id-map.unit`
 and a starter `id-map.json` alongside the resolver (opt out with
 `--no-id-map`).

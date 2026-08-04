@@ -1980,9 +1980,15 @@ fn print_id_map_result(r: &offline_ops::IdMapResult) {
         IdMapResult::NoIdentityName => {
             println!("(no DNS SAN / CN — skipping id-map registration)")
         }
+        // Offline signing is the break-glass path, so it registers into the
+        // local file directly rather than through the admin plane — but there
+        // is nothing to register into if the host was never installed with an
+        // id-map role. The installers drop a starter map; `admin id-map` is
+        // how it is managed once a CA is reachable again.
         IdMapResult::NoMap { path } => println!(
-            "(no local id-map at {} — skipping registration; create one with \
-             `netidx admin component id-map init`)",
+            "(no local id-map at {} — skipping registration; this host has no \
+             id-map role. Install one, or manage the admin domain's id-map with \
+             `netidx admin id-map`)",
             path.display(),
         ),
         IdMapResult::Registered(reg) => match &reg.previous {
