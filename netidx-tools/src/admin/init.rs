@@ -323,25 +323,44 @@ fn workstation_input(
     f: WorkstationFlags,
 ) -> Result<netidx_admin::plan::install::workstation::WorkstationInput> {
     use netidx_admin::plan::install::workstation::WorkstationInput;
+    let WorkstationFlags {
+        parent,
+        admin_server,
+        default_auth,
+        base,
+        listen_port,
+        local_socket,
+        client_config_path,
+        resolver_config_path,
+        units_dir,
+        netidx_binary,
+        key_protection,
+        no_container,
+        owner,
+        no_perms,
+        perms_path,
+        common,
+    } = f;
     let explicit_parent =
-        if f.parent.any_set() { f.parent.to_parent_ref(&f.base)? } else { None };
-    let mut input = WorkstationInput::defaults(f.common.install_common()?);
-    input.explicit_parent = explicit_parent;
-    input.admin_server = f.admin_server;
-    input.default_auth = f.default_auth;
-    input.base = f.base;
-    input.listen_port = f.listen_port;
-    input.local_socket = f.local_socket;
-    input.client_config_path = f.client_config_path;
-    input.resolver_config_path = f.resolver_config_path;
-    input.units_dir = f.units_dir;
-    input.netidx_binary = f.netidx_binary;
-    input.key_protection = f.key_protection;
-    input.with_container = !f.no_container;
-    input.owner = f.owner.map(ArcStr::from);
-    input.with_perms_file = !f.no_perms;
-    input.perms_path = f.perms_path;
-    Ok(input)
+        if parent.any_set() { parent.to_parent_ref(&base)? } else { None };
+    Ok(WorkstationInput {
+        explicit_parent,
+        admin_server,
+        default_auth,
+        base,
+        listen_port,
+        local_socket,
+        client_config_path,
+        resolver_config_path,
+        units_dir,
+        netidx_binary,
+        key_protection,
+        with_container: !no_container,
+        owner: owner.map(ArcStr::from),
+        with_perms_file: !no_perms,
+        perms_path,
+        common: common.install_common()?,
+    })
 }
 
 #[derive(Args, Debug)]
