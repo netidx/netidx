@@ -11,6 +11,7 @@
 use crate::{atomic, config_lock::ConfigDirLock};
 use anyhow::{Context, Result};
 use arcstr::ArcStr;
+use netidx_admin_proto::IdMapEdit;
 use std::path::{Path, PathBuf};
 
 pub use netidx_id_map::file::{
@@ -94,14 +95,17 @@ pub async fn save_async<P: AsRef<Path>>(path: P, map: &IdMap) -> Result<()> {
 /// Whether the file exists is decided once, here, under the guard — every
 /// caller used to probe with `exists()` first, which a create between the probe
 /// and the read can defeat.
-pub struct IdMapEdit {
+///
+/// Distinct from [`netidx_admin_proto::IdMapEdit`], which is a single
+/// *operation* on a map. This is the open file it would be applied to.
+pub struct IdMapSession {
     path: PathBuf,
     lock: ConfigDirLock,
     map: IdMap,
     existed: bool,
 }
 
-impl IdMapEdit {
+impl IdMapSession {
     /// Open `path` for editing, defaulting to this host's user id-map. A file
     /// that does not exist opens as [`empty`].
     ///
@@ -128,7 +132,7 @@ impl IdMapEdit {
             }
             Err(e) => return Err(e),
         };
-        Ok(IdMapEdit { path, lock, map, existed })
+        Ok(IdMapSession { path, lock, map, existed })
     }
 
     pub fn path(&self) -> &Path {
@@ -339,6 +343,104 @@ pub fn register_identity(
     Ok(uid)
 }
 
+/// Load the map at `path`, or the empty map when there is no file yet.
+///
+/// A host whose id-map daemon has never registered anyone has no file, and a
+/// zero-touch join must still work there — so "absent" means empty, not an
+/// error. Only the daemon paths use this; [`IdMapSession::open`] does the same
+/// thing while holding the config-dir guard.
+pub async fn load_or_empty_async<P: AsRef<Path>>(path: P) -> Result<IdMap> {
+    let path = path.as_ref();
+    if tokio::fs::try_exists(path).await.unwrap_or(false) {
+        load_async(path).await
+    } else {
+        Ok(empty())
+    }
+}
+
+/// Apply one [`IdMapEdit`] to `map`, reporting whether it changed anything.
+///
+/// This is the single place an id-map mutation happens on the admin plane:
+/// the enrollment-time `AddIdentity` push, the server-to-server
+/// `ApplyIdMapEdit`, and the CA's own local apply all land here, so no two
+/// paths can disagree about what an operation means.
+///
+/// **Asking for something already true is not an error.** Every arm that
+/// finds nothing to do returns `Ok(false)` rather than failing, which is what
+/// makes a retry safe: when a push reaches some id-map hosts and not others,
+/// re-running the same edit is a no-op where it landed and applies where it
+/// didn't, so the hosts converge. An arm fails only on input that is *wrong* —
+/// a group that would dangle, an identity that isn't there to add a group to.
+///
+/// Because each host applies the operation rather than receiving a document,
+/// there is no read-modify-write and so no lost update: two concurrent edits
+/// to different identities can't clobber each other.
+pub fn apply_edit(map: &mut IdMap, edit: &IdMapEdit) -> Result<bool> {
+    match edit {
+        IdMapEdit::AddIdentity { san, primary_group, groups } => {
+            let gs: Vec<&str> = groups.iter().map(|g| g.as_str()).collect();
+            // register_identity creates any missing group, so a new group is
+            // a change even when the identity record ends up identical.
+            let creates_group = std::iter::once(primary_group.as_str())
+                .chain(gs.iter().copied())
+                .any(|g| !map.groups.contains_key(g));
+            let before = map.identities.get(san.as_str()).cloned();
+            register_identity(map, san, primary_group, &gs)?;
+            Ok(creates_group || map.identities.get(san.as_str()) != before.as_ref())
+        }
+        IdMapEdit::RemoveIdentity { san } => Ok(remove_identity(map, san).is_some()),
+        IdMapEdit::AddGroup { name } => {
+            check_name_chars("group name", name)?;
+            if map.groups.contains_key(name.as_str()) {
+                return Ok(false);
+            }
+            let gid = next_gid(map);
+            upsert_group(map, name, gid);
+            Ok(true)
+        }
+        IdMapEdit::RemoveGroup { name } => {
+            if !map.groups.contains_key(name.as_str()) {
+                return Ok(false);
+            }
+            // Still errors when an identity references it — that would
+            // dangle, which is wrong rather than already-true.
+            remove_group(map, name)?;
+            Ok(true)
+        }
+        IdMapEdit::AddMember { san, group } => {
+            let member = map
+                .identities
+                .get(san.as_str())
+                .map(|i| {
+                    i.primary_group.as_str() == group
+                        || i.groups.iter().any(|g| g.as_str() == group)
+                })
+                .unwrap_or(false);
+            add_group_member(map, san, group)?;
+            Ok(!member)
+        }
+        IdMapEdit::RemoveMember { san, group } => {
+            match map.identities.get(san.as_str()) {
+                // Nothing to remove it from — already true.
+                None => Ok(false),
+                Some(i) if !i.groups.iter().any(|g| g.as_str() == group) => {
+                    // Not a secondary group. If it is the *primary* group,
+                    // fall through so the engine refuses: dropping it would
+                    // leave the identity without one.
+                    if i.primary_group.as_str() == group {
+                        remove_group_member(map, san, group)?;
+                    }
+                    Ok(false)
+                }
+                Some(_) => {
+                    remove_group_member(map, san, group)?;
+                    Ok(true)
+                }
+            }
+        }
+    }
+}
+
 /// Parse an octal unix mode string. Accepts `"600"`, `"0600"`, or
 /// `"0o600"`. The whole input after stripping at most one `0o`/`0O`
 /// prefix is interpreted in base 8 — no leading-zero stripping. That
@@ -364,8 +466,8 @@ pub fn parse_octal_mode(s: &str) -> Result<u32> {
 mod tests {
     use super::*;
 
-    async fn edit(dir: &Path) -> IdMapEdit {
-        IdMapEdit::open(Some(dir.join("id-map.json")), None).await.unwrap()
+    async fn edit(dir: &Path) -> IdMapSession {
+        IdMapSession::open(Some(dir.join("id-map.json")), None).await.unwrap()
     }
 
     /// The whole edit cycle through the session type, including the referential
@@ -426,7 +528,7 @@ mod tests {
     async fn a_second_session_over_the_same_map_is_refused() {
         let dir = tempfile::tempdir().unwrap();
         let held = edit(dir.path()).await;
-        let e = IdMapEdit::open(Some(dir.path().join("id-map.json")), None)
+        let e = IdMapSession::open(Some(dir.path().join("id-map.json")), None)
             .await
             .err()
             .map(|e| format!("{e:#}"))
@@ -434,7 +536,7 @@ mod tests {
         assert!(e.contains("owns"), "got {e}");
         // ...but a caller that already holds the guard reuses it.
         let reused =
-            IdMapEdit::open(Some(dir.path().join("id-map.json")), Some(held.lock()))
+            IdMapSession::open(Some(dir.path().join("id-map.json")), Some(held.lock()))
                 .await
                 .unwrap();
         assert_eq!(reused.path(), held.path());

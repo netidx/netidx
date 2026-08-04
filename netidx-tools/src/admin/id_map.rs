@@ -14,7 +14,7 @@
 
 use anyhow::{Context, Result};
 use clap::Subcommand;
-use netidx_admin::id_map::{self, IdMapEdit};
+use netidx_admin::id_map::{self, IdMapSession};
 use std::path::PathBuf;
 
 use super::editor;
@@ -144,8 +144,8 @@ pub(crate) fn run(cmd: Cmd) -> Result<()> {
     })
 }
 
-async fn open(file: Option<PathBuf>) -> Result<IdMapEdit> {
-    IdMapEdit::open(file, None).await
+async fn open(file: Option<PathBuf>) -> Result<IdMapSession> {
+    IdMapSession::open(file, None).await
 }
 
 fn resolve(file: Option<PathBuf>) -> Result<PathBuf> {
@@ -155,7 +155,7 @@ fn resolve(file: Option<PathBuf>) -> Result<PathBuf> {
     }
 }
 
-async fn init(mut m: IdMapEdit, default_uid: u32, default_gid: u32) -> Result<()> {
+async fn init(mut m: IdMapSession, default_uid: u32, default_gid: u32) -> Result<()> {
     if m.existed() {
         bail!("{} already exists; refusing to overwrite", m.path().display());
     }
@@ -173,7 +173,7 @@ fn show(file: PathBuf) -> Result<()> {
     Ok(())
 }
 
-async fn edit(mut m: IdMapEdit) -> Result<()> {
+async fn edit(mut m: IdMapSession) -> Result<()> {
     if !m.existed() {
         eprintln!("# {:?} does not exist — starting with an empty template", m.path());
     }
@@ -222,7 +222,7 @@ fn list(file: PathBuf) -> Result<()> {
     Ok(())
 }
 
-async fn add_group(mut m: IdMapEdit, name: String, gid: Option<u32>) -> Result<()> {
+async fn add_group(mut m: IdMapSession, name: String, gid: Option<u32>) -> Result<()> {
     let gid = gid
         .or_else(|| m.map().groups.get(name.as_str()).map(|g| g.gid))
         .unwrap_or_else(|| id_map::next_gid(m.map()));
@@ -235,7 +235,7 @@ async fn add_group(mut m: IdMapEdit, name: String, gid: Option<u32>) -> Result<(
     Ok(())
 }
 
-async fn remove_group(mut m: IdMapEdit, name: String) -> Result<()> {
+async fn remove_group(mut m: IdMapSession, name: String) -> Result<()> {
     id_map::remove_group(m.map_mut(), &name)?;
     m.save().await?;
     println!("removed group {name}");
@@ -243,7 +243,7 @@ async fn remove_group(mut m: IdMapEdit, name: String) -> Result<()> {
 }
 
 async fn add_user(
-    mut m: IdMapEdit,
+    mut m: IdMapSession,
     name: String,
     uid: Option<u32>,
     primary_group: String,
@@ -268,7 +268,7 @@ async fn add_user(
     Ok(())
 }
 
-async fn remove_user(mut m: IdMapEdit, name: String) -> Result<()> {
+async fn remove_user(mut m: IdMapSession, name: String) -> Result<()> {
     match id_map::remove_identity(m.map_mut(), &name) {
         Some(_) => {
             m.save().await?;
@@ -279,14 +279,14 @@ async fn remove_user(mut m: IdMapEdit, name: String) -> Result<()> {
     Ok(())
 }
 
-async fn add_member(mut m: IdMapEdit, name: String, group: String) -> Result<()> {
+async fn add_member(mut m: IdMapSession, name: String, group: String) -> Result<()> {
     id_map::add_group_member(m.map_mut(), &name, &group)?;
     m.save().await?;
     println!("{name} ∈ {group}");
     Ok(())
 }
 
-async fn remove_member(mut m: IdMapEdit, name: String, group: String) -> Result<()> {
+async fn remove_member(mut m: IdMapSession, name: String, group: String) -> Result<()> {
     id_map::remove_group_member(m.map_mut(), &name, &group)?;
     m.save().await?;
     println!("{name} ∉ {group}");

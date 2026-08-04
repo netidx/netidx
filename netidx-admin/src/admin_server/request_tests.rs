@@ -1,8 +1,9 @@
 use super::*;
 use crate::admin_proto::{
     AddIdentityRequest, AdminDomainMap, AdminServerEntry, ApplyCaStateRequest,
-    ApplyCrlRequest, ApplyPermsEditRequest, ApplyReferralEditRequest,
-    ApplyServiceControlRequest, ExternalCaInstallRequest, InfoAuth, LoginRequest,
+    ApplyCrlRequest, ApplyIdMapEditRequest, ApplyPermsEditRequest,
+    ApplyReferralEditRequest, ApplyServiceControlRequest, EditIdMapRequest,
+    ExternalCaInstallRequest, GetIdMapRequest, IdMapEdit, InfoAuth, LoginRequest,
     LogoutRequest, ReadPermsRequest, ReferralEdit, RegisterRequest, ResolverAddr, Role,
 };
 
@@ -61,6 +62,26 @@ fn centralized_requirements_protect_all_mutations() {
         &Request::ReadPerms(ReadPermsRequest {
             credential: admin_proto::AdminCredential::password("alice", "pw"),
             target_path: "/eu".into(),
+        }),
+        NotNeeded,
+    );
+    // The id-map trio, gated exactly like its perms counterparts: the
+    // server-to-server apply is CA-only, the operator-facing pair is
+    // admin-authenticated and needs no server key (no signing involved).
+    assert_ca(&Request::ApplyIdMapEdit(ApplyIdMapEditRequest {
+        operation_id,
+        edit: IdMapEdit::AddGroup { name: "users".into() },
+    }));
+    assert_admin(
+        &Request::GetIdMap(GetIdMapRequest {
+            credential: admin_proto::AdminCredential::password("alice", "pw"),
+        }),
+        NotNeeded,
+    );
+    assert_admin(
+        &Request::EditIdMap(EditIdMapRequest {
+            credential: admin_proto::AdminCredential::password("alice", "pw"),
+            edit: IdMapEdit::RemoveIdentity { san: "bob.example".into() },
         }),
         NotNeeded,
     );

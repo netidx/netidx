@@ -156,30 +156,33 @@ pub(super) async fn handle_add_identity(
         "admin-server: applying id-map registration operation {} for {:?}",
         req.operation_id, req.san
     );
-    let map_path = match config_lock.require_contained(map_path) {
-        Ok(path) => path,
-        Err(e) => return AddIdentityResponse::Err { reason: format!("{e:#}") },
-    };
-    let mut map = if tokio::fs::try_exists(&map_path).await.unwrap_or(false) {
-        match id_map::load_async(&map_path).await {
-            Ok(m) => m,
-            Err(e) => {
-                return AddIdentityResponse::Err {
-                    reason: format!("loading id-map: {e:#}"),
-                };
-            }
+    let apply = async {
+        let map_path = config_lock.require_contained(map_path)?;
+        let mut map =
+            id_map::load_or_empty_async(&map_path).await.context("loading id-map")?;
+        // Enrollment registration is the same operation an operator's
+        // `admin id-map add-user` performs, so it goes through the same
+        // applier — otherwise the two could come to mean different things.
+        let changed = id_map::apply_edit(
+            &mut map,
+            &admin_proto::IdMapEdit::AddIdentity {
+                san: req.san.clone(),
+                primary_group: req.primary_group.clone(),
+                groups: req.groups.clone(),
+            },
+        )?;
+        let uid = map
+            .identities
+            .get(req.san.as_str())
+            .map(|i| i.uid)
+            .ok_or_else(|| anyhow!("registration did not produce an identity"))?;
+        if changed {
+            id_map::save_async(&map_path, &map).await.context("saving id-map")?;
         }
-    } else {
-        id_map::empty()
+        Ok::<u32, anyhow::Error>(uid)
     };
-    let groups: Vec<&str> = req.groups.iter().map(|s| s.as_str()).collect();
-    match id_map::register_identity(&mut map, &req.san, &req.primary_group, &groups) {
-        Ok(uid) => match id_map::save_async(&map_path, &map).await {
-            Ok(()) => AddIdentityResponse::Ok(AddIdentityOk { uid }),
-            Err(e) => {
-                AddIdentityResponse::Err { reason: format!("saving id-map: {e:#}") }
-            }
-        },
+    match apply.await {
+        Ok(uid) => AddIdentityResponse::Ok(AddIdentityOk { uid }),
         Err(e) => AddIdentityResponse::Err { reason: format!("{e:#}") },
     }
 }
@@ -709,6 +712,29 @@ impl IdentityPusher {
     }
 }
 
+/// Every host that holds an id-map: registered admin servers carrying
+/// [`Role::IdMap`], in stable server-ID order.
+///
+/// Shared by enrollment's registration fanout and by an operator's id-map
+/// edit ([`super::id_map`]), because the two must reach exactly the same set
+/// — a host that gets enrollment pushes but not edits (or the reverse) drifts
+/// out of agreement with the rest, and nothing would say so.
+pub(super) fn id_map_targets(
+    map: &admin_proto::AdminDomainMap,
+) -> Vec<(admin_proto::AdminServerId, SocketAddr)> {
+    let mut targets: Vec<_> = map
+        .admin_servers
+        .iter()
+        .filter(|s| {
+            s.roles.contains(Role::IdMap)
+                && s.state == admin_proto::ServerState::Registered
+        })
+        .map(|s| (s.id, s.addr))
+        .collect();
+    targets.sort_by_key(|(id, _)| *id);
+    targets
+}
+
 /// Fan the freshly signed identity out to every id-map host we know of:
 /// the local map directly, configured peers and mDNS-discovered admin
 /// servers over authenticated TLS. Returns warnings for the failures —
@@ -738,22 +764,8 @@ pub(super) async fn push_registrations(
         groups: secondary.to_vec(),
     };
     let mut warnings = Vec::new();
-    let (my_id, targets) = state
-        .read(move |state| {
-            let mut targets: Vec<_> = state
-                .map
-                .admin_servers
-                .iter()
-                .filter(|s| {
-                    s.roles.contains(Role::IdMap)
-                        && s.state == admin_proto::ServerState::Registered
-                })
-                .map(|s| (s.id, s.addr))
-                .collect();
-            targets.sort_by_key(|(id, _)| *id);
-            (state.cfg.server_id, targets)
-        })
-        .await;
+    let (my_id, targets) =
+        state.read(move |state| (state.cfg.server_id, id_map_targets(&state.map))).await;
     // Local id-map first (no TLS loopback).
     if targets.iter().any(|(id, _)| *id == my_id) {
         match state.add_identity(&req).await {

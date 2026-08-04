@@ -17,6 +17,7 @@ mod admins;
 mod auth;
 mod ca_ops;
 mod enrollment;
+mod id_map;
 mod issuance;
 mod password_limiter;
 mod permissions;
@@ -44,7 +45,7 @@ use crate::{
     admin_domain,
     admin_proto::{
         AddIdentityRequest, AddIdentityResponse, AdminDomainMap,
-        ApplyReferralEditRequest, ApplyReferralEditResponse, Role,
+        ApplyReferralEditRequest, ApplyReferralEditResponse, IdMapEdit, Role,
     },
     admin_server_config::AdminServerConfig,
     ca_store,
@@ -691,6 +692,32 @@ impl Server {
             },
         })
         .await
+    }
+
+    /// Apply one id-map operation to this host's map, under the state write
+    /// lock so it is serialized with every other id-map write.
+    async fn apply_id_map_edit(&self, edit: &IdMapEdit) -> Result<bool> {
+        let edit = edit.clone();
+        let config_lock = self.config_lock.clone();
+        self.write_async(async move |state| match state.cfg.roles.id_map.as_ref() {
+            Some(role) => id_map::apply_edit_local(&config_lock, &role.map, &edit).await,
+            None => bail!("this host has no id-map role"),
+        })
+        .await
+    }
+
+    /// This host's id-map, serialized for the wire.
+    async fn read_id_map(&self) -> Result<String> {
+        let path = self
+            .read(move |state| state.cfg.roles.id_map.as_ref().map(|r| r.map.clone()))
+            .await
+            .context("this host has no id-map role — no map to read")?;
+        let map = if tokio::fs::try_exists(&path).await.unwrap_or(false) {
+            crate::id_map::load_async(&path).await?
+        } else {
+            crate::id_map::empty()
+        };
+        serde_json::to_string(&map).context("serializing id-map")
     }
 
     async fn apply_referral_edit(

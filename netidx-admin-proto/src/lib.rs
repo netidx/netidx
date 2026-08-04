@@ -501,6 +501,31 @@ pub enum Request {
     /// with [`ApplySetReadGateResponse`].
     #[pack(tag(45))]
     ApplySetReadGate(ApplySetReadGateRequest),
+    /// Admin-authenticated, sent to the **CA**: read the receiving host's
+    /// id-map. Answered with [`GetIdMapResponse`].
+    ///
+    /// Deliberately one host's map, not a merged view: uids are allocated
+    /// locally by each receiver, so two hosts holding the same identity under
+    /// different uids are *correct*. Names and group membership are what must
+    /// agree, and those are what an edit propagates.
+    #[pack(tag(46))]
+    GetIdMap(GetIdMapRequest),
+    /// Admin-authenticated, sent to the **CA**: apply one id-map operation
+    /// and propagate it to every id-map host. The CA authorizes the caller
+    /// against its `id_map_groups` / `allowed_san` and pushes
+    /// [`Request::ApplyIdMapEdit`] to each. Answered with
+    /// [`EditIdMapResponse`].
+    #[pack(tag(47))]
+    EditIdMap(EditIdMapRequest),
+    /// Server-to-server: apply one id-map operation to this host's local map
+    /// — the receive side of id-map propagation. Peer-cert-gated like
+    /// [`Request::ApplyPermsEdit`]. Answered with [`ApplyIdMapEditResponse`].
+    ///
+    /// [`Request::AddIdentity`] is the enrollment-time special case of this,
+    /// kept as its own message so a mixed-version admin domain keeps working;
+    /// both land in the same applier.
+    #[pack(tag(48))]
+    ApplyIdMapEdit(ApplyIdMapEditRequest),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Pack)]
@@ -1318,6 +1343,126 @@ pub struct ApplyPermsEditRequest {
 }
 
 pub type ApplyPermsEditResponse = RpcResult<()>;
+
+/// One id-map mutation, as an operation rather than a document.
+///
+/// Perms propagate as a whole file because every member must hold the same
+/// one. An id-map must not: `AddIdentityRequest` says the uid "is allocated
+/// locally by the receiver — id-map perms are keyed on *names*; uids are a
+/// per-host detail". Shipping a document would force one host's uids onto
+/// every other. So each host applies the *operation* and allocates its own
+/// numbers.
+#[derive(Debug, Clone, Serialize, Deserialize, Pack)]
+pub enum IdMapEdit {
+    /// Register (or update) `san` with its groups, creating any that are
+    /// missing. The same operation [`AddIdentityRequest`] carries.
+    #[pack(tag(0))]
+    AddIdentity { san: String, primary_group: String, groups: Vec<String> },
+    /// Drop `san` entirely. Its groups are left alone — they may have other
+    /// members, and an empty group is not an error.
+    #[pack(tag(1))]
+    RemoveIdentity { san: String },
+    /// Create `name` if absent, allocating a gid. Existing groups keep theirs.
+    #[pack(tag(2))]
+    AddGroup { name: String },
+    /// Remove `name`. Refused by the applier while any identity still has it,
+    /// so membership can't dangle.
+    #[pack(tag(3))]
+    RemoveGroup { name: String },
+    /// Add `san` to `group`.
+    #[pack(tag(4))]
+    AddMember { san: String, group: String },
+    /// Remove `san` from `group`. Refused for a primary group — that is what
+    /// `RemoveIdentity` is for.
+    #[pack(tag(5))]
+    RemoveMember { san: String, group: String },
+}
+
+impl IdMapEdit {
+    /// Every group name this edit names, for the policy check. An operation
+    /// that names no group (`RemoveIdentity`) returns empty and is authorized
+    /// by the identity's *existing* groups instead — the applier knows those,
+    /// the wire message doesn't.
+    pub fn groups(&self) -> Vec<&str> {
+        match self {
+            Self::AddIdentity { primary_group, groups, .. } => {
+                let mut v = vec![primary_group.as_str()];
+                v.extend(groups.iter().map(|g| g.as_str()));
+                v
+            }
+            Self::AddGroup { name } | Self::RemoveGroup { name } => vec![name.as_str()],
+            Self::AddMember { group, .. } | Self::RemoveMember { group, .. } => {
+                vec![group.as_str()]
+            }
+            Self::RemoveIdentity { .. } => vec![],
+        }
+    }
+
+    /// The identity this edit acts on, if any — checked against the caller's
+    /// `allowed_san` so an admin cannot touch a name it could never sign.
+    pub fn identity(&self) -> Option<&str> {
+        match self {
+            Self::AddIdentity { san, .. }
+            | Self::RemoveIdentity { san }
+            | Self::AddMember { san, .. }
+            | Self::RemoveMember { san, .. } => Some(san.as_str()),
+            Self::AddGroup { .. } | Self::RemoveGroup { .. } => None,
+        }
+    }
+}
+
+/// Admin → CA: read the receiving host's id-map.
+#[derive(Debug, Clone, Serialize, Deserialize, Pack)]
+pub struct GetIdMapRequest {
+    pub credential: AdminCredential,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Pack)]
+pub struct GetIdMapOk {
+    pub server: AdminServerId,
+    pub addr: SocketAddr,
+    pub id_map_json: String,
+}
+
+pub type GetIdMapResponse = RpcResult<GetIdMapOk>;
+
+/// Admin → CA: apply `edit` here and propagate it to every id-map host.
+#[derive(Debug, Clone, Serialize, Deserialize, Pack)]
+pub struct EditIdMapRequest {
+    pub credential: AdminCredential,
+    pub edit: IdMapEdit,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Pack)]
+pub struct IdMapPropagationOk {
+    pub operation_id: OperationId,
+    pub peers: Vec<PeerResult>,
+    /// Whether any id-map host's map actually changed.
+    ///
+    /// Reported by the hosts rather than assumed by the CA, which need not
+    /// hold the id-map role itself. `false` means every host already agreed
+    /// with the edit — the operator asked for something already true, which
+    /// is not an error. A mixed result means the hosts had drifted, and this
+    /// propagation is what put them back together.
+    pub changed: bool,
+}
+
+pub type EditIdMapResponse = RpcResult<IdMapPropagationOk>;
+
+/// Server → server: apply `edit` to this host's local id-map.
+#[derive(Debug, Clone, Serialize, Deserialize, Pack)]
+pub struct ApplyIdMapEditRequest {
+    pub operation_id: OperationId,
+    pub edit: IdMapEdit,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Pack)]
+pub struct ApplyIdMapEditOk {
+    /// Whether this host's map changed.
+    pub changed: bool,
+}
+
+pub type ApplyIdMapEditResponse = RpcResult<ApplyIdMapEditOk>;
 
 // -- remote admin management (over the admin plane) ----------------------------
 

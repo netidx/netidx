@@ -681,6 +681,44 @@ pub async fn push_perms_edit(
     }
 }
 
+/// Server→server: apply one id-map operation to a peer admin server
+/// (serving-cert authed). Returns whether that host's map changed — the
+/// operator's answer is "did anything happen anywhere", and only the hosts
+/// know.
+pub async fn push_id_map_edit(
+    client: &AuthenticatedPkiClient,
+    addr: SocketAddr,
+    target_id: admin_proto::AdminServerId,
+    target_ca: bool,
+    home_ca: CertificateDer<'static>,
+    operation_id: admin_proto::OperationId,
+    edit: &admin_proto::IdMapEdit,
+) -> Result<bool> {
+    let (mut tls, _hello) = connect_pki_target(
+        client,
+        addr,
+        NodeKind::AdminServer,
+        Some(ExactTarget { id: Some(target_id), home_ca: &home_ca, ca: target_ca }),
+    )
+    .await?;
+    admin_proto::write_msg(
+        &mut tls,
+        &Request::ApplyIdMapEdit(admin_proto::ApplyIdMapEditRequest {
+            operation_id,
+            edit: edit.clone(),
+        }),
+    )
+    .await?;
+    match admin_proto::read_msg::<_, admin_proto::ApplyIdMapEditResponse>(&mut tls)
+        .await?
+    {
+        admin_proto::ApplyIdMapEditResponse::Ok(ok) => Ok(ok.changed),
+        admin_proto::ApplyIdMapEditResponse::Err { reason } => {
+            bail!("peer refused the id-map edit: {reason}")
+        }
+    }
+}
+
 /// CA → node: immediately install a freshly signed CRL on one exact
 /// home-CA admin-server identity.
 pub async fn push_crl(

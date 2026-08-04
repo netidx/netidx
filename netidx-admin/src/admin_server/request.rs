@@ -18,6 +18,7 @@ use super::{
         handle_external_ca_install, rotate_autorenew, rotate_recovery,
     },
     enrollment::handle_enroll,
+    id_map::{handle_apply_id_map_edit, handle_edit_id_map, handle_get_id_map},
     issuance::handle_sign,
     permissions::{
         handle_apply_perms_edit, handle_edit_perms, handle_get_perms, handle_read_perms,
@@ -38,11 +39,11 @@ use super::{
 };
 use crate::admin_proto::{
     self, AddIdentityResponse, ApplyCaStateResponse, ApplyCrlResponse,
-    ApplyPermsEditResponse, ApplyReferralEditResponse, ApplyServiceControlResponse,
-    ApplySetReadGateResponse, ClientHello, DelegationPollResponse, DelegationResponse,
-    DenyResponse, EnqueueResponse, GetMapResponse, GetMapVersionResponse,
-    ListDelegationsResponse, ListQueueResponse, MapVersion, PROTOCOL_VERSION,
-    RegisterResponse, Request, RevokeResponse, ServerHello,
+    ApplyIdMapEditResponse, ApplyPermsEditResponse, ApplyReferralEditResponse,
+    ApplyServiceControlResponse, ApplySetReadGateResponse, ClientHello,
+    DelegationPollResponse, DelegationResponse, DenyResponse, EnqueueResponse,
+    GetMapResponse, GetMapVersionResponse, ListDelegationsResponse, ListQueueResponse,
+    MapVersion, PROTOCOL_VERSION, RegisterResponse, Request, RevokeResponse, ServerHello,
 };
 use anyhow::{Context, Result, bail};
 use std::{net::SocketAddr, sync::Arc};
@@ -444,6 +445,33 @@ where
                 .await
                 .context("writing ApplyPermsEditResponse")
         }
+        Request::GetIdMap(req) => {
+            let resp =
+                handle_get_id_map(state, &req, request_authentication(), local).await;
+            admin_proto::write_msg(&mut tls, &resp)
+                .await
+                .context("writing GetIdMapResponse")
+        }
+        Request::EditIdMap(req) => {
+            let resp =
+                handle_edit_id_map(state, &req, request_authentication(), local).await;
+            admin_proto::write_msg(&mut tls, &resp)
+                .await
+                .context("writing EditIdMapResponse")
+        }
+        Request::ApplyIdMapEdit(req) => {
+            let resp = if !peer_is_admin_server {
+                ApplyIdMapEditResponse::Err {
+                    reason: "an id-map edit requires an admin-server peer certificate"
+                        .to_string(),
+                }
+            } else {
+                handle_apply_id_map_edit(state, &req).await
+            };
+            admin_proto::write_msg(&mut tls, &resp)
+                .await
+                .context("writing ApplyIdMapEditResponse")
+        }
         Request::ApplyCrl(req) => {
             let resp = if !peer_is_ca {
                 ApplyCrlResponse::Err {
@@ -666,6 +694,7 @@ fn request_requirements(req: &Request) -> RequestRequirements<'_> {
         | ApplyCaState(_)
         | GetPerms
         | ApplyPermsEdit(_)
+        | ApplyIdMapEdit(_)
         | ApplyReferralEdit(_)
         | ApplyServiceControl(_)
         | ApplySetReadGate(_) => RequestRequirements::CaOnly,
@@ -730,6 +759,14 @@ fn request_requirements(req: &Request) -> RequestRequirements<'_> {
             server_key: NotNeeded,
         },
         EditPerms(req) => RequestRequirements::Admin {
+            credential: &req.credential,
+            server_key: NotNeeded,
+        },
+        GetIdMap(req) => RequestRequirements::Admin {
+            credential: &req.credential,
+            server_key: NotNeeded,
+        },
+        EditIdMap(req) => RequestRequirements::Admin {
             credential: &req.credential,
             server_key: NotNeeded,
         },

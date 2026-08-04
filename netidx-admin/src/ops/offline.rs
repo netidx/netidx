@@ -38,7 +38,7 @@ pub enum SignSan {
 /// What to do about registering the newly signed identity in the local id-map.
 ///
 /// The guard over the map is not a caller's decision: the signing guard may
-/// already cover it, and [`crate::id_map::IdMapEdit`] works that out.
+/// already cover it, and [`crate::id_map::IdMapSession`] works that out.
 pub enum IdMapAction {
     /// `--no-id-map`: never register.
     Skip,
@@ -213,7 +213,7 @@ async fn register_id_map(
     };
     // The signing guard usually already covers the id-map; `open` reuses it
     // rather than deadlocking on a second acquire of the same directory.
-    let mut edit = id_map::IdMapEdit::open(None, Some(config_lock)).await?;
+    let mut edit = id_map::IdMapSession::open(None, Some(config_lock)).await?;
     if !edit.existed() {
         return Ok(IdMapResult::NoMap { path: edit.path().to_path_buf() });
     }
