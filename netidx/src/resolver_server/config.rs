@@ -207,9 +207,38 @@ pub fn merge_pmap(into: &mut PMap, from: PMap) {
 /// out keeps the reload's I/O footprint small and prevents spurious
 /// failures from e.g. mid-rotation cert files.
 pub fn merge_perms_only(cfg: &file::Config) -> Result<PMap> {
+    check_perms_sources(cfg)?;
     let mut merged = load_included_pmap(&cfg.include_permissions)?;
     merge_pmap(&mut merged, cfg.perms.clone());
     Ok(merged)
+}
+
+/// Refuse a config that carries both an inline `perms` block and
+/// `include_permissions`.
+///
+/// Inline perms merge last, so they override every included file. An admin
+/// server reads and writes only `include_permissions[0]`, which means a
+/// resolver configured both ways enforces permissions the admin plane cannot
+/// see and cannot change — `netidx admin perms show` would display one thing
+/// while the resolver applies another. That is a silent authorization
+/// divergence, so it is an error rather than a documented precedence rule.
+///
+/// Either source alone is fine: inline-only is a hand-managed standalone
+/// resolver, includes-only is what the installers produce.
+fn check_perms_sources(cfg: &file::Config) -> Result<()> {
+    if !cfg.perms.0.is_empty() && !cfg.include_permissions.is_empty() {
+        bail!(
+            "this resolver config has both an inline `perms` block and \
+             `include_permissions` ({:?}). Inline perms override every included \
+             file, so the resolver would enforce permissions the admin server \
+             cannot see or manage — it reads and writes only the first included \
+             file. Move the inline entries into that file (`netidx admin perms \
+             edit`) and delete the inline `perms` block; or, for a resolver you \
+             manage by hand, remove `include_permissions`.",
+            cfg.include_permissions
+        )
+    }
+    Ok(())
 }
 
 /// Read and parse a single permissions file in the on-disk `PMap`
@@ -633,6 +662,7 @@ pub(super) fn check_referrals(
 impl Config {
     /// Translate a file::Config into a validated netidx cluster Config
     pub fn from_file(cfg: file::Config) -> Result<Config> {
+        let perms = merge_perms_only(&cfg)?;
         let addrs = cfg
             .member_servers
             .iter()
@@ -736,15 +766,6 @@ impl Config {
             .into_iter()
             .map(|m| member_server_from_file(m))
             .collect::<Result<Vec<_>>>()?;
-        // Walk include_permissions in order, merging each file's PMap
-        // (later wins), then merge the inline `perms` last so it
-        // overrides anything from included files. Backwards-compatible:
-        // empty `include_permissions` reduces to just `cfg.perms`.
-        let perms = {
-            let mut merged = load_included_pmap(&cfg.include_permissions)?;
-            merge_pmap(&mut merged, cfg.perms);
-            merged
-        };
         Ok(Config { parent, children, perms, member_servers })
     }
 
@@ -855,17 +876,18 @@ mod perms_merge_tests {
         assert_eq!(merged.0.get("/foo").unwrap().get("alice").unwrap().as_str(), "sl");
     }
 
-    #[test]
-    fn inline_perms_override_includes_in_from_file() {
+    /// A config carrying both sources at once. Inline perms would win, and
+    /// the admin server manages only the included file, so the two together
+    /// are refused rather than silently resolved.
+    fn both_sources_cfg(included: &NamedTempFile) -> String {
         use std::io::Write;
-        let included = NamedTempFile::new().unwrap();
         writeln!(
             &mut included.as_file(),
             "{}",
             serde_json::to_string(&pmap(&[("/foo", &[("alice", "swlpd")])])).unwrap()
         )
         .unwrap();
-        let raw_cfg = format!(
+        format!(
             r#"{{
               "member_servers": [
                 {{
@@ -878,11 +900,66 @@ mod perms_merge_tests {
               "include_permissions": [{:?}]
             }}"#,
             included.path().to_string_lossy()
+        )
+    }
+
+    #[test]
+    fn inline_perms_alongside_includes_is_refused() {
+        let included = NamedTempFile::new().unwrap();
+        let err = Config::parse(&both_sources_cfg(&included)).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("inline `perms`"), "unexpected error: {msg}");
+        assert!(msg.contains("include_permissions"), "unexpected error: {msg}");
+    }
+
+    /// The reload path must refuse it too, or a running server could be
+    /// SIGHUP'd into enforcing perms the admin plane cannot see.
+    #[test]
+    fn inline_perms_alongside_includes_is_refused_on_reload() {
+        let included = NamedTempFile::new().unwrap();
+        let cfg: file::Config =
+            from_str(&both_sources_cfg(&included)).expect("parses as a file::Config");
+        let err = merge_perms_only(&cfg).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("inline `perms`"),
+            "unexpected error: {err:#}"
         );
-        let cfg = Config::parse(&raw_cfg).unwrap();
-        // Inline `perms` is merged last → alice = "sl" wins over the
-        // included file's "swlpd".
-        assert_eq!(cfg.perms.0.get("/foo").unwrap().get("alice").unwrap().as_str(), "sl",);
+    }
+
+    #[test]
+    fn either_perms_source_alone_is_fine() {
+        use std::io::Write;
+        let included = NamedTempFile::new().unwrap();
+        writeln!(
+            &mut included.as_file(),
+            "{}",
+            serde_json::to_string(&pmap(&[("/foo", &[("alice", "swlpd")])])).unwrap()
+        )
+        .unwrap();
+        let includes_only = format!(
+            r#"{{
+              "member_servers": [
+                {{
+                  "addr": "127.0.0.1:5001",
+                  "bind_addr": "127.0.0.1",
+                  "auth": "Anonymous"
+                }}
+              ],
+              "include_permissions": [{:?}]
+            }}"#,
+            included.path().to_string_lossy()
+        );
+        let cfg = Config::parse(&includes_only).unwrap();
+        assert_eq!(
+            cfg.perms.0.get("/foo").unwrap().get("alice").unwrap().as_str(),
+            "swlpd",
+        );
+        // An empty inline `perms` is not "both sources" — it is what serde
+        // fills in for a config that never mentioned the field, and what the
+        // old starter templates wrote.
+        let empty_inline = includes_only
+            .replace(r#""include_permissions""#, r#""perms": {}, "include_permissions""#);
+        assert!(Config::parse(&empty_inline).is_ok());
     }
 
     #[test]
