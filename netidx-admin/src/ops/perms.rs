@@ -7,7 +7,7 @@
 //! pinning to reach resolver cluster members. The `$EDITOR` loop between read and write
 //! is a frontend concern and stays there.
 
-use super::AdminTarget;
+use super::{AdminTarget, AppliedEdit};
 #[cfg(unix)]
 use crate::local;
 use crate::{
@@ -70,19 +70,6 @@ pub async fn edit_perms(
     }
 }
 
-/// The outcome of a single-entry edit: whether the document actually changed,
-/// and how the propagation to each resolver cluster member went.
-///
-/// `changed` is separate from the peer results because "the entry was already
-/// what you asked for" and "the entry was written" are different facts an
-/// operator needs, and neither is an error. A frontend that had only the peer
-/// list would have to claim it made a change it may not have made.
-pub struct PermsEdit {
-    /// Whether this edit altered the perms document at all.
-    pub changed: bool,
-    pub peers: Vec<PeerResult>,
-}
-
 /// Grant `entity` `bits` at `path`, inserting or replacing that one entry in
 /// the perms of the resolver cluster mounted at `at`.
 ///
@@ -96,14 +83,14 @@ pub async fn set_entry(
     path: &str,
     entity: &str,
     bits: &str,
-) -> Result<PermsEdit> {
+) -> Result<AppliedEdit> {
     crate::perms::validate_bits(bits)?;
     let mut pmap = crate::perms::validate(&show_perms(target, at).await?)
         .context("the resolver cluster's current perms are not valid")?;
     let changed =
         crate::perms::lookup(&pmap, path, entity).map(|b| b.as_str()) != Some(bits);
     crate::perms::add_entry(&mut pmap, path, entity, bits)?;
-    Ok(PermsEdit { changed, peers: propagate(target, at, &pmap).await? })
+    Ok(AppliedEdit { changed, peers: propagate(target, at, &pmap).await? })
 }
 
 /// Remove `entity`'s entry at `path` from the perms of the resolver cluster
@@ -120,11 +107,11 @@ pub async fn remove_entry(
     at: &str,
     path: &str,
     entity: &str,
-) -> Result<PermsEdit> {
+) -> Result<AppliedEdit> {
     let mut pmap = crate::perms::validate(&show_perms(target, at).await?)
         .context("the resolver cluster's current perms are not valid")?;
     let changed = crate::perms::remove_entry(&mut pmap, path, entity);
-    Ok(PermsEdit { changed, peers: propagate(target, at, &pmap).await? })
+    Ok(AppliedEdit { changed, peers: propagate(target, at, &pmap).await? })
 }
 
 async fn propagate(

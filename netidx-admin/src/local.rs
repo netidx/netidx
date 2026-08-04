@@ -387,6 +387,56 @@ pub async fn edit_perms(
     }
 }
 
+/// Read this host's id-map over the control socket.
+pub async fn get_id_map(cfg_path: &Path) -> Result<String> {
+    let mut s = connect(cfg_path).await?;
+    let (admin, password) = no_creds();
+    netidx_admin_proto::write_msg(
+        &mut s,
+        &Request::GetIdMap(netidx_admin_proto::GetIdMapRequest {
+            credential: netidx_admin_proto::AdminCredential::Password { admin, password },
+        }),
+    )
+    .await?;
+    match netidx_admin_proto::read_msg::<_, netidx_admin_proto::GetIdMapResponse>(&mut s)
+        .await?
+    {
+        netidx_admin_proto::GetIdMapResponse::Ok(ok) => Ok(ok.id_map_json),
+        netidx_admin_proto::GetIdMapResponse::Err { reason } => {
+            bail!("the admin daemon refused: {reason}")
+        }
+    }
+}
+
+/// Apply one id-map operation across the admin domain. The `SO_PEERCRED` gate
+/// is the authorization — no admin password — after which the daemon routes and
+/// propagates exactly as it would for a remote signing admin.
+pub async fn edit_id_map(
+    cfg_path: &Path,
+    edit: &netidx_admin_proto::IdMapEdit,
+) -> Result<crate::ops::AppliedEdit> {
+    let mut s = connect(cfg_path).await?;
+    let (admin, password) = no_creds();
+    netidx_admin_proto::write_msg(
+        &mut s,
+        &Request::EditIdMap(netidx_admin_proto::EditIdMapRequest {
+            credential: netidx_admin_proto::AdminCredential::Password { admin, password },
+            edit: edit.clone(),
+        }),
+    )
+    .await?;
+    match netidx_admin_proto::read_msg::<_, netidx_admin_proto::EditIdMapResponse>(&mut s)
+        .await?
+    {
+        netidx_admin_proto::EditIdMapResponse::Ok(ok) => {
+            Ok(crate::ops::AppliedEdit { changed: ok.changed, peers: ok.peers })
+        }
+        netidx_admin_proto::EditIdMapResponse::Err { reason } => {
+            bail!("the CA refused: {reason}")
+        }
+    }
+}
+
 /// Mint a fresh recovery (off-box break-glass) password. The daemon
 /// re-wraps the recovery slot using its own on-box autorenew credential and
 /// returns the new password in grouped display form (shown to the operator

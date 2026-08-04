@@ -864,6 +864,64 @@ pub async fn edit_perms(
     }
 }
 
+/// Admin → CA (pinned): read the CA host's id-map.
+pub async fn get_id_map(
+    addr: SocketAddr,
+    kind: NodeKind,
+    expected: &CaIdentity,
+    credential: admin_proto::AdminCredential,
+) -> Result<String> {
+    let mut tls = connect_ca_pinned(addr, kind, expected).await?;
+    admin_proto::write_msg(
+        &mut tls,
+        &Request::GetIdMap(admin_proto::GetIdMapRequest {
+            credential: credential.clone(),
+        }),
+    )
+    .await?;
+    match admin_proto::read_msg::<_, admin_proto::GetIdMapResponse>(&mut tls).await? {
+        admin_proto::GetIdMapResponse::Ok(ok) => Ok(ok.id_map_json),
+        admin_proto::GetIdMapResponse::Err { reason } => Err(admin_refusal(
+            expected,
+            &credential,
+            "the CA refused the id-map read",
+            reason,
+        )),
+    }
+}
+
+/// Admin → CA (pinned): apply one id-map operation across the admin domain.
+/// Returns whether anything changed alongside the per-peer results, so a
+/// partial failure and a no-op are told apart.
+pub async fn edit_id_map(
+    addr: SocketAddr,
+    kind: NodeKind,
+    expected: &CaIdentity,
+    credential: admin_proto::AdminCredential,
+    edit: &admin_proto::IdMapEdit,
+) -> Result<crate::ops::AppliedEdit> {
+    let mut tls = connect_ca_pinned(addr, kind, expected).await?;
+    admin_proto::write_msg(
+        &mut tls,
+        &Request::EditIdMap(admin_proto::EditIdMapRequest {
+            credential: credential.clone(),
+            edit: edit.clone(),
+        }),
+    )
+    .await?;
+    match admin_proto::read_msg::<_, admin_proto::EditIdMapResponse>(&mut tls).await? {
+        admin_proto::EditIdMapResponse::Ok(ok) => {
+            Ok(crate::ops::AppliedEdit { changed: ok.changed, peers: ok.peers })
+        }
+        admin_proto::EditIdMapResponse::Err { reason } => Err(admin_refusal(
+            expected,
+            &credential,
+            "the CA refused the id-map edit",
+            reason,
+        )),
+    }
+}
+
 /// Admin → CA (pinned): mint a new role admin `name` with `policy` and
 /// `new_password`. The server gates on the caller's management authority and
 /// enforces `policy ⊆ caller`.

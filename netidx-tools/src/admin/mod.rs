@@ -27,9 +27,11 @@ mod delegation;
 mod discover;
 mod editor;
 mod id_map;
+mod id_map_admin;
 mod init;
 mod lifecycle;
 mod perms;
+mod propagation;
 mod read_gate;
 mod roles;
 // `server` runs the admin-server daemon, which holds the CA vault and the
@@ -84,6 +86,13 @@ pub(crate) enum Params {
         #[command(subcommand)]
         cmd: perms::Cmd,
     },
+    /// show or edit the admin domain's id-map (the TLS name → uid/group table
+    /// the resolver keys permissions on) through the admin server. Every edit
+    /// propagates to each id-map host.
+    IdMap {
+        #[command(subcommand)]
+        cmd: id_map_admin::Cmd,
+    },
     /// discover netidx admin domains on the local network (mDNS) and print each
     /// one's admin-server address + CA glyph — a read-only query a script can
     /// feed to `--admin-server` / `--accept-glyph`.
@@ -113,6 +122,7 @@ pub(crate) fn run(p: Option<Params>) -> Result<()> {
         Params::Publisher { cmd } => roles::publisher::run(cmd),
         Params::Ca { cmd } => ca::run(cmd),
         Params::Perms { cmd } => perms::run(cmd),
+        Params::IdMap { cmd } => id_map_admin::run(cmd),
         Params::Discover(a) => discover::run(a),
         Params::Uninstall(p) => uninstall::run(p),
         Params::Component { cmd } => component::run(cmd),

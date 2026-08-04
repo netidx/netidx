@@ -16,9 +16,12 @@
 use anyhow::{Context, Result};
 use clap::{Args, Subcommand};
 use netidx_admin::{ops::perms as perms_ops, perms};
-use netidx_admin_proto::PeerResult;
 
-use super::{answer_cli::RemoteAuthFlags, editor};
+use super::{
+    answer_cli::RemoteAuthFlags,
+    editor,
+    propagation::{Propagated, report_peers},
+};
 
 fn runtime() -> Result<tokio::runtime::Runtime> {
     tokio::runtime::Runtime::new().context("starting tokio runtime")
@@ -106,7 +109,11 @@ fn edit(f: Flags) -> Result<()> {
     let edited =
         editor::edit_with_validation(&perms::pretty(&current)?, perms::normalize)?;
     let peers = rt.block_on(perms_ops::edit_perms(&target, &f.at, &edited))?;
-    report_peers(&peers, &f.at, format_args!("perms edit --at {}", f.at));
+    report_peers(
+        &peers,
+        Propagated::Perms { at: &f.at },
+        format_args!("perms edit --at {}", f.at),
+    );
     Ok(())
 }
 
@@ -126,7 +133,7 @@ fn set(f: Flags, path: String, entity: String, bits: String) -> Result<()> {
     }
     report_peers(
         &edit.peers,
-        &f.at,
+        Propagated::Perms { at: &f.at },
         format_args!("perms set --at {} {path} {entity} {bits}", f.at),
     );
     Ok(())
@@ -145,32 +152,8 @@ fn remove(f: Flags, path: String, entity: String) -> Result<()> {
     }
     report_peers(
         &edit.peers,
-        &f.at,
+        Propagated::Perms { at: &f.at },
         format_args!("perms remove --at {} {path} {entity}", f.at),
     );
     Ok(())
-}
-
-fn report_peers(peers: &[PeerResult], at: &str, retry: std::fmt::Arguments<'_>) {
-    let failed: Vec<_> = peers.iter().filter(|p| p.error.is_some()).collect();
-    if failed.is_empty() {
-        println!(
-            "ok — perms at {at:?} updated on {} resolver cluster member(s).",
-            peers.len()
-        );
-        println!("  restart the resolver server(s) to load the new perms.");
-        return;
-    }
-    println!(
-        "perms at {at:?}: {} of {} member(s) could NOT be updated:",
-        failed.len(),
-        peers.len()
-    );
-    for p in &failed {
-        println!("  ! {} : {}", p.addr, p.error.as_deref().unwrap_or("?"));
-    }
-    println!(
-        "  the resolver cluster is INCONSISTENT. The edit is idempotent — re-run \
-         `{retry}` once the member(s) are back to converge."
-    );
 }
