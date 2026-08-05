@@ -13,13 +13,11 @@ use super::{
 };
 use crate::{
     admin_proto::{
-        self, AddIdentityOk, AddIdentityRequest, AddIdentityResponse, NodeKind, Role,
-        SERVING_SAN, SignOk, SignRequest, SignResponse,
+        self, ApplyIdMapEditOk, IdMapEdit, NodeKind, Role, SERVING_SAN, SignOk,
+        SignRequest, SignResponse,
     },
     ca::{Ca, SanEntry},
-    ca_store, ca_vault,
-    config_lock::ConfigDirLock,
-    id_map, transport,
+    ca_store, ca_vault, transport,
 };
 use anyhow::{Context, Result, anyhow, bail};
 use futures::{StreamExt, stream};
@@ -141,50 +139,6 @@ pub(super) async fn sign_csr(
         warnings: Vec::new(),
         operation_id: None,
     }))
-}
-
-/// Handle an id-map registration against the map at `map_path`. A
-/// missing file starts from the seeded empty map — zero-touch joins
-/// must work on a host whose id-map daemon hasn't registered anyone
-/// yet.
-pub(super) async fn handle_add_identity(
-    config_lock: &ConfigDirLock,
-    map_path: &Path,
-    req: &AddIdentityRequest,
-) -> AddIdentityResponse {
-    info!(
-        "admin-server: applying id-map registration operation {} for {:?}",
-        req.operation_id, req.san
-    );
-    let apply = async {
-        let map_path = config_lock.require_contained(map_path)?;
-        let mut map =
-            id_map::load_or_empty_async(&map_path).await.context("loading id-map")?;
-        // Enrollment registration is the same operation an operator's
-        // `admin id-map add-user` performs, so it goes through the same
-        // applier — otherwise the two could come to mean different things.
-        let changed = id_map::apply_edit(
-            &mut map,
-            &admin_proto::IdMapEdit::AddIdentity {
-                san: req.san.clone(),
-                primary_group: req.primary_group.clone(),
-                groups: req.groups.clone(),
-            },
-        )?;
-        let uid = map
-            .identities
-            .get(req.san.as_str())
-            .map(|i| i.uid)
-            .ok_or_else(|| anyhow!("registration did not produce an identity"))?;
-        if changed {
-            id_map::save_async(&map_path, &map).await.context("saving id-map")?;
-        }
-        Ok::<u32, anyhow::Error>(uid)
-    };
-    match apply.await {
-        Ok(uid) => AddIdentityResponse::Ok(AddIdentityOk { uid }),
-        Err(e) => AddIdentityResponse::Err { reason: format!("{e:#}") },
-    }
 }
 
 /// Extract an X.509 certificate's serial as u64 (this CA issues from a
@@ -694,17 +648,19 @@ impl IdentityPusher {
         &self,
         server: admin_proto::AdminServerId,
         addr: SocketAddr,
-        req: &AddIdentityRequest,
-    ) -> Result<Option<u32>> {
+        operation_id: admin_proto::OperationId,
+        edit: &IdMapEdit,
+    ) -> Result<Option<ApplyIdMapEditOk>> {
         tokio::time::timeout(
             PUSH_TIMEOUT,
-            transport::push_identity(
+            transport::push_id_map_edit(
                 &self.client,
                 addr,
                 server,
                 server == self.ca,
                 self.home_ca.clone(),
-                req,
+                operation_id,
+                edit,
             ),
         )
         .await
@@ -757,8 +713,7 @@ pub(super) async fn push_registrations(
         )
         .await;
     }
-    let req = AddIdentityRequest {
-        operation_id,
+    let edit = IdMapEdit::AddIdentity {
         san: plan.name.clone(),
         primary_group: primary.clone(),
         groups: secondary.to_vec(),
@@ -767,13 +722,10 @@ pub(super) async fn push_registrations(
     let (my_id, targets) =
         state.read(move |state| (state.cfg.server_id, id_map_targets(&state.map))).await;
     // Local id-map first (no TLS loopback).
-    if targets.iter().any(|(id, _)| *id == my_id) {
-        match state.add_identity(&req).await {
-            AddIdentityResponse::Ok(_) => (),
-            AddIdentityResponse::Err { reason } => {
-                warnings.push(format!("local id-map registration failed: {reason}"))
-            }
-        }
+    if targets.iter().any(|(id, _)| *id == my_id)
+        && let Err(e) = state.apply_id_map_edit(&edit).await
+    {
+        warnings.push(format!("local id-map registration failed: {e:#}"));
     }
     let pusher = match IdentityPusher::new(state).await {
         Ok(pusher) => pusher,
@@ -784,10 +736,10 @@ pub(super) async fn push_registrations(
     };
     let mut results: Vec<_> = stream::iter(
         targets.into_iter().filter(|(id, _)| *id != my_id).map(|(id, addr)| {
-            let req = req.clone();
+            let edit = edit.clone();
             let pusher = pusher.clone();
             async move {
-                let result = pusher.push(id, addr, &req).await;
+                let result = pusher.push(id, addr, operation_id, &edit).await;
                 (id, addr, result)
             }
         }),
@@ -798,9 +750,10 @@ pub(super) async fn push_registrations(
     results.sort_by_key(|(id, _, _)| *id);
     for (id, addr, result) in results {
         match result {
-            Ok(Some(uid)) => {
-                info!("admin-server: registered {} (uid {uid}) on {addr}", plan.name)
-            }
+            Ok(Some(ok)) => info!(
+                "admin-server: registered {} (uid {:?}) on {addr}",
+                plan.name, ok.uid
+            ),
             Ok(None) => (),
             Err(e) => warnings.push(format!(
                 "id-map registration on server {id} at {addr} failed: {e:#}"
@@ -885,16 +838,15 @@ pub(super) async fn reconcile_identities_to_target(
             }
             audited = true;
         }
-        let req = AddIdentityRequest {
-            operation_id,
+        let edit = IdMapEdit::AddIdentity {
             san: record.name.clone(),
             primary_group: primary.clone(),
             groups: secondary.to_vec(),
         };
-        match pusher.push(server, addr, &req).await? {
-            Some(uid) => info!(
-                "admin-server: reconciled {} (uid {uid}) on server {server} at {addr}",
-                record.name
+        match pusher.push(server, addr, operation_id, &edit).await? {
+            Some(ok) => info!(
+                "admin-server: reconciled {} (uid {:?}) on server {server} at {addr}",
+                record.name, ok.uid
             ),
             None => bail!(
                 "server {server} at {addr} was granted IdMap but does not advertise that role"

@@ -180,7 +180,7 @@ pub enum Role {
     #[pack(tag(1))]
     Resolver = 1 << 1,
     /// An id-map daemon runs on this host; answers
-    /// [`Request::AddIdentity`].
+    /// [`Request::ApplyIdMapEdit`].
     #[pack(tag(2))]
     IdMap = 1 << 2,
 }
@@ -268,12 +268,14 @@ pub enum Request {
     /// [`SignResponse`].
     #[pack(tag(4))]
     Enroll(EnrollRequest),
-    /// CA → id-map push: register an identity on this host's id-map.
-    /// Only accepted from a TLS client authenticated with a
-    /// reserved-SAN serving cert. Answered with
-    /// [`AddIdentityResponse`].
+    /// Server → server: apply one id-map operation to this host's local map.
+    /// Only accepted from a TLS client authenticated with a reserved-SAN
+    /// serving cert. Answered with [`ApplyIdMapEditResponse`].
+    ///
+    /// Both id-map writers land here: the CA's registration push after it
+    /// signs an identity, and an operator's [`Request::EditIdMap`].
     #[pack(tag(5))]
-    AddIdentity(AddIdentityRequest),
+    ApplyIdMapEdit(ApplyIdMapEditRequest),
     /// Queue a signing request for asynchronous admin approval — no
     /// credentials; this is how a node enrolls when no admin is
     /// present at it. Answered with [`EnqueueResponse`].
@@ -338,12 +340,12 @@ pub enum Request {
     /// Server-to-server: apply a referral edit (add a child / set the
     /// parent) to this host's local resolver config — the receive side of
     /// resolver cluster-wide delegation propagation. Peer-cert-gated like
-    /// [`Request::AddIdentity`]. Answered with [`ApplyReferralEditResponse`].
+    /// [`Request::ApplyIdMapEdit`]. Answered with [`ApplyReferralEditResponse`].
     #[pack(tag(19))]
     ApplyReferralEdit(ApplyReferralEditRequest),
     /// Server→CA push: register/update this admin server's facts (address,
     /// roles, resolver cluster facts) in the CA's authoritative admin domain
-    /// map. Peer-cert-gated like [`Request::AddIdentity`]. Answered with
+    /// map. Peer-cert-gated like [`Request::ApplyIdMapEdit`]. Answered with
     /// [`RegisterResponse`].
     #[pack(tag(20))]
     Register(RegisterRequest),
@@ -517,15 +519,6 @@ pub enum Request {
     /// [`EditIdMapResponse`].
     #[pack(tag(47))]
     EditIdMap(EditIdMapRequest),
-    /// Server-to-server: apply one id-map operation to this host's local map
-    /// — the receive side of id-map propagation. Peer-cert-gated like
-    /// [`Request::ApplyPermsEdit`]. Answered with [`ApplyIdMapEditResponse`].
-    ///
-    /// [`Request::AddIdentity`] is the enrollment-time special case of this,
-    /// kept as its own message so a mixed-version admin domain keeps working;
-    /// both land in the same applier.
-    #[pack(tag(48))]
-    ApplyIdMapEdit(ApplyIdMapEditRequest),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Pack)]
@@ -816,27 +809,6 @@ pub struct SignOk {
 }
 
 pub type SignResponse = RpcResult<SignOk>;
-
-/// Register `san` on the receiving host's id-map. The uid is allocated
-/// locally by the receiver — id-map perms are keyed on *names*; uids
-/// are a per-host detail.
-#[derive(Debug, Clone, Serialize, Deserialize, Pack)]
-pub struct AddIdentityRequest {
-    pub operation_id: OperationId,
-    /// The identity name — the DNS SAN the CA just issued.
-    pub san: String,
-    /// Primary group (created with an allocated gid if missing).
-    pub primary_group: String,
-    /// Secondary groups (each created if missing).
-    pub groups: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Pack)]
-pub struct AddIdentityOk {
-    pub uid: u32,
-}
-
-pub type AddIdentityResponse = RpcResult<AddIdentityOk>;
 
 /// Queue a CSR for asynchronous admin approval. Carries no
 /// credentials — the requester proves nothing here; trust is
@@ -1347,15 +1319,16 @@ pub type ApplyPermsEditResponse = RpcResult<()>;
 /// One id-map mutation, as an operation rather than a document.
 ///
 /// Perms propagate as a whole file because every member must hold the same
-/// one. An id-map must not: `AddIdentityRequest` says the uid "is allocated
-/// locally by the receiver — id-map perms are keyed on *names*; uids are a
-/// per-host detail". Shipping a document would force one host's uids onto
+/// one. An id-map must not: a uid is allocated locally by the receiving host,
+/// because perms are keyed on *names* and the number is a per-host detail.
+/// Shipping a document would force one host's uids onto
 /// every other. So each host applies the *operation* and allocates its own
 /// numbers.
 #[derive(Debug, Clone, Serialize, Deserialize, Pack)]
 pub enum IdMapEdit {
     /// Register (or update) `san` with its groups, creating any that are
-    /// missing. The same operation [`AddIdentityRequest`] carries.
+    /// missing. This is what the CA pushes after it signs an identity, and
+    /// what `admin id-map add-user` sends.
     #[pack(tag(0))]
     AddIdentity { san: String, primary_group: String, groups: Vec<String> },
     /// Drop `san` entirely. Its groups are left alone — they may have other
@@ -1460,6 +1433,12 @@ pub struct ApplyIdMapEditRequest {
 pub struct ApplyIdMapEditOk {
     /// Whether this host's map changed.
     pub changed: bool,
+    /// The uid this host holds for the identity the edit named, if it named
+    /// one. Allocated locally by each host — perms are keyed on *names* — so
+    /// two hosts reporting different uids for the same identity is correct,
+    /// not drift. Carried because that is exactly what makes an id-map
+    /// question answerable from a log.
+    pub uid: Option<u32>,
 }
 
 pub type ApplyIdMapEditResponse = RpcResult<ApplyIdMapEditOk>;

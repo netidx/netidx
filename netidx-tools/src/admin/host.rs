@@ -86,35 +86,25 @@ mod tests {
         cmd: crate::admin::Params,
     }
 
-    /// The `component` alias is load-bearing, not politeness. An install
-    /// writes its admin-server and admin-agent activation units with the
-    /// subcommand path baked into argv, and nothing rewrites those units when
-    /// the binary is upgraded. Drop the alias and every host installed before
-    /// the rename stops starting its daemon on the next upgrade — silently,
-    /// because the supervisor just sees a process that exits non-zero.
-    #[test]
-    fn the_old_component_name_still_parses() {
-        for name in ["host", "component"] {
-            let cli = TestCli::try_parse_from([
-                "netidx",
-                name,
-                "server",
-                "run",
-                "-c",
-                "/etc/netidx/admin-server.json",
-                "-f",
-            ]);
-            assert!(cli.is_ok(), "`netidx admin {name} server run` must parse");
-        }
-    }
-
-    /// The exact argv the installed units carry, both spellings.
+    /// An install writes the admin-server and admin-agent activation units
+    /// with this subcommand path baked into their argv, and nothing rewrites a
+    /// unit once it is on disk. If the two ever drift apart the supervisor
+    /// only sees a process that exits non-zero, so pin the exact argv the
+    /// templates emit.
     #[test]
     fn the_installed_unit_argv_parses() {
-        for name in ["host", "component"] {
-            let cli =
-                TestCli::try_parse_from(["netidx", name, "admin-agent", "run", "-f"]);
-            assert!(cli.is_ok(), "`netidx admin {name} admin-agent run -f` must parse");
-        }
+        let server = TestCli::try_parse_from([
+            "netidx",
+            "host",
+            "server",
+            "run",
+            "-c",
+            "/etc/netidx/admin-server.json",
+            "-f",
+        ]);
+        assert!(server.is_ok(), "the admin-server unit's argv must parse");
+        let agent =
+            TestCli::try_parse_from(["netidx", "host", "admin-agent", "run", "-f"]);
+        assert!(agent.is_ok(), "the admin-agent unit's argv must parse");
     }
 }

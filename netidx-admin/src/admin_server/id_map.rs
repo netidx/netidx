@@ -5,16 +5,17 @@
 //! deliberate difference: perms propagate as a whole document, an id-map
 //! propagates as an *operation*.
 //!
-//! That is forced by the data. `AddIdentityRequest` records that a uid "is
-//! allocated locally by the receiver — id-map perms are keyed on *names*; uids
-//! are a per-host detail". Shipping a document would impose one host's uids on
-//! every other. Shipping the operation lets each host allocate its own, and
-//! costs nothing: there is no read-modify-write, so no lost update, and a
-//! retry after a partial push is a no-op where it landed.
+//! That is forced by the data: a uid is allocated locally by the receiving
+//! host, because perms are keyed on *names* and the number is a per-host
+//! detail. Shipping a document would impose one host's uids on every other.
+//! Shipping the operation lets each host allocate its own, and costs nothing:
+//! there is no read-modify-write, so no lost update, and a retry after a
+//! partial push is a no-op where it landed.
 //!
-//! The fanout target is every registered admin server holding [`Role::IdMap`],
-//! which is the same set enrollment already pushes registrations to — see
-//! [`super::issuance::id_map_targets`], shared so the two cannot drift.
+//! The fanout target is every registered admin server holding `Role::IdMap`,
+//! which is the same set the CA pushes a registration to after it signs an
+//! identity — see [`super::issuance::id_map_targets`], shared so the two
+//! cannot drift.
 
 #[cfg(test)]
 #[path = "id_map_tests.rs"]
@@ -43,23 +44,28 @@ use futures::{StreamExt, stream};
 use log::info;
 use std::{net::SocketAddr, path::Path, sync::Arc, time::Duration};
 
-/// Apply `edit` to the map at `map_path`, reporting whether it changed
-/// anything. The single local mutation path: the enrollment-time
-/// `AddIdentity` push, the server-to-server `ApplyIdMapEdit`, and the CA's own
-/// apply all reach the map through here.
+/// Apply `edit` to the map at `map_path`. The single local mutation path:
+/// the CA's registration push after it signs an identity, an operator's edit,
+/// and the CA's own apply all reach the map through here.
+///
+/// A missing file starts from the empty map — a zero-touch join must work on
+/// a host whose id-map daemon has never registered anyone.
 pub(super) async fn apply_edit_local(
     config_lock: &ConfigDirLock,
     map_path: &Path,
     edit: &IdMapEdit,
-) -> Result<bool> {
+) -> Result<ApplyIdMapEditOk> {
     let map_path = config_lock.require_contained(map_path)?;
     let mut map =
         id_map::load_or_empty_async(&map_path).await.context("loading id-map")?;
-    if !id_map::apply_edit(&mut map, edit)? {
-        return Ok(false);
+    let changed = id_map::apply_edit(&mut map, edit)?;
+    if changed {
+        id_map::save_async(&map_path, &map).await.context("saving id-map")?;
     }
-    id_map::save_async(&map_path, &map).await.context("saving id-map")?;
-    Ok(true)
+    // Read back rather than trusting the edit: on a re-registration the host
+    // keeps the uid it already had, which is the number worth reporting.
+    let uid = edit.identity().and_then(|san| map.identities.get(san)).map(|i| i.uid);
+    Ok(ApplyIdMapEditOk { changed, uid })
 }
 
 /// Server-to-server receive side (peer-cert-gated).
@@ -69,7 +75,7 @@ pub(super) async fn handle_apply_id_map_edit(
 ) -> ApplyIdMapEditResponse {
     info!("admin-server: applying id-map operation {}", req.operation_id);
     match state.apply_id_map_edit(&req.edit).await {
-        Ok(changed) => ApplyIdMapEditResponse::Ok(ApplyIdMapEditOk { changed }),
+        Ok(ok) => ApplyIdMapEditResponse::Ok(ok),
         Err(e) => ApplyIdMapEditResponse::Err { reason: format!("{e:#}") },
     }
 }
@@ -208,8 +214,8 @@ pub(super) async fn handle_edit_id_map(
     // Local first, with no TLS loopback — the same order enrollment uses.
     if let Some((server, addr)) = targets.iter().copied().find(|(id, _)| *id == my_id) {
         let error = match state.apply_id_map_edit(&req.edit).await {
-            Ok(c) => {
-                changed |= c;
+            Ok(ok) => {
+                changed |= ok.changed;
                 None
             }
             Err(e) => Some(format!("{e:#}")),
@@ -280,7 +286,21 @@ async fn push_id_map_edit_to_peers(
             .map_err(|_| anyhow!("timed out after {}s", PUSH_TIMEOUT.as_secs()))
             .and_then(|r| r);
             match res {
-                Ok(changed) => (PeerResult { server, addr, error: None }, changed),
+                Ok(Some(ok)) => (PeerResult { server, addr, error: None }, ok.changed),
+                // The map said this host holds the id-map role and its hello
+                // says otherwise. Report it rather than counting it as applied.
+                Ok(None) => (
+                    PeerResult {
+                        server,
+                        addr,
+                        error: Some(
+                            "the admin domain map grants this server the id-map role \
+                             but it does not advertise it"
+                                .to_string(),
+                        ),
+                    },
+                    false,
+                ),
                 Err(e) => {
                     (PeerResult { server, addr, error: Some(format!("{e:#}")) }, false)
                 }

@@ -102,13 +102,6 @@ pub(crate) enum Params {
     /// act on THIS machine: its activation units, its admin-server daemon,
     /// its TLS identity, its OS service. Everything else under `admin` acts
     /// on the admin domain.
-    // The `component` alias is load-bearing. An install bakes this subcommand
-    // path into the argv of the admin-server and admin-agent activation units,
-    // and nothing rewrites those units when the binary is upgraded — so a host
-    // installed before the rename would stop starting its daemon. Hidden
-    // because it is a compatibility shim, not a second name to learn;
-    // `admin::host::tests` pins it.
-    #[command(alias = "component")]
     Host {
         #[command(subcommand)]
         cmd: host::Cmd,

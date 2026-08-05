@@ -1,10 +1,10 @@
 use super::*;
 use crate::admin_proto::{
-    AddIdentityRequest, AdminDomainMap, AdminServerEntry, ApplyCaStateRequest,
-    ApplyCrlRequest, ApplyIdMapEditRequest, ApplyPermsEditRequest,
-    ApplyReferralEditRequest, ApplyServiceControlRequest, EditIdMapRequest,
-    ExternalCaInstallRequest, GetIdMapRequest, IdMapEdit, InfoAuth, LoginRequest,
-    LogoutRequest, ReadPermsRequest, ReferralEdit, RegisterRequest, ResolverAddr, Role,
+    AdminDomainMap, AdminServerEntry, ApplyCaStateRequest, ApplyCrlRequest,
+    ApplyIdMapEditRequest, ApplyPermsEditRequest, ApplyReferralEditRequest,
+    ApplyServiceControlRequest, EditIdMapRequest, ExternalCaInstallRequest,
+    GetIdMapRequest, IdMapEdit, InfoAuth, LoginRequest, LogoutRequest, ReadPermsRequest,
+    ReferralEdit, RegisterRequest, ResolverAddr, Role,
 };
 
 fn assert_public(req: &Request) {
@@ -47,12 +47,6 @@ fn centralized_requirements_protect_all_mutations() {
         addr: "127.0.0.1:4565".parse().unwrap(),
         resolver: None,
     }));
-    assert_ca(&Request::AddIdentity(AddIdentityRequest {
-        operation_id,
-        san: "alice.example".into(),
-        primary_group: "users".into(),
-        groups: vec![],
-    }));
     assert_ca(&Request::ApplyPermsEdit(ApplyPermsEditRequest {
         operation_id,
         perms_json: "{}".into(),
@@ -71,6 +65,15 @@ fn centralized_requirements_protect_all_mutations() {
     assert_ca(&Request::ApplyIdMapEdit(ApplyIdMapEditRequest {
         operation_id,
         edit: IdMapEdit::AddGroup { name: "users".into() },
+    }));
+    // The same message carries the CA's post-sign registration push.
+    assert_ca(&Request::ApplyIdMapEdit(ApplyIdMapEditRequest {
+        operation_id,
+        edit: IdMapEdit::AddIdentity {
+            san: "alice.example".into(),
+            primary_group: "users".into(),
+            groups: vec![],
+        },
     }));
     assert_admin(
         &Request::GetIdMap(GetIdMapRequest {

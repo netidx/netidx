@@ -38,12 +38,12 @@ use super::{
     },
 };
 use crate::admin_proto::{
-    self, AddIdentityResponse, ApplyCaStateResponse, ApplyCrlResponse,
-    ApplyIdMapEditResponse, ApplyPermsEditResponse, ApplyReferralEditResponse,
-    ApplyServiceControlResponse, ApplySetReadGateResponse, ClientHello,
-    DelegationPollResponse, DelegationResponse, DenyResponse, EnqueueResponse,
-    GetMapResponse, GetMapVersionResponse, ListDelegationsResponse, ListQueueResponse,
-    MapVersion, PROTOCOL_VERSION, RegisterResponse, Request, RevokeResponse, ServerHello,
+    self, ApplyCaStateResponse, ApplyCrlResponse, ApplyIdMapEditResponse,
+    ApplyPermsEditResponse, ApplyReferralEditResponse, ApplyServiceControlResponse,
+    ApplySetReadGateResponse, ClientHello, DelegationPollResponse, DelegationResponse,
+    DenyResponse, EnqueueResponse, GetMapResponse, GetMapVersionResponse,
+    ListDelegationsResponse, ListQueueResponse, MapVersion, PROTOCOL_VERSION,
+    RegisterResponse, Request, RevokeResponse, ServerHello,
 };
 use anyhow::{Context, Result, bail};
 use std::{net::SocketAddr, sync::Arc};
@@ -187,20 +187,6 @@ where
             )
             .await;
             admin_proto::write_msg(&mut tls, &resp).await.context("writing SignResponse")
-        }
-        Request::AddIdentity(req) => {
-            let resp = if !peer_is_admin_server {
-                AddIdentityResponse::Err {
-                    reason: "identity registration requires an admin-server peer \
-                             certificate"
-                        .to_string(),
-                }
-            } else {
-                state.add_identity(&req).await
-            };
-            admin_proto::write_msg(&mut tls, &resp)
-                .await
-                .context("writing AddIdentityResponse")
         }
         Request::Enqueue(req) => {
             let resp = match ca_dir(state).await {
@@ -689,8 +675,7 @@ fn request_requirements(req: &Request) -> RequestRequirements<'_> {
     match req {
         GetInfo | Enqueue(_) | Poll(_) | GetCrl | RequestDelegation(_)
         | PollDelegation(_) | GetMapVersion | GetMap => RequestRequirements::Public,
-        AddIdentity(_)
-        | ApplyCrl(_)
+        ApplyCrl(_)
         | ApplyCaState(_)
         | GetPerms
         | ApplyPermsEdit(_)

@@ -361,9 +361,9 @@ pub async fn load_or_empty_async<P: AsRef<Path>>(path: P) -> Result<IdMap> {
 /// Apply one [`IdMapEdit`] to `map`, reporting whether it changed anything.
 ///
 /// This is the single place an id-map mutation happens on the admin plane:
-/// the enrollment-time `AddIdentity` push, the server-to-server
-/// `ApplyIdMapEdit`, and the CA's own local apply all land here, so no two
-/// paths can disagree about what an operation means.
+/// the CA's registration push after it signs an identity, an operator's edit,
+/// and the CA's own local apply all land here, so no two paths can disagree
+/// about what an operation means.
 ///
 /// **Asking for something already true is not an error.** Every arm that
 /// finds nothing to do returns `Ok(false)` rather than failing, which is what

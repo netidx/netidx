@@ -33,8 +33,7 @@
 
 use crate::{
     admin_proto::{
-        self, AddIdentityOk, AddIdentityRequest, AddIdentityResponse,
-        AddRoleAdminRequest, AdminDomainMap, AdminListResponse, AdminMgmtResponse,
+        self, AddRoleAdminRequest, AdminDomainMap, AdminListResponse, AdminMgmtResponse,
         ApplyCaStateRequest, ApplyCaStateResponse, ApplyCrlRequest, ApplyCrlResponse,
         ApplyPermsEditRequest, ApplyPermsEditResponse, ApplyReferralEditRequest,
         ApplyReferralEditResponse, ApplyServiceControlRequest,
@@ -682,9 +681,13 @@ pub async fn push_perms_edit(
 }
 
 /// Server→server: apply one id-map operation to a peer admin server
-/// (serving-cert authed). Returns whether that host's map changed — the
-/// operator's answer is "did anything happen anywhere", and only the hosts
-/// know.
+/// (serving-cert authed).
+///
+/// `Ok(None)` means the peer does not hold the id-map role — checked from its
+/// hello rather than by asking, so a server that was granted the role but
+/// isn't running it is told apart from one that applied the edit. Otherwise
+/// the peer reports whether its map changed and the uid it holds, both of
+/// which only it can know.
 pub async fn push_id_map_edit(
     client: &AuthenticatedPkiClient,
     addr: SocketAddr,
@@ -693,14 +696,17 @@ pub async fn push_id_map_edit(
     home_ca: CertificateDer<'static>,
     operation_id: admin_proto::OperationId,
     edit: &admin_proto::IdMapEdit,
-) -> Result<bool> {
-    let (mut tls, _hello) = connect_pki_target(
+) -> Result<Option<admin_proto::ApplyIdMapEditOk>> {
+    let (mut tls, hello) = connect_pki_target(
         client,
         addr,
         NodeKind::AdminServer,
         Some(ExactTarget { id: Some(target_id), home_ca: &home_ca, ca: target_ca }),
     )
     .await?;
+    if !hello.roles.contains(Role::IdMap) {
+        return Ok(None);
+    }
     admin_proto::write_msg(
         &mut tls,
         &Request::ApplyIdMapEdit(admin_proto::ApplyIdMapEditRequest {
@@ -712,7 +718,7 @@ pub async fn push_id_map_edit(
     match admin_proto::read_msg::<_, admin_proto::ApplyIdMapEditResponse>(&mut tls)
         .await?
     {
-        admin_proto::ApplyIdMapEditResponse::Ok(ok) => Ok(ok.changed),
+        admin_proto::ApplyIdMapEditResponse::Ok(ok) => Ok(Some(ok)),
         admin_proto::ApplyIdMapEditResponse::Err { reason } => {
             bail!("peer refused the id-map edit: {reason}")
         }
@@ -1979,7 +1985,7 @@ pub async fn deny_delegation(
 
 /// Server-to-server: push a referral edit to a peer admin server's local
 /// resolver config (the resolver cluster-wide propagation push), authenticated by
-/// our reserved-SAN serving cert. Mirrors [`push_identity`].
+/// our reserved-SAN serving cert. Mirrors [`push_id_map_edit`].
 pub async fn push_referral_edit(
     client: &AuthenticatedPkiClient,
     addr: SocketAddr,
@@ -2081,33 +2087,6 @@ pub async fn revoke(
 /// Returns `Ok(None)` when the peer's hello shows it has no id-map role
 /// — not an error; the pusher fans out to every known peer and skips
 /// the ones that can't register identities.
-pub async fn push_identity(
-    client: &AuthenticatedPkiClient,
-    addr: SocketAddr,
-    target_id: admin_proto::AdminServerId,
-    target_ca: bool,
-    home_ca: CertificateDer<'static>,
-    req: &AddIdentityRequest,
-) -> Result<Option<u32>> {
-    let (mut tls, hello) = connect_pki_target(
-        client,
-        addr,
-        NodeKind::AdminServer,
-        Some(ExactTarget { id: Some(target_id), home_ca: &home_ca, ca: target_ca }),
-    )
-    .await?;
-    if !hello.roles.contains(Role::IdMap) {
-        return Ok(None);
-    }
-    admin_proto::write_msg(&mut tls, &Request::AddIdentity(req.clone())).await?;
-    match admin_proto::read_msg::<_, AddIdentityResponse>(&mut tls).await? {
-        AddIdentityResponse::Ok(AddIdentityOk { uid }) => Ok(Some(uid)),
-        AddIdentityResponse::Err { reason } => {
-            bail!("admin server refused the identity: {reason}")
-        }
-    }
-}
-
 /// Extract the home CA from an admin certificate chain.
 pub fn home_ca_from_chain(pem: &[u8]) -> Result<CertificateDer<'static>> {
     let certs = rustls_pemfile::certs(&mut std::io::Cursor::new(pem))
