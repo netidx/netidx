@@ -1254,6 +1254,7 @@ mod tests {
             cluster: Some(cluster),
             state: ServerState::Registered,
             reported_read_gate: None,
+            reported_id_map_version: None,
         });
         map.resolver_clusters.push(ResolverClusterEntry {
             id: cluster,

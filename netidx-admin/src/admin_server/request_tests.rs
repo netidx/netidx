@@ -46,6 +46,7 @@ fn centralized_requirements_protect_all_mutations() {
     assert_node(&Request::Register(RegisterRequest {
         addr: "127.0.0.1:4565".parse().unwrap(),
         resolver: None,
+        id_map_version: None,
     }));
     assert_ca(&Request::ApplyPermsEdit(ApplyPermsEditRequest {
         operation_id,
@@ -65,6 +66,7 @@ fn centralized_requirements_protect_all_mutations() {
     assert_ca(&Request::ApplyIdMapEdit(ApplyIdMapEditRequest {
         operation_id,
         edit: IdMapEdit::AddGroup { name: "users".into() },
+        version: Some(1),
     }));
     // The same message carries the CA's post-sign registration push.
     assert_ca(&Request::ApplyIdMapEdit(ApplyIdMapEditRequest {
@@ -74,6 +76,7 @@ fn centralized_requirements_protect_all_mutations() {
             primary_group: "users".into(),
             groups: vec![],
         },
+        version: Some(2),
     }));
     assert_admin(
         &Request::GetIdMap(GetIdMapRequest {
@@ -102,6 +105,7 @@ fn centralized_requirements_protect_all_mutations() {
         cluster: None,
         state: admin_proto::ServerState::Registered,
         reported_read_gate: None,
+        reported_id_map_version: None,
     });
     assert_ca(&Request::ApplyCaState(ApplyCaStateRequest {
         operation_id,

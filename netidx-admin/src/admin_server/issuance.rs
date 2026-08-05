@@ -650,6 +650,7 @@ impl IdentityPusher {
         addr: SocketAddr,
         operation_id: admin_proto::OperationId,
         edit: &IdMapEdit,
+        version: Option<u64>,
     ) -> Result<Option<ApplyIdMapEditOk>> {
         tokio::time::timeout(
             PUSH_TIMEOUT,
@@ -661,6 +662,7 @@ impl IdentityPusher {
                 self.home_ca.clone(),
                 operation_id,
                 edit,
+                version,
             ),
         )
         .await
@@ -721,15 +723,27 @@ pub(super) async fn push_registrations(
     let mut warnings = Vec::new();
     // The CA's own registration is an id-map write like any other, so it goes
     // into the model too — otherwise the model would describe an admin domain
-    // missing every identity that was ever enrolled into it.
-    if let Err(e) = super::id_map::record_in_model(state, &edit).await {
-        warnings.push(format!("recording the registration in the id-map model: {e:#}"));
-    }
+    // missing every identity that was ever enrolled into it, and a later
+    // reconcile would prune the very identities enrollment created.
+    //
+    // If that fails, push nothing. Propagating an edit the model does not know
+    // about would leave the model *behind* the hosts, which is the one
+    // direction the reconciler cannot recover from — it would read the extra
+    // identity as one to delete. The warning keeps `push_done` false, so the
+    // pending-push recovery set retries the whole thing later.
+    let version = match super::id_map::record_in_model(state, &edit).await {
+        Ok(version) => version,
+        Err(e) => {
+            warnings
+                .push(format!("recording the registration in the id-map model: {e:#}"));
+            return (operation_id, warnings);
+        }
+    };
     let (my_id, targets) =
         state.read(move |state| (state.cfg.server_id, id_map_targets(&state.map))).await;
     // Local id-map first (no TLS loopback).
     if targets.iter().any(|(id, _)| *id == my_id)
-        && let Err(e) = state.apply_id_map_edit(&edit).await
+        && let Err(e) = state.apply_id_map_edit(&edit, Some(version)).await
     {
         warnings.push(format!("local id-map registration failed: {e:#}"));
     }
@@ -745,7 +759,8 @@ pub(super) async fn push_registrations(
             let edit = edit.clone();
             let pusher = pusher.clone();
             async move {
-                let result = pusher.push(id, addr, operation_id, &edit).await;
+                let result =
+                    pusher.push(id, addr, operation_id, &edit, Some(version)).await;
                 (id, addr, result)
             }
         }),
@@ -849,7 +864,7 @@ pub(super) async fn reconcile_identities_to_target(
             primary_group: primary.clone(),
             groups: secondary.to_vec(),
         };
-        match pusher.push(server, addr, operation_id, &edit).await? {
+        match pusher.push(server, addr, operation_id, &edit, None).await? {
             Some(ok) => info!(
                 "admin-server: reconciled {} (uid {:?}) on server {server} at {addr}",
                 record.name, ok.uid

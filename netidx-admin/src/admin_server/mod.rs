@@ -683,14 +683,28 @@ impl Server {
 
     /// Apply one id-map operation to this host's map, under the state write
     /// lock so it is serialized with every other id-map write.
-    async fn apply_id_map_edit(&self, edit: &IdMapEdit) -> Result<ApplyIdMapEditOk> {
+    async fn apply_id_map_edit(
+        &self,
+        edit: &IdMapEdit,
+        version: Option<u64>,
+    ) -> Result<ApplyIdMapEditOk> {
         let edit = edit.clone();
         let config_lock = self.config_lock.clone();
         self.write_async(async move |state| match state.cfg.roles.id_map.as_ref() {
-            Some(role) => id_map::apply_edit_local(&config_lock, &role.map, &edit).await,
+            Some(role) => {
+                id_map::apply_edit_local(&config_lock, &role.map, &edit, version).await
+            }
             None => bail!("this host has no id-map role"),
         })
         .await
+    }
+
+    /// The id-map model version this host's map reflects, for its register.
+    async fn applied_id_map_version(&self) -> Option<u64> {
+        let path = self
+            .read(move |state| state.cfg.roles.id_map.as_ref().map(|r| r.map.clone()))
+            .await?;
+        crate::id_map::read_applied_version(&path).await
     }
 
     /// This host's id-map, serialized for the wire.

@@ -116,6 +116,7 @@ fn ca_reconciliation_fanout_covers_the_complete_hierarchy() {
                 cluster: Some(root),
                 state: admin_proto::ServerState::Registered,
                 reported_read_gate: None,
+                reported_id_map_version: None,
             },
             AdminServerEntry {
                 id: satellite,
@@ -125,6 +126,7 @@ fn ca_reconciliation_fanout_covers_the_complete_hierarchy() {
                 cluster: Some(child),
                 state: admin_proto::ServerState::Registered,
                 reported_read_gate: None,
+                reported_id_map_version: None,
             },
         ],
         resolver_clusters: vec![
@@ -184,6 +186,7 @@ fn registration_fanout_updates_its_cluster_and_both_adjacent_levels() {
         cluster: Some(cluster),
         state: admin_proto::ServerState::Registered,
         reported_read_gate: None,
+        reported_id_map_version: None,
     };
     let root_member = resolver("10.1.0.1:4564");
     let joining_member = resolver("10.2.0.1:4564");
@@ -292,6 +295,7 @@ async fn ca_state_relocation_persists_route_map_and_crl_without_rollback() {
         cluster: None,
         state: admin_proto::ServerState::Registered,
         reported_read_gate: None,
+        reported_id_map_version: None,
     };
     let mut old_map = AdminDomainMap::empty(ca);
     old_map.version = 4;
@@ -372,6 +376,7 @@ fn deciding_a_delegation_requires_authority_over_the_parent_cluster() {
         cluster: Some(cluster),
         state: admin_proto::ServerState::Registered,
         reported_read_gate: None,
+        reported_id_map_version: None,
     };
     let map = AdminDomainMap {
         version: 1,

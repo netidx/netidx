@@ -1169,6 +1169,14 @@ pub struct AdminServerEntry {
     #[serde(default)]
     #[pack(default)]
     pub reported_read_gate: Option<ReadGate>,
+    /// The id-map model version this host last applied, or `None` if it holds
+    /// no id-map or has never applied anything. Like `reported_read_gate` this
+    /// is what the host said, not what the CA told it — which is the point:
+    /// a version below the CA's model is a host that missed a change, and it
+    /// is the CA noticing that, rather than an operator, which repairs it.
+    #[serde(default)]
+    #[pack(default)]
+    pub reported_id_map_version: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Pack)]
@@ -1219,6 +1227,11 @@ pub struct RegisterRequest {
     /// The resolver configuration is evidence checked against the CA grant;
     /// it is never copied wholesale into the authoritative map.
     pub resolver: Option<ResolverClusterFacts>,
+    /// The id-map model version this host has applied. `None` from a host
+    /// with no id-map role, or one that has never applied an edit.
+    #[serde(default)]
+    #[pack(default)]
+    pub id_map_version: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Pack)]
@@ -1427,6 +1440,14 @@ pub type EditIdMapResponse = RpcResult<IdMapPropagationOk>;
 pub struct ApplyIdMapEditRequest {
     pub operation_id: OperationId,
     pub edit: IdMapEdit,
+    /// The model version this operation leaves the host at, recorded only on
+    /// success — a host that fails to apply stays behind and is picked up by
+    /// the next reconcile rather than silently claiming to be current.
+    ///
+    /// `None` means "this operation does not by itself make you current":
+    /// one step of a multi-step repair, where claiming the version after any
+    /// single step would let a host that failed halfway look caught up.
+    pub version: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Pack)]
@@ -2132,12 +2153,14 @@ mod tests {
                 children: vec![],
                 read_gated: ReadGate::No,
             }),
+            id_map_version: Some(9),
         });
         write_msg(&mut a, &req).await.unwrap();
         let got: Request = read_msg(&mut b).await.unwrap();
         let Request::Register(got) = got else { panic!("expected Register") };
         assert_eq!(got.addr, "10.0.0.2:4565".parse().unwrap());
         assert_eq!(got.resolver.unwrap().base, "/eu");
+        assert_eq!(got.id_map_version, Some(9));
 
         let ca = AdminServerId::new();
         let resp = GetMapResponse::Ok(AdminDomainMap {
@@ -2151,6 +2174,7 @@ mod tests {
                 cluster: None,
                 state: ServerState::Registered,
                 reported_read_gate: None,
+                reported_id_map_version: Some(9),
             }],
             resolver_clusters: vec![],
         });

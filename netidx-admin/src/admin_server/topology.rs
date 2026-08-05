@@ -800,6 +800,7 @@ pub(super) fn own_ca_entry(
             .or_else(|| has_resolver.then(admin_proto::ResolverClusterId::new)),
         state: admin_proto::ServerState::Registered,
         reported_read_gate: None,
+        reported_id_map_version: None,
     }
 }
 
@@ -858,6 +859,7 @@ pub(super) async fn handle_register(
                 server_id,
                 validation_req.addr,
                 validation_req.resolver.as_ref(),
+                validation_req.id_map_version,
             )?;
             Ok::<_, anyhow::Error>(reconcile)
         })
@@ -881,6 +883,7 @@ pub(super) async fn handle_register(
                 server_id,
                 req.addr,
                 req.resolver.as_ref(),
+                req.id_map_version,
             ) {
                 Ok(updated) => updated,
                 Err(e) => {

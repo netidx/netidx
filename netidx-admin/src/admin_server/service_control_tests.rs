@@ -16,6 +16,7 @@ fn service_control_routing_uses_identity_across_address_reuse() {
         cluster: None,
         state: admin_proto::ServerState::Registered,
         reported_read_gate: None,
+        reported_id_map_version: None,
     };
     let mut map = AdminDomainMap::empty(ca);
     // The selected identity moved, and a different identity reused its old

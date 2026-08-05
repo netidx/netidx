@@ -54,6 +54,7 @@ pub(super) async fn apply_edit_local(
     config_lock: &ConfigDirLock,
     map_path: &Path,
     edit: &IdMapEdit,
+    version: Option<u64>,
 ) -> Result<ApplyIdMapEditOk> {
     let map_path = config_lock.require_contained(map_path)?;
     let mut map =
@@ -61,6 +62,13 @@ pub(super) async fn apply_edit_local(
     let changed = id_map::apply_edit(&mut map, edit)?;
     if changed {
         id_map::save_async(&map_path, &map).await.context("saving id-map")?;
+    }
+    // Record the version even when nothing changed: this host now reflects
+    // that model version either way, and leaving it behind would earn it a
+    // reconcile every poll forever. Only on success — a host that failed to
+    // apply must stay behind so the next reconcile picks it up.
+    if let Some(version) = version {
+        id_map::record_applied_version(&map_path, version).await?;
     }
     // Read back rather than trusting the edit: on a re-registration the host
     // keeps the uid it already had, which is the number worth reporting.
@@ -99,7 +107,7 @@ pub(super) async fn handle_apply_id_map_edit(
     req: &ApplyIdMapEditRequest,
 ) -> ApplyIdMapEditResponse {
     info!("admin-server: applying id-map operation {}", req.operation_id);
-    match state.apply_id_map_edit(&req.edit).await {
+    match state.apply_id_map_edit(&req.edit, req.version).await {
         Ok(ok) => ApplyIdMapEditResponse::Ok(ok),
         Err(e) => ApplyIdMapEditResponse::Err { reason: format!("{e:#}") },
     }
@@ -231,9 +239,10 @@ pub(super) async fn handle_edit_id_map(
     // host behind a version — which is a thing that can be repaired. Applying
     // here also refuses an impossible edit once, centrally, instead of leaving
     // each host to discover it separately.
-    if let Err(e) = record_in_model(state, &req.edit).await {
-        return err(format!("{e:#}"));
-    }
+    let version = match record_in_model(state, &req.edit).await {
+        Ok(version) => version,
+        Err(e) => return err(format!("{e:#}")),
+    };
     let operation_id = admin_proto::OperationId::new();
     audit(
         &state.ca_dir().await.expect("CA role held"),
@@ -247,7 +256,7 @@ pub(super) async fn handle_edit_id_map(
     let mut changed = false;
     // Local first, with no TLS loopback — the same order enrollment uses.
     if let Some((server, addr)) = targets.iter().copied().find(|(id, _)| *id == my_id) {
-        let error = match state.apply_id_map_edit(&req.edit).await {
+        let error = match state.apply_id_map_edit(&req.edit, Some(version)).await {
             Ok(ok) => {
                 changed |= ok.changed;
                 None
@@ -261,6 +270,7 @@ pub(super) async fn handle_edit_id_map(
         &req.edit,
         &targets.iter().copied().filter(|(id, _)| *id != my_id).collect::<Vec<_>>(),
         operation_id,
+        Some(version),
     )
     .await;
     changed |= remote.iter().any(|(_, c)| *c);
@@ -277,6 +287,7 @@ async fn push_id_map_edit_to_peers(
     edit: &IdMapEdit,
     targets: &[(admin_proto::AdminServerId, SocketAddr)],
     operation_id: admin_proto::OperationId,
+    version: Option<u64>,
 ) -> Vec<(PeerResult, bool)> {
     let client = match state.outbound_client().await {
         Ok(client) => client,
@@ -314,6 +325,7 @@ async fn push_id_map_edit_to_peers(
                     home_ca,
                     operation_id,
                     edit,
+                    version,
                 ),
             )
             .await

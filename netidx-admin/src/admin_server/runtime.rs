@@ -108,7 +108,15 @@ pub(super) async fn report_facts(state: &Arc<Server>) {
         Ok(client) => client,
         Err(e) => return warn!("admin-server: loading outbound identity failed: {e:#}"),
     };
-    let req = RegisterRequest { addr: cfg.listen, resolver: facts };
+    let req = RegisterRequest {
+        addr: cfg.listen,
+        resolver: facts,
+        // What this host's id-map actually reflects, so the CA can tell a host
+        // that missed a change from one that is current. Reported on the poll
+        // that already runs, which is what makes a host that was down repair
+        // itself shortly after it comes back.
+        id_map_version: state.applied_id_map_version().await,
+    };
     if let Err(e) =
         transport::register(&client, ca_addr, state.home_ca_der.clone(), &req).await
     {

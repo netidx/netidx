@@ -696,6 +696,7 @@ pub async fn push_id_map_edit(
     home_ca: CertificateDer<'static>,
     operation_id: admin_proto::OperationId,
     edit: &admin_proto::IdMapEdit,
+    version: Option<u64>,
 ) -> Result<Option<admin_proto::ApplyIdMapEditOk>> {
     let (mut tls, hello) = connect_pki_target(
         client,
@@ -712,6 +713,7 @@ pub async fn push_id_map_edit(
         &Request::ApplyIdMapEdit(admin_proto::ApplyIdMapEditRequest {
             operation_id,
             edit: edit.clone(),
+            version,
         }),
     )
     .await?;
@@ -3075,6 +3077,7 @@ mod tests {
                 cluster: None,
                 state: ServerState::Registered,
                 reported_read_gate: None,
+                reported_id_map_version: None,
             }],
             resolver_clusters: vec![],
         };
@@ -3207,6 +3210,7 @@ mod tests {
                     cluster: None,
                     state: ServerState::Registered,
                     reported_read_gate: None,
+                    reported_id_map_version: None,
                 },
                 AdminServerEntry {
                     id: root_server,
@@ -3216,6 +3220,7 @@ mod tests {
                     cluster: Some(root_cluster),
                     state: ServerState::Registered,
                     reported_read_gate: None,
+                    reported_id_map_version: None,
                 },
                 AdminServerEntry {
                     id: waiting,
@@ -3225,6 +3230,7 @@ mod tests {
                     cluster: Some(root_cluster),
                     state: ServerState::Enrolled,
                     reported_read_gate: None,
+                    reported_id_map_version: None,
                 },
                 AdminServerEntry {
                     id: satellite,
@@ -3234,6 +3240,7 @@ mod tests {
                     cluster: Some(child_cluster),
                     state: ServerState::Registered,
                     reported_read_gate: None,
+                    reported_id_map_version: None,
                 },
             ],
             resolver_clusters: vec![
