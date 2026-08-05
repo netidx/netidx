@@ -177,10 +177,10 @@ pub(super) async fn handle_read_perms(
             GetPermsResponse::Err { reason } => err(reason),
         };
     }
-    let targets = {
+    let (cluster, targets) = {
         let map = state.read(move |state| state.map.clone()).await;
-        match cluster_members_for(&map, &req.target_path) {
-            Some(targets) => targets,
+        match cluster_for(&map, &req.target_path) {
+            Some(found) => found,
             None => {
                 return err(format!(
                     "no registered resolver cluster serving {:?} in the admin domain map",
@@ -189,6 +189,27 @@ pub(super) async fn handle_read_perms(
             }
         }
     };
+    // The model, once the CA has one. Reading a member instead is how a
+    // missed edit became the basis of the next one: the read walks members and
+    // takes the first that answers, so a member that was down for an edit and
+    // is up now hands back its stale document, and whatever is built on it
+    // gets propagated over everyone else's correct one.
+    if let Some(perms) = state
+        .read_async(async move |state| match state.ca.as_ref() {
+            Some(ca) => ca.store.perms_model().await.ok(),
+            None => None,
+        })
+        .await
+        .and_then(|model| model.get(cluster).cloned())
+    {
+        let (server, addr) =
+            state.read(move |state| (state.cfg.server_id, state.cfg.listen)).await;
+        return ReadPermsResponse::Ok(ReadPermsOk {
+            server,
+            addr,
+            perms_json: perms.doc,
+        });
+    }
     audit(
         &state.ca_dir().await.expect("CA role held"),
         &authd.admin,
@@ -314,14 +335,6 @@ fn cluster_for(
     (!members.is_empty()).then_some((cluster.id, members))
 }
 
-/// The members of the cluster mounted at `target_path`.
-fn cluster_members_for(
-    map: &AdminDomainMap,
-    target_path: &str,
-) -> Option<Vec<(admin_proto::AdminServerId, SocketAddr)>> {
-    cluster_for(map, target_path).map(|(_, members)| members)
-}
-
 /// Push a perms edit to every registered server in the target resolver cluster, using
 /// each CA-owned routing address. Every unreachable/erroring target is returned
 /// as a `PeerResult` carrying its immutable identity and current address.
@@ -376,6 +389,81 @@ async fn push_perms_edit_to_peers(
         .await;
     results.sort_by_key(|result| result.server);
     results
+}
+
+/// Bring one member up to its cluster's authoritative permissions.
+///
+/// There is no diff to compute: every member of a cluster holds the same
+/// document, so a member that is behind is simply sent it. That is the whole
+/// difference from the id-map, where a uid is per-host and the repair has to
+/// be expressed as operations.
+pub(super) async fn reconcile_to_member(
+    state: &Arc<Server>,
+    cluster: admin_proto::ResolverClusterId,
+    server: admin_proto::AdminServerId,
+    addr: SocketAddr,
+) -> Result<()> {
+    let model = state
+        .read_async(async move |state| {
+            state
+                .ca
+                .as_ref()
+                .context("this host does not hold the CA")?
+                .store
+                .perms_model()
+                .await
+        })
+        .await?;
+    let Some(perms) = model.get(cluster) else { return Ok(()) };
+    let ca = state.read(move |state| state.map.ca).await;
+    let operation_id = admin_proto::OperationId::new();
+    if let Some(dir) = state.ca_dir().await {
+        audit(
+            &dir,
+            "CA",
+            "reconcile-perms",
+            &format!("operation {operation_id}: server {server} at {addr}"),
+            Duration::ZERO,
+        )
+        .await;
+    }
+    if server == ca {
+        return apply_perms_local(state, &perms.doc, Some(perms.version)).await;
+    }
+    let client = state.outbound_client().await?;
+    tokio::time::timeout(
+        PUSH_TIMEOUT,
+        transport::push_perms_edit(
+            &client,
+            addr,
+            server,
+            false,
+            state.home_ca_der.clone(),
+            operation_id,
+            &perms.doc,
+            Some(perms.version),
+        ),
+    )
+    .await
+    .map_err(|_| anyhow!("timed out after {}s", PUSH_TIMEOUT.as_secs()))?
+}
+
+/// Whether `reported` is behind `cluster`'s model.
+///
+/// `None` — a member that has never been stamped — is behind anything
+/// established. A cluster the CA has no model for leaves its members alone.
+pub(super) async fn perms_behind(
+    state: &Arc<Server>,
+    cluster: admin_proto::ResolverClusterId,
+    reported: Option<u64>,
+) -> bool {
+    let model = state
+        .read_async(async move |state| match state.ca.as_ref() {
+            Some(ca) => ca.store.perms_model().await.ok(),
+            None => None,
+        })
+        .await;
+    model.is_some_and(|model| model.behind(cluster, reported))
 }
 
 /// Record `perms_json` as `cluster`'s authoritative permissions, returning the

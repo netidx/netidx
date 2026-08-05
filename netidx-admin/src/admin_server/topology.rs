@@ -856,7 +856,7 @@ pub(super) async fn handle_register(
         }
     };
     let validation_req = req.clone();
-    let reconcile_id_map = match state
+    let (reconcile_id_map, reconcile_perms) = match state
         .read(move |state| {
             let current = state
                 .map
@@ -873,6 +873,7 @@ pub(super) async fn handle_register(
             // version at all — so there is one rule rather than a general case
             // and a special case that can disagree.
             let reconcile = current.roles.contains(Role::IdMap);
+            let reconcile_perms = current.cluster;
             let mut staged = state.map.clone();
             admin_domain::register(
                 &mut staged,
@@ -882,17 +883,36 @@ pub(super) async fn handle_register(
                 validation_req.id_map_version,
                 validation_req.perms_version,
             )?;
-            Ok::<_, anyhow::Error>(reconcile)
+            Ok::<_, anyhow::Error>((reconcile, reconcile_perms))
         })
         .await
     {
-        Ok(reconcile) => reconcile,
+        Ok(pair) => pair,
         Err(e) => return RegisterResponse::Err { reason: format!("{e:#}") },
     };
     // Cheap in the steady state: a host whose reported version matches the
     // model costs one integer comparison, not a map fetch. This runs on the
     // facts poll every host already makes, which is what bounds how long a
     // host that came back stays out of agreement.
+    // Same rule for the cluster's permissions: a member below its cluster's
+    // model missed an edit, whether because it was down for it or because it
+    // came back from a backup taken before it.
+    if let Some(cluster) = reconcile_perms
+        && crate::admin_server::permissions::perms_behind(
+            state,
+            cluster,
+            req.perms_version,
+        )
+        .await
+        && let Err(e) = crate::admin_server::permissions::reconcile_to_member(
+            state, cluster, server_id, req.addr,
+        )
+        .await
+    {
+        return RegisterResponse::Err {
+            reason: format!("reconciling this member's permissions: {e:#}"),
+        };
+    }
     if reconcile_id_map && id_map_behind(state, req.id_map_version).await {
         if let Err(e) =
             crate::admin_server::id_map::reconcile_to_target(state, server_id, req.addr)

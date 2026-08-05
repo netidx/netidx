@@ -65,6 +65,15 @@ impl PermsModel {
         Ok(entry.version)
     }
 
+    /// Whether a member reporting `reported` is behind `cluster`'s document.
+    ///
+    /// `None` — a member that has never been stamped — is behind anything
+    /// established. A cluster the CA has no document for leaves its members
+    /// alone: not knowing is not the same as knowing they are empty.
+    pub fn behind(&self, cluster: ResolverClusterId, reported: Option<u64>) -> bool {
+        self.get(cluster).is_some_and(|p| reported.is_none_or(|have| have < p.version))
+    }
+
     /// Drop a cluster the admin domain no longer has. Without this the model
     /// would keep a document for a cluster nobody can be a member of, which
     /// is harmless but accumulates and would confuse anyone reading the file.
@@ -139,6 +148,27 @@ mod tests {
         assert!(model.forget(id));
         assert!(model.get(id).is_none());
         assert!(!model.forget(id));
+    }
+
+    #[test]
+    fn who_is_behind() {
+        let (eu, ap) = (cluster(), cluster());
+        let mut model = PermsModel::default();
+        // Nothing established: nobody is behind, whatever they report.
+        assert!(!model.behind(eu, None));
+        assert!(!model.behind(eu, Some(7)));
+        model.set(eu, A).unwrap();
+        // Never stamped is behind anything established.
+        assert!(model.behind(eu, None));
+        assert!(!model.behind(eu, Some(1)));
+        model.set(eu, B).unwrap();
+        assert!(model.behind(eu, Some(1)));
+        assert!(!model.behind(eu, Some(2)));
+        // A member reporting a version from the future is not behind — it is
+        // wrong, but pushing an older document at it would make that worse.
+        assert!(!model.behind(eu, Some(99)));
+        // Another cluster's edits do not make this one's members behind.
+        assert!(!model.behind(ap, Some(1)));
     }
 
     #[test]
