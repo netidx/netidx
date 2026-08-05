@@ -33,14 +33,15 @@ impl Propagated<'_> {
         }
     }
 
+    /// Nothing, for either. Both daemons poll the files they were just handed
+    /// and reload on their own, so there is no operator step after a
+    /// successful propagation — the resolver polls its config and its
+    /// `include_permissions` mtimes, and the id-mapper polls its map. Saying
+    /// otherwise sends operators to restart a service that did not need it,
+    /// which on a resolver means a needless gap in service.
     fn after(&self) -> Option<&'static str> {
         match self {
-            Propagated::Perms { .. } => {
-                Some("  restart the resolver server(s) to load the new perms.")
-            }
-            // The id-mapper reloads on SIGHUP and the daemon has already
-            // written the file — nothing for the operator to do.
-            Propagated::IdMap => None,
+            Propagated::Perms { .. } | Propagated::IdMap => None,
         }
     }
 }
