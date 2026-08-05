@@ -719,6 +719,12 @@ pub(super) async fn push_registrations(
         groups: secondary.to_vec(),
     };
     let mut warnings = Vec::new();
+    // The CA's own registration is an id-map write like any other, so it goes
+    // into the model too — otherwise the model would describe an admin domain
+    // missing every identity that was ever enrolled into it.
+    if let Err(e) = super::id_map::record_in_model(state, &edit).await {
+        warnings.push(format!("recording the registration in the id-map model: {e:#}"));
+    }
     let (my_id, targets) =
         state.read(move |state| (state.cfg.server_id, id_map_targets(&state.map))).await;
     // Local id-map first (no TLS loopback).

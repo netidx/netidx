@@ -68,6 +68,31 @@ pub(super) async fn apply_edit_local(
     Ok(ApplyIdMapEditOk { changed, uid })
 }
 
+/// Apply `edit` to the CA's authoritative model and persist it, returning the
+/// version the admin domain is now at.
+///
+/// The read-modify-write runs under the state write lock so two concurrent
+/// edits can't both read the same version and write over each other — the
+/// model is the one piece of id-map state that *is* shared, so it is the one
+/// place the operation-based design still needs serializing.
+pub(super) async fn record_in_model(
+    state: &Arc<Server>,
+    edit: &IdMapEdit,
+) -> Result<u64> {
+    let edit = edit.clone();
+    state
+        .write_async(async move |state| {
+            let store =
+                &state.ca.as_ref().context("this host does not hold the CA")?.store;
+            let mut model = store.id_map_model().await?;
+            model.apply(&edit)?;
+            let version = model.version;
+            store.save_id_map_model(&model).await?;
+            Ok(version)
+        })
+        .await
+}
+
 /// Server-to-server receive side (peer-cert-gated).
 pub(super) async fn handle_apply_id_map_edit(
     state: &Server,
@@ -199,6 +224,15 @@ pub(super) async fn handle_edit_id_map(
     };
     if targets.is_empty() {
         return err("no registered id-map host in the admin domain map".to_string());
+    }
+    // Record the intent before propagating any of it. The model is what the
+    // admin domain is supposed to look like whether or not every host was
+    // reachable, so a host that misses the push below is afterwards simply a
+    // host behind a version — which is a thing that can be repaired. Applying
+    // here also refuses an impossible edit once, centrally, instead of leaving
+    // each host to discover it separately.
+    if let Err(e) = record_in_model(state, &req.edit).await {
+        return err(format!("{e:#}"));
     }
     let operation_id = admin_proto::OperationId::new();
     audit(

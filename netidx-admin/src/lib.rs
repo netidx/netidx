@@ -64,6 +64,8 @@ pub mod delegation_store;
 /// workstation browses; the unix daemon advertises.
 pub mod discovery;
 pub mod id_map;
+/// The CA's record of the shape every id-map host is supposed to agree on.
+pub mod id_map_model;
 /// The bundle a joining host is handed to install itself from.
 pub mod install_bundle;
 /// Local control-socket client: the on-box `ca` CLI drives the running admin

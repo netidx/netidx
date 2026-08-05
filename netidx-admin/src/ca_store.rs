@@ -25,6 +25,7 @@ use crate::{
     admin_proto::{EnrollmentRequest, NodeKind},
     atomic,
     config_lock::ConfigDirLock,
+    id_map_model::IdMapModel,
 };
 use anyhow::{Context, Result};
 use serde_derive::{Deserialize, Serialize};
@@ -668,6 +669,34 @@ impl CAStore {
             outcomes[index].1 = true;
         }
         Ok(outcomes)
+    }
+
+    /// The admin domain's authoritative id-map shape.
+    ///
+    /// A missing file reads as the default (version 0), which describes
+    /// nothing and can never make a host look behind. That is the safe
+    /// direction: a CA that has lost this file must not conclude that every
+    /// host should be emptied to match it.
+    pub async fn id_map_model(&self) -> Result<IdMapModel> {
+        let path = self.id_map_model_path();
+        match tokio::fs::read(&path).await {
+            Ok(bytes) => serde_json::from_slice(&bytes)
+                .with_context(|| format!("parsing {}", path.display())),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                Ok(IdMapModel::default())
+            }
+            Err(e) => Err(e).with_context(|| format!("reading {}", path.display())),
+        }
+    }
+
+    pub async fn save_id_map_model(&self, model: &IdMapModel) -> Result<()> {
+        let bytes =
+            serde_json::to_vec_pretty(model).context("serializing the id-map model")?;
+        atomic::write_atomic_async(&self.id_map_model_path(), &bytes, 0o644).await
+    }
+
+    fn id_map_model_path(&self) -> PathBuf {
+        self.dir.join("id-map-model.json")
     }
 
     /// Record that the id-map registration for this issuance has been
