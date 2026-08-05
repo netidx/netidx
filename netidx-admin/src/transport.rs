@@ -680,6 +680,38 @@ pub async fn push_perms_edit(
     }
 }
 
+/// Server→server: read a peer admin server's id-map (serving-cert authed).
+///
+/// The CA needs this to work out what a lagging host is actually missing,
+/// rather than replaying its whole history at it. `Ok(None)` means the peer
+/// does not hold the id-map role, same as [`push_id_map_edit`].
+pub async fn fetch_id_map(
+    client: &AuthenticatedPkiClient,
+    addr: SocketAddr,
+    target_id: admin_proto::AdminServerId,
+    target_ca: bool,
+    home_ca: CertificateDer<'static>,
+) -> Result<Option<String>> {
+    let (mut tls, hello) = connect_pki_target(
+        client,
+        addr,
+        NodeKind::AdminServer,
+        Some(ExactTarget { id: Some(target_id), home_ca: &home_ca, ca: target_ca }),
+    )
+    .await?;
+    if !hello.roles.contains(Role::IdMap) {
+        return Ok(None);
+    }
+    admin_proto::write_msg(&mut tls, &Request::GetLocalIdMap).await?;
+    match admin_proto::read_msg::<_, admin_proto::GetLocalIdMapResponse>(&mut tls).await?
+    {
+        admin_proto::GetLocalIdMapResponse::Ok(json) => Ok(Some(json)),
+        admin_proto::GetLocalIdMapResponse::Err { reason } => {
+            bail!("peer refused the id-map read: {reason}")
+        }
+    }
+}
+
 /// Server→server: apply one id-map operation to a peer admin server
 /// (serving-cert authed).
 ///

@@ -76,6 +76,151 @@ pub(super) async fn apply_edit_local(
     Ok(ApplyIdMapEditOk { changed, uid })
 }
 
+/// Bring one host up to the CA's model.
+///
+/// Fetches that host's actual map, diffs it, and pushes the operations that
+/// close the gap. The host records the model version only after the last one
+/// lands, so a repair that fails halfway leaves it visibly behind and is
+/// picked up again on its next register rather than silently claiming to be
+/// current.
+///
+/// A host that already agrees but whose recorded version is stale — it applied
+/// everything, then the version write failed, or it was reconciled by an older
+/// build — costs one `GetIdMap` and one version write, not a rewrite of its
+/// map.
+pub(super) async fn reconcile_to_target(
+    state: &Arc<Server>,
+    server: admin_proto::AdminServerId,
+    addr: SocketAddr,
+) -> Result<()> {
+    let model = state
+        .read_async(async move |state| {
+            state
+                .ca
+                .as_ref()
+                .context("this host does not hold the CA")?
+                .store
+                .id_map_model()
+                .await
+        })
+        .await?;
+    if !model.established() {
+        return Ok(());
+    }
+    let ca = state.read(move |state| state.map.ca).await;
+    let client = state.outbound_client().await?;
+    let home_ca = state.home_ca_der.clone();
+    let host: crate::id_map::IdMap = if server == ca {
+        serde_json::from_str(&state.read_id_map().await?)
+            .context("parsing this host's own id-map")?
+    } else {
+        let json = tokio::time::timeout(
+            PUSH_TIMEOUT,
+            transport::fetch_id_map(&client, addr, server, false, home_ca.clone()),
+        )
+        .await
+        .map_err(|_| anyhow!("timed out after {}s", PUSH_TIMEOUT.as_secs()))??;
+        match json {
+            Some(json) => {
+                serde_json::from_str(&json).context("parsing the peer's id-map")?
+            }
+            // It holds the grant but is not running the role. Nothing to
+            // reconcile, and nothing wrong with saying so quietly — the map
+            // already records the grant, and an operator asking why will see
+            // it in the roster.
+            None => return Ok(()),
+        }
+    };
+    let edits = model.diff(&host);
+    let operation_id = admin_proto::OperationId::new();
+    if !edits.is_empty()
+        && let Some(dir) = state.ca_dir().await
+    {
+        audit(
+            &dir,
+            "CA",
+            "reconcile-id-map",
+            &format!(
+                "operation {operation_id}: server {server} at {addr}, {} operation(s)",
+                edits.len()
+            ),
+            Duration::ZERO,
+        )
+        .await;
+    }
+    let last = edits.len().saturating_sub(1);
+    for (i, edit) in edits.iter().enumerate() {
+        // Only the final step may claim the version — see the doc comment.
+        let claim = (i == last).then_some(model.version);
+        apply_one(state, server, addr, ca, &client, &home_ca, operation_id, edit, claim)
+            .await
+            .with_context(|| format!("reconciling {server} at {addr}"))?;
+    }
+    if edits.is_empty() {
+        // Shape already right, version stale: settle the claim with an
+        // operation that is already true rather than leaving it to be
+        // rediscovered every poll.
+        let settle = IdMapEdit::AddGroup {
+            name: model
+                .shape()
+                .groups
+                .keys()
+                .next()
+                .context("an established model has at least the base group")?
+                .to_string(),
+        };
+        apply_one(
+            state,
+            server,
+            addr,
+            ca,
+            &client,
+            &home_ca,
+            operation_id,
+            &settle,
+            Some(model.version),
+        )
+        .await
+        .with_context(|| format!("recording the id-map version on {server} at {addr}"))?;
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn apply_one(
+    state: &Arc<Server>,
+    server: admin_proto::AdminServerId,
+    addr: SocketAddr,
+    ca: admin_proto::AdminServerId,
+    client: &transport::AuthenticatedPkiClient,
+    home_ca: &rustls_pki_types::CertificateDer<'static>,
+    operation_id: admin_proto::OperationId,
+    edit: &IdMapEdit,
+    version: Option<u64>,
+) -> Result<()> {
+    if server == ca {
+        state.apply_id_map_edit(edit, version).await?;
+        return Ok(());
+    }
+    tokio::time::timeout(
+        PUSH_TIMEOUT,
+        transport::push_id_map_edit(
+            client,
+            addr,
+            server,
+            false,
+            home_ca.clone(),
+            operation_id,
+            edit,
+            version,
+        ),
+    )
+    .await
+    .map_err(|_| anyhow!("timed out after {}s", PUSH_TIMEOUT.as_secs()))??
+    .context("the host stopped advertising the id-map role mid-reconcile")?;
+    Ok(())
+}
+
 /// Apply `edit` to the CA's authoritative model and persist it, returning the
 /// version the admin domain is now at.
 ///
@@ -99,6 +244,16 @@ pub(super) async fn record_in_model(
             Ok(version)
         })
         .await
+}
+
+/// CA → node id-map read (peer-cert-gated), the receive side of a reconcile.
+pub(super) async fn handle_get_local_id_map(
+    state: &Server,
+) -> admin_proto::GetLocalIdMapResponse {
+    match state.read_id_map().await {
+        Ok(json) => admin_proto::GetLocalIdMapResponse::Ok(json),
+        Err(e) => admin_proto::GetLocalIdMapResponse::Err { reason: format!("{e:#}") },
+    }
 }
 
 /// Server-to-server receive side (peer-cert-gated).

@@ -503,6 +503,13 @@ pub enum Request {
     /// with [`ApplySetReadGateResponse`].
     #[pack(tag(45))]
     ApplySetReadGate(ApplySetReadGateRequest),
+    /// CA → node: read this host's id-map. The internal exact-target RPC
+    /// behind a reconcile — the CA has to know what a lagging host actually
+    /// holds before it can work out what it is missing. Admin domain clients
+    /// use [`Request::GetIdMap`] so credentials are verified at the CA first.
+    /// Answered with [`GetLocalIdMapResponse`].
+    #[pack(tag(48))]
+    GetLocalIdMap,
     /// Admin-authenticated, sent to the **CA**: read the receiving host's
     /// id-map. Answered with [`GetIdMapResponse`].
     ///
@@ -1434,6 +1441,9 @@ pub struct IdMapPropagationOk {
 }
 
 pub type EditIdMapResponse = RpcResult<IdMapPropagationOk>;
+
+/// The receiving host's id-map, serialized. Mirrors [`GetPermsResponse`].
+pub type GetLocalIdMapResponse = RpcResult<String>;
 
 /// Server → server: apply `edit` to this host's local id-map.
 #[derive(Debug, Clone, Serialize, Deserialize, Pack)]

@@ -18,7 +18,10 @@ use super::{
         handle_external_ca_install, rotate_autorenew, rotate_recovery,
     },
     enrollment::handle_enroll,
-    id_map::{handle_apply_id_map_edit, handle_edit_id_map, handle_get_id_map},
+    id_map::{
+        handle_apply_id_map_edit, handle_edit_id_map, handle_get_id_map,
+        handle_get_local_id_map,
+    },
     issuance::handle_sign,
     permissions::{
         handle_apply_perms_edit, handle_edit_perms, handle_get_perms, handle_read_perms,
@@ -431,6 +434,12 @@ where
                 .await
                 .context("writing ApplyPermsEditResponse")
         }
+        Request::GetLocalIdMap => {
+            let resp = handle_get_local_id_map(state).await;
+            admin_proto::write_msg(&mut tls, &resp)
+                .await
+                .context("writing GetLocalIdMapResponse")
+        }
         Request::GetIdMap(req) => {
             let resp =
                 handle_get_id_map(state, &req, request_authentication(), local).await;
@@ -678,6 +687,7 @@ fn request_requirements(req: &Request) -> RequestRequirements<'_> {
         ApplyCrl(_)
         | ApplyCaState(_)
         | GetPerms
+        | GetLocalIdMap
         | ApplyPermsEdit(_)
         | ApplyIdMapEdit(_)
         | ApplyReferralEdit(_)

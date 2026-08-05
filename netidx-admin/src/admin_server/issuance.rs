@@ -19,7 +19,7 @@ use crate::{
     ca::{Ca, SanEntry},
     ca_store, ca_vault, transport,
 };
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow};
 use futures::{StreamExt, stream};
 use log::{info, warn};
 use rustls_pki_types::CertificateDer;
@@ -799,80 +799,4 @@ pub(super) async fn push_registrations(
             .await;
     }
     (operation_id, warnings)
-}
-
-fn reconcile_identity_at(
-    records: &[ca_store::IssuedRecord],
-    index: usize,
-    now: u64,
-) -> bool {
-    let record = &records[index];
-    !record.groups.is_empty()
-        && records.iter().any(|candidate| {
-            candidate.name.eq_ignore_ascii_case(&record.name) && candidate.live(now)
-        })
-        && !records[index + 1..].iter().any(|candidate| {
-            candidate.name.eq_ignore_ascii_case(&record.name)
-                && !candidate.groups.is_empty()
-        })
-}
-
-pub(super) async fn reconcile_identities_to_target(
-    state: &Server,
-    server: admin_proto::AdminServerId,
-    addr: SocketAddr,
-) -> Result<()> {
-    let mut records = state
-        .read_async(async move |state| {
-            state
-                .ca
-                .as_ref()
-                .context("this host does not hold the CA")?
-                .store
-                .list_signed()
-                .await
-        })
-        .await?;
-    records.sort_by_key(|record| record.serial);
-    let now = ca_store::now_unix();
-    let operation_id = admin_proto::OperationId::new();
-    let pusher = IdentityPusher::new(state).await?;
-    let mut audited = false;
-    for (index, record) in records.iter().enumerate() {
-        if !reconcile_identity_at(&records, index, now) {
-            continue;
-        }
-        let (primary, secondary) = record
-            .groups
-            .split_first()
-            .expect("reconciliation predicate requires groups");
-        if !audited {
-            if let Some(dir) = state.ca_dir().await {
-                audit(
-                    &dir,
-                    "CA",
-                    "reconcile-id-map",
-                    &format!("operation {operation_id}: server {server} at {addr}"),
-                    Duration::ZERO,
-                )
-                .await;
-            }
-            audited = true;
-        }
-        let edit = IdMapEdit::AddIdentity {
-            san: record.name.clone(),
-            primary_group: primary.clone(),
-            groups: secondary.to_vec(),
-        };
-        match pusher.push(server, addr, operation_id, &edit, None).await? {
-            Some(ok) => info!(
-                "admin-server: reconciled {} (uid {:?}) on server {server} at {addr}",
-                record.name, ok.uid
-            ),
-            None => bail!(
-                "server {server} at {addr} was granted IdMap but does not advertise that role"
-            ),
-        }
-    }
-    Ok(())
 }

@@ -80,6 +80,77 @@ impl IdMapModel {
         }
         Ok(changed)
     }
+
+    /// The operations that bring `host` to this model — empty when it already
+    /// agrees.
+    ///
+    /// Compares names and membership only. A uid difference is not a
+    /// difference: each host allocates its own, and re-registering an identity
+    /// keeps the number it already had.
+    ///
+    /// **Order is the whole difficulty.** Each step has to be applicable when
+    /// it runs, against the applier's own invariants — a group cannot be
+    /// removed while an identity still holds it, and an identity cannot name a
+    /// group that does not exist yet. So: create groups, then settle
+    /// identities, then drop memberships, then identities, then groups. Any
+    /// other order produces a batch the host is right to refuse.
+    ///
+    /// Returns nothing for a model that is not [`established`](Self::established).
+    /// A CA that has lost its model knows nothing, and "knows nothing" must
+    /// never be read as "everything should be deleted".
+    pub fn diff(&self, host: &IdMap) -> Vec<IdMapEdit> {
+        if !self.established() {
+            return Vec::new();
+        }
+        let mut out = Vec::new();
+        // 1. Groups the host is missing, before anything can name them.
+        for name in self.shape.groups.keys() {
+            if !host.groups.contains_key(name) {
+                out.push(IdMapEdit::AddGroup { name: name.to_string() });
+            }
+        }
+        // 2. Identities the host is missing or holds differently.
+        //    AddIdentity is an upsert that creates any group it names, so it
+        //    settles a wrong primary group and any missing membership at once.
+        for (san, want) in &self.shape.identities {
+            let matches = host.identities.get(san).is_some_and(|have| {
+                have.primary_group == want.primary_group && have.groups == want.groups
+            });
+            if !matches {
+                out.push(IdMapEdit::AddIdentity {
+                    san: san.to_string(),
+                    primary_group: want.primary_group.to_string(),
+                    groups: want.groups.iter().map(|g| g.to_string()).collect(),
+                });
+            }
+        }
+        // 3. Memberships the host has that the model does not — the removals
+        //    step 2 cannot express, since AddIdentity only adds.
+        for (san, have) in &host.identities {
+            let Some(want) = self.shape.identities.get(san) else { continue };
+            for group in &have.groups {
+                if !want.groups.contains(group) {
+                    out.push(IdMapEdit::RemoveMember {
+                        san: san.to_string(),
+                        group: group.to_string(),
+                    });
+                }
+            }
+        }
+        // 4. Identities the model does not have, before the groups they hold.
+        for san in host.identities.keys() {
+            if !self.shape.identities.contains_key(san) {
+                out.push(IdMapEdit::RemoveIdentity { san: san.to_string() });
+            }
+        }
+        // 5. Groups the model does not have, once nothing references them.
+        for name in host.groups.keys() {
+            if !self.shape.groups.contains_key(name) {
+                out.push(IdMapEdit::RemoveGroup { name: name.to_string() });
+            }
+        }
+        out
+    }
 }
 
 #[cfg(test)]
@@ -199,5 +270,208 @@ mod tests {
         let json = serde_json::to_string(&model).unwrap();
         let back: IdMapModel = serde_json::from_str(&json).unwrap();
         assert_eq!(model, back);
+    }
+
+    /// A diff is only correct if the host can actually apply it in the order
+    /// given — every step has to satisfy the applier's invariants when it
+    /// runs. Applying the diff and re-diffing is the strongest statement of
+    /// that: it must converge, and it must converge in one pass.
+    fn assert_converges(model: &IdMapModel, host: &mut IdMap) -> Vec<IdMapEdit> {
+        let edits = model.diff(host);
+        for e in &edits {
+            apply_edit(host, e)
+                .unwrap_or_else(|err| panic!("the host refused {e:?}: {err:#}"));
+        }
+        assert!(
+            model.diff(host).is_empty(),
+            "one pass must be enough; still to do: {:?}",
+            model.diff(host)
+        );
+        edits
+    }
+
+    fn model_of(edits: &[IdMapEdit]) -> IdMapModel {
+        let mut m = IdMapModel::default();
+        for e in edits {
+            m.apply(e).unwrap();
+        }
+        m
+    }
+
+    #[test]
+    fn a_host_that_agrees_needs_nothing() {
+        let edits = [IdMapEdit::AddIdentity {
+            san: "alice.example.com".into(),
+            primary_group: "users".into(),
+            groups: vec!["ops".into()],
+        }];
+        let model = model_of(&edits);
+        let mut host = empty();
+        for e in &edits {
+            apply_edit(&mut host, e).unwrap();
+        }
+        assert!(model.diff(&host).is_empty(), "no needless pushes");
+    }
+
+    /// The case that prompted all of this: a host that was down for a batch of
+    /// edits, including the removals that are the unsafe direction to miss.
+    #[test]
+    fn a_host_that_missed_everything_catches_up_in_one_pass() {
+        let model = model_of(&[
+            IdMapEdit::AddGroup { name: "oncall".into() },
+            IdMapEdit::AddIdentity {
+                san: "alice.example.com".into(),
+                primary_group: "users".into(),
+                groups: vec!["oncall".into()],
+            },
+            IdMapEdit::AddIdentity {
+                san: "carol.example.com".into(),
+                primary_group: "users".into(),
+                groups: vec![],
+            },
+        ]);
+        // The host is at an older state: it has an identity since removed, a
+        // membership since revoked, and a group since dropped.
+        let mut host = empty();
+        for e in [
+            IdMapEdit::AddGroup { name: "legacy".into() },
+            IdMapEdit::AddIdentity {
+                san: "alice.example.com".into(),
+                primary_group: "users".into(),
+                groups: vec!["legacy".into()],
+            },
+            IdMapEdit::AddIdentity {
+                san: "bob.example.com".into(),
+                primary_group: "users".into(),
+                groups: vec!["legacy".into()],
+            },
+        ] {
+            apply_edit(&mut host, &e).unwrap();
+        }
+        let uid = host.identities.get("alice.example.com").unwrap().uid;
+        assert_converges(&model, &mut host);
+        // The revoked membership is gone, not merely absent from the others.
+        assert!(
+            !host
+                .identities
+                .get("alice.example.com")
+                .unwrap()
+                .groups
+                .iter()
+                .any(|g| g.as_str() == "legacy")
+        );
+        assert!(
+            host.identities
+                .get("alice.example.com")
+                .unwrap()
+                .groups
+                .iter()
+                .any(|g| g.as_str() == "oncall")
+        );
+        assert!(!host.identities.contains_key("bob.example.com"));
+        assert!(!host.groups.contains_key("legacy"));
+        assert!(host.identities.contains_key("carol.example.com"));
+        // Converging must not renumber an identity the host already had.
+        assert_eq!(host.identities.get("alice.example.com").unwrap().uid, uid);
+    }
+
+    /// The ordering trap: a group can only be dropped once nothing holds it,
+    /// and the identity holding it is itself being dropped in the same pass.
+    #[test]
+    fn a_group_is_dropped_after_the_identity_that_held_it() {
+        let model = model_of(&[IdMapEdit::AddGroup { name: "keep".into() }]);
+        let mut host = empty();
+        for e in [
+            IdMapEdit::AddGroup { name: "keep".into() },
+            IdMapEdit::AddIdentity {
+                san: "gone.example.com".into(),
+                primary_group: "doomed".into(),
+                groups: vec![],
+            },
+        ] {
+            apply_edit(&mut host, &e).unwrap();
+        }
+        let edits = assert_converges(&model, &mut host);
+        let rm_ident = edits
+            .iter()
+            .position(|e| matches!(e, IdMapEdit::RemoveIdentity { .. }))
+            .expect("the identity is removed");
+        let rm_group = edits
+            .iter()
+            .position(
+                |e| matches!(e, IdMapEdit::RemoveGroup { name } if name == "doomed"),
+            )
+            .expect("its group is removed");
+        assert!(rm_ident < rm_group, "the holder has to go first: {edits:?}");
+        assert!(!host.groups.contains_key("doomed"));
+    }
+
+    /// The mirror trap: an identity cannot name a group that does not exist
+    /// yet, so the group has to be created first.
+    #[test]
+    fn a_group_is_created_before_the_identity_that_names_it() {
+        let model = model_of(&[IdMapEdit::AddIdentity {
+            san: "alice.example.com".into(),
+            primary_group: "newgroup".into(),
+            groups: vec![],
+        }]);
+        let mut host = empty();
+        let edits = assert_converges(&model, &mut host);
+        let add_group = edits
+            .iter()
+            .position(|e| matches!(e, IdMapEdit::AddGroup { name } if name == "newgroup"))
+            .expect("the group is created");
+        let add_ident = edits
+            .iter()
+            .position(|e| matches!(e, IdMapEdit::AddIdentity { .. }))
+            .expect("the identity is created");
+        assert!(add_group < add_ident, "the group has to exist first: {edits:?}");
+    }
+
+    /// A host whose identity has the right groups but the wrong primary is
+    /// corrected, not left alone — the primary group is what an unmatched
+    /// permission entry falls back to.
+    #[test]
+    fn a_wrong_primary_group_is_corrected() {
+        let model = model_of(&[IdMapEdit::AddIdentity {
+            san: "alice.example.com".into(),
+            primary_group: "users".into(),
+            groups: vec![],
+        }]);
+        let mut host = empty();
+        apply_edit(
+            &mut host,
+            &IdMapEdit::AddIdentity {
+                san: "alice.example.com".into(),
+                primary_group: "wrong".into(),
+                groups: vec![],
+            },
+        )
+        .unwrap();
+        assert_converges(&model, &mut host);
+        assert_eq!(
+            host.identities.get("alice.example.com").unwrap().primary_group.as_str(),
+            "users"
+        );
+    }
+
+    /// A model that has never been written to knows nothing. Diffing against
+    /// it must produce nothing — the alternative is a CA that lost its model
+    /// file emptying every id-map in the admin domain.
+    #[test]
+    fn an_unestablished_model_never_proposes_anything() {
+        let model = IdMapModel::default();
+        assert!(!model.established());
+        let mut host = empty();
+        apply_edit(
+            &mut host,
+            &IdMapEdit::AddIdentity {
+                san: "alice.example.com".into(),
+                primary_group: "users".into(),
+                groups: vec![],
+            },
+        )
+        .unwrap();
+        assert!(model.diff(&host).is_empty());
     }
 }

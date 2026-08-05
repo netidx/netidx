@@ -8,7 +8,6 @@ use super::{
         PreparedAdminAuthentication, PreparedServerUnlock, authenticate, broad_admin,
         delegation_authority, prepare_server_unlock, scope_covers, server_unlock,
     },
-    issuance::reconcile_identities_to_target,
     revocation::{
         apply_crl_to_destinations, collect_peer_results, local_crl_destinations,
         push_crl_to_peers, registered_crl_targets, revoke_server_certificates,
@@ -824,6 +823,21 @@ pub(super) async fn own_base(state: &Server) -> Option<String> {
         })
         .await
 }
+/// Whether a host reporting `reported` is behind the CA's id-map model.
+///
+/// `None` — a host that has never applied anything, including one that has
+/// just enrolled — is behind anything established. A CA with no model
+/// established yet leaves every host alone; see [`IdMapModel::established`].
+async fn id_map_behind(state: &Arc<Server>, reported: Option<u64>) -> bool {
+    let model = state
+        .read_async(async move |state| match state.ca.as_ref() {
+            Some(ca) => ca.store.id_map_model().await.ok(),
+            None => None,
+        })
+        .await;
+    let Some(model) = model else { return false };
+    model.established() && reported.is_none_or(|have| have < model.version)
+}
 
 pub(super) async fn handle_register(
     state: &Arc<Server>,
@@ -851,8 +865,13 @@ pub(super) async fn handle_register(
                 .with_context(|| {
                     format!("server {server_id} has no approved enrollment grant")
                 })?;
-            let reconcile = current.state == admin_proto::ServerState::Enrolled
-                && current.roles.contains(Role::IdMap);
+            // Reconcile any id-map host that is behind the model, not just
+            // one registering for the first time. A host that was down for an
+            // edit, or restored from a backup taken before one, is behind by
+            // exactly the same measure as a brand-new one — which reports no
+            // version at all — so there is one rule rather than a general case
+            // and a special case that can disagree.
+            let reconcile = current.roles.contains(Role::IdMap);
             let mut staged = state.map.clone();
             admin_domain::register(
                 &mut staged,
@@ -868,12 +887,19 @@ pub(super) async fn handle_register(
         Ok(reconcile) => reconcile,
         Err(e) => return RegisterResponse::Err { reason: format!("{e:#}") },
     };
-    if reconcile_id_map
-        && let Err(e) = reconcile_identities_to_target(state, server_id, req.addr).await
-    {
-        return RegisterResponse::Err {
-            reason: format!("reconciling existing identities before registration: {e:#}"),
-        };
+    // Cheap in the steady state: a host whose reported version matches the
+    // model costs one integer comparison, not a map fetch. This runs on the
+    // facts poll every host already makes, which is what bounds how long a
+    // host that came back stays out of agreement.
+    if reconcile_id_map && id_map_behind(state, req.id_map_version).await {
+        if let Err(e) =
+            crate::admin_server::id_map::reconcile_to_target(state, server_id, req.addr)
+                .await
+        {
+            return RegisterResponse::Err {
+                reason: format!("reconciling this host's id-map: {e:#}"),
+            };
+        }
     }
     let config_lock = state.config_lock.clone();
     let (response, fanout) = state
