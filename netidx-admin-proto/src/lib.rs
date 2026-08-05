@@ -1184,6 +1184,13 @@ pub struct AdminServerEntry {
     #[serde(default)]
     #[pack(default)]
     pub reported_id_map_version: Option<u64>,
+    /// The perms model version this member's document is at. Below its
+    /// cluster's model means it missed an edit — and, before the CA kept a
+    /// model at all, meant it could be read back as the truth for the next
+    /// one.
+    #[serde(default)]
+    #[pack(default)]
+    pub reported_perms_version: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Pack)]
@@ -1239,6 +1246,13 @@ pub struct RegisterRequest {
     #[serde(default)]
     #[pack(default)]
     pub id_map_version: Option<u64>,
+    /// The perms model version this host's resolver cluster document is at.
+    /// One number suffices: a member belongs to exactly one cluster. `None`
+    /// from a host with no resolver, or one whose cluster has never had an
+    /// edit propagated to it.
+    #[serde(default)]
+    #[pack(default)]
+    pub perms_version: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Pack)]
@@ -1332,6 +1346,11 @@ pub type EditPermsResponse = RpcResult<PropagationOk>;
 pub struct ApplyPermsEditRequest {
     pub operation_id: OperationId,
     pub perms_json: String,
+    /// The model version this document leaves the member at, recorded only on
+    /// success. `None` means "this does not by itself make you current",
+    /// reserved for a multi-step repair; a perms push is one step, so it
+    /// always carries a version.
+    pub version: Option<u64>,
 }
 
 pub type ApplyPermsEditResponse = RpcResult<()>;
@@ -2164,6 +2183,7 @@ mod tests {
                 read_gated: ReadGate::No,
             }),
             id_map_version: Some(9),
+            perms_version: Some(3),
         });
         write_msg(&mut a, &req).await.unwrap();
         let got: Request = read_msg(&mut b).await.unwrap();
@@ -2171,6 +2191,7 @@ mod tests {
         assert_eq!(got.addr, "10.0.0.2:4565".parse().unwrap());
         assert_eq!(got.resolver.unwrap().base, "/eu");
         assert_eq!(got.id_map_version, Some(9));
+        assert_eq!(got.perms_version, Some(3));
 
         let ca = AdminServerId::new();
         let resp = GetMapResponse::Ok(AdminDomainMap {
@@ -2185,6 +2206,7 @@ mod tests {
                 state: ServerState::Registered,
                 reported_read_gate: None,
                 reported_id_map_version: Some(9),
+                reported_perms_version: None,
             }],
             resolver_clusters: vec![],
         });

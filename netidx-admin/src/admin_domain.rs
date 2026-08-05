@@ -284,6 +284,7 @@ pub fn enroll(
         state: ServerState::Enrolled,
         reported_read_gate: None,
         reported_id_map_version: None,
+        reported_perms_version: None,
     });
     changed(map);
     Ok(cluster)
@@ -632,6 +633,7 @@ pub fn register(
     addr: std::net::SocketAddr,
     resolver: Option<&ResolverClusterFacts>,
     id_map_version: Option<u64>,
+    perms_version: Option<u64>,
 ) -> Result<bool> {
     let pos = map
         .admin_servers
@@ -680,12 +682,14 @@ pub fn register(
     let server_changed = server.addr != addr
         || server.state != ServerState::Registered
         || server.reported_read_gate != gate
-        || server.reported_id_map_version != id_map_version;
+        || server.reported_id_map_version != id_map_version
+        || server.reported_perms_version != perms_version;
     if server_changed {
         server.addr = addr;
         server.state = ServerState::Registered;
         server.reported_read_gate = gate;
         server.reported_id_map_version = id_map_version;
+        server.reported_perms_version = perms_version;
     }
     if activate_root {
         map.resolver_clusters
@@ -835,6 +839,7 @@ mod tests {
             state: ServerState::Registered,
             reported_read_gate: None,
             reported_id_map_version: None,
+            reported_perms_version: None,
         };
         let peer_entry = AdminServerEntry {
             id: peer,
@@ -845,6 +850,7 @@ mod tests {
             state: ServerState::Registered,
             reported_read_gate: None,
             reported_id_map_version: None,
+            reported_perms_version: None,
         };
         let mut map = AdminDomainMap {
             version: 7,
@@ -904,6 +910,7 @@ mod tests {
                     state: ServerState::Registered,
                     reported_read_gate: None,
                     reported_id_map_version: None,
+                    reported_perms_version: None,
                 },
                 AdminServerEntry {
                     id: peer,
@@ -914,6 +921,7 @@ mod tests {
                     state: ServerState::Registered,
                     reported_read_gate: None,
                     reported_id_map_version: None,
+                    reported_perms_version: None,
                 },
             ],
             resolver_clusters: vec![ResolverClusterEntry {
@@ -965,6 +973,7 @@ mod tests {
                 server,
                 "10.0.0.20:4565".parse().unwrap(),
                 Some(&facts),
+                None,
                 None
             )
             .unwrap()
@@ -982,6 +991,7 @@ mod tests {
                 server,
                 "10.0.0.30:4565".parse().unwrap(),
                 Some(&drift),
+                None,
                 None
             )
             .is_err()
@@ -1005,26 +1015,26 @@ mod tests {
             children: vec![],
             read_gated: ReadGate::No,
         };
-        assert!(register(&mut map, server, addr, Some(&facts), None).unwrap());
+        assert!(register(&mut map, server, addr, Some(&facts), None, None).unwrap());
         assert_eq!(map.admin_servers[0].reported_read_gate, Some(ReadGate::No));
         let version = map.version;
         // A host that has taken itself out of service has not drifted from
         // its grant — it is still exactly the member the CA approved.
         facts.read_gated = ReadGate::Yes;
-        assert!(register(&mut map, server, addr, Some(&facts), None).unwrap());
+        assert!(register(&mut map, server, addr, Some(&facts), None, None).unwrap());
         assert_eq!(map.admin_servers[0].reported_read_gate, Some(ReadGate::Yes));
         assert_eq!(map.admin_servers[0].state, ServerState::Registered);
         assert!(map.version > version, "a gate change has to reach map readers");
         // ... and reporting the same gate again is not a change.
-        assert!(!register(&mut map, server, addr, Some(&facts), None).unwrap());
+        assert!(!register(&mut map, server, addr, Some(&facts), None, None).unwrap());
     }
 
-    /// The id-map version a host reports is recorded the same way its read
-    /// gate is: a fact about the host, not a grant. It is what lets the CA
-    /// tell a host that missed an id-map change from one that is current,
-    /// without asking it for its whole map every poll.
+    /// The versions a host reports are recorded the same way its read gate
+    /// is: facts about the host, not grants. They are what lets the CA tell a
+    /// host that missed a change from one that is current, without asking it
+    /// for its whole state every poll.
     #[test]
-    fn registration_records_the_reported_id_map_version() {
+    fn registration_records_the_reported_versions() {
         let ca = AdminServerId::new();
         let server = AdminServerId::new();
         let mut map = AdminDomainMap::empty(ca);
@@ -1039,15 +1049,30 @@ mod tests {
             read_gated: ReadGate::No,
         };
         assert_eq!(map.admin_servers[0].reported_id_map_version, None);
-        assert!(register(&mut map, server, addr, Some(&facts), Some(4)).unwrap());
+        assert_eq!(map.admin_servers[0].reported_perms_version, None);
+        assert!(
+            register(&mut map, server, addr, Some(&facts), Some(4), Some(2)).unwrap()
+        );
         assert_eq!(map.admin_servers[0].reported_id_map_version, Some(4));
-        // Reporting the same version again is not a change — a host that is
+        assert_eq!(map.admin_servers[0].reported_perms_version, Some(2));
+        // Reporting the same versions again is not a change — a host that is
         // current must not churn the map version on every poll.
-        assert!(!register(&mut map, server, addr, Some(&facts), Some(4)).unwrap());
+        assert!(
+            !register(&mut map, server, addr, Some(&facts), Some(4), Some(2)).unwrap()
+        );
         let version = map.version;
-        assert!(register(&mut map, server, addr, Some(&facts), Some(5)).unwrap());
+        assert!(
+            register(&mut map, server, addr, Some(&facts), Some(5), Some(2)).unwrap()
+        );
         assert_eq!(map.admin_servers[0].reported_id_map_version, Some(5));
         assert!(map.version > version, "map readers have to see it move");
+        // Either one moving on its own is a change.
+        let version = map.version;
+        assert!(
+            register(&mut map, server, addr, Some(&facts), Some(5), Some(3)).unwrap()
+        );
+        assert_eq!(map.admin_servers[0].reported_perms_version, Some(3));
+        assert!(map.version > version);
     }
 
     #[test]
@@ -1071,6 +1096,7 @@ mod tests {
                 server,
                 "10.0.0.10:4565".parse().unwrap(),
                 Some(&facts),
+                None,
                 None
             )
             .unwrap()
@@ -1084,6 +1110,7 @@ mod tests {
                 server,
                 "10.0.0.10:4565".parse().unwrap(),
                 Some(&facts),
+                None,
                 None
             )
             .unwrap()
@@ -1104,6 +1131,7 @@ mod tests {
             state: ServerState::Registered,
             reported_read_gate: Some(ReadGate::No),
             reported_id_map_version: None,
+            reported_perms_version: None,
         };
         let facts = ResolverClusterFacts {
             members: vec![addr("10.0.0.1:4564")],
@@ -1159,6 +1187,7 @@ mod tests {
             state: ServerState::Registered,
             reported_read_gate: Some(ReadGate::No),
             reported_id_map_version: None,
+            reported_perms_version: None,
         };
         let authoritative_child = ResolverClusterEntry {
             id: child,
@@ -1182,6 +1211,7 @@ mod tests {
                     state: ServerState::Registered,
                     reported_read_gate: None,
                     reported_id_map_version: None,
+                    reported_perms_version: None,
                 },
             ],
             resolver_clusters: vec![
@@ -1261,6 +1291,7 @@ mod tests {
                 "10.0.0.10:4565".parse().unwrap(),
                 Some(&child_facts),
                 None,
+                None,
             )
             .unwrap()
         );
@@ -1272,6 +1303,7 @@ mod tests {
                 first,
                 "10.0.0.12:4565".parse().unwrap(),
                 Some(&wrong_mount),
+                None,
                 None,
             )
             .is_err()
@@ -1286,6 +1318,7 @@ mod tests {
                 second,
                 "10.0.0.11:4565".parse().unwrap(),
                 Some(&second_local_only),
+                None,
                 None,
             )
             .unwrap()
@@ -1327,6 +1360,7 @@ mod tests {
                 state: ServerState::Registered,
                 reported_read_gate: None,
                 reported_id_map_version: None,
+                reported_perms_version: None,
             })
             .collect();
         let mut members: Vec<_> =
@@ -1407,6 +1441,7 @@ mod tests {
                 state: ServerState::Registered,
                 reported_read_gate: None,
                 reported_id_map_version: None,
+                reported_perms_version: None,
             })
             .collect(),
             resolver_clusters: vec![ResolverClusterEntry {

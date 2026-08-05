@@ -478,6 +478,7 @@ mod tests {
             state,
             reported_read_gate: None,
             reported_id_map_version: None,
+            reported_perms_version: None,
         }
     }
 

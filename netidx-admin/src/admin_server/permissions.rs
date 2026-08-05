@@ -228,7 +228,17 @@ pub(super) async fn handle_read_perms(
     ))
 }
 
-async fn apply_perms_local(state: &Server, perms_json: &str) -> Result<()> {
+/// This member's perms path, for the version stamp and for reading back what
+/// it holds.
+pub(super) async fn local_perms_file(state: &Server) -> Result<PathBuf> {
+    local_perms_path(state).await
+}
+
+async fn apply_perms_local(
+    state: &Server,
+    perms_json: &str,
+    version: Option<u64>,
+) -> Result<()> {
     let pmap = crate::perms::validate(perms_json).context("parsing the new perms")?;
     let config_lock = state.config_lock.clone();
     state
@@ -256,7 +266,14 @@ async fn apply_perms_local(state: &Server, perms_json: &str) -> Result<()> {
             .await
             .context("permissions preflight task panicked")?
             .context("the edited perms would make the resolver config invalid")?;
-            crate::perms::save_perms_async(&path, &pmap).await
+            crate::perms::save_perms_async(&path, &pmap).await?;
+            // Stamped only on success, so a member that failed to write stays
+            // visibly behind and is picked up by the next reconcile rather
+            // than claiming to be current.
+            if let Some(version) = version {
+                crate::version_stamp::record(&path, version).await?;
+            }
+            Ok(())
         })
         .await
 }
@@ -267,7 +284,7 @@ pub(super) async fn handle_apply_perms_edit(
     req: &ApplyPermsEditRequest,
 ) -> ApplyPermsEditResponse {
     info!("admin-server: applying permissions operation {}", req.operation_id);
-    match apply_perms_local(state, &req.perms_json).await {
+    match apply_perms_local(state, &req.perms_json, req.version).await {
         Ok(()) => ApplyPermsEditResponse::Ok(()),
         Err(e) => ApplyPermsEditResponse::Err { reason: format!("{e:#}") },
     }
@@ -313,6 +330,7 @@ async fn push_perms_edit_to_peers(
     perms_json: &str,
     targets: &[(admin_proto::AdminServerId, SocketAddr)],
     operation_id: admin_proto::OperationId,
+    version: u64,
 ) -> Vec<PeerResult> {
     let client = match state.outbound_client().await {
         Ok(client) => client,
@@ -344,6 +362,7 @@ async fn push_perms_edit_to_peers(
                         home_ca,
                         operation_id,
                         perms_json,
+                        Some(version),
                     ),
                 )
                 .await
@@ -429,7 +448,6 @@ pub(super) async fn handle_edit_perms(
         Ok(version) => version,
         Err(e) => return err(format!("{e:#}")),
     };
-    let _ = version;
     let operation_id = admin_proto::OperationId::new();
     audit(
         &state.ca_dir().await.expect("CA role held"),
@@ -440,6 +458,7 @@ pub(super) async fn handle_edit_perms(
     )
     .await;
     let peers =
-        push_perms_edit_to_peers(state, &req.perms_json, &members, operation_id).await;
+        push_perms_edit_to_peers(state, &req.perms_json, &members, operation_id, version)
+            .await;
     EditPermsResponse::Ok(PropagationOk { operation_id, peers })
 }

@@ -116,6 +116,7 @@ pub(super) async fn report_facts(state: &Arc<Server>) {
         // that already runs, which is what makes a host that was down repair
         // itself shortly after it comes back.
         id_map_version: state.applied_id_map_version().await,
+        perms_version: state.applied_perms_version().await,
     };
     if let Err(e) =
         transport::register(&client, ca_addr, state.home_ca_der.clone(), &req).await

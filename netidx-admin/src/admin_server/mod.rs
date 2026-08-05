@@ -699,12 +699,20 @@ impl Server {
         .await
     }
 
+    /// The perms model version this host's resolver document is at, for its
+    /// register. `None` when it runs no resolver, or when its perms file has
+    /// never been stamped.
+    async fn applied_perms_version(&self) -> Option<u64> {
+        let path = permissions::local_perms_file(self).await.ok()?;
+        crate::version_stamp::read(&path).await
+    }
+
     /// The id-map model version this host's map reflects, for its register.
     async fn applied_id_map_version(&self) -> Option<u64> {
         let path = self
             .read(move |state| state.cfg.roles.id_map.as_ref().map(|r| r.map.clone()))
             .await?;
-        crate::id_map::read_applied_version(&path).await
+        crate::version_stamp::read(&path).await
     }
 
     /// This host's id-map, serialized for the wire.

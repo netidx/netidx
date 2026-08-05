@@ -800,6 +800,7 @@ pub(super) fn own_ca_entry(
         state: admin_proto::ServerState::Registered,
         reported_read_gate: None,
         reported_id_map_version: None,
+        reported_perms_version: None,
     }
 }
 
@@ -879,6 +880,7 @@ pub(super) async fn handle_register(
                 validation_req.addr,
                 validation_req.resolver.as_ref(),
                 validation_req.id_map_version,
+                validation_req.perms_version,
             )?;
             Ok::<_, anyhow::Error>(reconcile)
         })
@@ -910,6 +912,7 @@ pub(super) async fn handle_register(
                 req.addr,
                 req.resolver.as_ref(),
                 req.id_map_version,
+                req.perms_version,
             ) {
                 Ok(updated) => updated,
                 Err(e) => {

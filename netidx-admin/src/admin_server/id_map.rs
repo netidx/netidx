@@ -68,7 +68,7 @@ pub(super) async fn apply_edit_local(
     // reconcile every poll forever. Only on success — a host that failed to
     // apply must stay behind so the next reconcile picks it up.
     if let Some(version) = version {
-        id_map::record_applied_version(&map_path, version).await?;
+        crate::version_stamp::record(&map_path, version).await?;
     }
     // Read back rather than trusting the edit: on a re-registration the host
     // keeps the uid it already had, which is the number worth reporting.

@@ -358,47 +358,6 @@ pub async fn load_or_empty_async<P: AsRef<Path>>(path: P) -> Result<IdMap> {
     }
 }
 
-/// Where a host records the CA model version its map reflects.
-///
-/// A sibling of the map rather than a field inside it: the map's schema is
-/// `deny_unknown_fields` and is read by the id-mapper daemon, which has no
-/// business knowing about admin-domain bookkeeping.
-pub fn applied_version_path<P: AsRef<Path>>(map_path: P) -> PathBuf {
-    let p = map_path.as_ref();
-    let mut name = p.file_name().unwrap_or_default().to_os_string();
-    name.push(".version");
-    p.with_file_name(name)
-}
-
-/// The model version this host's map reflects, or `None` if it has never
-/// applied one. `None` reads as "behind everything", which is the safe
-/// direction — an unknown host gets reconciled rather than assumed current.
-pub async fn read_applied_version<P: AsRef<Path>>(map_path: P) -> Option<u64> {
-    let bytes = tokio::fs::read(applied_version_path(map_path)).await.ok()?;
-    std::str::from_utf8(&bytes).ok()?.trim().parse().ok()
-}
-
-/// Record that this host's map now reflects model version `version`.
-///
-/// Never moves backwards: a late-arriving retry of an older edit must not make
-/// a current host look stale, which would cost a pointless reconcile every
-/// poll.
-pub async fn record_applied_version<P: AsRef<Path>>(
-    map_path: P,
-    version: u64,
-) -> Result<()> {
-    let map_path = map_path.as_ref();
-    if read_applied_version(map_path).await.is_some_and(|have| have >= version) {
-        return Ok(());
-    }
-    atomic::write_atomic_async(
-        &applied_version_path(map_path),
-        version.to_string().as_bytes(),
-        0o644,
-    )
-    .await
-}
-
 /// Apply one [`IdMapEdit`] to `map`, reporting whether it changed anything.
 ///
 /// This is the single place an id-map mutation happens on the admin plane:

@@ -125,6 +125,8 @@ mod tls_tofu;
 /// (rcgen + rustls, no openssl).
 pub mod transport;
 pub mod uninstall;
+/// A model version recorded beside the file it describes.
+pub mod version_stamp;
 
 #[cfg(unix)]
 pub use admin_server::{AUTORENEW_ADMIN, load_roots, serve};
