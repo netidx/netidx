@@ -276,10 +276,11 @@ pub(super) async fn handle_apply_perms_edit(
 /// Whether any granted scope covers `target` — target equals or descends
 /// from a scope (`/` covers the whole tree). The path-aware prefix test
 /// (`Path::is_parent`) won't let `/eu` match `/europe`.
-fn cluster_members_for(
+fn cluster_for(
     map: &AdminDomainMap,
     target_path: &str,
-) -> Option<Vec<(admin_proto::AdminServerId, SocketAddr)>> {
+) -> Option<(admin_proto::ResolverClusterId, Vec<(admin_proto::AdminServerId, SocketAddr)>)>
+{
     let cluster = map.resolver_clusters.iter().find(|c| {
         c.base == target_path && c.state == admin_proto::ResolverClusterState::Active
     })?;
@@ -293,7 +294,15 @@ fn cluster_members_for(
         .map(|s| (s.id, s.addr))
         .collect();
     members.sort_by_key(|(id, _)| *id);
-    (!members.is_empty()).then_some(members)
+    (!members.is_empty()).then_some((cluster.id, members))
+}
+
+/// The members of the cluster mounted at `target_path`.
+fn cluster_members_for(
+    map: &AdminDomainMap,
+    target_path: &str,
+) -> Option<Vec<(admin_proto::AdminServerId, SocketAddr)>> {
+    cluster_for(map, target_path).map(|(_, members)| members)
 }
 
 /// Push a perms edit to every registered server in the target resolver cluster, using
@@ -350,6 +359,30 @@ async fn push_perms_edit_to_peers(
     results
 }
 
+/// Record `perms_json` as `cluster`'s authoritative permissions, returning the
+/// version it is now at.
+///
+/// Under the state write lock, so two concurrent edits cannot both read the
+/// same version and write over each other. That lock is also what will let the
+/// read-modify-write behind `perms set` collapse into the CA.
+pub(super) async fn record_in_model(
+    state: &Arc<Server>,
+    cluster: admin_proto::ResolverClusterId,
+    perms_json: &str,
+) -> Result<u64> {
+    let perms_json = perms_json.to_string();
+    state
+        .write_async(async move |state| {
+            let store =
+                &state.ca.as_ref().context("this host does not hold the CA")?.store;
+            let mut model = store.perms_model().await?;
+            let version = model.set(cluster, &perms_json)?;
+            store.save_perms_model(&model).await?;
+            Ok(version)
+        })
+        .await
+}
+
 /// CA-side: authenticate the admin, find the target resolver cluster in the map, and
 /// propagate the perms edit to its admin servers (peer-cert-gated). The CA
 /// never edits a foreign resolver cluster's files directly — it pushes.
@@ -376,10 +409,10 @@ pub(super) async fn handle_edit_perms(
     if let Err(reason) = authorize_perms_scope(&authd, &req.target_path, "edit") {
         return err(reason);
     }
-    let members = {
+    let (cluster, members) = {
         let map = state.read(move |state| state.map.clone()).await;
-        match cluster_members_for(&map, &req.target_path) {
-            Some(m) => m,
+        match cluster_for(&map, &req.target_path) {
+            Some(found) => found,
             None => {
                 return err(format!(
                     "no resolver cluster serving {:?} in the admin domain map",
@@ -388,6 +421,15 @@ pub(super) async fn handle_edit_perms(
             }
         }
     };
+    // Record what this cluster is supposed to hold before propagating any of
+    // it. Until now the CA kept no copy, so a member that missed a push was a
+    // candidate source of truth for the *next* edit — which is how a stale
+    // document gets read back and propagated over everyone else's correct one.
+    let version = match record_in_model(state, cluster, &req.perms_json).await {
+        Ok(version) => version,
+        Err(e) => return err(format!("{e:#}")),
+    };
+    let _ = version;
     let operation_id = admin_proto::OperationId::new();
     audit(
         &state.ca_dir().await.expect("CA role held"),

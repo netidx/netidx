@@ -26,6 +26,7 @@ use crate::{
     atomic,
     config_lock::ConfigDirLock,
     id_map_model::IdMapModel,
+    perms_model::PermsModel,
 };
 use anyhow::{Context, Result};
 use serde_derive::{Deserialize, Serialize};
@@ -697,6 +698,34 @@ impl CAStore {
 
     fn id_map_model_path(&self) -> PathBuf {
         self.dir.join("id-map-model.json")
+    }
+
+    /// Each resolver cluster's authoritative permissions.
+    ///
+    /// A missing file reads as empty, which describes nothing and can never
+    /// make a member look behind — the safe direction for a CA that has lost
+    /// it, since the alternative is pushing an empty document at a working
+    /// cluster.
+    pub async fn perms_model(&self) -> Result<PermsModel> {
+        let path = self.perms_model_path();
+        match tokio::fs::read(&path).await {
+            Ok(bytes) => serde_json::from_slice(&bytes)
+                .with_context(|| format!("parsing {}", path.display())),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                Ok(PermsModel::default())
+            }
+            Err(e) => Err(e).with_context(|| format!("reading {}", path.display())),
+        }
+    }
+
+    pub async fn save_perms_model(&self, model: &PermsModel) -> Result<()> {
+        let bytes =
+            serde_json::to_vec_pretty(model).context("serializing the perms model")?;
+        atomic::write_atomic_async(&self.perms_model_path(), &bytes, 0o644).await
+    }
+
+    fn perms_model_path(&self) -> PathBuf {
+        self.dir.join("perms-model.json")
     }
 
     /// Record that the id-map registration for this issuance has been
