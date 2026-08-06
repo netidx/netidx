@@ -362,7 +362,7 @@ where
         }
         Request::Deregister => {
             let resp = if !peer_is_admin_server {
-                RegisterResponse::Err {
+                admin_proto::DeregisterResponse::Err {
                     reason: "deregister requires an admin-server peer certificate"
                         .to_string(),
                 }
@@ -372,7 +372,7 @@ where
             };
             admin_proto::write_msg(&mut tls, &resp)
                 .await
-                .context("writing RegisterResponse")
+                .context("writing DeregisterResponse")
         }
         Request::GetMapVersion => {
             let resp = GetMapVersionResponse::Ok(MapVersion {

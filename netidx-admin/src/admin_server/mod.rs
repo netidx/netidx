@@ -16,6 +16,7 @@
 mod admins;
 mod auth;
 mod ca_ops;
+mod desired;
 mod enrollment;
 mod id_map;
 mod issuance;

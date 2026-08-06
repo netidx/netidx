@@ -1575,27 +1575,16 @@ async fn edit_perms(
     let validate: super::answer::EditValidator =
         Box::new(|s: &str| perms_file::parse(s).and_then(|p| perms_file::render(&p)));
     let edited = perms_file::parse(&ans.edit(seed, validate).await?)?;
-    let peers = perms::edit_perms(&resolved, &at, &edited).await?;
-    let failed: Vec<_> = peers.iter().filter(|p| p.error.is_some()).collect();
-    let lines = if failed.is_empty() {
-        // No operator step after this: the resolver polls its
-        // `include_permissions` mtimes every 30s and reloads on its own.
-        vec![format!(
-            "Updated perms at {at:?} on {} resolver cluster member(s).",
-            peers.len()
-        )]
-    } else {
-        let mut v = vec![format!(
-            "{} of {} member(s) could NOT be updated — the resolver cluster is INCONSISTENT; \
-             re-edit to converge:",
-            failed.len(),
-            peers.len()
-        )];
-        for p in &failed {
-            v.push(format!("  ! {} : {}", p.addr, p.error.as_deref().unwrap_or("?")));
-        }
-        v
-    };
+    let version = perms::edit_perms(&resolved, &at, &edited).await?;
+    // Recorded, not yet everywhere: members converge on this version at their
+    // next register, and the resolver then reloads on its own file poll. The
+    // Servers panel shows who has caught up — a count taken here would be
+    // stale before it finished drawing.
+    let lines = vec![
+        format!("Recorded perms at {at:?} as version {version}."),
+        "Every member of the resolver cluster converges within a poll interval."
+            .to_string(),
+    ];
     let rows = perms_rows(ans, &target, &at).await?;
     Ok(super::action::Outcome::remote_after("Perms updated", lines, Panel::Perms, rows))
 }

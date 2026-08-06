@@ -105,6 +105,7 @@ fn ca_reconciliation_fanout_covers_the_complete_hierarchy() {
     let root_member = resolver("10.1.0.1:4564");
     let child_member = resolver("10.2.0.1:4564");
     let map = AdminDomainMap {
+        id_map_version: None,
         version: 9,
         ca,
         admin_servers: vec![
@@ -139,6 +140,7 @@ fn ca_reconciliation_fanout_covers_the_complete_hierarchy() {
                 members: vec![root_member.clone()],
                 parent: None,
                 children: vec![child],
+                perms_version: None,
             },
             admin_proto::ResolverClusterEntry {
                 id: child,
@@ -147,6 +149,7 @@ fn ca_reconciliation_fanout_covers_the_complete_hierarchy() {
                 members: vec![child_member.clone()],
                 parent: Some(root),
                 children: vec![],
+                perms_version: None,
             },
         ],
     };
@@ -219,6 +222,7 @@ fn registration_fanout_updates_its_cluster_and_both_adjacent_levels() {
                 members: vec![root_member],
                 parent: None,
                 children: vec![child, sibling],
+                perms_version: None,
             },
             admin_proto::ResolverClusterEntry {
                 id: child,
@@ -227,6 +231,7 @@ fn registration_fanout_updates_its_cluster_and_both_adjacent_levels() {
                 members: vec![joining_member, peer_member],
                 parent: Some(root),
                 children: vec![grandchild],
+                perms_version: None,
             },
             admin_proto::ResolverClusterEntry {
                 id: grandchild,
@@ -235,6 +240,7 @@ fn registration_fanout_updates_its_cluster_and_both_adjacent_levels() {
                 members: vec![grandchild_member],
                 parent: Some(child),
                 children: vec![],
+                perms_version: None,
             },
             admin_proto::ResolverClusterEntry {
                 id: sibling,
@@ -243,8 +249,10 @@ fn registration_fanout_updates_its_cluster_and_both_adjacent_levels() {
                 members: vec![sibling_member],
                 parent: Some(root),
                 children: vec![],
+                perms_version: None,
             },
         ],
+        id_map_version: None,
     };
 
     let mut targets: Vec<_> = registration_topology_fanout(&map, joining)
@@ -398,6 +406,7 @@ fn deciding_a_delegation_requires_authority_over_the_parent_cluster() {
                 members: vec![root_member],
                 parent: None,
                 children: vec![eu],
+                perms_version: None,
             },
             admin_proto::ResolverClusterEntry {
                 id: eu,
@@ -406,8 +415,10 @@ fn deciding_a_delegation_requires_authority_over_the_parent_cluster() {
                 members: vec![eu_member],
                 parent: Some(root),
                 children: vec![],
+                perms_version: None,
             },
         ],
+        id_map_version: None,
     };
     let scoped = |scope: &str| crate::ca_vault::Authenticated {
         slot_id: uuid::Uuid::new_v4(),

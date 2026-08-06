@@ -828,18 +828,6 @@ pub(super) async fn own_base(state: &Server) -> Option<String> {
 ///
 /// `None` — a host that has never applied anything, including one that has
 /// just enrolled — is behind anything established. A CA with no model
-/// established yet leaves every host alone; see [`IdMapModel::established`].
-async fn id_map_behind(state: &Arc<Server>, reported: Option<u64>) -> bool {
-    let model = state
-        .read_async(async move |state| match state.ca.as_ref() {
-            Some(ca) => ca.store.id_map_model().await.ok(),
-            None => None,
-        })
-        .await;
-    let Some(model) = model else { return false };
-    model.established() && reported.is_none_or(|have| have < model.version)
-}
-
 pub(super) async fn handle_register(
     state: &Arc<Server>,
     server_id: admin_proto::AdminServerId,
@@ -856,9 +844,9 @@ pub(super) async fn handle_register(
         }
     };
     let validation_req = req.clone();
-    let (reconcile_id_map, reconcile_perms) = match state
+    if let Err(e) = state
         .read(move |state| {
-            let current = state
+            state
                 .map
                 .admin_servers
                 .iter()
@@ -866,14 +854,6 @@ pub(super) async fn handle_register(
                 .with_context(|| {
                     format!("server {server_id} has no approved enrollment grant")
                 })?;
-            // Reconcile any id-map host that is behind the model, not just
-            // one registering for the first time. A host that was down for an
-            // edit, or restored from a backup taken before one, is behind by
-            // exactly the same measure as a brand-new one — which reports no
-            // version at all — so there is one rule rather than a general case
-            // and a special case that can disagree.
-            let reconcile = current.roles.contains(Role::IdMap);
-            let reconcile_perms = current.cluster;
             let mut staged = state.map.clone();
             admin_domain::register(
                 &mut staged,
@@ -883,46 +863,22 @@ pub(super) async fn handle_register(
                 validation_req.id_map_version,
                 validation_req.perms_version,
             )?;
-            Ok::<_, anyhow::Error>((reconcile, reconcile_perms))
+            Ok::<_, anyhow::Error>(())
         })
         .await
     {
-        Ok(pair) => pair,
+        return RegisterResponse::Err { reason: format!("{e:#}") };
+    }
+    // Work out what this server is missing and hand it back with the answer.
+    // Cheap in the steady state — a server whose reported versions match the
+    // models costs two integer comparisons and no file reads — which matters
+    // because it runs on every register from every server. It is also the
+    // whole repair path: a server that was down for an edit is afterwards just
+    // a server behind a version, and this is where it stops being one.
+    let updates = match super::desired::updates_for(state, server_id, &req).await {
+        Ok(updates) => updates,
         Err(e) => return RegisterResponse::Err { reason: format!("{e:#}") },
     };
-    // Cheap in the steady state: a host whose reported version matches the
-    // model costs one integer comparison, not a map fetch. This runs on the
-    // facts poll every host already makes, which is what bounds how long a
-    // host that came back stays out of agreement.
-    // Same rule for the cluster's permissions: a member below its cluster's
-    // model missed an edit, whether because it was down for it or because it
-    // came back from a backup taken before it.
-    if let Some(cluster) = reconcile_perms
-        && crate::admin_server::permissions::perms_behind(
-            state,
-            cluster,
-            req.perms_version,
-        )
-        .await
-        && let Err(e) = crate::admin_server::permissions::reconcile_to_member(
-            state, cluster, server_id, req.addr,
-        )
-        .await
-    {
-        return RegisterResponse::Err {
-            reason: format!("reconciling this member's permissions: {e:#}"),
-        };
-    }
-    if reconcile_id_map && id_map_behind(state, req.id_map_version).await {
-        if let Err(e) =
-            crate::admin_server::id_map::reconcile_to_target(state, server_id, req.addr)
-                .await
-        {
-            return RegisterResponse::Err {
-                reason: format!("reconciling this host's id-map: {e:#}"),
-            };
-        }
-    }
     let config_lock = state.config_lock.clone();
     let (response, fanout) = state
         .write_async(async move |state| {
@@ -953,7 +909,13 @@ pub(super) async fn handle_register(
             let fanout = updated
                 .then(|| registration_topology_fanout(&state.map, server_id))
                 .flatten();
-            (RegisterResponse::Ok(MapVersion { version: state.map.version }), fanout)
+            (
+                RegisterResponse::Ok(admin_proto::RegisterOk {
+                    map: MapVersion { version: state.map.version },
+                    updates,
+                }),
+                fanout,
+            )
         })
         .await;
     if let Some(fanout) = fanout {
@@ -974,11 +936,12 @@ pub(super) async fn handle_register(
 pub(super) async fn handle_deregister(
     state: &Server,
     server_id: admin_proto::AdminServerId,
-) -> RegisterResponse {
+) -> admin_proto::DeregisterResponse {
+    use admin_proto::DeregisterResponse;
     let ca_dir = match state.ca_dir().await {
         Some(d) => d,
         None => {
-            return RegisterResponse::Err {
+            return DeregisterResponse::Err {
                 reason: "this host does not hold the CA".to_string(),
             };
         }
@@ -988,17 +951,17 @@ pub(super) async fn handle_deregister(
         .write_async(async move |state| {
             let updated = match admin_domain::deregister(&mut state.map, server_id) {
                 Ok(updated) => updated,
-                Err(e) => return RegisterResponse::Err { reason: format!("{e:#}") },
+                Err(e) => return DeregisterResponse::Err { reason: format!("{e:#}") },
             };
             if updated
                 && let Err(e) =
                     admin_domain::save_async(&config_lock, &ca_dir, &state.map).await
             {
-                return RegisterResponse::Err {
+                return DeregisterResponse::Err {
                     reason: format!("persisting the admin domain map: {e:#}"),
                 };
             }
-            RegisterResponse::Ok(MapVersion { version: state.map.version })
+            DeregisterResponse::Ok(MapVersion { version: state.map.version })
         })
         .await
 }
@@ -1408,6 +1371,24 @@ struct TopologyFanout {
     targets: Vec<(admin_proto::AdminServerId, SocketAddr, ReferralEdit)>,
 }
 
+/// The topology edit `server` should hold, derived from the map alone.
+///
+/// A pure function of the map — which every admin server already polls — so a
+/// member can compute its own and apply it, and no topology needs pushing at
+/// all. `None` when the server runs no resolver, or is not in an active
+/// cluster, in which case there is no topology to hold.
+pub(super) fn topology_for_server(
+    map: &AdminDomainMap,
+    server_id: admin_proto::AdminServerId,
+) -> Option<ReferralEdit> {
+    let server = map.admin_servers.iter().find(|s| s.id == server_id)?;
+    let local_member = server.resolver.clone()?;
+    let cluster = server
+        .cluster
+        .and_then(|id| map.resolver_clusters.iter().find(|c| c.id == id))?;
+    Some(topology_edit(map, cluster, local_member))
+}
+
 fn registration_topology_fanout(
     map: &AdminDomainMap,
     server_id: admin_proto::AdminServerId,
@@ -1485,8 +1466,18 @@ fn topology_edit(
     }
 }
 
-/// Propagate topology edits to every registered server in the affected
-/// resolver clusters using CA-owned routing addresses.
+/// Hand topology edits to every registered server in the affected resolver
+/// clusters, using CA-owned routing addresses.
+///
+/// **This is an optimization, not the mechanism.** Every admin server derives
+/// its own topology from the map it polls — see
+/// [`super::desired::apply_topology_from_map`] — so a server that misses this
+/// applies exactly the same edit within a poll interval. What the push buys is
+/// that an operator who has just moved a cluster sees it immediately instead
+/// of after 30 seconds, and gets told which members were unreachable.
+///
+/// Because correctness no longer depends on it, a failure here is a warning
+/// rather than a failed operation.
 async fn push_topology(
     state: &Arc<Server>,
     fanout: TopologyFanout,

@@ -884,7 +884,7 @@ pub async fn edit_perms(
     credential: admin_proto::AdminCredential,
     target_path: &str,
     perms: &crate::perms::PMap,
-) -> Result<Vec<admin_proto::PeerResult>> {
+) -> Result<u64> {
     let mut tls = connect_ca_pinned(addr, kind, expected).await?;
     admin_proto::write_msg(
         &mut tls,
@@ -896,7 +896,7 @@ pub async fn edit_perms(
     )
     .await?;
     match admin_proto::read_msg::<_, EditPermsResponse>(&mut tls).await? {
-        EditPermsResponse::Ok(PropagationOk { peers, .. }) => Ok(peers),
+        EditPermsResponse::Ok(ok) => Ok(ok.version),
         EditPermsResponse::Err { reason } => Err(admin_refusal(
             expected,
             &credential,
@@ -941,7 +941,7 @@ pub async fn edit_id_map(
     expected: &CaIdentity,
     credential: admin_proto::AdminCredential,
     edit: &admin_proto::IdMapEdit,
-) -> Result<crate::ops::AppliedEdit> {
+) -> Result<crate::ops::RecordedEdit> {
     let mut tls = connect_ca_pinned(addr, kind, expected).await?;
     admin_proto::write_msg(
         &mut tls,
@@ -953,7 +953,7 @@ pub async fn edit_id_map(
     .await?;
     match admin_proto::read_msg::<_, admin_proto::EditIdMapResponse>(&mut tls).await? {
         admin_proto::EditIdMapResponse::Ok(ok) => {
-            Ok(crate::ops::AppliedEdit { changed: ok.changed, peers: ok.peers })
+            Ok(crate::ops::RecordedEdit { version: ok.version, changed: ok.changed })
         }
         admin_proto::EditIdMapResponse::Err { reason } => Err(admin_refusal(
             expected,
@@ -2142,7 +2142,7 @@ pub async fn register(
     addr: SocketAddr,
     home_ca: CertificateDer<'static>,
     req: &RegisterRequest,
-) -> Result<u64> {
+) -> Result<admin_proto::DesiredUpdate> {
     let (mut tls, _hello) = connect_pki_target(
         client,
         addr,
@@ -2152,7 +2152,7 @@ pub async fn register(
     .await?;
     admin_proto::write_msg(&mut tls, &Request::Register(req.clone())).await?;
     match admin_proto::read_msg::<_, RegisterResponse>(&mut tls).await? {
-        RegisterResponse::Ok(MapVersion { version }) => Ok(version),
+        RegisterResponse::Ok(ok) => Ok(ok.updates),
         RegisterResponse::Err { reason } => {
             bail!("the CA refused the registration: {reason}")
         }
@@ -2173,9 +2173,9 @@ pub async fn deregister(
     )
     .await?;
     admin_proto::write_msg(&mut tls, &Request::Deregister).await?;
-    match admin_proto::read_msg::<_, RegisterResponse>(&mut tls).await? {
-        RegisterResponse::Ok(MapVersion { version }) => Ok(version),
-        RegisterResponse::Err { reason } => {
+    match admin_proto::read_msg::<_, admin_proto::DeregisterResponse>(&mut tls).await? {
+        admin_proto::DeregisterResponse::Ok(MapVersion { version }) => Ok(version),
+        admin_proto::DeregisterResponse::Err { reason } => {
             bail!("the CA refused the deregistration: {reason}")
         }
     }
@@ -3099,6 +3099,7 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let hostile_map = AdminDomainMap {
+            id_map_version: None,
             version: 1,
             ca: server_id,
             admin_servers: vec![AdminServerEntry {
@@ -3234,6 +3235,7 @@ mod tests {
             auth: admin_proto::InfoAuth::Tls { name: "root.example".into() },
         };
         let map = AdminDomainMap {
+            id_map_version: None,
             version: 1,
             ca,
             admin_servers: vec![
@@ -3290,6 +3292,7 @@ mod tests {
                     members: vec![root.clone(), waiting_root],
                     parent: None,
                     children: vec![child_cluster],
+                    perms_version: None,
                 },
                 ResolverClusterEntry {
                     id: child_cluster,
@@ -3298,6 +3301,7 @@ mod tests {
                     members: vec![child.clone()],
                     parent: Some(root_cluster),
                     children: vec![],
+                    perms_version: None,
                 },
             ],
         };

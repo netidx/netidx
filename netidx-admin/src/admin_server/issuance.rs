@@ -3,7 +3,7 @@
 mod tests;
 
 use super::{
-    PUSH_TIMEOUT, Server, audit,
+    Server, audit,
     auth::{
         PreparedAdminAuthentication, PreparedServerUnlock, authenticate, name_permitted,
         one_live_refusal, reject, safe_auth_failure, server_unlock,
@@ -13,17 +13,14 @@ use super::{
 };
 use crate::{
     admin_proto::{
-        self, ApplyIdMapEditOk, IdMapEdit, NodeKind, Role, SERVING_SAN, SignOk,
-        SignRequest, SignResponse,
+        self, IdMapEdit, NodeKind, SERVING_SAN, SignOk, SignRequest, SignResponse,
     },
     ca::{Ca, SanEntry},
-    ca_store, ca_vault, transport,
+    ca_store, ca_vault,
 };
-use anyhow::{Context, Result, anyhow};
-use futures::{StreamExt, stream};
+use anyhow::{Context, Result};
 use log::{info, warn};
-use rustls_pki_types::CertificateDer;
-use std::{net::SocketAddr, path::Path, sync::Arc, time::Duration};
+use std::{path::Path, sync::Arc, time::Duration};
 
 pub(super) fn one_live_name(kind: NodeKind) -> bool {
     kind != NodeKind::Resolver
@@ -628,75 +625,16 @@ pub(super) async fn issue_serialized(
 /// scoped enrollment policy, and sign the CSR with the reserved
 /// [`SERVING_SAN`].
 
-#[derive(Clone)]
-struct IdentityPusher {
-    ca: admin_proto::AdminServerId,
-    client: transport::AuthenticatedPkiClient,
-    home_ca: CertificateDer<'static>,
-}
-
-impl IdentityPusher {
-    async fn new(state: &Server) -> Result<Self> {
-        Ok(IdentityPusher {
-            ca: state.read(move |state| state.map.ca).await,
-            client: state.outbound_client().await?,
-            home_ca: state.home_ca_der.clone(),
-        })
-    }
-
-    async fn push(
-        &self,
-        server: admin_proto::AdminServerId,
-        addr: SocketAddr,
-        operation_id: admin_proto::OperationId,
-        edit: &IdMapEdit,
-        version: Option<u64>,
-    ) -> Result<Option<ApplyIdMapEditOk>> {
-        tokio::time::timeout(
-            PUSH_TIMEOUT,
-            transport::push_id_map_edit(
-                &self.client,
-                addr,
-                server,
-                server == self.ca,
-                self.home_ca.clone(),
-                operation_id,
-                edit,
-                version,
-            ),
-        )
-        .await
-        .map_err(|_| anyhow!("timed out after {}s", PUSH_TIMEOUT.as_secs()))?
-    }
-}
-
-/// Every host that holds an id-map: registered admin servers carrying
-/// [`Role::IdMap`], in stable server-ID order.
-///
-/// Shared by enrollment's registration fanout and by an operator's id-map
-/// edit ([`super::id_map`]), because the two must reach exactly the same set
-/// — a host that gets enrollment pushes but not edits (or the reverse) drifts
 /// out of agreement with the rest, and nothing would say so.
-pub(super) fn id_map_targets(
-    map: &admin_proto::AdminDomainMap,
-) -> Vec<(admin_proto::AdminServerId, SocketAddr)> {
-    let mut targets: Vec<_> = map
-        .admin_servers
-        .iter()
-        .filter(|s| {
-            s.roles.contains(Role::IdMap)
-                && s.state == admin_proto::ServerState::Registered
-        })
-        .map(|s| (s.id, s.addr))
-        .collect();
-    targets.sort_by_key(|(id, _)| *id);
-    targets
-}
 
-/// Fan the freshly signed identity out to every id-map host we know of:
-/// the local map directly, configured peers and mDNS-discovered admin
-/// servers over authenticated TLS. Returns warnings for the failures —
-/// the sign itself already succeeded.
+/// Record the freshly signed identity in the admin domain's id-map model.
+///
+/// Recording it is the whole job. Every host holding the id-map role converges
+/// on the model at its next register, so there is nothing to fan out and no
+/// per-host failure to report. The cost is latency: a newly enrolled identity
+/// is not mapped anywhere until each host's next register and then that host's
+/// id-mapper poll, so the resolver denies it in the meantime rather than
+/// mismapping it.
 pub(super) async fn push_registrations(
     state: &Arc<Server>,
     plan: &PushPlan,
@@ -709,7 +647,7 @@ pub(super) async fn push_registrations(
         audit(
             &dir,
             "CA",
-            "fanout-id-map",
+            "record-id-map",
             &format!("operation {operation_id}: {}", plan.name),
             Duration::ZERO,
         )
@@ -721,73 +659,13 @@ pub(super) async fn push_registrations(
         groups: secondary.to_vec(),
     };
     let mut warnings = Vec::new();
-    // The CA's own registration is an id-map write like any other, so it goes
-    // into the model too — otherwise the model would describe an admin domain
-    // missing every identity that was ever enrolled into it, and a later
-    // reconcile would prune the very identities enrollment created.
-    //
-    // If that fails, push nothing. Propagating an edit the model does not know
-    // about would leave the model *behind* the hosts, which is the one
-    // direction the reconciler cannot recover from — it would read the extra
-    // identity as one to delete. The warning keeps `push_done` false, so the
+    // Recording it in the model is what makes the identity real. If that
+    // fails, nothing has happened and `push_done` stays false, so the
     // pending-push recovery set retries the whole thing later.
-    let version = match super::id_map::record_in_model(state, &edit).await {
-        Ok(version) => version,
-        Err(e) => {
-            warnings
-                .push(format!("recording the registration in the id-map model: {e:#}"));
-            return (operation_id, warnings);
-        }
-    };
-    let (my_id, targets) =
-        state.read(move |state| (state.cfg.server_id, id_map_targets(&state.map))).await;
-    // Local id-map first (no TLS loopback).
-    if targets.iter().any(|(id, _)| *id == my_id)
-        && let Err(e) = state.apply_id_map_edit(&edit, Some(version)).await
-    {
-        warnings.push(format!("local id-map registration failed: {e:#}"));
+    if let Err(e) = super::id_map::record_in_model(state, &edit).await {
+        warnings.push(format!("recording the registration in the id-map model: {e:#}"));
+        return (operation_id, warnings);
     }
-    let pusher = match IdentityPusher::new(state).await {
-        Ok(pusher) => pusher,
-        Err(e) => {
-            warnings.push(format!("loading outbound identity failed: {e:#}"));
-            return (operation_id, warnings);
-        }
-    };
-    let mut results: Vec<_> = stream::iter(
-        targets.into_iter().filter(|(id, _)| *id != my_id).map(|(id, addr)| {
-            let edit = edit.clone();
-            let pusher = pusher.clone();
-            async move {
-                let result =
-                    pusher.push(id, addr, operation_id, &edit, Some(version)).await;
-                (id, addr, result)
-            }
-        }),
-    )
-    .buffer_unordered(32)
-    .collect()
-    .await;
-    results.sort_by_key(|(id, _, _)| *id);
-    for (id, addr, result) in results {
-        match result {
-            Ok(Some(ok)) => info!(
-                "admin-server: registered {} on {addr} (changed: {})",
-                plan.name, ok.changed
-            ),
-            Ok(None) => (),
-            Err(e) => warnings.push(format!(
-                "id-map registration on server {id} at {addr} failed: {e:#}"
-            )),
-        }
-    }
-    // Mark the issuance's id-map push complete only when nothing failed at
-    // all — local *or* remote (a local failure is a real failure, not part
-    // of the baseline). A partial push leaves a warning, so the record
-    // stays in the recovery set (`pending_pushes`) and is retried on the
-    // next poll or daemon restart. The `set_push_done` read-modify-write
-    // is serialized with `handle_revoke` by the state write lock, so the two
-    // can't clobber each other's field on the same record.
     if warnings.is_empty() {
         let id = plan.id.clone();
         state

@@ -12,7 +12,7 @@
 //! window between concurrent admins, and re-running an op after a partial
 //! propagation failure converges rather than erroring.
 
-use super::{AdminTarget, AppliedEdit};
+use super::{AdminTarget, RecordedEdit};
 #[cfg(unix)]
 use crate::local;
 use crate::{
@@ -44,7 +44,9 @@ pub async fn show_id_map(target: &AdminTarget) -> Result<IdMap> {
     }
 }
 
-async fn apply(target: &AdminTarget, edit: IdMapEdit) -> Result<AppliedEdit> {
+/// Record `edit` at the CA. Every id-map host converges on it at its next
+/// register.
+async fn apply(target: &AdminTarget, edit: IdMapEdit) -> Result<RecordedEdit> {
     match target {
         AdminTarget::Remote { session } => {
             transport::edit_id_map(
@@ -63,13 +65,13 @@ async fn apply(target: &AdminTarget, edit: IdMapEdit) -> Result<AppliedEdit> {
 
 /// Create `name` if it isn't there. The gid is chosen by each host — the
 /// resolver reads group *names*, never gids.
-pub async fn add_group(target: &AdminTarget, name: &str) -> Result<AppliedEdit> {
+pub async fn add_group(target: &AdminTarget, name: &str) -> Result<RecordedEdit> {
     apply(target, IdMapEdit::AddGroup { name: name.to_string() }).await
 }
 
 /// Remove `name`. Refused while any identity still holds it — that would
 /// leave the membership dangling.
-pub async fn remove_group(target: &AdminTarget, name: &str) -> Result<AppliedEdit> {
+pub async fn remove_group(target: &AdminTarget, name: &str) -> Result<RecordedEdit> {
     apply(target, IdMapEdit::RemoveGroup { name: name.to_string() }).await
 }
 
@@ -81,7 +83,7 @@ pub async fn add_user(
     san: &str,
     primary_group: &str,
     groups: &[String],
-) -> Result<AppliedEdit> {
+) -> Result<RecordedEdit> {
     apply(
         target,
         IdMapEdit::AddIdentity {
@@ -98,7 +100,7 @@ pub async fn add_user(
 /// Note what this is not: revoking a certificate. A revoked identity's map
 /// entry is inert because its cert no longer authenticates, so removing it is
 /// hygiene rather than a security boundary.
-pub async fn remove_user(target: &AdminTarget, san: &str) -> Result<AppliedEdit> {
+pub async fn remove_user(target: &AdminTarget, san: &str) -> Result<RecordedEdit> {
     apply(target, IdMapEdit::RemoveIdentity { san: san.to_string() }).await
 }
 
@@ -107,7 +109,7 @@ pub async fn add_member(
     target: &AdminTarget,
     san: &str,
     group: &str,
-) -> Result<AppliedEdit> {
+) -> Result<RecordedEdit> {
     apply(target, IdMapEdit::AddMember { san: san.to_string(), group: group.to_string() })
         .await
 }
@@ -118,7 +120,7 @@ pub async fn remove_member(
     target: &AdminTarget,
     san: &str,
     group: &str,
-) -> Result<AppliedEdit> {
+) -> Result<RecordedEdit> {
     apply(
         target,
         IdMapEdit::RemoveMember { san: san.to_string(), group: group.to_string() },

@@ -26,6 +26,7 @@ mod host;
 mod agent;
 mod delegation;
 mod discover;
+mod drift;
 mod editor;
 mod id_map_admin;
 mod init;
@@ -80,19 +81,25 @@ pub(crate) enum Params {
     },
     /// show or edit a resolver cluster's permissions through the admin server,
     /// routed by the admin domain map (no SSH). Whole-document (`show` /
-    /// `edit`) or one entry at a time (`set` / `remove`); every form
-    /// propagates to the whole resolver cluster.
+    /// `edit`) or one entry at a time (`set` / `remove`). An edit is recorded
+    /// at the CA; members converge on it — `admin drift` says who has.
     Perms {
         #[command(subcommand)]
         cmd: perms::Cmd,
     },
-    /// show or edit the admin domain's id-map (the TLS name → uid/group table
-    /// the resolver keys permissions on) through the admin server. Every edit
-    /// propagates to each id-map host.
+    /// show or edit the admin domain's id-map (the TLS name → group table the
+    /// resolver keys permissions on) through the admin server. An edit is
+    /// recorded at the CA; id-map hosts converge on it — `admin drift` says
+    /// who has.
     IdMap {
         #[command(subcommand)]
         cmd: id_map_admin::Cmd,
     },
+    /// report which admin servers have caught up with the CA, and which are
+    /// behind. Nothing is pushed — an edit records a version and every server
+    /// converges on it at its next register — so this, not the edit's output,
+    /// is what says whether it has landed everywhere yet.
+    Drift(drift::Flags),
     /// discover netidx admin domains on the local network (mDNS) and print each
     /// one's admin-server address + CA glyph — a read-only query a script can
     /// feed to `--admin-server` / `--accept-glyph`.
@@ -124,6 +131,7 @@ pub(crate) fn run(p: Option<Params>) -> Result<()> {
         Params::Ca { cmd } => ca::run(cmd),
         Params::Perms { cmd } => perms::run(cmd),
         Params::IdMap { cmd } => id_map_admin::run(cmd),
+        Params::Drift(f) => drift::run(f),
         Params::Discover(a) => discover::run(a),
         Params::Uninstall(p) => uninstall::run(p),
         Params::Host { cmd } => host::run(cmd),

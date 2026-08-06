@@ -2,6 +2,7 @@ use super::{
     AUTORENEW_ADMIN, AUTORENEW_POLL, CONN_TIMEOUT, MAX_CONCURRENT_SIGNS, MAX_CONNECTIONS,
     Server,
     auth::{PreparedAdminAuthentication, PreparedServerUnlock, run_signing},
+    desired::converge_self,
     issuance::{PushPlan, leaf_serial, push_registrations},
     queue::autorenew_sweep,
     request::{PeerIdent, cert_signed_by, serve_request},
@@ -62,19 +63,134 @@ const MAP_REFRESH_INTERVAL: Duration = Duration::from_secs(30);
 ///
 /// The CA runs this too. It is usually a resolver, and nothing else would ever
 /// update its own entry.
+///
+/// A member that cannot reach the CA for [`CA_LOST_AFTER`] passes goes looking
+/// for it — see [`recover_ca_addr`].
+
+/// Consecutive failed passes before a member goes looking for the CA.
+///
+/// High enough that an ordinary restart or a brief network fault never
+/// triggers the search, low enough that a genuinely relocated CA is found in a
+/// few minutes rather than never.
+const CA_LOST_AFTER: u32 = 4;
+
 async fn spawn_facts_poll(state: &Arc<Server>) {
     let weak = Arc::downgrade(state);
     tokio::spawn(async move {
+        let mut consecutive_failures = 0u32;
         loop {
             let Some(state) = weak.upgrade() else { break };
-            report_facts(&state).await;
+            let reached = report_facts(&state).await;
             if !state.has_ca().await {
                 refresh_map_cache(&state).await;
+                // Derived, not delivered: the topology block of a resolver
+                // config is a function of the map we just refreshed.
+                if let Err(e) = super::desired::apply_topology_from_map(&state).await {
+                    warn!("admin-server: {e:#}");
+                }
+                if reached {
+                    consecutive_failures = 0;
+                } else {
+                    consecutive_failures += 1;
+                    if consecutive_failures >= CA_LOST_AFTER {
+                        if recover_ca_addr(&state).await {
+                            consecutive_failures = 0;
+                        }
+                    }
+                }
             }
             drop(state);
             tokio::time::sleep(MAP_REFRESH_INTERVAL).await;
         }
     });
+}
+
+/// Go looking for a CA that moved, and adopt its new address.
+///
+/// A member's only record of where the CA lives is `ca_addr` in its own
+/// config, and until now the sole thing that could update it was a message the
+/// CA had to deliver *to* the member — the very delivery that fails when the
+/// member is down for the relocation. Such a member was stranded permanently.
+///
+/// The search is safe because it never trusts the answer. A candidate has to
+/// present a certificate signed by this host's pinned home CA before it will
+/// serve us anything, and the address we take out of its map is then only ever
+/// used with exact CA pinning — so a doctored map naming a hostile address
+/// produces a failed handshake, not a hijacked member.
+///
+/// Returns whether it found and recorded a new address.
+async fn recover_ca_addr(state: &Arc<Server>) -> bool {
+    let Some(cfg_path) = state.cfg_path.clone() else { return false };
+    let (current, mut candidates) =
+        state.read(move |state| (state.cfg.ca_addr, state.cfg.peers.clone())).await;
+    for addr in discovery::admin_servers().await {
+        if !candidates.contains(&addr) {
+            candidates.push(addr);
+        }
+    }
+    candidates.retain(|a| Some(*a) != current);
+    if candidates.is_empty() {
+        return false;
+    }
+    warn!(
+        "admin-server: the CA at {current:?} has been unreachable for {CA_LOST_AFTER} \
+         passes; asking {} known peer(s) where it moved",
+        candidates.len()
+    );
+    for addr in candidates {
+        let map = match transport::get_map(&state.pki_client, addr, NodeKind::AdminServer)
+            .await
+        {
+            Ok(map) => map,
+            Err(e) => {
+                debug!("admin-server: peer {addr} could not serve the map: {e:#}");
+                continue;
+            }
+        };
+        let Some(ca) = map.ca_entry() else { continue };
+        if Some(ca.addr) == current {
+            continue;
+        }
+        // Prove it before recording it: connect to the claimed address
+        // requiring our own home CA's certificate. A peer that handed us a
+        // doctored map gets no further than this.
+        if let Err(e) = transport::get_map_from_ca(
+            &state.pki_client,
+            ca.addr,
+            state.home_ca_der.clone(),
+            NodeKind::AdminServer,
+        )
+        .await
+        {
+            warn!(
+                "admin-server: peer {addr} says the CA is at {} but it did not \
+                 authenticate as our CA: {e:#}",
+                ca.addr
+            );
+            continue;
+        }
+        let config_lock = state.config_lock.clone();
+        let saved = state
+            .write_async(async move |state| {
+                let mut next = state.cfg.clone();
+                next.ca_addr = Some(ca.addr);
+                admin_server_config::save_async(&config_lock, &cfg_path, &next).await?;
+                state.cfg = next;
+                Ok::<_, anyhow::Error>(())
+            })
+            .await;
+        return match saved {
+            Ok(()) => {
+                info!("admin-server: the CA has moved to {}; recorded", ca.addr);
+                true
+            }
+            Err(e) => {
+                warn!("admin-server: recording the relocated CA address: {e:#}");
+                false
+            }
+        };
+    }
+    false
 }
 
 /// Put this host's current resolver facts in the map: directly when we hold
@@ -83,11 +199,11 @@ async fn spawn_facts_poll(state: &Arc<Server>) {
 ///
 /// Also called the moment something deliberately changes those facts, so an
 /// operator who has just shut a gate sees it rather than waiting out the poll.
-pub(super) async fn report_facts(state: &Arc<Server>) {
+pub(super) async fn report_facts(state: &Arc<Server>) -> bool {
     let cfg = state.read(move |state| state.cfg.clone()).await;
     let (resolver, facts) = local_resolver_data(&cfg).await;
     if state.has_ca().await {
-        let Some(ca_dir) = state.ca_dir().await else { return };
+        let Some(ca_dir) = state.ca_dir().await else { return true };
         let config_lock = state.config_lock.clone();
         let r = state
             .write_async(async move |state| {
@@ -101,12 +217,24 @@ pub(super) async fn report_facts(state: &Arc<Server>) {
         if let Err(e) = r {
             warn!("admin-server: recording our own resolver facts failed: {e:#}");
         }
-        return;
+        // The CA converges on its own models by the same route as everyone
+        // else, just without a round trip. It is usually a resolver and an
+        // id-map host too, and nothing else would ever bring it up to date.
+        if let Err(e) = converge_self(state).await {
+            warn!("admin-server: {e:#}");
+        }
+        if let Err(e) = super::desired::apply_topology_from_map(state).await {
+            warn!("admin-server: {e:#}");
+        }
+        return true;
     }
-    let Some(ca_addr) = cfg.ca_addr else { return };
+    let Some(ca_addr) = cfg.ca_addr else { return true };
     let client = match state.outbound_client().await {
         Ok(client) => client,
-        Err(e) => return warn!("admin-server: loading outbound identity failed: {e:#}"),
+        Err(e) => {
+            warn!("admin-server: loading outbound identity failed: {e:#}");
+            return false;
+        }
     };
     let req = RegisterRequest {
         addr: cfg.listen,
@@ -118,12 +246,25 @@ pub(super) async fn report_facts(state: &Arc<Server>) {
         id_map_version: state.applied_id_map_version().await,
         perms_version: state.applied_perms_version().await,
     };
-    if let Err(e) =
-        transport::register(&client, ca_addr, state.home_ca_der.clone(), &req).await
-    {
-        warn!(
-            "admin-server: registering with the CA {ca_addr} failed (will retry): {e:#}"
-        );
+    match transport::register(&client, ca_addr, state.home_ca_der.clone(), &req).await {
+        // The register carries our versions; the answer carries whatever we
+        // turned out to be behind on. Applying it here is the whole of how a
+        // host that missed an edit catches up — no push, no operator step.
+        Ok(updates) => {
+            if !updates.is_empty()
+                && let Err(e) = super::desired::apply(state, &updates).await
+            {
+                warn!("admin-server: {e:#}");
+            }
+            true
+        }
+        Err(e) => {
+            warn!(
+                "admin-server: registering with the CA {ca_addr} failed \
+                 (will retry): {e:#}"
+            );
+            false
+        }
     }
 }
 

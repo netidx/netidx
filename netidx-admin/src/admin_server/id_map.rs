@@ -1,47 +1,39 @@
 //! Map-routed id-map administration.
 //!
-//! The shape mirrors [`super::permissions`] — authenticate at the CA, push to
-//! every host that holds the state, report per-peer results — with one
-//! difference: perms propagate as a whole document, an id-map propagates as an
-//! *operation*.
+//! The shape mirrors [`super::permissions`]: an operator's edit is authorized
+//! at the CA and recorded in a model, and every host holding the id-map role
+//! converges on that model at its next register. Nothing is pushed.
 //!
-//! That difference is now only historical. It was justified by uids being
-//! allocated per host, and the id-map no longer holds any — see the schema
-//! docs on [`netidx_id_map::file::IdMap`]. What the operation form still buys
-//! is that there is no read-modify-write, so no lost update, and a retry after
-//! a partial push is a no-op where it landed.
-//!
-//! The fanout target is every registered admin server holding `Role::IdMap`,
-//! which is the same set the CA pushes a registration to after it signs an
-//! identity — see [`super::issuance::id_map_targets`], shared so the two
-//! cannot drift.
+//! An edit names an *operation* ([`IdMapEdit`]) rather than a document, but
+//! only as the operator's verb — it is applied to the model here, once and
+//! centrally, and what reaches a host is the resulting document. That means an
+//! impossible edit is refused in one place instead of being discovered
+//! separately by every host.
 
 #[cfg(test)]
 #[path = "id_map_tests.rs"]
 mod tests;
 
 use super::{
-    PUSH_TIMEOUT, Server, audit,
+    Server, audit,
     auth::{
         PreparedAdminAuthentication, authenticate, local_superuser, name_permitted,
         safe_auth_failure,
     },
-    issuance::id_map_targets,
 };
 use crate::{
     admin_proto::{
         self, ApplyIdMapEditOk, ApplyIdMapEditRequest, ApplyIdMapEditResponse,
         EditIdMapRequest, EditIdMapResponse, GetIdMapOk, GetIdMapRequest,
-        GetIdMapResponse, IdMapEdit, IdMapPropagationOk, PeerResult,
+        GetIdMapResponse, IdMapEdit,
     },
     ca_vault,
     config_lock::ConfigDirLock,
-    id_map, transport,
+    id_map,
 };
-use anyhow::{Context, Result, anyhow};
-use futures::{StreamExt, stream};
+use anyhow::{Context, Result};
 use log::info;
-use std::{net::SocketAddr, path::Path, sync::Arc, time::Duration};
+use std::{path::Path, sync::Arc, time::Duration};
 
 /// Apply `edit` to the map at `map_path`. The single local mutation path:
 /// the CA's registration push after it signs an identity, an operator's edit,
@@ -72,146 +64,24 @@ pub(super) async fn apply_edit_local(
     Ok(ApplyIdMapEditOk { changed })
 }
 
-/// Bring one host up to the CA's model.
+/// Write `shape` into this host's id-map, stamping `version` on success.
 ///
-/// Fetches that host's actual map, diffs it, and pushes the operations that
-/// close the gap. The host records the model version only after the last one
-/// lands, so a repair that fails halfway leaves it visibly behind and is
-/// picked up again on its next register rather than silently claiming to be
-/// current.
-///
-/// A host that already agrees but whose recorded version is stale — it applied
-/// everything, then the version write failed, or it was reconciled by an older
-/// build — costs one `GetIdMap` and one version write, not a rewrite of its
-/// map.
-pub(super) async fn reconcile_to_target(
-    state: &Arc<Server>,
-    server: admin_proto::AdminServerId,
-    addr: SocketAddr,
+/// The whole document, not a diff. A map holds names only — see the schema
+/// docs on [`netidx_id_map::file::IdMap`] — so every host that holds the
+/// id-map role holds the identical file, and being behind is fully described
+/// by a version rather than by working out which operations are missing.
+pub(crate) async fn install_id_map(
+    state: &Server,
+    shape: &id_map::IdMap,
+    version: u64,
 ) -> Result<()> {
-    let model = state
-        .read_async(async move |state| {
-            state
-                .ca
-                .as_ref()
-                .context("this host does not hold the CA")?
-                .store
-                .id_map_model()
-                .await
-        })
-        .await?;
-    if !model.established() {
-        return Ok(());
-    }
-    let ca = state.read(move |state| state.map.ca).await;
-    let client = state.outbound_client().await?;
-    let home_ca = state.home_ca_der.clone();
-    let host: crate::id_map::IdMap = if server == ca {
-        state.read_id_map().await?
-    } else {
-        let fetched = tokio::time::timeout(
-            PUSH_TIMEOUT,
-            transport::fetch_id_map(&client, addr, server, false, home_ca.clone()),
-        )
+    let path = state
+        .read(move |state| state.cfg.roles.id_map.as_ref().map(|r| r.map.clone()))
         .await
-        .map_err(|_| anyhow!("timed out after {}s", PUSH_TIMEOUT.as_secs()))??;
-        match fetched {
-            Some(map) => map,
-            // It holds the grant but is not running the role. Nothing to
-            // reconcile, and nothing wrong with saying so quietly — the map
-            // already records the grant, and an operator asking why will see
-            // it in the roster.
-            None => return Ok(()),
-        }
-    };
-    let edits = model.diff(&host);
-    let operation_id = admin_proto::OperationId::new();
-    if !edits.is_empty()
-        && let Some(dir) = state.ca_dir().await
-    {
-        audit(
-            &dir,
-            "CA",
-            "reconcile-id-map",
-            &format!(
-                "operation {operation_id}: server {server} at {addr}, {} operation(s)",
-                edits.len()
-            ),
-            Duration::ZERO,
-        )
-        .await;
-    }
-    let last = edits.len().saturating_sub(1);
-    for (i, edit) in edits.iter().enumerate() {
-        // Only the final step may claim the version — see the doc comment.
-        let claim = (i == last).then_some(model.version);
-        apply_one(state, server, addr, ca, &client, &home_ca, operation_id, edit, claim)
-            .await
-            .with_context(|| format!("reconciling {server} at {addr}"))?;
-    }
-    if edits.is_empty() {
-        // Shape already right, version stale: settle the claim with an
-        // operation that is already true rather than leaving it to be
-        // rediscovered every poll.
-        let settle = IdMapEdit::AddGroup {
-            name: model
-                .shape()
-                .groups
-                .iter()
-                .next()
-                .context("an established model has at least the base group")?
-                .to_string(),
-        };
-        apply_one(
-            state,
-            server,
-            addr,
-            ca,
-            &client,
-            &home_ca,
-            operation_id,
-            &settle,
-            Some(model.version),
-        )
-        .await
-        .with_context(|| format!("recording the id-map version on {server} at {addr}"))?;
-    }
-    Ok(())
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn apply_one(
-    state: &Arc<Server>,
-    server: admin_proto::AdminServerId,
-    addr: SocketAddr,
-    ca: admin_proto::AdminServerId,
-    client: &transport::AuthenticatedPkiClient,
-    home_ca: &rustls_pki_types::CertificateDer<'static>,
-    operation_id: admin_proto::OperationId,
-    edit: &IdMapEdit,
-    version: Option<u64>,
-) -> Result<()> {
-    if server == ca {
-        state.apply_id_map_edit(edit, version).await?;
-        return Ok(());
-    }
-    tokio::time::timeout(
-        PUSH_TIMEOUT,
-        transport::push_id_map_edit(
-            client,
-            addr,
-            server,
-            false,
-            home_ca.clone(),
-            operation_id,
-            edit,
-            version,
-        ),
-    )
-    .await
-    .map_err(|_| anyhow!("timed out after {}s", PUSH_TIMEOUT.as_secs()))??
-    .context("the host stopped advertising the id-map role mid-reconcile")?;
-    Ok(())
+        .context("this host has no id-map role — nothing to install into")?;
+    let path = state.config_lock.require_contained(path)?;
+    id_map::save_async(&path, shape).await.context("saving id-map")?;
+    crate::version_stamp::record(&path, version).await
 }
 
 /// Apply `edit` to the CA's authoritative model and persist it, returning the
@@ -224,17 +94,25 @@ async fn apply_one(
 pub(super) async fn record_in_model(
     state: &Arc<Server>,
     edit: &IdMapEdit,
-) -> Result<u64> {
+) -> Result<(u64, bool)> {
     let edit = edit.clone();
+    let config_lock = state.config_lock.clone();
+    let ca_dir = state.ca_dir().await.context("this host does not hold the CA")?;
     state
         .write_async(async move |state| {
             let store =
                 &state.ca.as_ref().context("this host does not hold the CA")?.store;
             let mut model = store.id_map_model().await?;
-            model.apply(&edit)?;
+            let changed = model.apply(&edit)?;
             let version = model.version;
-            store.save_id_map_model(&model).await?;
-            Ok(version)
+            if changed {
+                store.save_id_map_model(&model).await?;
+                if crate::admin_domain::set_id_map_version(&mut state.map, version) {
+                    crate::admin_domain::save_async(&config_lock, &ca_dir, &state.map)
+                        .await?;
+                }
+            }
+            Ok((version, changed))
         })
         .await
 }
@@ -351,8 +229,15 @@ pub(super) async fn handle_get_id_map(
     }
 }
 
-/// Admin → CA id-map edit: authorize, apply locally when this host holds the
-/// role, and push to every other id-map host.
+/// Admin → CA id-map edit: authorize it and record it in the model.
+///
+/// Recording it is the whole edit. Every host holding the id-map role reports
+/// the version it has on the register it already makes, and the CA hands back
+/// the document when it is behind — so a host that was down for this edit is
+/// afterwards just a host behind a version.
+///
+/// Applying to the model here also refuses an impossible edit once, centrally,
+/// rather than leaving every host to discover it separately.
 pub(super) async fn handle_edit_id_map(
     state: &Arc<Server>,
     req: &EditIdMapRequest,
@@ -373,135 +258,17 @@ pub(super) async fn handle_edit_id_map(
     if let Err(reason) = authorize_id_map_edit(&authd, &req.edit) {
         return err(reason);
     }
-    let (my_id, targets) = {
-        let map = state.read(move |state| state.map.clone()).await;
-        let my_id = state.read(|state| state.cfg.server_id).await;
-        (my_id, id_map_targets(&map))
-    };
-    if targets.is_empty() {
-        return err("no registered id-map host in the admin domain map".to_string());
-    }
-    // Record the intent before propagating any of it. The model is what the
-    // admin domain is supposed to look like whether or not every host was
-    // reachable, so a host that misses the push below is afterwards simply a
-    // host behind a version — which is a thing that can be repaired. Applying
-    // here also refuses an impossible edit once, centrally, instead of leaving
-    // each host to discover it separately.
-    let version = match record_in_model(state, &req.edit).await {
-        Ok(version) => version,
+    let (version, changed) = match record_in_model(state, &req.edit).await {
+        Ok(recorded) => recorded,
         Err(e) => return err(format!("{e:#}")),
     };
-    let operation_id = admin_proto::OperationId::new();
     audit(
         &state.ca_dir().await.expect("CA role held"),
         &authd.admin,
         "edit-id-map",
-        &format!("operation {operation_id}: {:?}", req.edit),
+        &format!("version {version}: {:?}", req.edit),
         Duration::ZERO,
     )
     .await;
-    let mut peers = Vec::with_capacity(targets.len());
-    let mut changed = false;
-    // Local first, with no TLS loopback — the same order enrollment uses.
-    if let Some((server, addr)) = targets.iter().copied().find(|(id, _)| *id == my_id) {
-        let error = match state.apply_id_map_edit(&req.edit, Some(version)).await {
-            Ok(ok) => {
-                changed |= ok.changed;
-                None
-            }
-            Err(e) => Some(format!("{e:#}")),
-        };
-        peers.push(PeerResult { server, addr, error });
-    }
-    let remote = push_id_map_edit_to_peers(
-        state,
-        &req.edit,
-        &targets.iter().copied().filter(|(id, _)| *id != my_id).collect::<Vec<_>>(),
-        operation_id,
-        Some(version),
-    )
-    .await;
-    changed |= remote.iter().any(|(_, c)| *c);
-    peers.extend(remote.into_iter().map(|(p, _)| p));
-    peers.sort_by_key(|p| p.server);
-    EditIdMapResponse::Ok(IdMapPropagationOk { operation_id, peers, changed })
-}
-
-/// Push `edit` to each target, pairing every result with whether that host
-/// changed. A host that failed reports `false` — it is not evidence either way,
-/// and its `PeerResult` already says the propagation is incomplete.
-async fn push_id_map_edit_to_peers(
-    state: &Arc<Server>,
-    edit: &IdMapEdit,
-    targets: &[(admin_proto::AdminServerId, SocketAddr)],
-    operation_id: admin_proto::OperationId,
-    version: Option<u64>,
-) -> Vec<(PeerResult, bool)> {
-    let client = match state.outbound_client().await {
-        Ok(client) => client,
-        Err(e) => {
-            return targets
-                .iter()
-                .map(|(server, addr)| {
-                    (
-                        PeerResult {
-                            server: *server,
-                            addr: *addr,
-                            error: Some(format!(
-                                "loading outbound identity failed: {e:#}"
-                            )),
-                        },
-                        false,
-                    )
-                })
-                .collect();
-        }
-    };
-    let ca = state.read(move |state| state.map.ca).await;
-    let home_ca = state.home_ca_der.clone();
-    stream::iter(targets.iter().copied().map(|(server, addr)| {
-        let client = client.clone();
-        let home_ca = home_ca.clone();
-        async move {
-            let res = tokio::time::timeout(
-                PUSH_TIMEOUT,
-                transport::push_id_map_edit(
-                    &client,
-                    addr,
-                    server,
-                    server == ca,
-                    home_ca,
-                    operation_id,
-                    edit,
-                    version,
-                ),
-            )
-            .await
-            .map_err(|_| anyhow!("timed out after {}s", PUSH_TIMEOUT.as_secs()))
-            .and_then(|r| r);
-            match res {
-                Ok(Some(ok)) => (PeerResult { server, addr, error: None }, ok.changed),
-                // The map said this host holds the id-map role and its hello
-                // says otherwise. Report it rather than counting it as applied.
-                Ok(None) => (
-                    PeerResult {
-                        server,
-                        addr,
-                        error: Some(
-                            "the admin domain map grants this server the id-map role \
-                             but it does not advertise it"
-                                .to_string(),
-                        ),
-                    },
-                    false,
-                ),
-                Err(e) => {
-                    (PeerResult { server, addr, error: Some(format!("{e:#}")) }, false)
-                }
-            }
-        }
-    }))
-    .buffer_unordered(32)
-    .collect()
-    .await
+    EditIdMapResponse::Ok(admin_proto::RecordedOk { version, changed })
 }

@@ -2,15 +2,14 @@
 //! thin CLI over [`netidx_admin::ops::id_map`].
 //!
 //! Every command goes through the admin server, which authorizes the caller
-//! and propagates the operation to every id-map host. There is deliberately
-//! no command that edits an id-map file in place: the CA writes that file too
-//! (at enrollment), so a second local writer is how two hosts come to
-//! authorize differently.
+//! and records the operation in the admin domain's model; every id-map host
+//! converges on it at its next register. There is deliberately no command that
+//! edits an id-map file in place: the CA owns that file, so a second local
+//! writer is how two hosts come to authorize differently.
 //!
-//! `show` reports **one host's** map. Two hosts holding the same identity
-//! under different uids are both correct — uids are allocated locally and the
-//! resolver keys permissions on names — so there is nothing to merge and a
-//! combined view would imply an agreement that isn't required.
+//! `show` reports the map of the host this command reaches. Every id-map host
+//! holds the identical document, so which one answered does not matter — but
+//! one may be behind, which `netidx admin drift` is for.
 
 use anyhow::{Context, Result};
 use clap::{Args, Subcommand};
@@ -18,7 +17,7 @@ use netidx_admin::ops::id_map as id_map_ops;
 
 use super::{
     answer_cli::RemoteAuthFlags,
-    propagation::{Propagated, report_peers},
+    propagation::{Recorded, report_recorded},
 };
 
 fn runtime() -> Result<tokio::runtime::Runtime> {
@@ -92,34 +91,22 @@ pub(crate) fn run(cmd: Cmd) -> Result<()> {
     match cmd {
         Cmd::Show(f) => show(f),
         Cmd::AddGroup { name, flags } => {
-            edit(flags, format_args!("id-map add-group {name}"), |t, rt| {
-                rt.block_on(id_map_ops::add_group(t, &name))
-            })
+            edit(flags, |t, rt| rt.block_on(id_map_ops::add_group(t, &name)))
         }
         Cmd::RemoveGroup { name, flags } => {
-            edit(flags, format_args!("id-map remove-group {name}"), |t, rt| {
-                rt.block_on(id_map_ops::remove_group(t, &name))
-            })
+            edit(flags, |t, rt| rt.block_on(id_map_ops::remove_group(t, &name)))
         }
-        Cmd::AddUser { name, primary_group, groups, flags } => edit(
-            flags,
-            format_args!("id-map add-user {name} {primary_group}"),
-            |t, rt| rt.block_on(id_map_ops::add_user(t, &name, &primary_group, &groups)),
-        ),
+        Cmd::AddUser { name, primary_group, groups, flags } => edit(flags, |t, rt| {
+            rt.block_on(id_map_ops::add_user(t, &name, &primary_group, &groups))
+        }),
         Cmd::RemoveUser { name, flags } => {
-            edit(flags, format_args!("id-map remove-user {name}"), |t, rt| {
-                rt.block_on(id_map_ops::remove_user(t, &name))
-            })
+            edit(flags, |t, rt| rt.block_on(id_map_ops::remove_user(t, &name)))
         }
         Cmd::AddMember { name, group, flags } => {
-            edit(flags, format_args!("id-map add-member {name} {group}"), |t, rt| {
-                rt.block_on(id_map_ops::add_member(t, &name, &group))
-            })
+            edit(flags, |t, rt| rt.block_on(id_map_ops::add_member(t, &name, &group)))
         }
         Cmd::RemoveMember { name, group, flags } => {
-            edit(flags, format_args!("id-map remove-member {name} {group}"), |t, rt| {
-                rt.block_on(id_map_ops::remove_member(t, &name, &group))
-            })
+            edit(flags, |t, rt| rt.block_on(id_map_ops::remove_member(t, &name, &group)))
         }
     }
 }
@@ -148,23 +135,18 @@ fn show(f: Flags) -> Result<()> {
     Ok(())
 }
 
-/// Run one mutating op and report it. `changed: false` is not a failure — the
-/// operator asked for something already true, or is re-running an edit to
-/// converge hosts a previous attempt missed, and both need saying.
+/// Run one mutating op and report what it recorded. `changed: false` is not a
+/// failure — the operator asked for something already true, which is what
+/// makes re-running a command safe.
 fn edit(
     f: Flags,
-    retry: std::fmt::Arguments<'_>,
     op: impl FnOnce(
         &netidx_admin::ops::AdminTarget,
         &tokio::runtime::Runtime,
-    ) -> Result<netidx_admin::ops::AppliedEdit>,
+    ) -> Result<netidx_admin::ops::RecordedEdit>,
 ) -> Result<()> {
     let rt = runtime()?;
     let target = target(&rt, &f)?;
-    let applied = op(&target, &rt)?;
-    if !applied.changed {
-        println!("no change — every id-map host already agreed");
-    }
-    report_peers(&applied.peers, Propagated::IdMap, retry);
+    report_recorded(&op(&target, &rt)?, Recorded::IdMap);
     Ok(())
 }

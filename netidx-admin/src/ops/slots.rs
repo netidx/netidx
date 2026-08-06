@@ -1258,6 +1258,7 @@ mod tests {
             reported_perms_version: None,
         });
         map.resolver_clusters.push(ResolverClusterEntry {
+            perms_version: None,
             id: cluster,
             base: "/".to_string(),
             state: ResolverClusterState::Active,

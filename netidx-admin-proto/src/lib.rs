@@ -1197,6 +1197,16 @@ pub struct ResolverClusterEntry {
     pub members: Vec<ResolverAddr>,
     pub parent: Option<ResolverClusterId>,
     pub children: Vec<ResolverClusterId>,
+    /// The perms version the CA has recorded for this cluster, if any.
+    ///
+    /// Here rather than only in the CA's model file so that "which members are
+    /// behind" is answerable by anyone who can read the map, against the
+    /// versions those members report in it — one round trip, no privileged
+    /// call. `None` means no perms edit has ever been made for this cluster,
+    /// which is not the same as every member being current.
+    #[serde(default)]
+    #[pack(default)]
+    pub perms_version: Option<u64>,
 }
 
 /// The CA-authoritative, versioned picture of the whole admin domain. The
@@ -1209,14 +1219,35 @@ pub struct AdminDomainMap {
     /// Monotonic, bumped by the CA on every change. Callers cheap-compare
     /// this (via [`Request::GetMapVersion`]) before pulling the full map.
     pub version: u64,
+    /// The id-map version the CA has recorded, if any. Admin-domain-wide, for
+    /// the same reason [`ResolverClusterEntry::perms_version`] is per cluster:
+    /// so drift is a question the map answers.
+    #[serde(default)]
+    #[pack(default)]
+    pub id_map_version: Option<u64>,
     pub ca: AdminServerId,
     pub admin_servers: Vec<AdminServerEntry>,
     pub resolver_clusters: Vec<ResolverClusterEntry>,
 }
 
 impl AdminDomainMap {
+    /// The perms version the CA has recorded for `cluster`, if any.
+    pub fn perms_version_for(&self, cluster: Option<ResolverClusterId>) -> Option<u64> {
+        let cluster = cluster?;
+        self.resolver_clusters
+            .iter()
+            .find(|c| c.id == cluster)
+            .and_then(|c| c.perms_version)
+    }
+
     pub fn empty(ca: AdminServerId) -> Self {
-        Self { version: 0, ca, admin_servers: Vec::new(), resolver_clusters: Vec::new() }
+        Self {
+            version: 0,
+            id_map_version: None,
+            ca,
+            admin_servers: Vec::new(),
+            resolver_clusters: Vec::new(),
+        }
     }
 
     pub fn ca_entry(&self) -> Option<&AdminServerEntry> {
@@ -1256,7 +1287,62 @@ pub struct MapVersion {
     pub version: u64,
 }
 
-pub type RegisterResponse = RpcResult<MapVersion>;
+/// The CA's answer to a register: the map version, and whatever configuration
+/// this server turned out to be behind on.
+///
+/// Attaching it here rather than pushing it is the whole shape of the admin
+/// plane. A member already registers every 30s reporting the versions it
+/// holds, so the CA already knows what it is missing; sending it back on the
+/// same round trip means a member that was down for an edit repairs itself on
+/// its own schedule, with the CA needing nothing from it but the poll it was
+/// making anyway.
+#[derive(Debug, Clone, Serialize, Deserialize, Pack)]
+pub struct RegisterOk {
+    pub map: MapVersion,
+    pub updates: DesiredUpdate,
+}
+
+/// The parts of a server's desired configuration it does not yet have.
+///
+/// Each part carries its own version rather than sharing one. They have
+/// genuinely different scopes — the id-map is admin-domain-wide, perms are
+/// per resolver cluster — so one counter would have to be bumped by fanning
+/// out over every affected server on every edit, and a member that applied one
+/// part and failed the other could not describe itself.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, Pack)]
+pub struct DesiredUpdate {
+    /// This server's resolver cluster's permissions.
+    #[serde(default)]
+    #[pack(default)]
+    pub perms: Option<VersionedPerms>,
+    /// The admin domain's id-map.
+    #[serde(default)]
+    #[pack(default)]
+    pub id_map: Option<VersionedIdMap>,
+}
+
+impl DesiredUpdate {
+    pub fn is_empty(&self) -> bool {
+        let Self { perms, id_map } = self;
+        perms.is_none() && id_map.is_none()
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Pack)]
+pub struct VersionedPerms {
+    pub version: u64,
+    pub perms: PMap,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Pack)]
+pub struct VersionedIdMap {
+    pub version: u64,
+    pub id_map: IdMap,
+}
+
+pub type RegisterResponse = RpcResult<RegisterOk>;
+/// Deregistration has no configuration to hand back — the server is leaving.
+pub type DeregisterResponse = RpcResult<MapVersion>;
 pub type GetMapVersionResponse = RpcResult<MapVersion>;
 
 pub type GetMapResponse = RpcResult<AdminDomainMap>;
@@ -1340,7 +1426,26 @@ pub struct EditPermsRequest {
     pub perms: PMap,
 }
 
-pub type EditPermsResponse = RpcResult<PropagationOk>;
+/// What an edit records, and the version members will converge on.
+///
+/// Not a list of per-peer results: nothing is pushed, so there are no peers to
+/// report on. An edit that returns is an edit the CA has recorded, and every
+/// member reaches it on its own next register. Who has got there yet is a
+/// question about the admin domain right now, answered by the versions members
+/// report in the map — not by a snapshot taken during the edit, which is stale
+/// by the time it prints.
+#[derive(Debug, Clone, Serialize, Deserialize, Pack)]
+pub struct RecordedOk {
+    /// The model version this edit produced.
+    pub version: u64,
+    /// Whether it moved. An edit that asked for something already true leaves
+    /// the version where it was, which is not an error and is what makes
+    /// re-running a command safe. The CA reports it because the CA is the only
+    /// party that can see it without another round trip.
+    pub changed: bool,
+}
+
+pub type EditPermsResponse = RpcResult<RecordedOk>;
 
 /// Server → server: apply a permissions edit to the local resolver perms.
 #[derive(Debug, Clone, Serialize, Deserialize, Pack)]
@@ -1437,28 +1542,15 @@ pub struct GetIdMapOk {
 
 pub type GetIdMapResponse = RpcResult<GetIdMapOk>;
 
-/// Admin → CA: apply `edit` here and propagate it to every id-map host.
+/// Admin → CA: record `edit` in the admin domain's id-map model. Every host
+/// holding the id-map role converges on it at its next register.
 #[derive(Debug, Clone, Serialize, Deserialize, Pack)]
 pub struct EditIdMapRequest {
     pub credential: AdminCredential,
     pub edit: IdMapEdit,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Pack)]
-pub struct IdMapPropagationOk {
-    pub operation_id: OperationId,
-    pub peers: Vec<PeerResult>,
-    /// Whether any id-map host's map actually changed.
-    ///
-    /// Reported by the hosts rather than assumed by the CA, which need not
-    /// hold the id-map role itself. `false` means every host already agreed
-    /// with the edit — the operator asked for something already true, which
-    /// is not an error. A mixed result means the hosts had drifted, and this
-    /// propagation is what put them back together.
-    pub changed: bool,
-}
-
-pub type EditIdMapResponse = RpcResult<IdMapPropagationOk>;
+pub type EditIdMapResponse = RpcResult<RecordedOk>;
 
 /// The receiving host's id-map.
 pub type GetLocalIdMapResponse = RpcResult<IdMap>;
@@ -2202,6 +2294,7 @@ mod tests {
 
         let ca = AdminServerId::new();
         let resp = GetMapResponse::Ok(AdminDomainMap {
+            id_map_version: None,
             version: 7,
             ca,
             admin_servers: vec![AdminServerEntry {

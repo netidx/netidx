@@ -7,14 +7,10 @@
 //! pinning to reach resolver cluster members. The `$EDITOR` loop between read and write
 //! is a frontend concern and stays there.
 
-use super::{AdminTarget, AppliedEdit};
+use super::{AdminTarget, RecordedEdit};
 #[cfg(unix)]
 use crate::local;
-use crate::{
-    admin_proto::{NodeKind, PeerResult},
-    perms::PMap,
-    transport,
-};
+use crate::{admin_proto::NodeKind, perms::PMap, transport};
 use anyhow::{Context, Result};
 use std::collections::BTreeSet;
 
@@ -41,18 +37,14 @@ pub async fn show_perms(target: &AdminTarget, at: &str) -> Result<PMap> {
     }
 }
 
-/// Hand an edited document to the CA, which re-checks it and propagates it to
-/// every member of the resolver cluster mounted at `at`. Returns the per-peer
-/// results, so a partial failure surfaces rather than reading as success.
+/// Hand an edited document to the CA, which re-checks it and records it as
+/// what the resolver cluster mounted at `at` is supposed to hold. Returns the
+/// version it recorded; members converge on it at their next register.
 ///
 /// The `$EDITOR` loop stays in the frontend — suspending a terminal and
 /// offering a text area are different gestures — and so does the rendering it
 /// needs: [`crate::perms::render`] out, [`crate::perms::parse`] back.
-pub async fn edit_perms(
-    target: &AdminTarget,
-    at: &str,
-    edited: &PMap,
-) -> Result<Vec<PeerResult>> {
+pub async fn edit_perms(target: &AdminTarget, at: &str, edited: &PMap) -> Result<u64> {
     match target {
         AdminTarget::Remote { session } => {
             transport::edit_perms(
@@ -92,33 +84,32 @@ pub async fn set_entry(
     path: &str,
     entity: &str,
     bits: &str,
-) -> Result<AppliedEdit> {
+) -> Result<RecordedEdit> {
     crate::perms::validate_bits(bits)?;
     let mut pmap = basis(target, at).await?;
     let changed =
         crate::perms::lookup(&pmap, path, entity).map(|b| b.as_str()) != Some(bits);
     crate::perms::add_entry(&mut pmap, path, entity, bits)?;
-    Ok(AppliedEdit { changed, peers: edit_perms(target, at, &pmap).await? })
+    let version = edit_perms(target, at, &pmap).await?;
+    Ok(RecordedEdit { version, changed })
 }
 
 /// Remove `entity`'s entry at `path` from the perms of the resolver cluster
 /// mounted at `at`.
 ///
 /// An entry that was already absent is reported (`changed: false`), not
-/// refused. Refusing would break the one property every perms command has:
-/// that re-running it converges a resolver cluster left inconsistent by a
-/// partial propagation failure. The second run reads the member the removal
-/// already succeeded on, would find nothing to remove, and would error out
-/// with the other members still holding the entry.
+/// refused — the operator asked for something already true, which is not an
+/// error.
 pub async fn remove_entry(
     target: &AdminTarget,
     at: &str,
     path: &str,
     entity: &str,
-) -> Result<AppliedEdit> {
+) -> Result<RecordedEdit> {
     let mut pmap = basis(target, at).await?;
     let changed = crate::perms::remove_entry(&mut pmap, path, entity);
-    Ok(AppliedEdit { changed, peers: edit_perms(target, at, &pmap).await? })
+    let version = edit_perms(target, at, &pmap).await?;
+    Ok(RecordedEdit { version, changed })
 }
 
 /// The exact `--at` targets a perms read or edit can route to.

@@ -372,7 +372,7 @@ pub async fn edit_perms(
     cfg_path: &Path,
     target_path: &str,
     perms: &crate::perms::PMap,
-) -> Result<Vec<PeerResult>> {
+) -> Result<u64> {
     let mut s = connect(cfg_path).await?;
     let (admin, password) = no_creds();
     netidx_admin_proto::write_msg(
@@ -385,8 +385,23 @@ pub async fn edit_perms(
     )
     .await?;
     match netidx_admin_proto::read_msg::<_, EditPermsResponse>(&mut s).await? {
-        EditPermsResponse::Ok(PropagationOk { peers, .. }) => Ok(peers),
+        EditPermsResponse::Ok(ok) => Ok(ok.version),
         EditPermsResponse::Err { reason } => bail!("the CA refused: {reason}"),
+    }
+}
+
+/// Read the admin domain map over the control socket. Every admin server
+/// serves the map, so this works on a satellite as well as the CA.
+pub async fn get_map(cfg_path: &Path) -> Result<netidx_admin_proto::AdminDomainMap> {
+    let mut s = connect(cfg_path).await?;
+    netidx_admin_proto::write_msg(&mut s, &Request::GetMap).await?;
+    match netidx_admin_proto::read_msg::<_, netidx_admin_proto::GetMapResponse>(&mut s)
+        .await?
+    {
+        netidx_admin_proto::GetMapResponse::Ok(map) => Ok(map),
+        netidx_admin_proto::GetMapResponse::Err { reason } => {
+            bail!("the admin daemon refused: {reason}")
+        }
     }
 }
 
@@ -417,7 +432,7 @@ pub async fn get_id_map(cfg_path: &Path) -> Result<crate::id_map::IdMap> {
 pub async fn edit_id_map(
     cfg_path: &Path,
     edit: &netidx_admin_proto::IdMapEdit,
-) -> Result<crate::ops::AppliedEdit> {
+) -> Result<crate::ops::RecordedEdit> {
     let mut s = connect(cfg_path).await?;
     let (admin, password) = no_creds();
     netidx_admin_proto::write_msg(
@@ -432,7 +447,7 @@ pub async fn edit_id_map(
         .await?
     {
         netidx_admin_proto::EditIdMapResponse::Ok(ok) => {
-            Ok(crate::ops::AppliedEdit { changed: ok.changed, peers: ok.peers })
+            Ok(crate::ops::RecordedEdit { version: ok.version, changed: ok.changed })
         }
         netidx_admin_proto::EditIdMapResponse::Err { reason } => {
             bail!("the CA refused: {reason}")

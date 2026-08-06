@@ -456,6 +456,7 @@ mod tests {
         children: &[u128],
     ) -> ResolverClusterEntry {
         ResolverClusterEntry {
+            perms_version: None,
             id: ResolverClusterId(Uuid::from_u128(n)),
             base: base.into(),
             state: ResolverClusterState::Active,
@@ -486,6 +487,7 @@ mod tests {
     /// is server 1, in the root cluster.
     fn map() -> AdminDomainMap {
         AdminDomainMap {
+            id_map_version: None,
             version: 1,
             ca: AdminServerId(Uuid::from_u128(1)),
             admin_servers: vec![

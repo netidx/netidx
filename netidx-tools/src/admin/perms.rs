@@ -20,7 +20,7 @@ use netidx_admin::{ops::perms as perms_ops, perms};
 use super::{
     answer_cli::RemoteAuthFlags,
     editor,
-    propagation::{Propagated, report_peers},
+    propagation::{Recorded, report_recorded},
 };
 
 fn runtime() -> Result<tokio::runtime::Runtime> {
@@ -108,11 +108,10 @@ fn edit(f: Flags) -> Result<()> {
     // text; past it the document travels as itself.
     let current = rt.block_on(perms_ops::show_perms(&target, &f.at))?;
     let edited = editor::edit_with_validation(&perms::render(&current)?, perms::parse)?;
-    let peers = rt.block_on(perms_ops::edit_perms(&target, &f.at, &edited))?;
-    report_peers(
-        &peers,
-        Propagated::Perms { at: &f.at },
-        format_args!("perms edit --at {}", f.at),
+    let version = rt.block_on(perms_ops::edit_perms(&target, &f.at, &edited))?;
+    report_recorded(
+        &netidx_admin::ops::RecordedEdit { version, changed: true },
+        Recorded::Perms { at: &f.at },
     );
     Ok(())
 }
@@ -128,14 +127,8 @@ fn set(f: Flags, path: String, entity: String, bits: String) -> Result<()> {
         rt.block_on(perms_ops::set_entry(&target, &f.at, &path, &entity, &bits))?;
     if edit.changed {
         println!("set {path}  {entity}  {bits}");
-    } else {
-        println!("{entity} already has {bits} at {path} — re-propagating unchanged");
     }
-    report_peers(
-        &edit.peers,
-        Propagated::Perms { at: &f.at },
-        format_args!("perms set --at {} {path} {entity} {bits}", f.at),
-    );
+    report_recorded(&edit, Recorded::Perms { at: &f.at });
     Ok(())
 }
 
@@ -145,15 +138,7 @@ fn remove(f: Flags, path: String, entity: String) -> Result<()> {
     let edit = rt.block_on(perms_ops::remove_entry(&target, &f.at, &path, &entity))?;
     if edit.changed {
         println!("removed {path}  {entity}");
-    } else {
-        println!(
-            "{entity} had no entry at {path} — nothing removed, re-propagating unchanged"
-        );
     }
-    report_peers(
-        &edit.peers,
-        Propagated::Perms { at: &f.at },
-        format_args!("perms remove --at {} {path} {entity}", f.at),
-    );
+    report_recorded(&edit, Recorded::Perms { at: &f.at });
     Ok(())
 }

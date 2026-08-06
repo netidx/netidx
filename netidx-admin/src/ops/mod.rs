@@ -37,6 +37,7 @@ use std::{
 };
 
 pub mod delegation;
+pub mod drift;
 pub mod id_map;
 #[cfg(unix)]
 pub mod offline;
@@ -49,17 +50,21 @@ pub mod service;
 #[cfg(unix)]
 pub mod slots;
 
-/// The outcome of an edit that propagates to several hosts: whether the state
-/// actually changed, and how each host took it.
+/// The outcome of an edit: the model version the CA recorded, and whether that
+/// was a change.
 ///
-/// `changed` is separate from the peer results because "it already said that"
-/// and "it now says that" are different facts an operator needs, and neither
-/// is an error. A frontend holding only the peer list would have to claim it
-/// made a change it may not have made.
-pub struct AppliedEdit {
-    /// Whether this edit altered anything.
+/// No per-peer results, because nothing is pushed. Every host converges on the
+/// recorded version at its next register, so "did it reach everyone yet" is a
+/// question about the admin domain *now* — answered by [`drift`], which reads
+/// the versions hosts report — not by a snapshot taken during the edit that is
+/// stale by the time it prints.
+pub struct RecordedEdit {
+    /// The version the CA is now at for this state.
+    pub version: u64,
+    /// Whether this edit altered anything. An edit that asked for something
+    /// already true leaves the version where it was, which is not an error and
+    /// is what makes re-running a command safe.
     pub changed: bool,
-    pub peers: Vec<crate::admin_proto::PeerResult>,
 }
 
 /// A pinned, authenticated remote-admin session: the admin server to talk to,

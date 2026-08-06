@@ -122,6 +122,7 @@ pub fn upsert_ca(
                     members: entry.resolver.clone().into_iter().collect(),
                     parent: None,
                     children: Vec::new(),
+                    perms_version: None,
                 });
                 did_change = true;
             }
@@ -252,6 +253,7 @@ pub fn enroll(
                 members: vec![resolver_member.clone()],
                 parent: None,
                 children: Vec::new(),
+                perms_version: None,
             });
             id
         }
@@ -560,6 +562,7 @@ pub fn delegate(
         members: child_members,
         parent: Some(parent_id),
         children: child_children,
+        perms_version: None,
     });
     for server in &mut map.admin_servers {
         if child_servers.contains(&server.id) {
@@ -863,7 +866,9 @@ mod tests {
                 members: vec![old.clone(), peer_addr.clone()],
                 parent: None,
                 children: vec![],
+                perms_version: None,
             }],
+            id_map_version: None,
         };
 
         let new_addr = "10.1.0.1:5564".parse().unwrap();
@@ -898,6 +903,7 @@ mod tests {
         let old = addr("10.0.0.1:4564");
         let peer_addr = addr("10.0.0.2:4564");
         let mut map = AdminDomainMap {
+            id_map_version: None,
             version: 3,
             ca,
             admin_servers: vec![
@@ -931,6 +937,7 @@ mod tests {
                 members: vec![old, peer_addr.clone()],
                 parent: None,
                 children: vec![],
+                perms_version: None,
             }],
         };
         let before = map.clone();
@@ -1155,6 +1162,7 @@ mod tests {
                     members: facts.members.clone(),
                     parent: None,
                     children: vec![child],
+                    perms_version: None,
                 },
                 ResolverClusterEntry {
                     id: child,
@@ -1163,8 +1171,10 @@ mod tests {
                     members: vec![addr("10.0.0.2:4564")],
                     parent: Some(root),
                     children: vec![],
+                    perms_version: None,
                 },
             ],
+            id_map_version: None,
         };
 
         assert!(!upsert_ca(&mut map, ca_entry, Some(facts)).unwrap());
@@ -1196,8 +1206,10 @@ mod tests {
             members: vec![addr("10.0.60.1:4564")],
             parent: Some(root),
             children: vec![],
+            perms_version: None,
         };
         let mut map = AdminDomainMap {
+            id_map_version: None,
             version: 3,
             ca,
             admin_servers: vec![
@@ -1222,6 +1234,7 @@ mod tests {
                     members: vec![addr("10.0.0.1:4564")],
                     parent: None,
                     children: vec![child],
+                    perms_version: None,
                 },
                 authoritative_child.clone(),
             ],
@@ -1377,7 +1390,9 @@ mod tests {
                 members,
                 parent: None,
                 children: vec![],
+                perms_version: None,
             }],
+            id_map_version: None,
         };
 
         let change =
@@ -1424,6 +1439,7 @@ mod tests {
         let third = AdminServerId::new();
         let cluster = ResolverClusterId::new();
         let mut map = AdminDomainMap {
+            id_map_version: None,
             version: 0,
             ca,
             admin_servers: [
@@ -1455,6 +1471,7 @@ mod tests {
                 ],
                 parent: None,
                 children: vec![],
+                perms_version: None,
             }],
         };
         let before = map.clone();
@@ -1479,4 +1496,32 @@ mod tests {
         );
         assert_eq!(map, before);
     }
+}
+
+/// Record the perms version the CA now holds for `cluster`, so a reader of the
+/// map can tell which members are behind without a privileged call. Returns
+/// whether it changed.
+pub fn set_perms_version(
+    map: &mut AdminDomainMap,
+    cluster: ResolverClusterId,
+    version: u64,
+) -> bool {
+    match map.resolver_clusters.iter_mut().find(|c| c.id == cluster) {
+        Some(c) if c.perms_version != Some(version) => {
+            c.perms_version = Some(version);
+            map.version += 1;
+            true
+        }
+        _ => false,
+    }
+}
+
+/// Record the id-map version the CA now holds. Returns whether it changed.
+pub fn set_id_map_version(map: &mut AdminDomainMap, version: u64) -> bool {
+    if map.id_map_version == Some(version) {
+        return false;
+    }
+    map.id_map_version = Some(version);
+    map.version += 1;
+    true
 }

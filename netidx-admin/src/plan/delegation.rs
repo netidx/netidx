@@ -302,9 +302,11 @@ mod tests {
             server(ap2, "10.0.60.2:4565", "10.0.60.2:4564", root),
         ];
         let map = AdminDomainMap {
+            id_map_version: None,
             version: 1,
             ca: us1,
             resolver_clusters: vec![ResolverClusterEntry {
+                perms_version: None,
                 id: root,
                 base: "/".into(),
                 state: ResolverClusterState::Active,
@@ -345,10 +347,12 @@ mod tests {
             server(ap1, "10.0.60.1:4565", "10.0.60.1:4564", ap),
         ];
         let map = AdminDomainMap {
+            id_map_version: None,
             version: 1,
             ca: us1,
             resolver_clusters: vec![
                 ResolverClusterEntry {
+                    perms_version: None,
                     id: root,
                     base: "/".into(),
                     state: ResolverClusterState::Active,
@@ -357,6 +361,7 @@ mod tests {
                     children: vec![],
                 },
                 ResolverClusterEntry {
+                    perms_version: None,
                     id: ap,
                     base: "/ap".into(),
                     state: ResolverClusterState::Pending,

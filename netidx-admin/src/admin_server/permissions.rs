@@ -13,13 +13,12 @@ use super::{
 use crate::{
     admin_proto::{
         self, AdminDomainMap, ApplyPermsEditRequest, ApplyPermsEditResponse,
-        EditPermsRequest, EditPermsResponse, GetPermsResponse, PeerResult, PropagationOk,
-        ReadPermsOk, ReadPermsRequest, ReadPermsResponse,
+        EditPermsRequest, EditPermsResponse, GetPermsResponse, ReadPermsOk,
+        ReadPermsRequest, ReadPermsResponse,
     },
     ca_vault, transport,
 };
-use anyhow::{Context, Result, anyhow, bail};
-use futures::{StreamExt, stream};
+use anyhow::{Context, Result, bail};
 use log::info;
 use std::{
     net::SocketAddr,
@@ -250,7 +249,11 @@ pub(super) async fn local_perms_file(state: &Server) -> Result<PathBuf> {
     local_perms_path(state).await
 }
 
-async fn apply_perms_local(
+/// Write `perms` into this host's resolver, stamping `version` on success.
+///
+/// The single local write path: the CA handing a member its cluster's
+/// document on register, and the CA installing its own, both land here.
+pub(crate) async fn install_perms(
     state: &Server,
     perms: &crate::perms::PMap,
     version: Option<u64>,
@@ -305,7 +308,7 @@ pub(super) async fn handle_apply_perms_edit(
     req: &ApplyPermsEditRequest,
 ) -> ApplyPermsEditResponse {
     info!("admin-server: applying permissions operation {}", req.operation_id);
-    match apply_perms_local(state, &req.perms, req.version).await {
+    match install_perms(state, &req.perms, req.version).await {
         Ok(()) => ApplyPermsEditResponse::Ok(()),
         Err(e) => ApplyPermsEditResponse::Err { reason: format!("{e:#}") },
     }
@@ -335,137 +338,6 @@ fn cluster_for(
     (!members.is_empty()).then_some((cluster.id, members))
 }
 
-/// Push a perms edit to every registered server in the target resolver cluster, using
-/// each CA-owned routing address. Every unreachable/erroring target is returned
-/// as a `PeerResult` carrying its immutable identity and current address.
-async fn push_perms_edit_to_peers(
-    state: &Arc<Server>,
-    perms: &crate::perms::PMap,
-    targets: &[(admin_proto::AdminServerId, SocketAddr)],
-    operation_id: admin_proto::OperationId,
-    version: u64,
-) -> Vec<PeerResult> {
-    let client = match state.outbound_client().await {
-        Ok(client) => client,
-        Err(e) => {
-            return targets
-                .iter()
-                .map(|(server, addr)| PeerResult {
-                    server: *server,
-                    addr: *addr,
-                    error: Some(format!("loading outbound identity failed: {e:#}")),
-                })
-                .collect();
-        }
-    };
-    let ca = state.read(move |state| state.map.ca).await;
-    let home_ca = state.home_ca_der.clone();
-    let mut results: Vec<_> =
-        stream::iter(targets.iter().copied().map(|(server, addr)| {
-            let client = client.clone();
-            let home_ca = home_ca.clone();
-            async move {
-                let res = tokio::time::timeout(
-                    PUSH_TIMEOUT,
-                    transport::push_perms_edit(
-                        &client,
-                        addr,
-                        server,
-                        server == ca,
-                        home_ca,
-                        operation_id,
-                        perms,
-                        Some(version),
-                    ),
-                )
-                .await
-                .map_err(|_| anyhow!("timed out after {}s", PUSH_TIMEOUT.as_secs()))
-                .and_then(|r| r);
-                PeerResult { server, addr, error: res.err().map(|e| format!("{e:#}")) }
-            }
-        }))
-        .buffer_unordered(32)
-        .collect()
-        .await;
-    results.sort_by_key(|result| result.server);
-    results
-}
-
-/// Bring one member up to its cluster's authoritative permissions.
-///
-/// There is no diff to compute: every member of a cluster holds the same
-/// document, so a member that is behind is simply sent it. That is the whole
-/// difference from the id-map, where a uid is per-host and the repair has to
-/// be expressed as operations.
-pub(super) async fn reconcile_to_member(
-    state: &Arc<Server>,
-    cluster: admin_proto::ResolverClusterId,
-    server: admin_proto::AdminServerId,
-    addr: SocketAddr,
-) -> Result<()> {
-    let model = state
-        .read_async(async move |state| {
-            state
-                .ca
-                .as_ref()
-                .context("this host does not hold the CA")?
-                .store
-                .perms_model()
-                .await
-        })
-        .await?;
-    let Some(perms) = model.get(cluster) else { return Ok(()) };
-    let ca = state.read(move |state| state.map.ca).await;
-    let operation_id = admin_proto::OperationId::new();
-    if let Some(dir) = state.ca_dir().await {
-        audit(
-            &dir,
-            "CA",
-            "reconcile-perms",
-            &format!("operation {operation_id}: server {server} at {addr}"),
-            Duration::ZERO,
-        )
-        .await;
-    }
-    if server == ca {
-        return apply_perms_local(state, &perms.perms, Some(perms.version)).await;
-    }
-    let client = state.outbound_client().await?;
-    tokio::time::timeout(
-        PUSH_TIMEOUT,
-        transport::push_perms_edit(
-            &client,
-            addr,
-            server,
-            false,
-            state.home_ca_der.clone(),
-            operation_id,
-            &perms.perms,
-            Some(perms.version),
-        ),
-    )
-    .await
-    .map_err(|_| anyhow!("timed out after {}s", PUSH_TIMEOUT.as_secs()))?
-}
-
-/// Whether `reported` is behind `cluster`'s model.
-///
-/// `None` — a member that has never been stamped — is behind anything
-/// established. A cluster the CA has no model for leaves its members alone.
-pub(super) async fn perms_behind(
-    state: &Arc<Server>,
-    cluster: admin_proto::ResolverClusterId,
-    reported: Option<u64>,
-) -> bool {
-    let model = state
-        .read_async(async move |state| match state.ca.as_ref() {
-            Some(ca) => ca.store.perms_model().await.ok(),
-            None => None,
-        })
-        .await;
-    model.is_some_and(|model| model.behind(cluster, reported))
-}
-
 /// Record `perms` as `cluster`'s authoritative permissions, returning the
 /// version it is now at.
 ///
@@ -476,23 +348,45 @@ pub(super) async fn record_in_model(
     state: &Arc<Server>,
     cluster: admin_proto::ResolverClusterId,
     perms: &crate::perms::PMap,
-) -> Result<u64> {
+) -> Result<(u64, bool)> {
     let perms = perms.clone();
+    let config_lock = state.config_lock.clone();
+    let ca_dir = state.ca_dir().await.context("this host does not hold the CA")?;
     state
         .write_async(async move |state| {
             let store =
                 &state.ca.as_ref().context("this host does not hold the CA")?.store;
             let mut model = store.perms_model().await?;
+            let before = model.get(cluster).map(|p| p.version);
             let version = model.set(cluster, &perms)?;
-            store.save_perms_model(&model).await?;
-            Ok(version)
+            let changed = before != Some(version);
+            if changed {
+                store.save_perms_model(&model).await?;
+                // Also into the map, so "which members are behind" is a
+                // question anyone who can read the map can answer against the
+                // versions those members report in it.
+                if crate::admin_domain::set_perms_version(
+                    &mut state.map,
+                    cluster,
+                    version,
+                ) {
+                    crate::admin_domain::save_async(&config_lock, &ca_dir, &state.map)
+                        .await?;
+                }
+            }
+            Ok((version, changed))
         })
         .await
 }
 
-/// CA-side: authenticate the admin, find the target resolver cluster in the map, and
-/// propagate the perms edit to its admin servers (peer-cert-gated). The CA
-/// never edits a foreign resolver cluster's files directly — it pushes.
+/// CA-side: authenticate the admin, find the target resolver cluster, and
+/// record the document as what that cluster is supposed to hold.
+///
+/// Recording it is the whole edit. Nothing is pushed: every member reports the
+/// version it holds on the register it already makes every 30s, and the CA
+/// hands back anything it is behind on. A member that was down for this edit
+/// is afterwards just a member behind a version, which is a thing that repairs
+/// itself.
 pub(super) async fn handle_edit_perms(
     state: &Arc<Server>,
     req: &EditPermsRequest,
@@ -516,10 +410,10 @@ pub(super) async fn handle_edit_perms(
     if let Err(reason) = authorize_perms_scope(&authd, &req.target_path, "edit") {
         return err(reason);
     }
-    let (cluster, members) = {
+    let cluster = {
         let map = state.read(move |state| state.map.clone()).await;
         match cluster_for(&map, &req.target_path) {
-            Some(found) => found,
+            Some((cluster, _)) => cluster,
             None => {
                 return err(format!(
                     "no resolver cluster serving {:?} in the admin domain map",
@@ -528,25 +422,17 @@ pub(super) async fn handle_edit_perms(
             }
         }
     };
-    // Record what this cluster is supposed to hold before propagating any of
-    // it. Until now the CA kept no copy, so a member that missed a push was a
-    // candidate source of truth for the *next* edit — which is how a stale
-    // document gets read back and propagated over everyone else's correct one.
-    let version = match record_in_model(state, cluster, &req.perms).await {
-        Ok(version) => version,
+    let (version, changed) = match record_in_model(state, cluster, &req.perms).await {
+        Ok(recorded) => recorded,
         Err(e) => return err(format!("{e:#}")),
     };
-    let operation_id = admin_proto::OperationId::new();
     audit(
         &state.ca_dir().await.expect("CA role held"),
         &authd.admin,
         "edit-perms",
-        &format!("operation {operation_id} at {}", req.target_path),
+        &format!("version {version} at {}", req.target_path),
         Duration::ZERO,
     )
     .await;
-    let peers =
-        push_perms_edit_to_peers(state, &req.perms, &members, operation_id, version)
-            .await;
-    EditPermsResponse::Ok(PropagationOk { operation_id, peers })
+    EditPermsResponse::Ok(admin_proto::RecordedOk { version, changed })
 }

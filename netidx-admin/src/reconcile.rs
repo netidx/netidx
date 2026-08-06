@@ -598,6 +598,7 @@ mod tests {
 
     fn srv(_addr: &str, base: &str, members: &[&str]) -> ResolverClusterEntry {
         ResolverClusterEntry {
+            perms_version: None,
             id: ResolverClusterId::new(),
             base: base.to_string(),
             state: ResolverClusterState::Active,
@@ -615,6 +616,7 @@ mod tests {
 
     fn map_of(resolver_clusters: Vec<ResolverClusterEntry>) -> AdminDomainMap {
         AdminDomainMap {
+            id_map_version: None,
             version: 1,
             ca: AdminServerId::new(),
             admin_servers: vec![],
