@@ -19,24 +19,16 @@
 use anyhow::{Context, Result, bail};
 use compact_str::format_compact;
 use serde::Serialize;
-use std::{io::Write, path::Path, time::Duration};
+use std::{io::Write, path::Path};
 use tokio::io::AsyncWriteExt;
 
-/// How long an atomic write waits before returning.
+/// How long an atomic write waits before returning: one filesystem timestamp
+/// tick, so two writes to the same path can never share a modification time.
 ///
-/// Everything that follows one of these files — a resolver watching its own
-/// config, a netidx client watching its resolver addresses, the id-map daemon —
-/// notices a change by its modification time. Linux stamps inodes from a clock
-/// that only advances once per timer tick (a millisecond or four), so two
-/// writes closer together than that share a timestamp, and the second is
-/// invisible to anything comparing times.
-///
-/// Rather than make every reader pay to defend against that, the writer simply
-/// declines to produce it. Administrative writes are seconds apart in any case;
-/// the cost of being certain is this pause, in the one place all of them go
-/// through. It must stay comfortably above one tick at any plausible
-/// `CONFIG_HZ`.
-pub const SETTLE: Duration = Duration::from_millis(50);
+/// The constant itself lives in `netidx-core` because the readers that depend
+/// on this — the resolver, the netidx client, the id-map daemon — are in other
+/// crates, and there is only one fact.
+pub use netidx_core::utils::FS_TIMESTAMP_SETTLE as SETTLE;
 
 /// Write `bytes` to `path` atomically (temp file + rename), with the
 /// given unix `mode`. On Windows the mode is ignored.

@@ -485,6 +485,47 @@ mod tests {
     use std::collections::BTreeMap;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+    /// Write `map` to `path` the way every real writer of this file does: a
+    /// sibling temp file renamed over the top, then a settle past one
+    /// filesystem timestamp tick.
+    ///
+    /// The settle is not scaffolding, it is half of how this file is followed.
+    /// Linux stamps inodes from a clock that only advances once per timer tick,
+    /// so two writes closer together than that carry the same modification
+    /// time — and the daemon, which notices a change by comparing that time
+    /// against what it last read, never sees the second one. Ever: the stamp it
+    /// holds already matches the file. `netidx-admin`'s atomic write is where
+    /// production pays this; a test that skipped it would be exercising a
+    /// writer that no netidx tool is, and failing on the daemon's behalf.
+    fn write_config(path: &Path, map: &IdMap) {
+        let bytes = serde_json::to_vec_pretty(map).unwrap();
+        let tmp = path.with_extension("json.tmp");
+        std::fs::write(&tmp, &bytes).unwrap();
+        std::fs::rename(&tmp, path).unwrap();
+        std::thread::sleep(netidx_core::utils::FS_TIMESTAMP_SETTLE);
+    }
+
+    /// A map with `users` at gid 100 and one identity per `(name, uid)`, each
+    /// in `users` and nothing else.
+    fn map_of(identities: &[(&str, u32)]) -> IdMap {
+        let mut groups = BTreeMap::new();
+        groups.insert(ArcStr::from("users"), Group { gid: 100 });
+        let identities = identities
+            .iter()
+            .map(|(name, uid)| {
+                (
+                    ArcStr::from(*name),
+                    Identity {
+                        uid: *uid,
+                        primary_group: ArcStr::from("users"),
+                        groups: vec![],
+                    },
+                )
+            })
+            .collect();
+        IdMap { default_uid: 65534, default_gid: 65534, groups, identities }
+    }
+
     fn write_sample(path: &Path) {
         let mut groups = BTreeMap::new();
         groups.insert(ArcStr::from("users"), Group { gid: 100 });
@@ -498,8 +539,10 @@ mod tests {
                 groups: vec![ArcStr::from("wheel")],
             },
         );
-        let cfg = IdMap { default_uid: 65534, default_gid: 65534, groups, identities };
-        std::fs::write(path, serde_json::to_vec_pretty(&cfg).unwrap()).unwrap();
+        write_config(
+            path,
+            &IdMap { default_uid: 65534, default_gid: 65534, groups, identities },
+        );
     }
 
     async fn query(socket: &Path, q: &str) -> String {
@@ -658,17 +701,14 @@ mod tests {
         );
     }
 
-    /// Edit the config on disk, then poll the daemon *through the
-    /// socket* until it reflects the new identity (or we hit the 10s
-    /// ceiling). Querying the live interface, rather than peeking at
-    /// internal state, is the real end-to-end check that a reload
-    /// reached the path that serves clients. The watcher's default
-    /// debounce timeout is 250ms, so a reload should arrive within a
-    /// few hundred ms; the long ceiling is just to be CI-tolerant on
-    /// slow filesystems.
+    /// Edit the config on disk, then poll the daemon *through the socket*
+    /// until it reflects the new identity (or we hit the 10s ceiling).
+    /// Querying the live interface, rather than peeking at internal state, is
+    /// the real end-to-end check that a reload reached the path that serves
+    /// clients. A reload should arrive within a poll interval; the long
+    /// ceiling is just to be CI-tolerant on slow filesystems.
     #[tokio::test]
     async fn config_watcher_reloads_on_modify() {
-        use std::collections::BTreeMap;
         let dir = tempfile::tempdir().unwrap();
         let cfg_path = dir.path().join("id-map.json");
         let sock_path = dir.path().join("id-map.sock");
@@ -680,54 +720,17 @@ mod tests {
         })
         .await
         .unwrap();
-        // Initial map has alice but not bob. The watcher arms its
-        // parent-dir inotify watch on its own task shortly after
-        // start; the two socket round-trips below give it ample time
-        // before we touch the file, and the reload is observed via the
-        // poll loop regardless.
+        // Initial map has alice but not bob.
         let s = query(&sock_path, "alice.example.com").await;
         assert!(s.contains("uid=1000(alice.example.com)"), "got {s:?}");
         // bob is unknown, so the daemon falls back to the default uid.
         let s = query(&sock_path, "bob.example.com").await;
         assert!(s.contains("uid=65534(bob.example.com)"), "got {s:?}");
 
-        // Edit the file: add bob. We use the same atomic-write
-        // pattern the `netidx admin id-map` tools use, since the
-        // rename-into-place path is the most demanding for the
-        // watcher to catch.
-        let mut groups = BTreeMap::new();
-        groups.insert(arcstr::ArcStr::from("users"), Group { gid: 100 });
-        let mut identities = BTreeMap::new();
-        identities.insert(
-            arcstr::ArcStr::from("alice.example.com"),
-            Identity {
-                uid: 1000,
-                primary_group: arcstr::ArcStr::from("users"),
-                groups: vec![],
-            },
+        write_config(
+            &cfg_path,
+            &map_of(&[("alice.example.com", 1000), ("bob.example.com", 1001)]),
         );
-        identities.insert(
-            arcstr::ArcStr::from("bob.example.com"),
-            Identity {
-                uid: 1001,
-                primary_group: arcstr::ArcStr::from("users"),
-                groups: vec![],
-            },
-        );
-        let cfg = IdMap { default_uid: 65534, default_gid: 65534, groups, identities };
-        let bytes = serde_json::to_vec_pretty(&cfg).unwrap();
-        // Atomic write: temp + rename — the most demanding path for the
-        // watcher, since the target gets a fresh inode.
-        let tmp = cfg_path.with_extension("json.tmp");
-        std::fs::write(&tmp, &bytes).unwrap();
-        std::fs::rename(&tmp, &cfg_path).unwrap();
-
-        // Poll for up to ~10s. The edit can land before the watch is
-        // armed, but because we subscribe to `Established` the watch
-        // going live triggers a reload that re-reads the file and picks
-        // bob up regardless of arming timing. (If the watch armed
-        // first, the Create from the rename catches it instead.) So a
-        // single up-front write is enough — no need to keep re-writing.
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
         loop {
             let s = query(&sock_path, "bob.example.com").await;
@@ -741,18 +744,15 @@ mod tests {
         }
     }
 
-    /// Regression: the daemon must keep picking up *repeated* atomic
-    /// replacements of its config, not just the first. Every
-    /// `id-map.json` update (enrollment, `netidx admin id-map …`) writes
-    /// a sibling temp file and renames it over the target — a fresh
-    /// inode each time. A file watch that isn't re-armed after the
-    /// replace goes dead after the first one, leaving the daemon serving
-    /// a stale map: the first enrollment registers, every one after it
-    /// silently maps to the default uid (denied). `config_watcher_reloads_on_modify`
-    /// only did a single replace, so it passed while the bug was live.
+    /// Regression: the daemon must keep picking up *repeated* replacements of
+    /// its config, not just the first. Every `id-map.json` update (enrollment,
+    /// `netidx admin id-map …`) renames a sibling temp file over the target — a
+    /// fresh inode each time — and the daemon has to notice all of them, or the
+    /// first enrollment registers and every one after it silently maps to the
+    /// default uid (denied). `config_watcher_reloads_on_modify` does a single
+    /// replace, so it passed while an earlier version of this bug was live.
     #[tokio::test]
     async fn config_watcher_reloads_on_repeated_modify() {
-        use std::collections::BTreeMap;
         let dir = tempfile::tempdir().unwrap();
         let cfg_path = dir.path().join("id-map.json");
         let sock_path = dir.path().join("id-map.sock");
@@ -764,43 +764,17 @@ mod tests {
         })
         .await
         .unwrap();
-        // Add identities one at a time via the same atomic-write pattern
-        // the tools use (temp + rename), polling the live socket for each
-        // before moving on. Each name is a *separate* replacement, so the
-        // watch has to survive being re-armed N times over.
-        let mut identities = BTreeMap::new();
-        identities.insert(
-            arcstr::ArcStr::from("alice.example.com"),
-            Identity {
-                uid: 1000,
-                primary_group: arcstr::ArcStr::from("users"),
-                groups: vec![],
-            },
-        );
-        for (i, name) in ["bob", "carol", "dave", "erin", "frank"].into_iter().enumerate()
-        {
+        // Add identities one at a time, polling the live socket for each before
+        // moving on, so every replacement has to be noticed on its own.
+        let hosts: Vec<String> = ["bob", "carol", "dave", "erin", "frank"]
+            .iter()
+            .map(|name| format!("{name}.example.com"))
+            .collect();
+        let mut in_map = vec![("alice.example.com", 1000)];
+        for (i, host) in hosts.iter().enumerate() {
             let uid = 1001 + i as u32;
-            let host = format!("{name}.example.com");
-            identities.insert(
-                arcstr::ArcStr::from(host.as_str()),
-                Identity {
-                    uid,
-                    primary_group: arcstr::ArcStr::from("users"),
-                    groups: vec![],
-                },
-            );
-            let mut groups = BTreeMap::new();
-            groups.insert(arcstr::ArcStr::from("users"), Group { gid: 100 });
-            let cfg = IdMap {
-                default_uid: 65534,
-                default_gid: 65534,
-                groups,
-                identities: identities.clone(),
-            };
-            let bytes = serde_json::to_vec_pretty(&cfg).unwrap();
-            let tmp = cfg_path.with_extension("json.tmp");
-            std::fs::write(&tmp, &bytes).unwrap();
-            std::fs::rename(&tmp, &cfg_path).unwrap();
+            in_map.push((host.as_str(), uid));
+            write_config(&cfg_path, &map_of(&in_map));
 
             let want = format!("uid={uid}({host})");
             let deadline = std::time::Instant::now() + Duration::from_secs(10);
@@ -811,8 +785,8 @@ mod tests {
                 }
                 if std::time::Instant::now() >= deadline {
                     panic!(
-                        "replacement #{} ({host}) was never observed — the watch \
-                         went dead after an earlier atomic replace. last query: {s:?}",
+                        "replacement #{} ({host}) was never observed — the daemon \
+                         stopped noticing changes to its config. last query: {s:?}",
                         i + 1,
                     );
                 }

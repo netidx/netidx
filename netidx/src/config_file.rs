@@ -16,8 +16,9 @@
 //!
 //! The other half of this is that consecutive writes must not share a
 //! modification time. Linux stamps inodes from a clock that only advances once
-//! per timer tick, so `netidx-admin`'s atomic write settles for longer
-//! than a tick before returning; see `atomic::SETTLE`.
+//! per timer tick, so `netidx-admin`'s atomic write settles for longer than a
+//! tick before returning; see [`netidx_core::utils::FS_TIMESTAMP_SETTLE`],
+//! which is where that duration is defined for everyone who depends on it.
 
 use anyhow::{Context, Result};
 use poolshark::local::LPooled;

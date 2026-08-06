@@ -18,7 +18,27 @@ use std::{
     iter::{IntoIterator, Iterator},
     net::{IpAddr, SocketAddr},
     pin::Pin,
+    time::Duration,
 };
+
+/// How long a writer must wait after replacing a file that something else
+/// follows by modification time.
+///
+/// Linux stamps inodes from a clock that only advances once per timer tick (a
+/// millisecond or four), so two writes closer together than that share a
+/// modification time — and the second is invisible to anything comparing
+/// times. Every config netidx follows is followed that way: the resolver
+/// watching its own config, a client watching its resolver addresses, the
+/// id-map daemon watching its map.
+///
+/// Rather than make every reader defend against it, the writer declines to
+/// produce it. Administrative writes are seconds apart in any case; the cost
+/// of being certain is this pause, in the one place they all go through. It
+/// must stay comfortably above one tick at any plausible `CONFIG_HZ`.
+///
+/// It lives here because the readers and the writer are in different crates
+/// and there is only one fact.
+pub const FS_TIMESTAMP_SETTLE: Duration = Duration::from_millis(50);
 
 #[macro_export]
 macro_rules! try_cf {
