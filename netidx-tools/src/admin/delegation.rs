@@ -29,8 +29,14 @@ fn describe_ids(ids: &[netidx_admin_proto::AdminServerId]) -> String {
     ids.iter().map(ToString::to_string).collect::<Vec<_>>().join(", ")
 }
 
-/// Report a resolver cluster-propagation push (idempotent — re-run to converge if a peer
-/// was down).
+/// Report which peers took the topology immediately.
+///
+/// The push is a latency optimization, not the mechanism: the CA renders every
+/// server's config and each one collects it on the register it already makes,
+/// so a peer that was unreachable here arrives at the same document within a
+/// poll interval on its own. So an unreachable peer is "not yet", not a
+/// failure, and there is nothing for the operator to re-run — saying otherwise
+/// sends them to do work the system is already doing.
 fn report_peers(subject: &str, peers: &[PeerResult]) {
     let failed: Vec<_> = peers.iter().filter(|p| p.error.is_some()).collect();
     if failed.is_empty() {
@@ -38,7 +44,7 @@ fn report_peers(subject: &str, peers: &[PeerResult]) {
         return;
     }
     println!(
-        "{subject}: {} of {} resolver cluster peer(s) could NOT be updated:",
+        "{subject}: recorded; {} of {} resolver cluster peer(s) did not take it now:",
         failed.len(),
         peers.len()
     );
@@ -51,8 +57,8 @@ fn report_peers(subject: &str, peers: &[PeerResult]) {
         );
     }
     println!(
-        "  the resolver cluster is INCONSISTENT until every peer is updated. The push is \
-         idempotent — re-run this command once the failed peer(s) are back."
+        "  they converge on it at their next register — nothing to re-run. \
+         `netidx admin drift` says who has."
     );
 }
 
