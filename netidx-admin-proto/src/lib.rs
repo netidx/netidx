@@ -766,6 +766,22 @@ pub struct EnrollRequest {
     #[serde(default)]
     #[pack(default)]
     pub replaces: Option<AdminServerId>,
+    /// This host's resolver config as it was installed, verbatim.
+    ///
+    /// It carries the half the CA cannot otherwise know: the bind address, the
+    /// paths to this host's certificate and key, its pid file, its id-map
+    /// socket, its tuning, and where its permissions file lives. Handing it
+    /// over here — once, at enrollment, from the only party that knows it — is
+    /// what lets the CA be authoritative for the whole document afterwards
+    /// rather than patching topology into a file it does not understand and
+    /// preserving the rest by matching addresses.
+    ///
+    /// Its topology fields are ignored; the CA renders those from the map.
+    ///
+    /// `None` from a host with no resolver.
+    #[serde(default)]
+    #[pack(default)]
+    pub resolver_config: Option<netidx::resolver_server::config::file::Config>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Pack, PartialEq, Eq)]
@@ -786,6 +802,22 @@ pub struct EnrollmentRequest {
     #[serde(default)]
     #[pack(default)]
     pub replaces: Option<AdminServerId>,
+    /// This host's resolver config as it was installed, verbatim.
+    ///
+    /// It carries the half the CA cannot otherwise know: the bind address, the
+    /// paths to this host's certificate and key, its pid file, its id-map
+    /// socket, its tuning, and where its permissions file lives. Handing it
+    /// over here — once, at enrollment, from the only party that knows it — is
+    /// what lets the CA be authoritative for the whole document afterwards
+    /// rather than patching topology into a file it does not understand and
+    /// preserving the rest by matching addresses.
+    ///
+    /// Its topology fields are ignored; the CA renders those from the map.
+    ///
+    /// `None` from a host with no resolver.
+    #[serde(default)]
+    #[pack(default)]
+    pub resolver_config: Option<netidx::resolver_server::config::file::Config>,
 }
 
 /// Response to both [`Request::Sign`] and [`Request::Enroll`].
@@ -1280,6 +1312,12 @@ pub struct RegisterRequest {
     #[serde(default)]
     #[pack(default)]
     pub perms_version: Option<u64>,
+    /// The version of the CA-rendered resolver config this host has written.
+    /// `None` from a host with no resolver, or one installed before the CA
+    /// rendered configs.
+    #[serde(default)]
+    #[pack(default)]
+    pub config_version: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Pack)]
@@ -1319,13 +1357,25 @@ pub struct DesiredUpdate {
     #[serde(default)]
     #[pack(default)]
     pub id_map: Option<VersionedIdMap>,
+    /// This server's whole resolver config, rendered by the CA from the block
+    /// this host handed over at enrollment plus its cluster's current
+    /// topology.
+    #[serde(default)]
+    #[pack(default)]
+    pub config: Option<VersionedResolverConfig>,
 }
 
 impl DesiredUpdate {
     pub fn is_empty(&self) -> bool {
-        let Self { perms, id_map } = self;
-        perms.is_none() && id_map.is_none()
+        let Self { perms, id_map, config } = self;
+        perms.is_none() && id_map.is_none() && config.is_none()
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Pack)]
+pub struct VersionedResolverConfig {
+    pub version: u64,
+    pub config: netidx::resolver_server::config::file::Config,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Pack)]
@@ -1846,6 +1896,29 @@ mod tests {
         renew_identity: Option<AdminServerId>,
     }
 
+    #[derive(netidx_derive::Pack)]
+    struct EnrollmentBeforeResolverConfig {
+        listen: SocketAddr,
+        roles: BitFlags<Role>,
+        resolver_member: Option<ResolverAddr>,
+        resolver_members: Vec<ResolverAddr>,
+        cluster: ResolverClusterPlacement,
+        replaces: Option<AdminServerId>,
+    }
+
+    #[derive(netidx_derive::Pack)]
+    struct EnrollBeforeResolverConfig {
+        credential: AdminCredential,
+        csr_pem: String,
+        listen: SocketAddr,
+        roles: BitFlags<Role>,
+        resolver_member: Option<ResolverAddr>,
+        resolver_members: Vec<ResolverAddr>,
+        cluster: ResolverClusterPlacement,
+        renew_identity: Option<AdminServerId>,
+        replaces: Option<AdminServerId>,
+    }
+
     #[test]
     fn secret_is_redacted_but_round_trips() {
         let s = Secret("hunter2".to_string());
@@ -1918,6 +1991,34 @@ mod tests {
         });
         let enroll = EnrollRequest::decode(&mut old.as_slice()).unwrap();
         assert_eq!(enroll.replaces, None);
+
+        // The resolver config a host hands the CA at enrollment. Appended, so
+        // an enrollment that predates it still decodes — and the CA renders
+        // nothing for that server rather than mistaking a later field for one.
+        let old = encode(&EnrollmentBeforeResolverConfig {
+            listen: "127.0.0.1:4565".parse().unwrap(),
+            roles: Role::Resolver.into(),
+            resolver_member: None,
+            resolver_members: Vec::new(),
+            cluster: ResolverClusterPlacement::Create { base: "/".into() },
+            replaces: None,
+        });
+        let enrollment = EnrollmentRequest::decode(&mut old.as_slice()).unwrap();
+        assert!(enrollment.resolver_config.is_none());
+
+        let old = encode(&EnrollBeforeResolverConfig {
+            credential: AdminCredential::password("admin", "pw"),
+            csr_pem: "CSR".into(),
+            listen: "127.0.0.1:4565".parse().unwrap(),
+            roles: Role::Resolver.into(),
+            resolver_member: None,
+            resolver_members: Vec::new(),
+            cluster: ResolverClusterPlacement::Create { base: "/".into() },
+            renew_identity: None,
+            replaces: None,
+        });
+        let enroll = EnrollRequest::decode(&mut old.as_slice()).unwrap();
+        assert!(enroll.resolver_config.is_none());
     }
 
     #[test]
@@ -2264,6 +2365,7 @@ mod tests {
     async fn map_messages_round_trip() {
         let (mut a, mut b) = tokio::io::duplex(4096);
         let req = Request::Register(RegisterRequest {
+            config_version: None,
             addr: "10.0.0.2:4565".parse().unwrap(),
             resolver: Some(ResolverClusterFacts {
                 members: vec![ResolverAddr {

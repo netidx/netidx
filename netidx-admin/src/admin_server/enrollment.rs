@@ -69,6 +69,7 @@ pub(super) async fn handle_enroll(
         roles: req.roles,
         resolver_member: req.resolver_member.clone(),
         resolver_members: req.resolver_members.clone(),
+        resolver_config: req.resolver_config.clone(),
         cluster: req.cluster.clone(),
         replaces: req.replaces,
     };
@@ -142,6 +143,29 @@ async fn grant_enrollment(
                 )
                 .await
                 .context("revoking the replaced server identity")?;
+            }
+            // Take ownership of this host's resolver config *before* the grant
+            // is persisted. From here the CA renders the whole document and the
+            // host stops being authoritative for any of it — including the half
+            // only it could have told us: its bind address, its certificate and
+            // key paths, its pid file, its tuning.
+            //
+            // Before, so that a failure here fails the enrollment. The other
+            // order would leave a granted server whose config the CA does not
+            // own — a server that looks managed and is not. An entry for a
+            // server whose grant then failed is harmless by comparison: nothing
+            // renders for a server that is not in the map.
+            if let Some(installed) = enrollment.resolver_config.clone() {
+                let mut configs = ca
+                    .store
+                    .desired_configs()
+                    .await
+                    .context("reading the desired resolver configs")?;
+                configs.set(server_id, installed);
+                ca.store
+                    .save_desired_configs(&configs)
+                    .await
+                    .context("recording this server's resolver config")?;
             }
             admin_domain::save_async(&config_lock, &ca_dir, &staged)
                 .await
@@ -309,6 +333,7 @@ async fn try_enroll(
             roles: req.roles,
             resolver_member: req.resolver_member.clone(),
             resolver_members: req.resolver_members.clone(),
+            resolver_config: req.resolver_config.clone(),
             cluster: req.cluster.clone(),
             replaces: req.replaces,
         };
@@ -329,6 +354,7 @@ async fn try_enroll(
             roles: req.roles,
             resolver_member: req.resolver_member.clone(),
             resolver_members: req.resolver_members.clone(),
+            resolver_config: req.resolver_config.clone(),
             cluster: req.cluster.clone(),
             replaces: req.replaces,
         }),
@@ -349,6 +375,7 @@ async fn try_enroll(
             roles: req.roles,
             resolver_member: req.resolver_member.clone(),
             resolver_members: req.resolver_members.clone(),
+            resolver_config: req.resolver_config.clone(),
             cluster: req.cluster.clone(),
             replaces: req.replaces,
         };

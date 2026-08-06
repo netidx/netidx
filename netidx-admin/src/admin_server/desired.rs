@@ -15,6 +15,7 @@
 use super::Server;
 use crate::admin_proto::{
     AdminServerId, DesiredUpdate, RegisterRequest, Role, VersionedIdMap, VersionedPerms,
+    VersionedResolverConfig,
 };
 use anyhow::{Context, Result};
 use std::sync::Arc;
@@ -56,6 +57,21 @@ pub(crate) async fn updates_for(
                 })
             });
     }
+    // Re-render this server's resolver config from its stored block and the
+    // map's current topology, every time. Rendering is a pure function of the
+    // two, so doing it here rather than fanning out over affected servers when
+    // topology moves means there is nothing to keep in sync — and the version
+    // advances only when the document actually differs, so a member chasing it
+    // can arrive.
+    updates.config = match render_config(state, server).await {
+        Ok(rendered) => rendered
+            .filter(|(version, _)| req.config_version.is_none_or(|have| have < *version)),
+        Err(e) => {
+            log::warn!("admin-server: rendering the config for {server}: {e:#}");
+            None
+        }
+    }
+    .map(|(version, config)| VersionedResolverConfig { version, config });
     if holds_id_map {
         let reported = req.id_map_version;
         updates.id_map = state
@@ -76,6 +92,33 @@ pub(crate) async fn updates_for(
     Ok(updates)
 }
 
+/// Render `server`'s resolver config and record it, returning the version it
+/// is now at. `None` when there is nothing stored to render from — a server
+/// with no resolver, or one that enrolled before the CA kept these.
+async fn render_config(
+    state: &Arc<Server>,
+    server: AdminServerId,
+) -> Result<Option<(u64, netidx::resolver_server::config::file::Config)>> {
+    state
+        .write_async(async move |state| {
+            let Some(ca) = state.ca.as_ref() else { return Ok(None) };
+            let mut stored = ca.store.desired_configs().await?;
+            let Some(config) =
+                crate::desired_config::render(&state.map, server, &stored, |cluster| {
+                    super::topology::referrals_for(&state.map, cluster)
+                })
+            else {
+                return Ok(None);
+            };
+            let (version, changed) = stored.set(server, config.clone());
+            if changed {
+                ca.store.save_desired_configs(&stored).await?;
+            }
+            Ok(Some((version, config)))
+        })
+        .await
+}
+
 /// The CA bringing itself up to its own models.
 ///
 /// Same two halves as everyone else — work out what is missing, install it —
@@ -90,38 +133,10 @@ pub(crate) async fn converge_self(state: &Arc<Server>) -> Result<()> {
         resolver: None,
         id_map_version: state.applied_id_map_version().await,
         perms_version: state.applied_perms_version().await,
+        config_version: state.applied_config_version().await,
     };
     let updates = updates_for(state, server, &req).await?;
     if updates.is_empty() { Ok(()) } else { apply(state, &updates).await }
-}
-
-/// Derive this host's resolver topology from the map and write it.
-///
-/// No wire message and no payload: the topology block of a resolver config is
-/// a pure function of the admin domain map, and every admin server already
-/// polls that map. So a member computes its own — which means a member that
-/// was down for a topology change picks it up on the poll it was making
-/// anyway, and a CA that cannot reach inward is no longer a problem for it.
-///
-/// Idempotent, and cheap when nothing changed: the apply is a no-op that
-/// rewrites nothing when the config already says this.
-pub(crate) async fn apply_topology_from_map(state: &Arc<Server>) -> Result<()> {
-    let (server, resolver_config) = state
-        .read(|state| {
-            (
-                state.cfg.server_id,
-                state.cfg.roles.resolver.as_ref().map(|r| r.config.clone()),
-            )
-        })
-        .await;
-    let Some(resolver_config) = resolver_config else { return Ok(()) };
-    let edit = state
-        .read(move |state| super::topology::topology_for_server(&state.map, server))
-        .await;
-    let Some(edit) = edit else { return Ok(()) };
-    super::apply_referral_edit_local(&state.config_lock, &resolver_config, &edit)
-        .await
-        .context("applying the topology this host's map says it should have")
 }
 
 /// Member-side: install what the CA handed back.
@@ -132,8 +147,16 @@ pub(crate) async fn apply_topology_from_map(state: &Arc<Server>) -> Result<()> {
 /// failure rather than swallowing it is what gets an operator an error instead
 /// of a server that quietly never converges.
 pub(crate) async fn apply(state: &Arc<Server>, updates: &DesiredUpdate) -> Result<()> {
-    let DesiredUpdate { perms, id_map } = updates;
+    let DesiredUpdate { perms, id_map, config } = updates;
     let mut failures = Vec::new();
+    // The resolver config first: perms are written to a path this document
+    // names, so installing them against a stale one would put them where
+    // nothing reads.
+    if let Some(c) = config
+        && let Err(e) = install_config(state, &c.config, c.version).await
+    {
+        failures.push(format!("resolver config (version {}): {e:#}", c.version));
+    }
     if let Some(p) = perms
         && let Err(e) =
             super::permissions::install_perms(state, &p.perms, Some(p.version)).await
@@ -150,4 +173,29 @@ pub(crate) async fn apply(state: &Arc<Server>, updates: &DesiredUpdate) -> Resul
     } else {
         bail!("applying the configuration the CA handed back: {}", failures.join("; "))
     }
+}
+
+/// Write the CA's rendered config into this host's resolver, stamping
+/// `version` on success.
+///
+/// Validated before it is written — `ResolverConfig::validate` runs the
+/// resolver's own `Config::from_file`, which opens the certificate and key the
+/// document names. A config this host cannot actually load is refused, and
+/// refusing leaves the version unstamped so the next register brings it again
+/// rather than the host quietly running on a file it could not parse.
+async fn install_config(
+    state: &Arc<Server>,
+    config: &netidx::resolver_server::config::file::Config,
+    version: u64,
+) -> Result<()> {
+    let path = state
+        .read(move |state| state.cfg.roles.resolver.as_ref().map(|r| r.config.clone()))
+        .await
+        .context("this host has no resolver role — nothing to install into")?;
+    let path = state.config_lock.require_contained(path)?;
+    let rc = crate::resolver::ResolverConfig::from_file(config.clone());
+    rc.validate_for_path(&path)
+        .context("the CA sent a resolver config this host cannot load")?;
+    rc.save_async(&path).await?;
+    crate::version_stamp::record(&path, version).await
 }

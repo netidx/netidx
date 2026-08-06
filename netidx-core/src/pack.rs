@@ -237,6 +237,72 @@ impl Pack for net::SocketAddr {
     }
 }
 
+/// An IP address without a port. The tag/format mirrors [`net::SocketAddr`]'s
+/// so the two read the same on the wire.
+impl Pack for net::IpAddr {
+    fn encoded_len(&self) -> usize {
+        match self {
+            net::IpAddr::V4(_) => 5,
+            net::IpAddr::V6(_) => 17,
+        }
+    }
+
+    fn encode(&self, buf: &mut impl BufMut) -> Result<(), PackError> {
+        match self {
+            net::IpAddr::V4(v4) => {
+                buf.put_u8(0);
+                buf.put_u32(u32::from_be_bytes(v4.octets()));
+            }
+            net::IpAddr::V6(v6) => {
+                buf.put_u8(1);
+                for s in &v6.segments() {
+                    buf.put_u16(*s);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn decode(buf: &mut impl Buf) -> Result<Self, PackError> {
+        match <u8 as Pack>::decode(buf)? {
+            0 => Ok(net::IpAddr::V4(net::Ipv4Addr::from(u32::to_be_bytes(
+                <u32 as Pack>::decode(buf)?,
+            )))),
+            1 => {
+                let mut segments = [0u16; 8];
+                for seg in segments.iter_mut() {
+                    *seg = <u16 as Pack>::decode(buf)?;
+                }
+                Ok(net::IpAddr::V6(net::Ipv6Addr::from(segments)))
+            }
+            _ => Err(PackError::UnknownTag),
+        }
+    }
+}
+
+/// A filesystem path, as its bytes.
+///
+/// Deliberately not portable across platforms: a path is only ever meaningful
+/// on the machine it names, so the only correct use is handing a host back a
+/// path it supplied. A non-UTF-8 path is refused rather than lossily converted,
+/// because a path that comes back different is worse than one that fails.
+impl Pack for std::path::PathBuf {
+    fn encoded_len(&self) -> usize {
+        let len = self.as_os_str().len();
+        varint_len(len as u64) + len
+    }
+
+    fn encode(&self, buf: &mut impl BufMut) -> Result<(), PackError> {
+        let Some(s) = self.to_str() else { return Err(PackError::InvalidFormat) };
+        encode_varint(s.len() as u64, buf);
+        Ok(buf.put_slice(s.as_bytes()))
+    }
+
+    fn decode(buf: &mut impl Buf) -> Result<Self, PackError> {
+        Ok(std::path::PathBuf::from(<String as Pack>::decode(buf)?))
+    }
+}
+
 impl Pack for Bytes {
     fn encoded_len(&self) -> usize {
         let len = Bytes::len(self);

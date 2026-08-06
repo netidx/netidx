@@ -700,6 +700,16 @@ impl Server {
         .await
     }
 
+    /// The version of the CA-rendered resolver config this host has written,
+    /// for its register. `None` when it runs no resolver, or when its config
+    /// has never been stamped.
+    async fn applied_config_version(&self) -> Option<u64> {
+        let path = self
+            .read(move |state| state.cfg.roles.resolver.as_ref().map(|r| r.config.clone()))
+            .await?;
+        crate::version_stamp::read(&path).await
+    }
+
     /// The perms model version this host's resolver document is at, for its
     /// register. `None` when it runs no resolver, or when its perms file has
     /// never been stamped.

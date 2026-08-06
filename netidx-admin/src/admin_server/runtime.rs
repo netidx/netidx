@@ -83,11 +83,6 @@ async fn spawn_facts_poll(state: &Arc<Server>) {
             let reached = report_facts(&state).await;
             if !state.has_ca().await {
                 refresh_map_cache(&state).await;
-                // Derived, not delivered: the topology block of a resolver
-                // config is a function of the map we just refreshed.
-                if let Err(e) = super::desired::apply_topology_from_map(&state).await {
-                    warn!("admin-server: {e:#}");
-                }
                 if reached {
                     consecutive_failures = 0;
                 } else {
@@ -223,9 +218,6 @@ pub(super) async fn report_facts(state: &Arc<Server>) -> bool {
         if let Err(e) = converge_self(state).await {
             warn!("admin-server: {e:#}");
         }
-        if let Err(e) = super::desired::apply_topology_from_map(state).await {
-            warn!("admin-server: {e:#}");
-        }
         return true;
     }
     let Some(ca_addr) = cfg.ca_addr else { return true };
@@ -245,6 +237,7 @@ pub(super) async fn report_facts(state: &Arc<Server>) -> bool {
         // itself shortly after it comes back.
         id_map_version: state.applied_id_map_version().await,
         perms_version: state.applied_perms_version().await,
+        config_version: state.applied_config_version().await,
     };
     match transport::register(&client, ca_addr, state.home_ca_der.clone(), &req).await {
         // The register carries our versions; the answer carries whatever we

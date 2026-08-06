@@ -62,6 +62,7 @@ pub mod delegation_store;
 /// a *hint* (candidate addresses, display grouping) — nothing
 /// security-relevant is decided from it. Cross-platform: a Windows
 /// workstation browses; the unix daemon advertises.
+pub mod desired_config;
 pub mod discovery;
 pub mod id_map;
 /// The CA's record of the shape every id-map host is supposed to agree on.

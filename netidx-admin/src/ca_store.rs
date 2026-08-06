@@ -25,6 +25,7 @@ use crate::{
     admin_proto::{EnrollmentRequest, NodeKind},
     atomic,
     config_lock::ConfigDirLock,
+    desired_config::DesiredConfigs,
     id_map_model::IdMapModel,
     perms_model::PermsModel,
 };
@@ -726,6 +727,34 @@ impl CAStore {
 
     fn perms_model_path(&self) -> PathBuf {
         self.dir.join("perms-model.json")
+    }
+
+    /// Each server's resolver configuration, as the CA says it should be.
+    ///
+    /// Mode 0600 rather than 0644 like the models beside it: this names the
+    /// paths to every host's certificate and private key. Not key material,
+    /// but a map of where to look for it, and the admin domain map — which is
+    /// public within the domain — is deliberately not where it lives.
+    pub async fn desired_configs(&self) -> Result<DesiredConfigs> {
+        let path = self.desired_configs_path();
+        match tokio::fs::read(&path).await {
+            Ok(bytes) => serde_json::from_slice(&bytes)
+                .with_context(|| format!("parsing {}", path.display())),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                Ok(DesiredConfigs::default())
+            }
+            Err(e) => Err(e).with_context(|| format!("reading {}", path.display())),
+        }
+    }
+
+    pub async fn save_desired_configs(&self, configs: &DesiredConfigs) -> Result<()> {
+        let bytes = serde_json::to_vec_pretty(configs)
+            .context("serializing the desired resolver configs")?;
+        atomic::write_atomic_async(&self.desired_configs_path(), &bytes, 0o600).await
+    }
+
+    fn desired_configs_path(&self) -> PathBuf {
+        self.dir.join("desired-configs.json")
     }
 
     /// Record that the id-map registration for this issuance has been

@@ -44,6 +44,7 @@ fn centralized_requirements_protect_all_mutations() {
     let operation_id = admin_proto::OperationId::new();
     assert_public(&Request::GetInfo);
     assert_node(&Request::Register(RegisterRequest {
+        config_version: None,
         addr: "127.0.0.1:4565".parse().unwrap(),
         resolver: None,
         id_map_version: None,

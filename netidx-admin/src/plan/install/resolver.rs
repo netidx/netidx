@@ -1465,6 +1465,12 @@ pub async fn enroll_admin_server(
         .find(|member| member.addr == resolver_listen)
         .cloned()
         .context("the local resolver listen address is absent from resolver members")?;
+    // The half of the resolver config the CA cannot know: this host's bind
+    // address, its certificate and key paths, its pid file, its id-map socket,
+    // its tuning. Handed over once, here, from the only party that knows it —
+    // after which the CA renders the whole document and this host stops being
+    // authoritative for any of it.
+    let installed_config = Some(resolver.as_file().clone());
     let roles = if id_map.is_some() {
         Role::Resolver | Role::IdMap
     } else {
@@ -1487,6 +1493,7 @@ pub async fn enroll_admin_server(
         roles,
         resolver_member: Some(resolver_member.clone()),
         resolver_members: resolver_members.clone(),
+        resolver_config: installed_config.clone(),
         cluster: cluster.clone(),
         replaces,
     };
@@ -1525,6 +1532,7 @@ pub async fn enroll_admin_server(
             roles,
             resolver_member,
             resolver_members,
+            installed_config,
             cluster,
             replaces,
             &net.identity,

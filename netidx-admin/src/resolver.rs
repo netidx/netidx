@@ -28,6 +28,13 @@ impl ResolverConfig {
         Ok(Self(cfg))
     }
 
+    /// Wrap a config the CA rendered. Nothing is validated here — the caller
+    /// validates against the path it is about to write, which is the only
+    /// place relative `include_permissions` entries resolve correctly.
+    pub fn from_file(cfg: file::Config) -> Self {
+        Self(cfg)
+    }
+
     pub fn load_default() -> Result<Self> {
         Self::load(paths::discover_resolver_config()?)
     }

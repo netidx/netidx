@@ -35,6 +35,7 @@ fn restore_enrollment_atomically_replaces_only_the_same_cluster_satellite() {
         auth: InfoAuth::Anonymous,
     };
     let initial = admin_proto::EnrollmentRequest {
+        resolver_config: None,
         listen: "10.0.0.10:4565".parse().unwrap(),
         roles: Role::Resolver.into(),
         resolver_member: Some(member.clone()),
@@ -77,6 +78,7 @@ fn enrollment_policy_enforces_scope_roles_and_invariants() {
         kind: netidx_admin_proto::policy::SlotKind::Role,
     };
     let request = |base: &str, roles: BitFlags<Role>| admin_proto::EnrollmentRequest {
+        resolver_config: None,
         listen: "127.0.0.1:4565".parse().unwrap(),
         roles,
         resolver_member: Some(ResolverAddr {

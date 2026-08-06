@@ -1371,22 +1371,48 @@ struct TopologyFanout {
     targets: Vec<(admin_proto::AdminServerId, SocketAddr, ReferralEdit)>,
 }
 
-/// The topology edit `server` should hold, derived from the map alone.
+/// The `parent` and `children` referrals a member of `cluster` should hold,
+/// derived from the map alone.
 ///
-/// A pure function of the map — which every admin server already polls — so a
-/// member can compute its own and apply it, and no topology needs pushing at
-/// all. `None` when the server runs no resolver, or is not in an active
-/// cluster, in which case there is no topology to hold.
-pub(super) fn topology_for_server(
+/// The same derivation `topology_edit` feeds into a push, in the form the
+/// resolver config actually stores — used by the CA when it renders a whole
+/// config, so a rendered document and a pushed edit cannot disagree about
+/// what the topology is.
+pub(super) fn referrals_for(
     map: &AdminDomainMap,
-    server_id: admin_proto::AdminServerId,
-) -> Option<ReferralEdit> {
-    let server = map.admin_servers.iter().find(|s| s.id == server_id)?;
-    let local_member = server.resolver.clone()?;
-    let cluster = server
-        .cluster
-        .and_then(|id| map.resolver_clusters.iter().find(|c| c.id == id))?;
-    Some(topology_edit(map, cluster, local_member))
+    cluster: &admin_proto::ResolverClusterEntry,
+) -> (
+    Option<netidx::resolver_server::config::file::Referral>,
+    Vec<netidx::resolver_server::config::file::Referral>,
+) {
+    use netidx::resolver_server::config::file::Referral;
+    // The ttl is what lets an edit reach clients that have already been told
+    // where a neighbouring cluster lives; without one a referral is cached for
+    // the life of the process.
+    let ttl = Some(crate::template::REFERRAL_TTL);
+    let edge = |path: &str, addrs: &[ResolverAddr]| Referral {
+        path: arcstr::ArcStr::from(path),
+        ttl,
+        addrs: addrs.iter().map(|r| (r.addr, info_to_refauth(&r.auth))).collect(),
+    };
+    let parent = cluster.parent.and_then(|id| {
+        map.resolver_clusters
+            .iter()
+            .find(|p| p.id == id)
+            .map(|p| edge(&cluster.base, &p.members))
+    });
+    let mut children: Vec<_> = cluster
+        .children
+        .iter()
+        .filter_map(|id| {
+            map.resolver_clusters
+                .iter()
+                .find(|c| c.id == *id)
+                .map(|c| edge(&c.base, &c.members))
+        })
+        .collect();
+    children.sort_by(|a, b| a.path.cmp(&b.path));
+    (parent, children)
 }
 
 fn registration_topology_fanout(
@@ -1469,12 +1495,13 @@ fn topology_edit(
 /// Hand topology edits to every registered server in the affected resolver
 /// clusters, using CA-owned routing addresses.
 ///
-/// **This is an optimization, not the mechanism.** Every admin server derives
-/// its own topology from the map it polls — see
-/// [`super::desired::apply_topology_from_map`] — so a server that misses this
-/// applies exactly the same edit within a poll interval. What the push buys is
-/// that an operator who has just moved a cluster sees it immediately instead
-/// of after 30 seconds, and gets told which members were unreachable.
+/// **This is an optimization, not the mechanism.** The CA renders every
+/// server's whole resolver config — topology included — from the map, and each
+/// server picks it up on the register it already makes, so a server that
+/// misses this ends up with exactly the same document within a poll interval.
+/// What the push buys is that an operator who has just moved a cluster sees it
+/// immediately instead of after 30 seconds, and gets told which members were
+/// unreachable.
 ///
 /// Because correctness no longer depends on it, a failure here is a warning
 /// rather than a failed operation.

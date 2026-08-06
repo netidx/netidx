@@ -336,13 +336,24 @@ pub mod file {
         path::PathBuf,
     };
 
-    /// Type of authentication to use
-    #[derive(Debug, Clone, Serialize, Deserialize)]
+    /// Type of authentication to use.
+    ///
+    /// `Pack` as well as serde: the admin plane carries a member block from a
+    /// host to the CA at enrollment, so the CA can be authoritative for that
+    /// host's resolver config afterwards. The TLS variant names *paths*, not
+    /// key material.
+    #[derive(
+        Debug, Clone, PartialEq, Eq, Serialize, Deserialize, netidx_derive::Pack,
+    )]
     #[serde(deny_unknown_fields)]
     pub enum Auth {
+        #[pack(tag(0))]
         Anonymous,
+        #[pack(tag(1))]
         Krb5(ArcStr),
+        #[pack(tag(2))]
         Local(ArcStr),
+        #[pack(tag(3))]
         Tls { name: ArcStr, trusted: ArcStr, certificate: ArcStr, private_key: ArcStr },
     }
 
@@ -358,12 +369,18 @@ pub mod file {
     }
 
     /// Type of authentication used by this `Referral`
-    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[derive(
+        Debug, Clone, PartialEq, Eq, Serialize, Deserialize, netidx_derive::Pack,
+    )]
     #[serde(deny_unknown_fields)]
     pub enum RefAuth {
+        #[pack(tag(0))]
         Anonymous,
+        #[pack(tag(1))]
         Krb5(ArcStr),
+        #[pack(tag(2))]
         Local(ArcStr),
+        #[pack(tag(3))]
         Tls(ArcStr),
     }
 
@@ -379,7 +396,9 @@ pub mod file {
     }
 
     /// A referral to another resolver server
-    #[derive(Debug, Clone, Serialize, Deserialize, Builder)]
+    #[derive(
+        Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Builder, netidx_derive::Pack,
+    )]
     #[serde(deny_unknown_fields)]
     pub struct Referral {
         /// The path where the referred cluster attaches to the tree
@@ -430,7 +449,9 @@ pub mod file {
     }
 
     /// The type of user id mapping to perform
-    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[derive(
+        Debug, Clone, PartialEq, Eq, Serialize, Deserialize, netidx_derive::Pack,
+    )]
     #[serde(deny_unknown_fields)]
     pub enum IdMapType {
         /// Don't map user ids at all
@@ -469,8 +490,15 @@ pub mod file {
         120
     }
 
-    /// Describes a member of the local resolver cluster
-    #[derive(Debug, Clone, Serialize, Deserialize, Builder)]
+    /// Describes a member of the local resolver cluster.
+    ///
+    /// `Pack` as well as serde: a host hands its own block to the CA at
+    /// enrollment, which is what lets the CA render that host's whole resolver
+    /// config afterwards rather than patching the topology into a file it does
+    /// not otherwise understand.
+    #[derive(
+        Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Builder, netidx_derive::Pack,
+    )]
     #[serde(deny_unknown_fields)]
     pub struct MemberServer {
         /// The advertised external address and port of this
@@ -546,7 +574,13 @@ pub mod file {
     ///
     /// The config file is expected to contain exactly one of these
     /// encoded as json.
-    #[derive(Debug, Clone, Serialize, Deserialize, Builder)]
+    ///
+    /// `Pack` as well as serde: the CA is authoritative for this document and
+    /// hands it to the host it belongs to. JSON stays the on-disk form, which
+    /// is what an operator reads.
+    #[derive(
+        Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Builder, netidx_derive::Pack,
+    )]
     #[serde(deny_unknown_fields)]
     pub struct Config {
         /// A list of referrals to child clusters, if any

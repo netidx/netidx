@@ -234,6 +234,7 @@ pub async fn enroll(
     netidx_admin_proto::write_msg(
         &mut s,
         &Request::Enroll(EnrollRequest {
+            resolver_config: None,
             credential: netidx_admin_proto::AdminCredential::Password { admin, password },
             csr_pem: csr_pem.to_string(),
             listen,

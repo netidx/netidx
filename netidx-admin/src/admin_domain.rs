@@ -814,6 +814,7 @@ mod tests {
     fn enrollment(base: &str, member: &str) -> EnrollmentRequest {
         let member = addr(member);
         EnrollmentRequest {
+            resolver_config: None,
             listen: "10.0.0.10:4565".parse().unwrap(),
             roles: Role::Resolver.into(),
             resolver_member: Some(member.clone()),
@@ -1274,6 +1275,7 @@ mod tests {
         let mut expanded_members = request.resolver_members.clone();
         expanded_members.push(second_member.clone());
         let join = EnrollmentRequest {
+            resolver_config: None,
             listen: "10.0.0.11:4565".parse().unwrap(),
             roles: Role::Resolver.into(),
             resolver_member: Some(second_member.clone()),
