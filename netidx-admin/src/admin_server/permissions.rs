@@ -135,6 +135,37 @@ async fn confine_local_perms(
     }
 }
 
+/// This host's own cluster's perms as the CA records them, when this host
+/// holds the CA and has recorded them.
+///
+/// `None` on a satellite — it holds no model, and its cached map is a remote
+/// hint the local socket deliberately does not trust — and `None` at a CA that
+/// has never recorded perms for this cluster, where the local file is still
+/// the only answer there is.
+async fn own_cluster_model_perms(state: &Arc<Server>) -> Option<crate::perms::PMap> {
+    if !state.has_ca().await {
+        return None;
+    }
+    let cluster = state
+        .read(move |state| {
+            state
+                .map
+                .admin_servers
+                .iter()
+                .find(|server| server.id == state.cfg.server_id)?
+                .cluster
+        })
+        .await?;
+    state
+        .read_async(async move |state| match state.ca.as_ref() {
+            Some(ca) => ca.store.perms_model().await.ok(),
+            None => None,
+        })
+        .await?
+        .get(cluster)
+        .map(|p| p.perms.clone())
+}
+
 /// Admin → CA permissions read. Authentication and policy are checked
 /// once at the CA, then registered resolver cluster members are tried in stable
 /// server-ID order using the CA certificate and exact target pinning.
@@ -164,9 +195,20 @@ pub(super) async fn handle_read_perms(
     // The protected local socket is deliberately useful on every resolver,
     // including satellites that do not have the CA role. It may read only the
     // host's own resolver cluster and never consults or trusts remote map hints.
+    //
+    // On the host that *holds* the CA, though, the model is not a hint — it is
+    // the authority, and it is on this disk. Answering from the local perms
+    // file there hands back a document up to a poll interval stale, and since
+    // every `perms set` / `perms remove` is a read-modify-write, two edits
+    // inside that window silently drop the first. That is the same failure the
+    // remote path below documents and avoids; the local path must not have its
+    // own answer to it.
     if local {
         let (server, addr) =
             state.read(move |state| (state.cfg.server_id, state.cfg.listen)).await;
+        if let Some(perms) = own_cluster_model_perms(state).await {
+            return ReadPermsResponse::Ok(ReadPermsOk { server, addr, perms });
+        }
         let read = handle_get_perms(state).await;
         return match read {
             GetPermsResponse::Ok(perms) => {

@@ -1,9 +1,55 @@
+use super::{MutableState, Server, password_limiter::PasswordLimiter};
 use crate::{
+    admin_proto::{self, AdminDomainMap},
+    admin_server_config::AdminServerConfig,
     ca::{Ca, CaParams, MIN_KEY_BITS, Subject},
     ca_store,
     config_lock::ConfigDirLock,
 };
-use std::{io::Cursor, path::Path, time::Duration};
+use rustls::RootCertStore;
+use rustls_pki_types::CertificateDer;
+use std::{io::Cursor, path::Path, path::PathBuf, sync::Arc, time::Duration};
+
+/// A [`Server`] with no listener and no identity, for testing the request
+/// handlers directly. `ca` decides whether this host holds the CA, which is
+/// the axis most of the interesting behaviour turns on.
+pub(super) fn test_server(ca: Option<ca_store::CaDir>) -> Arc<Server> {
+    let id = admin_proto::AdminServerId::new();
+    let config_lock =
+        ca.as_ref().map(ca_store::CaDir::config_lock).unwrap_or_else(|| {
+            let root = tempfile::tempdir().unwrap().keep().join("config");
+            ConfigDirLock::acquire(root).unwrap()
+        });
+    Server::from_state(
+        config_lock,
+        None,
+        MutableState {
+            cfg: AdminServerConfig {
+                domain: String::new(),
+                server_id: id,
+                home_ca_fingerprint: String::new(),
+                listen: "127.0.0.1:0".parse().unwrap(),
+                serving_cert: PathBuf::new(),
+                serving_key: PathBuf::new(),
+                trusted: PathBuf::new(),
+                roles: crate::admin_server_config::Roles::default(),
+                ca_addr: Some("127.0.0.1:0".parse().unwrap()),
+                peers: Vec::new(),
+                mdns: false,
+                activation_units_dir: None,
+            },
+            map: AdminDomainMap::empty(id),
+            ca,
+            password_limiter: PasswordLimiter::default(),
+        },
+        None,
+        Vec::new(),
+        Vec::new(),
+        RootCertStore::empty(),
+        CertificateDer::from(Vec::new()),
+    )
+    .unwrap()
+}
 
 pub(super) async fn signed_empty_crl(dir: &Path, name: &str) -> (String, Vec<u8>) {
     let ca = Ca::init(

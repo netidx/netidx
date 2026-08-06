@@ -127,43 +127,7 @@ mod state_tests {
         assert!(ConfigDirLock::acquire(&ca_dir).is_err());
     }
 
-    fn test_server(ca: Option<ca_store::CaDir>) -> Arc<Server> {
-        let id = admin_proto::AdminServerId::new();
-        let config_lock =
-            ca.as_ref().map(ca_store::CaDir::config_lock).unwrap_or_else(|| {
-                let root = tempfile::tempdir().unwrap().keep().join("config");
-                ConfigDirLock::acquire(root).unwrap()
-            });
-        Server::from_state(
-            config_lock,
-            None,
-            MutableState {
-                cfg: AdminServerConfig {
-                    domain: String::new(),
-                    server_id: id,
-                    home_ca_fingerprint: String::new(),
-                    listen: "127.0.0.1:0".parse().unwrap(),
-                    serving_cert: PathBuf::new(),
-                    serving_key: PathBuf::new(),
-                    trusted: PathBuf::new(),
-                    roles: crate::admin_server_config::Roles::default(),
-                    ca_addr: Some("127.0.0.1:0".parse().unwrap()),
-                    peers: Vec::new(),
-                    mdns: false,
-                    activation_units_dir: None,
-                },
-                map: AdminDomainMap::empty(id),
-                ca,
-                password_limiter: PasswordLimiter::default(),
-            },
-            None,
-            Vec::new(),
-            Vec::new(),
-            RootCertStore::empty(),
-            CertificateDer::from(Vec::new()),
-        )
-        .unwrap()
-    }
+    use super::test_support::test_server;
 
     fn limiter_server() -> Arc<Server> {
         test_server(None)
