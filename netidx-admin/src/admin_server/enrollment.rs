@@ -167,6 +167,9 @@ async fn grant_enrollment(
                     .await
                     .context("recording this server's resolver config")?;
             }
+            grant_member_self_perms(ca, &mut staged, cluster, &enrollment)
+                .await
+                .context("granting the enrolling member its own permissions")?;
             admin_domain::save_async(&config_lock, &ca_dir, &staged)
                 .await
                 .context("persisting the enrollment grant")?;
@@ -182,6 +185,81 @@ async fn grant_enrollment(
             Ok(cluster)
         })
         .await
+}
+
+/// Add the enrolling member's own identity to its resolver cluster's
+/// permissions.
+///
+/// A resolver host uses its own certificate as a client — that is what makes
+/// `netidx resolver list` work on the box, and the installer drops a
+/// `client.json` for it — so its identity needs rights at the cluster base.
+/// The installer used to write that grant into the host's own perms file,
+/// which is how two members of one cluster came to hold different documents:
+/// each granted itself and not the other, so the same subscription authorized
+/// differently depending on which member it reached, and the first CA edit
+/// then propagated one host's document over everyone else's, silently revoking
+/// one grant and extending another's across the cluster.
+///
+/// Permissions belong to the resolver cluster, so the CA owns them and a
+/// member never does. The grant is *derived* from what the CA is issuing
+/// rather than requested by the enrollee: the only entry a host could
+/// legitimately ask for is the one for the identity the CA is about to give
+/// it, and the CA already knows that — so there is nothing here an enrollee
+/// could ask for on someone else's behalf.
+async fn grant_member_self_perms(
+    ca: &ca_store::CaDir,
+    map: &mut AdminDomainMap,
+    cluster: admin_proto::ResolverClusterId,
+    enrollment: &admin_proto::EnrollmentRequest,
+) -> Result<()> {
+    let Some(member) = enrollment.resolver_member.as_ref() else { return Ok(()) };
+    // Anonymous has no identity, and local auth is peer credentials with no
+    // fixed name — neither is an entity permissions can name.
+    let entity = match &member.auth {
+        admin_proto::InfoAuth::Tls { name } => name.as_str(),
+        admin_proto::InfoAuth::Krb5 { spn } => spn.as_str(),
+        admin_proto::InfoAuth::Anonymous => return Ok(()),
+    };
+    let base = map
+        .resolver_clusters
+        .iter()
+        .find(|c| c.id == cluster)
+        .context("the enrolled grant references a missing resolver cluster")?
+        .base
+        .clone();
+    let mut model = ca.store.perms_model().await?;
+    let mut perms = match model.get(cluster) {
+        Some(recorded) => recorded.perms.clone(),
+        // The first member of a new cluster: start from the shared seed, so a
+        // cluster has a document from the moment it exists rather than from
+        // whenever someone first edits it.
+        None => crate::perms::default_seed(&base, seed_groups(enrollment)),
+    };
+    crate::perms::add_entry(&mut perms, &base, entity, "swlpd")
+        .with_context(|| format!("granting {entity} swlpd at {base}"))?;
+    let version = model.set(cluster, &perms)?;
+    ca.store.save_perms_model(&model).await?;
+    admin_domain::set_perms_version(map, cluster, version);
+    Ok(())
+}
+
+/// Whether this cluster's seed should carry the shared `users` group grant.
+///
+/// The seed's shared entry names a group, and with no id mapping there are no
+/// groups to be a member of, so it would grant nothing to nobody.
+fn seed_groups(enrollment: &admin_proto::EnrollmentRequest) -> crate::perms::Groups {
+    use netidx::resolver_server::config::file::IdMapType;
+    let mapped = enrollment.resolver_config.as_ref().is_none_or(|config| {
+        config
+            .member_servers
+            .first()
+            .is_none_or(|m| !matches!(m.id_map_type, IdMapType::DoNotMap))
+    });
+    if mapped {
+        crate::perms::Groups::Resolve
+    } else {
+        crate::perms::Groups::DoNotResolve
+    }
 }
 
 /// Stage a new enrollment and, for restore, atomically replace the failed

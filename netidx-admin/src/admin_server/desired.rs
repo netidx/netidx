@@ -180,6 +180,73 @@ async fn adopt_own_config(state: &Arc<Server>) -> Result<()> {
         .context("recording the CA host's own resolver config")
 }
 
+/// Take ownership of this cluster's permissions, once, from the CA host's own
+/// installed file.
+///
+/// Permissions are a property of a resolver cluster, not of a host: every
+/// member answers the same subscriber, so members holding different documents
+/// authorize differently depending on which one a client happens to reach. The
+/// installer nonetheless seeds each host a file of its own, which made that the
+/// state every cluster started in — and made the first CA edit silently replace
+/// one host's grants with another's, because the edit propagates one document
+/// to everyone.
+///
+/// So the CA adopts its own installed document as the cluster's, and from then
+/// on it is the only writer; each member that enrols has its own grant added to
+/// it (see the enrollment path) rather than keeping a private copy.
+///
+/// Once, when absent, for the same reason [`adopt_own_config`] is: after that
+/// the CA is authoritative and a local edit must not be able to overwrite it.
+async fn adopt_own_perms(state: &Arc<Server>) -> Result<()> {
+    let Some(cluster) = state
+        .read(|state| {
+            state
+                .map
+                .admin_servers
+                .iter()
+                .find(|server| server.id == state.cfg.server_id)?
+                .cluster
+        })
+        .await
+    else {
+        return Ok(());
+    };
+    let established = state
+        .read_async(async move |state| match state.ca.as_ref() {
+            Some(ca) => {
+                ca.store.perms_model().await.ok().map(|m| m.get(cluster).is_some())
+            }
+            None => None,
+        })
+        .await;
+    if established != Some(false) {
+        return Ok(());
+    }
+    let path = super::permissions::local_perms_file(state).await?;
+    let perms = crate::perms::load_perms_async(&path)
+        .await
+        .with_context(|| format!("reading our own perms {}", path.display()))?;
+    let config_lock = state.config_lock.clone();
+    let ca_dir = state.ca_dir().await.context("this host does not hold the CA")?;
+    state
+        .write_async(async move |state| {
+            let Some(ca) = state.ca.as_ref() else { return Ok::<_, anyhow::Error>(()) };
+            let mut model = ca.store.perms_model().await?;
+            if model.get(cluster).is_some() {
+                return Ok(());
+            }
+            let version = model.set(cluster, &perms)?;
+            ca.store.save_perms_model(&model).await?;
+            if crate::admin_domain::set_perms_version(&mut state.map, cluster, version) {
+                crate::admin_domain::save_async(&config_lock, &ca_dir, &state.map)
+                    .await?;
+            }
+            Ok::<_, anyhow::Error>(())
+        })
+        .await
+        .context("recording the CA host's cluster permissions")
+}
+
 /// The CA bringing itself up to its own models.
 ///
 /// Same two halves as everyone else — work out what is missing, install it —
@@ -188,6 +255,7 @@ async fn adopt_own_config(state: &Arc<Server>) -> Result<()> {
 /// holding the models would come to disagree with them.
 pub(crate) async fn converge_self(state: &Arc<Server>) -> Result<()> {
     adopt_own_config(state).await?;
+    adopt_own_perms(state).await?;
     let (server, addr) =
         state.read(|state| (state.cfg.server_id, state.cfg.listen)).await;
     let req = RegisterRequest {
