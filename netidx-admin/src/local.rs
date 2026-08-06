@@ -342,7 +342,10 @@ pub async fn list_admins(
 /// Read this resolver host's own permissions over the protected local socket.
 /// The daemon confines `target_path` to its configured resolver cluster; no
 /// admin domain map or remote discovery hint participates in this operation.
-pub async fn read_perms(cfg_path: &Path, target_path: &str) -> Result<String> {
+pub async fn read_perms(
+    cfg_path: &Path,
+    target_path: &str,
+) -> Result<crate::perms::PMap> {
     let mut s = connect(cfg_path).await?;
     let (admin, password) = no_creds();
     netidx_admin_proto::write_msg(
@@ -354,12 +357,12 @@ pub async fn read_perms(cfg_path: &Path, target_path: &str) -> Result<String> {
     )
     .await?;
     match netidx_admin_proto::read_msg::<_, ReadPermsResponse>(&mut s).await? {
-        ReadPermsResponse::Ok(ReadPermsOk { perms_json, .. }) => Ok(perms_json),
+        ReadPermsResponse::Ok(ReadPermsOk { perms, .. }) => Ok(perms),
         ReadPermsResponse::Err { reason } => bail!("the admin daemon refused: {reason}"),
     }
 }
 
-/// Replace the `target_path` resolver cluster's permissions with `perms_json`. The
+/// Replace the `target_path` resolver cluster's permissions with `perms`. The
 /// daemon authorizes this local caller as a signing superuser (the
 /// `SO_PEERCRED` gate is the authorization — no admin password), then routes
 /// by the admin domain map and propagates the edit to every member of the target
@@ -368,7 +371,7 @@ pub async fn read_perms(cfg_path: &Path, target_path: &str) -> Result<String> {
 pub async fn edit_perms(
     cfg_path: &Path,
     target_path: &str,
-    perms_json: &str,
+    perms: &crate::perms::PMap,
 ) -> Result<Vec<PeerResult>> {
     let mut s = connect(cfg_path).await?;
     let (admin, password) = no_creds();
@@ -377,7 +380,7 @@ pub async fn edit_perms(
         &Request::EditPerms(EditPermsRequest {
             credential: netidx_admin_proto::AdminCredential::Password { admin, password },
             target_path: target_path.to_string(),
-            perms_json: perms_json.to_string(),
+            perms: perms.clone(),
         }),
     )
     .await?;

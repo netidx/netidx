@@ -12,6 +12,7 @@ use super::{AdminTarget, AppliedEdit};
 use crate::local;
 use crate::{
     admin_proto::{NodeKind, PeerResult},
+    perms::PMap,
     transport,
 };
 use anyhow::{Context, Result};
@@ -23,7 +24,7 @@ use std::collections::BTreeSet;
 /// admin, and this host's own daemon trusts the `SO_PEERCRED` superuser over
 /// its control socket. Which one is in hand is [`AdminTarget`]'s business, not
 /// a frontend's.
-pub async fn show_perms(target: &AdminTarget, at: &str) -> Result<String> {
+pub async fn show_perms(target: &AdminTarget, at: &str) -> Result<PMap> {
     match target {
         AdminTarget::Remote { session } => {
             transport::read_perms(
@@ -40,18 +41,17 @@ pub async fn show_perms(target: &AdminTarget, at: &str) -> Result<String> {
     }
 }
 
-/// Hand already-edited, already-validated perms JSON to the CA, which
-/// re-validates and propagates it to every member of the resolver cluster
-/// mounted at `at`. Returns the per-peer results, so a partial failure
-/// surfaces rather than reading as success.
+/// Hand an edited document to the CA, which re-checks it and propagates it to
+/// every member of the resolver cluster mounted at `at`. Returns the per-peer
+/// results, so a partial failure surfaces rather than reading as success.
 ///
 /// The `$EDITOR` loop stays in the frontend — suspending a terminal and
-/// offering a text area are different gestures. [`crate::perms::validate`] is
-/// the rule it validates against.
+/// offering a text area are different gestures — and so does the rendering it
+/// needs: [`crate::perms::render`] out, [`crate::perms::parse`] back.
 pub async fn edit_perms(
     target: &AdminTarget,
     at: &str,
-    edited: &str,
+    edited: &PMap,
 ) -> Result<Vec<PeerResult>> {
     match target {
         AdminTarget::Remote { session } => {
@@ -70,13 +70,22 @@ pub async fn edit_perms(
     }
 }
 
+/// The cluster's document, checked before an edit is built on top of it. Bits
+/// that don't parse are something to tell the operator about, not something to
+/// carry forward into the next edit.
+async fn basis(target: &AdminTarget, at: &str) -> Result<PMap> {
+    let pmap = show_perms(target, at).await?;
+    crate::perms::check(&pmap)
+        .context("the resolver cluster's current perms are not valid")?;
+    Ok(pmap)
+}
+
 /// Grant `entity` `bits` at `path`, inserting or replacing that one entry in
 /// the perms of the resolver cluster mounted at `at`.
 ///
 /// Read-modify-write against the whole document, because that is the only
 /// shape the admin plane has: [`show_perms`], mutate, [`edit_perms`]. Doing it
-/// here rather than in a frontend keeps one implementation for all three, and
-/// keeps the JSON surgery away from code whose job is to print.
+/// here rather than in a frontend keeps one implementation for all three.
 pub async fn set_entry(
     target: &AdminTarget,
     at: &str,
@@ -85,12 +94,11 @@ pub async fn set_entry(
     bits: &str,
 ) -> Result<AppliedEdit> {
     crate::perms::validate_bits(bits)?;
-    let mut pmap = crate::perms::validate(&show_perms(target, at).await?)
-        .context("the resolver cluster's current perms are not valid")?;
+    let mut pmap = basis(target, at).await?;
     let changed =
         crate::perms::lookup(&pmap, path, entity).map(|b| b.as_str()) != Some(bits);
     crate::perms::add_entry(&mut pmap, path, entity, bits)?;
-    Ok(AppliedEdit { changed, peers: propagate(target, at, &pmap).await? })
+    Ok(AppliedEdit { changed, peers: edit_perms(target, at, &pmap).await? })
 }
 
 /// Remove `entity`'s entry at `path` from the perms of the resolver cluster
@@ -108,19 +116,9 @@ pub async fn remove_entry(
     path: &str,
     entity: &str,
 ) -> Result<AppliedEdit> {
-    let mut pmap = crate::perms::validate(&show_perms(target, at).await?)
-        .context("the resolver cluster's current perms are not valid")?;
+    let mut pmap = basis(target, at).await?;
     let changed = crate::perms::remove_entry(&mut pmap, path, entity);
-    Ok(AppliedEdit { changed, peers: propagate(target, at, &pmap).await? })
-}
-
-async fn propagate(
-    target: &AdminTarget,
-    at: &str,
-    pmap: &crate::perms::PMap,
-) -> Result<Vec<PeerResult>> {
-    let edited = serde_json::to_string(pmap).context("serializing perms")?;
-    edit_perms(target, at, &edited).await
+    Ok(AppliedEdit { changed, peers: edit_perms(target, at, &pmap).await? })
 }
 
 /// The exact `--at` targets a perms read or edit can route to.

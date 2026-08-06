@@ -55,15 +55,14 @@ fn perms_path_from_config(
     Ok(base.join(inc.as_str()))
 }
 
-/// Read the local resolver's perms file, serialized for the wire.
+/// Read the local resolver's perms file.
 pub(super) async fn handle_get_perms(state: &Server) -> GetPermsResponse {
     let read = async {
         let path = local_perms_path(state).await?;
-        let pmap = crate::perms::load_perms_async(&path).await?;
-        serde_json::to_string(&pmap).context("serializing perms")
+        crate::perms::load_perms_async(&path).await
     };
     match read.await {
-        Ok(perms_json) => GetPermsResponse::Ok(perms_json),
+        Ok(perms) => GetPermsResponse::Ok(perms),
         Err(e) => GetPermsResponse::Err { reason: format!("{e:#}") },
     }
 }
@@ -171,8 +170,8 @@ pub(super) async fn handle_read_perms(
             state.read(move |state| (state.cfg.server_id, state.cfg.listen)).await;
         let read = handle_get_perms(state).await;
         return match read {
-            GetPermsResponse::Ok(perms_json) => {
-                ReadPermsResponse::Ok(ReadPermsOk { server, addr, perms_json })
+            GetPermsResponse::Ok(perms) => {
+                ReadPermsResponse::Ok(ReadPermsOk { server, addr, perms })
             }
             GetPermsResponse::Err { reason } => err(reason),
         };
@@ -204,11 +203,7 @@ pub(super) async fn handle_read_perms(
     {
         let (server, addr) =
             state.read(move |state| (state.cfg.server_id, state.cfg.listen)).await;
-        return ReadPermsResponse::Ok(ReadPermsOk {
-            server,
-            addr,
-            perms_json: perms.doc,
-        });
+        return ReadPermsResponse::Ok(ReadPermsOk { server, addr, perms: perms.perms });
     }
     audit(
         &state.ca_dir().await.expect("CA role held"),
@@ -232,8 +227,8 @@ pub(super) async fn handle_read_perms(
         )
         .await;
         match result {
-            Ok(Ok(perms_json)) => {
-                return ReadPermsResponse::Ok(ReadPermsOk { server, addr, perms_json });
+            Ok(Ok(perms)) => {
+                return ReadPermsResponse::Ok(ReadPermsOk { server, addr, perms });
             }
             Ok(Err(e)) => failures.push(format!("{server} at {addr}: {e:#}")),
             Err(_) => failures.push(format!(
@@ -257,10 +252,15 @@ pub(super) async fn local_perms_file(state: &Server) -> Result<PathBuf> {
 
 async fn apply_perms_local(
     state: &Server,
-    perms_json: &str,
+    perms: &crate::perms::PMap,
     version: Option<u64>,
 ) -> Result<()> {
-    let pmap = crate::perms::validate(perms_json).context("parsing the new perms")?;
+    // The bits are opaque strings in a `PMap`, so arriving as a structure
+    // proves nothing about them. A peer is not more trustworthy than a
+    // keyboard, and nothing downstream looks at them until a resolver loads
+    // the file.
+    crate::perms::check(perms).context("checking the new perms")?;
+    let pmap = perms.clone();
     let config_lock = state.config_lock.clone();
     state
         .write_async(async move |state| {
@@ -305,7 +305,7 @@ pub(super) async fn handle_apply_perms_edit(
     req: &ApplyPermsEditRequest,
 ) -> ApplyPermsEditResponse {
     info!("admin-server: applying permissions operation {}", req.operation_id);
-    match apply_perms_local(state, &req.perms_json, req.version).await {
+    match apply_perms_local(state, &req.perms, req.version).await {
         Ok(()) => ApplyPermsEditResponse::Ok(()),
         Err(e) => ApplyPermsEditResponse::Err { reason: format!("{e:#}") },
     }
@@ -340,7 +340,7 @@ fn cluster_for(
 /// as a `PeerResult` carrying its immutable identity and current address.
 async fn push_perms_edit_to_peers(
     state: &Arc<Server>,
-    perms_json: &str,
+    perms: &crate::perms::PMap,
     targets: &[(admin_proto::AdminServerId, SocketAddr)],
     operation_id: admin_proto::OperationId,
     version: u64,
@@ -374,7 +374,7 @@ async fn push_perms_edit_to_peers(
                         server == ca,
                         home_ca,
                         operation_id,
-                        perms_json,
+                        perms,
                         Some(version),
                     ),
                 )
@@ -428,7 +428,7 @@ pub(super) async fn reconcile_to_member(
         .await;
     }
     if server == ca {
-        return apply_perms_local(state, &perms.doc, Some(perms.version)).await;
+        return apply_perms_local(state, &perms.perms, Some(perms.version)).await;
     }
     let client = state.outbound_client().await?;
     tokio::time::timeout(
@@ -440,7 +440,7 @@ pub(super) async fn reconcile_to_member(
             false,
             state.home_ca_der.clone(),
             operation_id,
-            &perms.doc,
+            &perms.perms,
             Some(perms.version),
         ),
     )
@@ -466,7 +466,7 @@ pub(super) async fn perms_behind(
     model.is_some_and(|model| model.behind(cluster, reported))
 }
 
-/// Record `perms_json` as `cluster`'s authoritative permissions, returning the
+/// Record `perms` as `cluster`'s authoritative permissions, returning the
 /// version it is now at.
 ///
 /// Under the state write lock, so two concurrent edits cannot both read the
@@ -475,15 +475,15 @@ pub(super) async fn perms_behind(
 pub(super) async fn record_in_model(
     state: &Arc<Server>,
     cluster: admin_proto::ResolverClusterId,
-    perms_json: &str,
+    perms: &crate::perms::PMap,
 ) -> Result<u64> {
-    let perms_json = perms_json.to_string();
+    let perms = perms.clone();
     state
         .write_async(async move |state| {
             let store =
                 &state.ca.as_ref().context("this host does not hold the CA")?.store;
             let mut model = store.perms_model().await?;
-            let version = model.set(cluster, &perms_json)?;
+            let version = model.set(cluster, &perms)?;
             store.save_perms_model(&model).await?;
             Ok(version)
         })
@@ -532,7 +532,7 @@ pub(super) async fn handle_edit_perms(
     // it. Until now the CA kept no copy, so a member that missed a push was a
     // candidate source of truth for the *next* edit — which is how a stale
     // document gets read back and propagated over everyone else's correct one.
-    let version = match record_in_model(state, cluster, &req.perms_json).await {
+    let version = match record_in_model(state, cluster, &req.perms).await {
         Ok(version) => version,
         Err(e) => return err(format!("{e:#}")),
     };
@@ -546,7 +546,7 @@ pub(super) async fn handle_edit_perms(
     )
     .await;
     let peers =
-        push_perms_edit_to_peers(state, &req.perms_json, &members, operation_id, version)
+        push_perms_edit_to_peers(state, &req.perms, &members, operation_id, version)
             .await;
     EditPermsResponse::Ok(PropagationOk { operation_id, peers })
 }

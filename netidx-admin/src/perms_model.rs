@@ -11,8 +11,8 @@
 //! — which is why this needs no diff: a member that is behind is simply sent
 //! the document. See `design/perms-convergence.md`.
 
-use crate::admin_proto::ResolverClusterId;
-use anyhow::{Context, Result};
+use crate::{admin_proto::ResolverClusterId, perms::PMap};
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -26,10 +26,10 @@ pub struct ClusterPerms {
     /// version 0, so a CA that has lost this file leaves every member alone
     /// rather than pushing an empty document at a working cluster.
     pub version: u64,
-    /// Canonical perms JSON, as [`crate::perms::normalize`] produces it.
-    /// Canonical so that comparing two documents compares their content
-    /// rather than their whitespace.
-    pub doc: String,
+    /// The document itself. A structure rather than its JSON, so comparing two
+    /// of them compares their content — whitespace was never a difference, and
+    /// when this was text it took a normalization pass to say so.
+    pub perms: PMap,
 }
 
 /// Every cluster's perms, by cluster. One file: clusters are few, and one
@@ -43,24 +43,22 @@ impl PermsModel {
         self.0.get(&cluster).filter(|p| p.version > 0)
     }
 
-    /// Record `doc` as `cluster`'s permissions, returning the version it is
+    /// Record `perms` as `cluster`'s permissions, returning the version it is
     /// now at.
     ///
-    /// The document is normalized first, so a re-propagation of the same
-    /// permissions written differently is recognised as no change and does
-    /// not advance the version — otherwise every re-run of a command to
-    /// converge a lagging member would move the target it is chasing.
-    pub fn set(&mut self, cluster: ResolverClusterId, doc: &str) -> Result<u64> {
-        let doc = crate::perms::normalize(doc)
-            .context("normalizing permissions for the model")?;
+    /// Re-recording the same permissions does not advance the version —
+    /// otherwise every re-run of a command to converge a lagging member would
+    /// move the target it is chasing.
+    pub fn set(&mut self, cluster: ResolverClusterId, perms: &PMap) -> Result<u64> {
+        crate::perms::check(perms)?;
         let entry = self
             .0
             .entry(cluster)
-            .or_insert(ClusterPerms { version: 0, doc: String::new() });
-        if entry.version > 0 && entry.doc == doc {
+            .or_insert(ClusterPerms { version: 0, perms: crate::perms::empty() });
+        if entry.version > 0 && &entry.perms == perms {
             return Ok(entry.version);
         }
-        entry.doc = doc;
+        entry.perms = perms.clone();
         entry.version += 1;
         Ok(entry.version)
     }
@@ -86,8 +84,13 @@ impl PermsModel {
 mod tests {
     use super::*;
 
-    const A: &str = r#"{"/eu":{"alice":"swlpd"}}"#;
-    const B: &str = r#"{"/eu":{"alice":"sl"}}"#;
+    fn a() -> PMap {
+        crate::perms::parse(r#"{"/eu":{"alice":"swlpd"}}"#).unwrap()
+    }
+
+    fn b() -> PMap {
+        crate::perms::parse(r#"{"/eu":{"alice":"sl"}}"#).unwrap()
+    }
 
     fn cluster() -> ResolverClusterId {
         ResolverClusterId::new()
@@ -98,24 +101,27 @@ mod tests {
         let id = cluster();
         let mut model = PermsModel::default();
         assert!(model.get(id).is_none());
-        assert_eq!(model.set(id, A).unwrap(), 1);
+        assert_eq!(model.set(id, &a()).unwrap(), 1);
         assert_eq!(model.get(id).unwrap().version, 1);
     }
 
     /// Re-propagating the same permissions must not advance the version. A
     /// member converging on the model is chasing that number; moving it on
     /// every retry would mean it could never arrive.
+    ///
+    /// Formatting cannot enter into it any more — the model holds a structure,
+    /// so a document that differs only in whitespace is not a different
+    /// document by construction rather than by a normalization pass.
     #[test]
     fn the_same_document_does_not_advance_the_version() {
         let id = cluster();
         let mut model = PermsModel::default();
-        assert_eq!(model.set(id, A).unwrap(), 1);
-        assert_eq!(model.set(id, A).unwrap(), 1);
-        // Same content, different formatting.
-        let spaced = r#"{ "/eu" : { "alice" : "swlpd" } }"#;
-        assert_eq!(model.set(id, spaced).unwrap(), 1);
+        assert_eq!(model.set(id, &a()).unwrap(), 1);
+        assert_eq!(model.set(id, &a()).unwrap(), 1);
+        let spaced = crate::perms::parse(r#"{ "/eu" : { "alice" : "swlpd" } }"#).unwrap();
+        assert_eq!(model.set(id, &spaced).unwrap(), 1);
         // A real change does advance it.
-        assert_eq!(model.set(id, B).unwrap(), 2);
+        assert_eq!(model.set(id, &b()).unwrap(), 2);
     }
 
     /// Each cluster is versioned on its own. An edit to one must not make
@@ -124,27 +130,34 @@ mod tests {
     fn clusters_are_versioned_independently() {
         let (eu, ap) = (cluster(), cluster());
         let mut model = PermsModel::default();
-        model.set(eu, A).unwrap();
-        model.set(eu, B).unwrap();
-        model.set(ap, A).unwrap();
+        model.set(eu, &a()).unwrap();
+        model.set(eu, &b()).unwrap();
+        model.set(ap, &a()).unwrap();
         assert_eq!(model.get(eu).unwrap().version, 2);
         assert_eq!(model.get(ap).unwrap().version, 1);
     }
 
+    /// Bad bits are refused even though they arrive as a structure. `PMap`
+    /// keeps them as opaque strings, so the type does not make this
+    /// unrepresentable and the check still has to run.
     #[test]
     fn invalid_permissions_are_refused_rather_than_recorded() {
         let id = cluster();
         let mut model = PermsModel::default();
-        assert!(model.set(id, r#"{"/eu":{"alice":"swx"}}"#).is_err());
+        let mut bad = crate::perms::empty();
+        bad.0
+            .entry(arcstr::ArcStr::from("/eu"))
+            .or_default()
+            .insert(arcstr::ArcStr::from("alice"), arcstr::ArcStr::from("swx"));
+        assert!(model.set(id, &bad).is_err());
         assert!(model.get(id).is_none(), "a refused edit must not establish it");
-        assert!(model.set(id, "not json").is_err());
     }
 
     #[test]
     fn a_forgotten_cluster_is_unknown_again() {
         let id = cluster();
         let mut model = PermsModel::default();
-        model.set(id, A).unwrap();
+        model.set(id, &a()).unwrap();
         assert!(model.forget(id));
         assert!(model.get(id).is_none());
         assert!(!model.forget(id));
@@ -157,11 +170,11 @@ mod tests {
         // Nothing established: nobody is behind, whatever they report.
         assert!(!model.behind(eu, None));
         assert!(!model.behind(eu, Some(7)));
-        model.set(eu, A).unwrap();
+        model.set(eu, &a()).unwrap();
         // Never stamped is behind anything established.
         assert!(model.behind(eu, None));
         assert!(!model.behind(eu, Some(1)));
-        model.set(eu, B).unwrap();
+        model.set(eu, &b()).unwrap();
         assert!(model.behind(eu, Some(1)));
         assert!(!model.behind(eu, Some(2)));
         // A member reporting a version from the future is not behind — it is
@@ -175,7 +188,7 @@ mod tests {
     fn round_trips_through_json() {
         let id = cluster();
         let mut model = PermsModel::default();
-        model.set(id, A).unwrap();
+        model.set(id, &a()).unwrap();
         let json = serde_json::to_string(&model).unwrap();
         assert_eq!(serde_json::from_str::<PermsModel>(&json).unwrap(), model);
     }

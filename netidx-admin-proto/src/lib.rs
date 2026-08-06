@@ -36,7 +36,7 @@
 
 use anyhow::{Context, Result, bail};
 use enumflags2::{BitFlags, bitflags};
-use netidx::resolver_server::config::ReadGate;
+use netidx::resolver_server::config::{PMap, ReadGate};
 use netidx_core::pack::Pack;
 use netidx_derive::Pack;
 use netidx_id_map::file::IdMap;
@@ -50,7 +50,7 @@ pub mod identity;
 pub mod policy;
 pub mod server_config;
 
-pub const PROTOCOL_VERSION: u32 = 8;
+pub const PROTOCOL_VERSION: u32 = 9;
 
 /// Conventional admin-server port (resolver is 4564).
 pub const DEFAULT_PORT: u16 = 4565;
@@ -1310,8 +1310,8 @@ pub struct RemoveServerOk {
 
 pub type RemoveServerResponse = RpcResult<RemoveServerOk>;
 
-/// This host's permissions file, serialized (a resolver `PMap` as JSON).
-pub type GetPermsResponse = RpcResult<String>;
+/// This host's permissions file.
+pub type GetPermsResponse = RpcResult<PMap>;
 
 /// Admin → ca: read the permissions of the resolver cluster mounted exactly at
 /// `target_path`.
@@ -1325,19 +1325,24 @@ pub struct ReadPermsRequest {
 pub struct ReadPermsOk {
     pub server: AdminServerId,
     pub addr: SocketAddr,
-    pub perms_json: String,
+    pub perms: PMap,
 }
 
 pub type ReadPermsResponse = RpcResult<ReadPermsOk>;
 
-/// Admin → CA: replace the `target_path` resolver cluster's permissions with
-/// `perms_json` (a serialized resolver `PMap`).
+/// Admin → CA: replace the `target_path` resolver cluster's permissions.
+///
+/// The document is a `PMap`, not the JSON of one. JSON is what an operator
+/// edits and what the resolver reads off disk; between hosts there is no
+/// reason to render a structure both ends already have. A frontend renders it
+/// for `$EDITOR` and parses what comes back — that boundary is the only place
+/// the text form belongs.
 #[derive(Debug, Clone, Serialize, Deserialize, Pack)]
 pub struct EditPermsRequest {
     pub credential: AdminCredential,
     /// The base path of the resolver cluster whose perms to edit (e.g. `/eu`).
     pub target_path: String,
-    pub perms_json: String,
+    pub perms: PMap,
 }
 
 pub type EditPermsResponse = RpcResult<PropagationOk>;
@@ -1346,7 +1351,7 @@ pub type EditPermsResponse = RpcResult<PropagationOk>;
 #[derive(Debug, Clone, Serialize, Deserialize, Pack)]
 pub struct ApplyPermsEditRequest {
     pub operation_id: OperationId,
-    pub perms_json: String,
+    pub perms: PMap,
     /// The model version this document leaves the member at, recorded only on
     /// success. `None` means "this does not by itself make you current",
     /// reserved for a multi-step repair; a perms push is one step, so it
@@ -1849,7 +1854,7 @@ mod tests {
                 protocol_version: PROTOCOL_VERSION,
                 kind: NodeKind::Client,
             }),
-            vec![7, 0, 0, 0, 8, 2, 2]
+            vec![7, 0, 0, 0, 9, 2, 2]
         );
         assert_eq!(encode(&Request::GetMap), vec![2, 23]);
         assert_eq!(encode(&Request::Deregister), vec![2, 21]);
@@ -1948,19 +1953,33 @@ mod tests {
         assert_eq!(got.id_map_groups, vec!["users".to_string()]);
 
         let server = AdminServerId::new();
+        let perms: PMap =
+            serde_json::from_str(r#"{"/eu":{"alice":"swlpd","":"sl"},"/":{"bob":"!s"}}"#)
+                .unwrap();
         let response = ReadPermsResponse::Ok(ReadPermsOk {
             server,
             addr: "127.0.0.1:4565".parse().unwrap(),
-            perms_json: "{}".to_string(),
+            perms: perms.clone(),
         });
         write_msg(&mut a, &response).await.unwrap();
         match read_msg::<_, ReadPermsResponse>(&mut b).await.unwrap() {
-            ReadPermsResponse::Ok(ReadPermsOk { server: got, addr, perms_json }) => {
+            ReadPermsResponse::Ok(ReadPermsOk {
+                server: got,
+                addr,
+                perms: got_perms,
+            }) => {
                 assert_eq!(got, server);
                 assert_eq!(addr, "127.0.0.1:4565".parse().unwrap());
-                assert_eq!(perms_json, "{}");
+                assert_eq!(got_perms, perms);
             }
             ReadPermsResponse::Err { reason } => panic!("unexpected error: {reason}"),
+        }
+        // An empty document is a real state — a resolver cluster with no
+        // grants — and must not decode as an error or a truncation.
+        write_msg(&mut a, &GetPermsResponse::Ok(PMap::default())).await.unwrap();
+        match read_msg::<_, GetPermsResponse>(&mut b).await.unwrap() {
+            GetPermsResponse::Ok(got) => assert_eq!(got, PMap::default()),
+            GetPermsResponse::Err { reason } => panic!("unexpected error: {reason}"),
         }
     }
 

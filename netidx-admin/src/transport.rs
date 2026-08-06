@@ -656,7 +656,7 @@ pub async fn push_perms_edit(
     target_ca: bool,
     home_ca: CertificateDer<'static>,
     operation_id: admin_proto::OperationId,
-    perms_json: &str,
+    perms: &crate::perms::PMap,
     version: Option<u64>,
 ) -> Result<()> {
     let (mut tls, _hello) = connect_pki_target(
@@ -670,7 +670,7 @@ pub async fn push_perms_edit(
         &mut tls,
         &Request::ApplyPermsEdit(ApplyPermsEditRequest {
             operation_id,
-            perms_json: perms_json.to_string(),
+            perms: perms.clone(),
             version,
         }),
     )
@@ -832,7 +832,7 @@ pub async fn pull_perms(
     target_id: admin_proto::AdminServerId,
     target_ca: bool,
     home_ca: CertificateDer<'static>,
-) -> Result<String> {
+) -> Result<crate::perms::PMap> {
     let (mut tls, _hello) = connect_pki_target(
         client,
         addr,
@@ -842,7 +842,7 @@ pub async fn pull_perms(
     .await?;
     admin_proto::write_msg(&mut tls, &Request::GetPerms).await?;
     match admin_proto::read_msg::<_, GetPermsResponse>(&mut tls).await? {
-        GetPermsResponse::Ok(perms_json) => Ok(perms_json),
+        GetPermsResponse::Ok(perms) => Ok(perms),
         GetPermsResponse::Err { reason } => bail!("perms read refused: {reason}"),
     }
 }
@@ -855,7 +855,7 @@ pub async fn read_perms(
     expected: &CaIdentity,
     credential: admin_proto::AdminCredential,
     target_path: &str,
-) -> Result<String> {
+) -> Result<crate::perms::PMap> {
     let mut tls = connect_ca_pinned(addr, kind, expected).await?;
     admin_proto::write_msg(
         &mut tls,
@@ -866,7 +866,7 @@ pub async fn read_perms(
     )
     .await?;
     match admin_proto::read_msg::<_, ReadPermsResponse>(&mut tls).await? {
-        ReadPermsResponse::Ok(ReadPermsOk { perms_json, .. }) => Ok(perms_json),
+        ReadPermsResponse::Ok(ReadPermsOk { perms, .. }) => Ok(perms),
         ReadPermsResponse::Err { reason } => Err(admin_refusal(
             expected,
             &credential,
@@ -884,7 +884,7 @@ pub async fn edit_perms(
     expected: &CaIdentity,
     credential: admin_proto::AdminCredential,
     target_path: &str,
-    perms_json: &str,
+    perms: &crate::perms::PMap,
 ) -> Result<Vec<admin_proto::PeerResult>> {
     let mut tls = connect_ca_pinned(addr, kind, expected).await?;
     admin_proto::write_msg(
@@ -892,7 +892,7 @@ pub async fn edit_perms(
         &Request::EditPerms(EditPermsRequest {
             credential: credential.clone(),
             target_path: target_path.to_string(),
-            perms_json: perms_json.to_string(),
+            perms: perms.clone(),
         }),
     )
     .await?;

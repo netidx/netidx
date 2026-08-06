@@ -73,9 +73,14 @@ difference from the id-map. One admin domain has many clusters
 (`ResolverClusterEntry`), each with its own perms and its own members.
 
 ```rust
-struct PermsModel { version: u64, doc: String }   // canonical JSON
+struct ClusterPerms { version: u64, perms: PMap }
 // stored keyed by ResolverClusterId
 ```
+
+`PMap`, not its JSON. The document was text here at first, which meant
+recording one had to normalize it so that a reformatting would not read as a
+change and move the version a converging member is chasing. Holding the
+structure makes that true without a pass: whitespace was never a difference.
 
 `version: 0` means "never established", carrying the same rule as the id-map:
 a CA that has lost this knows nothing, and knowing nothing must never mean

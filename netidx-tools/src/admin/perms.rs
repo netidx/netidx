@@ -95,19 +95,19 @@ fn target(
 fn show(f: Flags) -> Result<()> {
     let rt = runtime()?;
     let target = target(&rt, &f)?;
-    let perms_json = rt.block_on(perms_ops::show_perms(&target, &f.at))?;
-    println!("{}", perms::pretty(&perms_json)?);
+    let perms = rt.block_on(perms_ops::show_perms(&target, &f.at))?;
+    println!("{}", perms::render(&perms)?);
     Ok(())
 }
 
 fn edit(f: Flags) -> Result<()> {
     let rt = runtime()?;
     let target = target(&rt, &f)?;
-    // Seed the editor with the resolver cluster's current perms, then hand the
-    // edited, locally-validated result to the library's authenticated write.
+    // Render the resolver cluster's current perms into the editor and parse
+    // back what the operator leaves. This is one of the two places perms are
+    // text; past it the document travels as itself.
     let current = rt.block_on(perms_ops::show_perms(&target, &f.at))?;
-    let edited =
-        editor::edit_with_validation(&perms::pretty(&current)?, perms::normalize)?;
+    let edited = editor::edit_with_validation(&perms::render(&current)?, perms::parse)?;
     let peers = rt.block_on(perms_ops::edit_perms(&target, &f.at, &edited))?;
     report_peers(
         &peers,

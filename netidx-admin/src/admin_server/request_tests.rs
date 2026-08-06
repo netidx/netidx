@@ -51,7 +51,7 @@ fn centralized_requirements_protect_all_mutations() {
     }));
     assert_ca(&Request::ApplyPermsEdit(ApplyPermsEditRequest {
         operation_id,
-        perms_json: "{}".into(),
+        perms: crate::perms::empty(),
         version: Some(1),
     }));
     assert_ca(&Request::GetPerms);

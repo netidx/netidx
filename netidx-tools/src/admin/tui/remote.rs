@@ -1526,7 +1526,7 @@ async fn show_perms_for(
     ans: &mut TuiAnswerer,
     target: &PanelTarget,
     at: &str,
-) -> Result<String> {
+) -> Result<netidx_admin::perms::PMap> {
     let target = admin_target(ans, target).await?;
     netidx_admin::ops::perms::show_perms(&target, at).await
 }
@@ -1547,10 +1547,10 @@ async fn perms_rows(
     target: &PanelTarget,
     at: &str,
 ) -> Result<Vec<PanelRow>> {
-    let json = show_perms_for(ans, target, at).await?;
-    let pretty = netidx_admin::perms::pretty(&json)?;
+    let perms = show_perms_for(ans, target, at).await?;
+    let rendered = netidx_admin::perms::render(&perms)?;
     let mut rows: Vec<PanelRow> =
-        pretty.lines().map(|l| PanelRow::plain(l.to_string(), RowKey::None)).collect();
+        rendered.lines().map(|l| PanelRow::plain(l.to_string(), RowKey::None)).collect();
     if rows.is_empty() {
         rows.push(PanelRow::plain("(no permissions set)".to_string(), RowKey::None));
     }
@@ -1567,16 +1567,21 @@ async fn edit_perms(
     // password once and keeps it across the operator's think-time.
     let resolved = admin_target(ans, &target).await?;
     let current = perms::show_perms(&resolved, &at).await?;
-    let seed = perms_file::pretty(&current)?;
+    let seed = perms_file::render(&current)?;
+    // `EditValidator` is shared with the policy and unit editors, so it hands
+    // back text; the document is parsed once more below. The parse inside the
+    // validator is what gets the operator an error at their editor rather than
+    // a refusal from the CA after they have closed it.
     let validate: super::answer::EditValidator =
-        Box::new(|s: &str| perms_file::normalize(s));
-    let edited = ans.edit(seed, validate).await?;
+        Box::new(|s: &str| perms_file::parse(s).and_then(|p| perms_file::render(&p)));
+    let edited = perms_file::parse(&ans.edit(seed, validate).await?)?;
     let peers = perms::edit_perms(&resolved, &at, &edited).await?;
     let failed: Vec<_> = peers.iter().filter(|p| p.error.is_some()).collect();
     let lines = if failed.is_empty() {
+        // No operator step after this: the resolver polls its
+        // `include_permissions` mtimes every 30s and reloads on its own.
         vec![format!(
-            "Updated perms at {at:?} on {} resolver cluster member(s). Restart the resolver \
-             server(s) to load them.",
+            "Updated perms at {at:?} on {} resolver cluster member(s).",
             peers.len()
         )]
     } else {
