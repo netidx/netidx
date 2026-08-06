@@ -19,12 +19,24 @@ is exact and has no such failure mode.
 | publisher-hq | 192.168.50.17 | client, own cert |
 | workstation-eu | 192.168.60.18 | client, own cert |
 
-The last three fixes (compare-and-swap on edits, the socket id-map cache, and
-the CA owning cluster permissions) were verified against a **clean install**,
-not the domain the earlier findings came from, so nothing rests on state a
-previous run had left behind.
+The whole list was then **re-run end to end on a clean install** with every fix
+in place (`68e3ece1`), because the first pass had proven the six steps against
+a binary that predated the last three commits. The re-run matters most for the
+delegated-child path: `grant_member_self_perms` runs on every enrollment, a
+child cluster's base is `/eu`, and the perms validator rejects entries outside
+the delegated root — so a seed anchored at `/` would have failed there and
+nowhere else. It anchors correctly:
+
+```
+/eu:                 { users: swl, resolver-eu-a.netidx.test: swlpd }
+/eu/users/$[user]:   { $[user]: swlpd }
+```
 
 ## The verification list, all six steps
+
+Every step below passed twice: once on the original build, and again on
+`68e3ece1` against a domain built from scratch — HQ (`/`, two members), two
+delegated children (`/eu`, `/ap`), and two client hosts either side of the WAN.
 
 1. **Edits with everything up, then a cross-site subscribe.** Perms and id-map
    edits reached every member within a poll; the `/` cluster members ended up
