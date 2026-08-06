@@ -466,8 +466,20 @@ pub mod file {
         IdMapType::Command
     }
 
-    fn default_id_map_timeout() -> u64 {
-        3600
+    /// How long a group-membership answer from `source` stays good, when the
+    /// config does not say.
+    ///
+    /// The id-mapper daemon answers from memory over a unix socket, so asking
+    /// it often is cheap — and its map is what the admin plane edits, so the
+    /// cache is the delay between an operator revoking a group and the
+    /// resolver enforcing it. A minute keeps that on the same order as the
+    /// admin-plane poll that delivered the change in the first place, rather
+    /// than an hour behind it.
+    pub(crate) fn default_id_map_timeout(source: &IdMapType) -> u64 {
+        match source {
+            IdMapType::Socket => 60,
+            IdMapType::Command | IdMapType::DoNotMap => 3600,
+        }
     }
 
     fn default_hello_timeout() -> u64 {
@@ -556,12 +568,20 @@ pub mod file {
         #[serde(default = "default_id_map_type")]
         #[builder(default = "default_id_map_type()")]
         pub id_map_type: IdMapType,
-        /// How long, in seconds, to wait for the id map command or socket to
-        /// return an answer for a given user. If the timeout expires
-        /// the request will be denied. (default 3600)
-        #[serde(default = "default_id_map_timeout")]
-        #[builder(default = "default_id_map_timeout()")]
-        pub id_map_timeout: u64,
+        /// How long, in seconds, an identity's group membership stays cached
+        /// before it is looked up again.
+        ///
+        /// Unset takes a default from [`id_map_type`](Self::id_map_type),
+        /// because the two sources cost very different amounts to ask and go
+        /// stale in very different ways. `Command` forks `/bin/id`, which may
+        /// go out to SSSD or AD, and reflects a directory nobody here
+        /// administers — an hour. `Socket` is a round trip to a local daemon
+        /// holding the map in memory, and that map is edited through the admin
+        /// plane, so a long cache means a revocation an operator has watched
+        /// converge everywhere is still not being enforced — a minute.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[builder(default)]
+        pub id_map_timeout: Option<u64>,
         /// Whether this member refuses read clients (default `No`). Applied
         /// live on reload, so it can be opened or shut without a restart.
         /// See [`super::ReadGate`].
@@ -760,6 +780,11 @@ impl Config {
                 bail!("hello_timeout must be positive")
             }
             check_member_server_auth(&m)?;
+            let id_map_timeout = chrono::Duration::seconds(
+                m.id_map_timeout
+                    .unwrap_or_else(|| file::default_id_map_timeout(&m.id_map_type))
+                    as i64,
+            );
             let id_map = match &m.id_map_type {
                 IdMapType::DoNotMap => IdMap::DoNotMap,
                 IdMapType::Socket => match m.id_map_command {
@@ -800,7 +825,7 @@ impl Config {
                 reader_ttl: Duration::from_secs(m.reader_ttl),
                 writer_ttl: Duration::from_secs(m.writer_ttl),
                 id_map,
-                id_map_timeout: chrono::Duration::seconds(m.id_map_timeout as i64),
+                id_map_timeout,
             })
         }
         let member_servers = cfg
@@ -1174,5 +1199,73 @@ mod children_overlap_tests {
         assert!(build("/eu2/x").is_err());
         // A subtree entirely outside the delegated root is rejected.
         assert!(build("/asia/x").is_err());
+    }
+}
+
+#[cfg(test)]
+mod id_map_timeout_tests {
+    use super::*;
+    use std::net::SocketAddr;
+
+    fn member_with(id_map_type: &file::IdMapType, timeout: Option<u64>) -> Config {
+        let mut b = file::MemberServerBuilder::default();
+        b.addr("127.0.0.1:4564".parse::<SocketAddr>().unwrap())
+            .bind_addr("127.0.0.1".parse::<std::net::IpAddr>().unwrap())
+            .auth(file::Auth::Anonymous)
+            .id_map_type(id_map_type.clone())
+            .id_map_timeout(timeout);
+        if matches!(id_map_type, file::IdMapType::Socket) {
+            b.id_map_command(arcstr::literal!("/tmp/id-map.sock"));
+        }
+        Config::from_file(file::Config {
+            parent: None,
+            children: Vec::new(),
+            member_servers: vec![b.build().unwrap()],
+            perms: crate::resolver_server::config::PMap::default(),
+            include_permissions: Vec::new(),
+        })
+        .unwrap()
+    }
+
+    /// The netidx id-mapper answers from memory over a local socket, and its
+    /// map is what the admin plane edits — so the cache is the delay between
+    /// an operator revoking a group and the resolver enforcing it. An hour
+    /// there meant `admin drift` could report a change converged everywhere
+    /// while every resolver still authorized on the old membership.
+    #[test]
+    fn a_socket_id_map_defaults_to_a_short_cache() {
+        let c = member_with(&file::IdMapType::Socket, None);
+        assert_eq!(c.member_servers[0].id_map_timeout, chrono::Duration::seconds(60));
+    }
+
+    /// `/bin/id` may fork out to a directory nobody here administers, so it is
+    /// both expensive to ask and not ours to keep current.
+    #[test]
+    fn a_command_id_map_keeps_the_long_cache() {
+        let c = member_with(&file::IdMapType::Command, None);
+        assert_eq!(c.member_servers[0].id_map_timeout, chrono::Duration::seconds(3600));
+    }
+
+    /// The type only supplies a default. An operator who names a timeout gets
+    /// exactly it, on either source.
+    #[test]
+    fn an_explicit_timeout_wins_over_the_type() {
+        let c = member_with(&file::IdMapType::Socket, Some(7200));
+        assert_eq!(c.member_servers[0].id_map_timeout, chrono::Duration::seconds(7200));
+    }
+
+    /// An unset timeout is left out of the file rather than written as null,
+    /// so a config the CA renders stays readable and keeps taking its default
+    /// from the type.
+    #[test]
+    fn an_unset_timeout_is_not_serialized() {
+        let m = file::MemberServerBuilder::default()
+            .addr("127.0.0.1:4564".parse::<SocketAddr>().unwrap())
+            .bind_addr("127.0.0.1".parse::<std::net::IpAddr>().unwrap())
+            .auth(file::Auth::Anonymous)
+            .build()
+            .unwrap();
+        let s = serde_json::to_string(&m).unwrap();
+        assert!(!s.contains("id_map_timeout"), "{s}");
     }
 }
