@@ -50,7 +50,7 @@ pub mod identity;
 pub mod policy;
 pub mod server_config;
 
-pub const PROTOCOL_VERSION: u32 = 10;
+pub const PROTOCOL_VERSION: u32 = 11;
 
 /// Conventional admin-server port (resolver is 4564).
 pub const DEFAULT_PORT: u16 = 4565;
@@ -1219,6 +1219,67 @@ pub struct AdminServerEntry {
     #[serde(default)]
     #[pack(default)]
     pub reported_perms_version: Option<u64>,
+    /// The version of the CA-rendered resolver config this host's file is at.
+    /// `None` when it runs no resolver, or when its config predates the CA
+    /// keeping one.
+    #[serde(default)]
+    #[pack(default)]
+    pub reported_config_version: Option<u64>,
+    /// Whether the resolver facts this host last reported disagreed with the
+    /// cluster the CA granted it — a stale document, a hand edit, or a config
+    /// that would not load at all.
+    ///
+    /// Recorded rather than refused. The register response is the only thing
+    /// that hands a drifting host a correct config, so rejecting the register
+    /// would leave it drifting forever; and there is nothing to protect by
+    /// rejecting, because a host's reported facts are never adopted into the
+    /// map in the first place.
+    #[serde(default)]
+    #[pack(default)]
+    pub reported_config_drift: bool,
+    /// The version of the config the CA has rendered for this server, against
+    /// which `reported_config_version` is compared.
+    ///
+    /// Kept here rather than only in the CA's store for the same reason
+    /// [`ResolverClusterEntry::perms_version`] is: it makes "which servers are
+    /// behind" answerable by anyone who can read the map, in one round trip
+    /// and with no privileged call.
+    #[serde(default)]
+    #[pack(default)]
+    pub config_version: Option<u64>,
+}
+
+impl AdminServerEntry {
+    /// A server exactly as the CA granted it, having reported nothing back.
+    ///
+    /// Every `reported_*` field is what a host said about itself, and no host
+    /// has said anything at the moment its grant is written. Constructing them
+    /// here rather than at each call site keeps that a property of the type:
+    /// the only way reported state gets into the map is [`register`], which is
+    /// where the rules about what a host may claim live.
+    pub fn granted(
+        id: AdminServerId,
+        addr: SocketAddr,
+        roles: BitFlags<Role>,
+        resolver: Option<ResolverAddr>,
+        cluster: Option<ResolverClusterId>,
+        state: ServerState,
+    ) -> Self {
+        Self {
+            id,
+            addr,
+            roles,
+            resolver,
+            cluster,
+            state,
+            reported_read_gate: None,
+            reported_id_map_version: None,
+            reported_perms_version: None,
+            reported_config_version: None,
+            reported_config_drift: false,
+            config_version: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Pack)]
@@ -2028,7 +2089,7 @@ mod tests {
                 protocol_version: PROTOCOL_VERSION,
                 kind: NodeKind::Client,
             }),
-            vec![7, 0, 0, 0, 10, 2, 2]
+            vec![7, 0, 0, 0, 11, 2, 2]
         );
         assert_eq!(encode(&Request::GetMap), vec![2, 23]);
         assert_eq!(encode(&Request::Deregister), vec![2, 21]);
@@ -2409,6 +2470,9 @@ mod tests {
                 reported_read_gate: None,
                 reported_id_map_version: Some(9),
                 reported_perms_version: None,
+                reported_config_version: Some(4),
+                reported_config_drift: true,
+                config_version: Some(5),
             }],
             resolver_clusters: vec![],
         });

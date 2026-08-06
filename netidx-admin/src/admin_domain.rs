@@ -2,10 +2,10 @@
 
 use crate::{
     admin_proto::{
-        AdminDomainMap, AdminServerEntry, AdminServerId, EnrollmentRequest, ResolverAddr,
-        ResolverClusterEdge, ResolverClusterEntry, ResolverClusterFacts,
-        ResolverClusterId, ResolverClusterPlacement, ResolverClusterState, Role,
-        ServerState,
+        AdminDomainMap, AdminServerEntry, AdminServerId, EnrollmentRequest,
+        RegisterRequest, ResolverAddr, ResolverClusterEdge, ResolverClusterEntry,
+        ResolverClusterFacts, ResolverClusterId, ResolverClusterPlacement,
+        ResolverClusterState, Role, ServerState,
     },
     atomic,
     config_lock::ConfigDirLock,
@@ -277,17 +277,14 @@ pub fn enroll(
             *cluster
         }
     };
-    map.admin_servers.push(AdminServerEntry {
-        id: server_id,
-        addr: request.listen,
-        roles: request.roles,
-        resolver: Some(resolver_member.clone()),
-        cluster: Some(cluster),
-        state: ServerState::Enrolled,
-        reported_read_gate: None,
-        reported_id_map_version: None,
-        reported_perms_version: None,
-    });
+    map.admin_servers.push(AdminServerEntry::granted(
+        server_id,
+        request.listen,
+        request.roles,
+        Some(resolver_member.clone()),
+        Some(cluster),
+        ServerState::Enrolled,
+    ));
     changed(map);
     Ok(cluster)
 }
@@ -630,14 +627,24 @@ fn facts_match(
 
 /// Activate only the authenticated node's existing grant and allow it to
 /// update only its own routing address.
+///
+/// A report that disagrees with the grant is *recorded*, never refused. The
+/// register response is the only thing that hands a host its correct config,
+/// so refusing a drifting host would strand it: it would be denied, on every
+/// poll forever, the one message that would fix it. Nothing is given up by
+/// recording instead, because the reported facts are never adopted here — only
+/// the host's address, its state, and the versions it reports are written, and
+/// the cluster stays exactly as the CA granted it.
+/// `desired_config` is the version the CA has rendered for this server — the
+/// only argument here that is not the server's own account of itself.
 pub fn register(
     map: &mut AdminDomainMap,
     server_id: AdminServerId,
-    addr: std::net::SocketAddr,
-    resolver: Option<&ResolverClusterFacts>,
-    id_map_version: Option<u64>,
-    perms_version: Option<u64>,
+    report: &RegisterRequest,
+    desired_config: Option<u64>,
 ) -> Result<bool> {
+    let addr = report.addr;
+    let resolver = report.resolver.as_ref();
     let pos = map
         .admin_servers
         .iter()
@@ -645,25 +652,22 @@ pub fn register(
         .context("the authenticated server has no enrollment grant")?;
     let cluster_id = map.admin_servers[pos].cluster;
     let owned = map.admin_servers[pos].resolver.clone();
-    match (cluster_id, resolver) {
+    let drift = match (cluster_id, resolver) {
         (Some(id), Some(facts)) => {
             let cluster = map
                 .resolver_clusters
                 .iter()
                 .find(|c| c.id == id)
                 .context("the server grant references a missing resolver cluster")?;
-            if !facts_match(map, cluster, owned.as_ref(), facts) {
-                bail!(
-                    "reported resolver configuration drifts from the CA-approved resolver cluster"
-                );
-            }
+            !facts_match(map, cluster, owned.as_ref(), facts)
         }
-        (Some(_), None) => bail!("the approved Resolver role must report resolver facts"),
-        (None, Some(_)) => {
-            bail!("resolver facts were reported without an approved resolver cluster")
-        }
-        (None, None) => {}
-    }
+        // A resolver-role host that reports no facts could not load its own
+        // resolver config. That is the strongest form of drift, and the case
+        // most in need of a config from the CA.
+        (Some(_), None) => true,
+        (None, Some(_)) => true,
+        (None, None) => false,
+    };
     // A newly granted non-root resolver cluster stays pending until delegation attaches it
     // to an active parent. The first `/` resolver cluster below a dedicated CA has
     // no such ceremony: registration of its approved first member is what makes
@@ -685,14 +689,24 @@ pub fn register(
     let server_changed = server.addr != addr
         || server.state != ServerState::Registered
         || server.reported_read_gate != gate
-        || server.reported_id_map_version != id_map_version
-        || server.reported_perms_version != perms_version;
+        || server.reported_id_map_version != report.id_map_version
+        || server.reported_perms_version != report.perms_version
+        || server.reported_config_version != report.config_version
+        || server.reported_config_drift != drift
+        || (desired_config.is_some() && server.config_version != desired_config);
     if server_changed {
         server.addr = addr;
         server.state = ServerState::Registered;
         server.reported_read_gate = gate;
-        server.reported_id_map_version = id_map_version;
-        server.reported_perms_version = perms_version;
+        server.reported_id_map_version = report.id_map_version;
+        server.reported_perms_version = report.perms_version;
+        server.reported_config_version = report.config_version;
+        server.reported_config_drift = drift;
+        // Only ever set, never cleared: a render that failed this once must
+        // not read as "the CA has no config for this server".
+        if desired_config.is_some() {
+            server.config_version = desired_config;
+        }
     }
     if activate_root {
         map.resolver_clusters
@@ -811,6 +825,22 @@ mod tests {
         ResolverAddr { addr: s.parse().unwrap(), auth: InfoAuth::Anonymous }
     }
 
+    fn report(
+        addr: std::net::SocketAddr,
+        resolver: Option<&ResolverClusterFacts>,
+        id_map_version: Option<u64>,
+        perms_version: Option<u64>,
+        config_version: Option<u64>,
+    ) -> RegisterRequest {
+        RegisterRequest {
+            addr,
+            resolver: resolver.cloned(),
+            id_map_version,
+            perms_version,
+            config_version,
+        }
+    }
+
     fn enrollment(base: &str, member: &str) -> EnrollmentRequest {
         let member = addr(member);
         EnrollmentRequest {
@@ -834,28 +864,22 @@ mod tests {
             auth: InfoAuth::Tls { name: "resolver.example.com".into() },
         };
         let peer_addr = addr("10.0.0.2:4564");
-        let ca_entry = AdminServerEntry {
-            id: ca,
-            addr: "10.0.0.1:4565".parse().unwrap(),
-            roles: Role::Ca | Role::Resolver,
-            resolver: Some(old.clone()),
-            cluster: Some(cluster),
-            state: ServerState::Registered,
-            reported_read_gate: None,
-            reported_id_map_version: None,
-            reported_perms_version: None,
-        };
-        let peer_entry = AdminServerEntry {
-            id: peer,
-            addr: "10.0.0.2:4565".parse().unwrap(),
-            roles: Role::Resolver.into(),
-            resolver: Some(peer_addr.clone()),
-            cluster: Some(cluster),
-            state: ServerState::Registered,
-            reported_read_gate: None,
-            reported_id_map_version: None,
-            reported_perms_version: None,
-        };
+        let ca_entry = AdminServerEntry::granted(
+            ca,
+            "10.0.0.1:4565".parse().unwrap(),
+            Role::Ca | Role::Resolver,
+            Some(old.clone()),
+            Some(cluster),
+            ServerState::Registered,
+        );
+        let peer_entry = AdminServerEntry::granted(
+            peer,
+            "10.0.0.2:4565".parse().unwrap(),
+            Role::Resolver.into(),
+            Some(peer_addr.clone()),
+            Some(cluster),
+            ServerState::Registered,
+        );
         let mut map = AdminDomainMap {
             version: 7,
             ca,
@@ -908,28 +932,22 @@ mod tests {
             version: 3,
             ca,
             admin_servers: vec![
-                AdminServerEntry {
-                    id: ca,
-                    addr: "10.0.0.1:4565".parse().unwrap(),
-                    roles: Role::Ca | Role::Resolver,
-                    resolver: Some(old.clone()),
-                    cluster: Some(cluster),
-                    state: ServerState::Registered,
-                    reported_read_gate: None,
-                    reported_id_map_version: None,
-                    reported_perms_version: None,
-                },
-                AdminServerEntry {
-                    id: peer,
-                    addr: "10.0.0.2:4565".parse().unwrap(),
-                    roles: Role::Resolver.into(),
-                    resolver: Some(peer_addr.clone()),
-                    cluster: Some(cluster),
-                    state: ServerState::Registered,
-                    reported_read_gate: None,
-                    reported_id_map_version: None,
-                    reported_perms_version: None,
-                },
+                AdminServerEntry::granted(
+                    ca,
+                    "10.0.0.1:4565".parse().unwrap(),
+                    Role::Ca | Role::Resolver,
+                    Some(old.clone()),
+                    Some(cluster),
+                    ServerState::Registered,
+                ),
+                AdminServerEntry::granted(
+                    peer,
+                    "10.0.0.2:4565".parse().unwrap(),
+                    Role::Resolver.into(),
+                    Some(peer_addr.clone()),
+                    Some(cluster),
+                    ServerState::Registered,
+                ),
             ],
             resolver_clusters: vec![ResolverClusterEntry {
                 id: cluster,
@@ -979,9 +997,13 @@ mod tests {
             register(
                 &mut map,
                 server,
-                "10.0.0.20:4565".parse().unwrap(),
-                Some(&facts),
-                None,
+                &report(
+                    "10.0.0.20:4565".parse().unwrap(),
+                    Some(&facts),
+                    None,
+                    None,
+                    None
+                ),
                 None
             )
             .unwrap()
@@ -993,18 +1015,79 @@ mod tests {
         assert_eq!(map.resolver_clusters[0].state, ResolverClusterState::Pending);
         let mut drift = facts.clone();
         drift.base = "/us".into();
-        assert!(
-            register(
-                &mut map,
-                server,
-                "10.0.0.30:4565".parse().unwrap(),
-                Some(&drift),
-                None,
-                None
-            )
-            .is_err()
-        );
-        assert_eq!(map.admin_servers[0].addr, "10.0.0.20:4565".parse().unwrap());
+        register(
+            &mut map,
+            server,
+            &report("10.0.0.30:4565".parse().unwrap(), Some(&drift), None, None, None),
+            None,
+        )
+        .unwrap();
+        // Drift is recorded, not refused. Refusing would deny this host the
+        // register response — the only thing that would ever hand it a correct
+        // config — so it would drift forever.
+        assert!(map.admin_servers[0].reported_config_drift);
+        // What drift must not do is move anything the CA granted. The base it
+        // claimed is not adopted, and its cluster is untouched.
+        assert_eq!(map.resolver_clusters[0].base, "/eu");
+        assert_eq!(map.admin_servers[0].cluster, Some(cluster));
+        // Its routing address is still its own to report: that is how the CA
+        // reaches it for a service control or a CA relocation, and a stale
+        // resolver document is no reason to lose track of where it lives.
+        assert_eq!(map.admin_servers[0].addr, "10.0.0.30:4565".parse().unwrap());
+        let recovered = register(
+            &mut map,
+            server,
+            &report("10.0.0.30:4565".parse().unwrap(), Some(&facts), None, None, Some(3)),
+            None,
+        )
+        .unwrap();
+        assert!(recovered);
+        assert!(!map.admin_servers[0].reported_config_drift);
+        assert_eq!(map.admin_servers[0].reported_config_version, Some(3));
+    }
+
+    /// A resolver host whose config will not load reports no facts at all.
+    /// That is the strongest drift there is, and the case most in need of a
+    /// config from the CA — so it must register, not be turned away.
+    ///
+    /// This was a deadlock: the register was refused, and the register
+    /// response is the only thing that hands a host a working config, so a
+    /// host with a broken resolver.json could never be given a good one.
+    #[test]
+    fn a_resolver_that_cannot_report_facts_still_registers() {
+        let ca = AdminServerId::new();
+        let server = AdminServerId::new();
+        let mut map = AdminDomainMap::empty(ca);
+        enroll(&mut map, server, &enrollment("/eu", "10.0.0.10:4564")).unwrap();
+        register(
+            &mut map,
+            server,
+            &report("10.0.0.10:4565".parse().unwrap(), None, None, None, None),
+            Some(7),
+        )
+        .unwrap();
+        assert_eq!(map.admin_servers[0].state, ServerState::Registered);
+        assert!(map.admin_servers[0].reported_config_drift);
+        // And it is told which config it should be running, so the next
+        // register can hand it one.
+        assert_eq!(map.admin_servers[0].config_version, Some(7));
+    }
+
+    /// The CA's rendered version is only ever set, never cleared. A render
+    /// that failed once must not read as "the CA has no config for this
+    /// server", which is indistinguishable from a server that never enrolled.
+    #[test]
+    fn a_failed_render_does_not_erase_the_recorded_config_version() {
+        let ca = AdminServerId::new();
+        let server = AdminServerId::new();
+        let mut map = AdminDomainMap::empty(ca);
+        enroll(&mut map, server, &enrollment("/eu", "10.0.0.10:4564")).unwrap();
+        let addr = "10.0.0.10:4565".parse().unwrap();
+        register(&mut map, server, &report(addr, None, None, None, None), Some(7))
+            .unwrap();
+        register(&mut map, server, &report(addr, None, None, None, Some(7)), None)
+            .unwrap();
+        assert_eq!(map.admin_servers[0].config_version, Some(7));
     }
 
     #[test]
@@ -1023,18 +1106,42 @@ mod tests {
             children: vec![],
             read_gated: ReadGate::No,
         };
-        assert!(register(&mut map, server, addr, Some(&facts), None, None).unwrap());
+        assert!(
+            register(
+                &mut map,
+                server,
+                &report(addr, Some(&facts), None, None, None),
+                None
+            )
+            .unwrap()
+        );
         assert_eq!(map.admin_servers[0].reported_read_gate, Some(ReadGate::No));
         let version = map.version;
         // A host that has taken itself out of service has not drifted from
         // its grant — it is still exactly the member the CA approved.
         facts.read_gated = ReadGate::Yes;
-        assert!(register(&mut map, server, addr, Some(&facts), None, None).unwrap());
+        assert!(
+            register(
+                &mut map,
+                server,
+                &report(addr, Some(&facts), None, None, None),
+                None
+            )
+            .unwrap()
+        );
         assert_eq!(map.admin_servers[0].reported_read_gate, Some(ReadGate::Yes));
         assert_eq!(map.admin_servers[0].state, ServerState::Registered);
         assert!(map.version > version, "a gate change has to reach map readers");
         // ... and reporting the same gate again is not a change.
-        assert!(!register(&mut map, server, addr, Some(&facts), None, None).unwrap());
+        assert!(
+            !register(
+                &mut map,
+                server,
+                &report(addr, Some(&facts), None, None, None),
+                None
+            )
+            .unwrap()
+        );
     }
 
     /// The versions a host reports are recorded the same way its read gate
@@ -1059,25 +1166,49 @@ mod tests {
         assert_eq!(map.admin_servers[0].reported_id_map_version, None);
         assert_eq!(map.admin_servers[0].reported_perms_version, None);
         assert!(
-            register(&mut map, server, addr, Some(&facts), Some(4), Some(2)).unwrap()
+            register(
+                &mut map,
+                server,
+                &report(addr, Some(&facts), Some(4), Some(2), None),
+                None
+            )
+            .unwrap()
         );
         assert_eq!(map.admin_servers[0].reported_id_map_version, Some(4));
         assert_eq!(map.admin_servers[0].reported_perms_version, Some(2));
         // Reporting the same versions again is not a change — a host that is
         // current must not churn the map version on every poll.
         assert!(
-            !register(&mut map, server, addr, Some(&facts), Some(4), Some(2)).unwrap()
+            !register(
+                &mut map,
+                server,
+                &report(addr, Some(&facts), Some(4), Some(2), None),
+                None
+            )
+            .unwrap()
         );
         let version = map.version;
         assert!(
-            register(&mut map, server, addr, Some(&facts), Some(5), Some(2)).unwrap()
+            register(
+                &mut map,
+                server,
+                &report(addr, Some(&facts), Some(5), Some(2), None),
+                None
+            )
+            .unwrap()
         );
         assert_eq!(map.admin_servers[0].reported_id_map_version, Some(5));
         assert!(map.version > version, "map readers have to see it move");
         // Either one moving on its own is a change.
         let version = map.version;
         assert!(
-            register(&mut map, server, addr, Some(&facts), Some(5), Some(3)).unwrap()
+            register(
+                &mut map,
+                server,
+                &report(addr, Some(&facts), Some(5), Some(3), None),
+                None
+            )
+            .unwrap()
         );
         assert_eq!(map.admin_servers[0].reported_perms_version, Some(3));
         assert!(map.version > version);
@@ -1102,9 +1233,13 @@ mod tests {
             register(
                 &mut map,
                 server,
-                "10.0.0.10:4565".parse().unwrap(),
-                Some(&facts),
-                None,
+                &report(
+                    "10.0.0.10:4565".parse().unwrap(),
+                    Some(&facts),
+                    None,
+                    None,
+                    None
+                ),
                 None
             )
             .unwrap()
@@ -1116,9 +1251,13 @@ mod tests {
             !register(
                 &mut map,
                 server,
-                "10.0.0.10:4565".parse().unwrap(),
-                Some(&facts),
-                None,
+                &report(
+                    "10.0.0.10:4565".parse().unwrap(),
+                    Some(&facts),
+                    None,
+                    None,
+                    None
+                ),
                 None
             )
             .unwrap()
@@ -1140,6 +1279,9 @@ mod tests {
             reported_read_gate: Some(ReadGate::No),
             reported_id_map_version: None,
             reported_perms_version: None,
+            reported_config_version: None,
+            reported_config_drift: false,
+            config_version: None,
         };
         let facts = ResolverClusterFacts {
             members: vec![addr("10.0.0.1:4564")],
@@ -1199,6 +1341,9 @@ mod tests {
             reported_read_gate: Some(ReadGate::No),
             reported_id_map_version: None,
             reported_perms_version: None,
+            reported_config_version: None,
+            reported_config_drift: false,
+            config_version: None,
         };
         let authoritative_child = ResolverClusterEntry {
             id: child,
@@ -1215,17 +1360,14 @@ mod tests {
             ca,
             admin_servers: vec![
                 ca_entry.clone(),
-                AdminServerEntry {
-                    id: root_server,
-                    addr: "10.0.0.1:4565".parse().unwrap(),
-                    roles: Role::Resolver.into(),
-                    resolver: Some(addr("10.0.0.1:4564")),
-                    cluster: Some(root),
-                    state: ServerState::Registered,
-                    reported_read_gate: None,
-                    reported_id_map_version: None,
-                    reported_perms_version: None,
-                },
+                AdminServerEntry::granted(
+                    root_server,
+                    "10.0.0.1:4565".parse().unwrap(),
+                    Role::Resolver.into(),
+                    Some(addr("10.0.0.1:4564")),
+                    Some(root),
+                    ServerState::Registered,
+                ),
             ],
             resolver_clusters: vec![
                 ResolverClusterEntry {
@@ -1303,26 +1445,39 @@ mod tests {
             register(
                 &mut map,
                 first,
-                "10.0.0.10:4565".parse().unwrap(),
-                Some(&child_facts),
-                None,
-                None,
+                &report(
+                    "10.0.0.10:4565".parse().unwrap(),
+                    Some(&child_facts),
+                    None,
+                    None,
+                    None
+                ),
+                None
             )
             .unwrap()
         );
+        // A child mounted at the wrong path is drift: recorded, and never
+        // allowed to redefine the cluster the CA granted.
         let mut wrong_mount = child_facts.clone();
         wrong_mount.parent.as_mut().unwrap().path = "/".into();
-        assert!(
-            register(
-                &mut map,
-                first,
+        register(
+            &mut map,
+            first,
+            &report(
                 "10.0.0.12:4565".parse().unwrap(),
                 Some(&wrong_mount),
                 None,
                 None,
-            )
-            .is_err()
-        );
+                None,
+            ),
+            None,
+        )
+        .unwrap();
+        let entry = map.admin_servers.iter().find(|s| s.id == first).unwrap();
+        assert!(entry.reported_config_drift);
+        let cluster =
+            map.resolver_clusters.iter().find(|c| Some(c.id) == entry.cluster).unwrap();
+        assert_eq!(cluster.base, "/eu");
         let second_local_only = ResolverClusterFacts {
             members: vec![addr("10.0.0.11:4564")],
             ..child_facts.clone()
@@ -1331,10 +1486,14 @@ mod tests {
             register(
                 &mut map,
                 second,
-                "10.0.0.11:4565".parse().unwrap(),
-                Some(&second_local_only),
-                None,
-                None,
+                &report(
+                    "10.0.0.11:4565".parse().unwrap(),
+                    Some(&second_local_only),
+                    None,
+                    None,
+                    None
+                ),
+                None
             )
             .unwrap()
         );
@@ -1362,20 +1521,15 @@ mod tests {
         ];
         let admin_servers: Vec<_> = specs
             .iter()
-            .map(|(id, admin, member, ca)| AdminServerEntry {
-                id: *id,
-                addr: admin.parse().unwrap(),
-                roles: if *ca {
-                    Role::Ca | Role::Resolver
-                } else {
-                    Role::Resolver.into()
-                },
-                resolver: Some(addr(member)),
-                cluster: Some(root),
-                state: ServerState::Registered,
-                reported_read_gate: None,
-                reported_id_map_version: None,
-                reported_perms_version: None,
+            .map(|(id, admin, member, ca)| {
+                AdminServerEntry::granted(
+                    *id,
+                    admin.parse().unwrap(),
+                    if *ca { Role::Ca | Role::Resolver } else { Role::Resolver.into() },
+                    Some(addr(member)),
+                    Some(root),
+                    ServerState::Registered,
+                )
             })
             .collect();
         let mut members: Vec<_> =
@@ -1450,16 +1604,15 @@ mod tests {
                 (third, "10.0.0.3:4565", "10.0.0.3:4564"),
             ]
             .into_iter()
-            .map(|(id, admin, member)| AdminServerEntry {
-                id,
-                addr: admin.parse().unwrap(),
-                roles: Role::Resolver.into(),
-                resolver: Some(addr(member)),
-                cluster: Some(cluster),
-                state: ServerState::Registered,
-                reported_read_gate: None,
-                reported_id_map_version: None,
-                reported_perms_version: None,
+            .map(|(id, admin, member)| {
+                AdminServerEntry::granted(
+                    id,
+                    admin.parse().unwrap(),
+                    Role::Resolver.into(),
+                    Some(addr(member)),
+                    Some(cluster),
+                    ServerState::Registered,
+                )
             })
             .collect(),
             resolver_clusters: vec![ResolverClusterEntry {

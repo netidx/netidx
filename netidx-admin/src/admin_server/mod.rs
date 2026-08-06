@@ -705,9 +705,28 @@ impl Server {
     /// has never been stamped.
     async fn applied_config_version(&self) -> Option<u64> {
         let path = self
-            .read(move |state| state.cfg.roles.resolver.as_ref().map(|r| r.config.clone()))
+            .read(move |state| {
+                state.cfg.roles.resolver.as_ref().map(|r| r.config.clone())
+            })
             .await?;
         crate::version_stamp::read(&path).await
+    }
+
+    /// The config version the CA has rendered for this host, when this host
+    /// *is* the CA. `None` on a member — a member never renders, it is handed
+    /// one — and `None` at the CA until it has rendered its own at least once.
+    async fn rendered_config_version(&self) -> Option<u64> {
+        let server = self.read(|state| state.cfg.server_id).await;
+        self.read_async(async move |state| match state.ca.as_ref() {
+            Some(ca) => ca
+                .store
+                .desired_configs()
+                .await
+                .ok()
+                .and_then(|c| c.get(server).map(|s| s.version)),
+            None => None,
+        })
+        .await
     }
 
     /// The perms model version this host's resolver document is at, for its

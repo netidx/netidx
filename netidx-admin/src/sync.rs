@@ -470,17 +470,14 @@ mod tests {
     }
 
     fn server(n: u128, cluster: Option<u128>, state: ServerState) -> AdminServerEntry {
-        AdminServerEntry {
-            id: AdminServerId(Uuid::from_u128(n)),
-            addr: SocketAddr::from(([10, 0, 0, n as u8], 4565)),
-            roles: Role::Resolver.into(),
-            resolver: None,
-            cluster: cluster.map(|c| ResolverClusterId(Uuid::from_u128(c))),
+        AdminServerEntry::granted(
+            AdminServerId(Uuid::from_u128(n)),
+            SocketAddr::from(([10, 0, 0, n as u8], 4565)),
+            Role::Resolver.into(),
+            None,
+            cluster.map(|c| ResolverClusterId(Uuid::from_u128(c))),
             state,
-            reported_read_gate: None,
-            reported_id_map_version: None,
-            reported_perms_version: None,
-        }
+        )
     }
 
     /// `/` — `/eu` — `/eu/west`, plus a sibling `/ap` under the root. The CA

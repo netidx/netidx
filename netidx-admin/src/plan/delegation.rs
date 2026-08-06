@@ -275,17 +275,14 @@ mod tests {
         resolver_addr: &str,
         cluster: ResolverClusterId,
     ) -> AdminServerEntry {
-        AdminServerEntry {
+        AdminServerEntry::granted(
             id,
-            addr: admin.parse().unwrap(),
-            roles: Role::Resolver.into(),
-            resolver: Some(resolver(resolver_addr)),
-            cluster: Some(cluster),
-            state: ServerState::Registered,
-            reported_read_gate: None,
-            reported_id_map_version: None,
-            reported_perms_version: None,
-        }
+            admin.parse().unwrap(),
+            Role::Resolver.into(),
+            Some(resolver(resolver_addr)),
+            Some(cluster),
+            ServerState::Registered,
+        )
     }
 
     #[test]

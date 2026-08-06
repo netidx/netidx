@@ -8,16 +8,15 @@ fn service_control_routing_uses_identity_across_address_reuse() {
     let replacement = admin_proto::AdminServerId::new();
     let old_addr = "10.0.0.10:4565".parse().unwrap();
     let new_addr = "10.0.0.20:4565".parse().unwrap();
-    let entry = |id, addr| AdminServerEntry {
-        id,
-        addr,
-        roles: Role::Resolver.into(),
-        resolver: None,
-        cluster: None,
-        state: admin_proto::ServerState::Registered,
-        reported_read_gate: None,
-        reported_id_map_version: None,
-        reported_perms_version: None,
+    let entry = |id, addr| {
+        AdminServerEntry::granted(
+            id,
+            addr,
+            Role::Resolver.into(),
+            None,
+            None,
+            admin_proto::ServerState::Registered,
+        )
     };
     let mut map = AdminDomainMap::empty(ca);
     // The selected identity moved, and a different identity reused its old

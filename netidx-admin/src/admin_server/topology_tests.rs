@@ -109,28 +109,22 @@ fn ca_reconciliation_fanout_covers_the_complete_hierarchy() {
         version: 9,
         ca,
         admin_servers: vec![
-            AdminServerEntry {
-                id: ca,
-                addr: "10.1.0.1:4565".parse().unwrap(),
-                roles: Role::Ca | Role::Resolver,
-                resolver: Some(root_member.clone()),
-                cluster: Some(root),
-                state: admin_proto::ServerState::Registered,
-                reported_read_gate: None,
-                reported_id_map_version: None,
-                reported_perms_version: None,
-            },
-            AdminServerEntry {
-                id: satellite,
-                addr: "10.2.0.1:4565".parse().unwrap(),
-                roles: Role::Resolver.into(),
-                resolver: Some(child_member.clone()),
-                cluster: Some(child),
-                state: admin_proto::ServerState::Registered,
-                reported_read_gate: None,
-                reported_id_map_version: None,
-                reported_perms_version: None,
-            },
+            AdminServerEntry::granted(
+                ca,
+                "10.1.0.1:4565".parse().unwrap(),
+                Role::Ca | Role::Resolver,
+                Some(root_member.clone()),
+                Some(root),
+                admin_proto::ServerState::Registered,
+            ),
+            AdminServerEntry::granted(
+                satellite,
+                "10.2.0.1:4565".parse().unwrap(),
+                Role::Resolver.into(),
+                Some(child_member.clone()),
+                Some(child),
+                admin_proto::ServerState::Registered,
+            ),
         ],
         resolver_clusters: vec![
             admin_proto::ResolverClusterEntry {
@@ -183,16 +177,15 @@ fn registration_fanout_updates_its_cluster_and_both_adjacent_levels() {
         addr: addr.parse().unwrap(),
         auth: InfoAuth::Anonymous,
     };
-    let server = |id, admin_addr: &str, member: ResolverAddr, cluster| AdminServerEntry {
-        id,
-        addr: admin_addr.parse().unwrap(),
-        roles: Role::Resolver.into(),
-        resolver: Some(member),
-        cluster: Some(cluster),
-        state: admin_proto::ServerState::Registered,
-        reported_read_gate: None,
-        reported_id_map_version: None,
-        reported_perms_version: None,
+    let server = |id, admin_addr: &str, member: ResolverAddr, cluster| {
+        AdminServerEntry::granted(
+            id,
+            admin_addr.parse().unwrap(),
+            Role::Resolver.into(),
+            Some(member),
+            Some(cluster),
+            admin_proto::ServerState::Registered,
+        )
     };
     let root_member = resolver("10.1.0.1:4564");
     let joining_member = resolver("10.2.0.1:4564");
@@ -298,16 +291,15 @@ async fn ca_state_relocation_persists_route_map_and_crl_without_rollback() {
     let config_lock = ConfigDirLock::acquire(root.path()).unwrap();
     crate::admin_server_config::save(&config_lock, &cfg_path, &cfg).unwrap();
     drop(config_lock);
-    let entry = |id, addr, roles| AdminServerEntry {
-        id,
-        addr,
-        roles,
-        resolver: None,
-        cluster: None,
-        state: admin_proto::ServerState::Registered,
-        reported_read_gate: None,
-        reported_id_map_version: None,
-        reported_perms_version: None,
+    let entry = |id, addr, roles| {
+        AdminServerEntry::granted(
+            id,
+            addr,
+            roles,
+            None,
+            None,
+            admin_proto::ServerState::Registered,
+        )
     };
     let mut old_map = AdminDomainMap::empty(ca);
     old_map.version = 4;
@@ -380,16 +372,15 @@ fn deciding_a_delegation_requires_authority_over_the_parent_cluster() {
     };
     let root_member = resolver("10.1.0.1:4564");
     let eu_member = resolver("10.2.0.1:4564");
-    let server = |id, addr: &str, member: &ResolverAddr, cluster| AdminServerEntry {
-        id,
-        addr: addr.parse().unwrap(),
-        roles: Role::Resolver.into(),
-        resolver: Some(member.clone()),
-        cluster: Some(cluster),
-        state: admin_proto::ServerState::Registered,
-        reported_read_gate: None,
-        reported_id_map_version: None,
-        reported_perms_version: None,
+    let server = |id, addr: &str, member: &ResolverAddr, cluster| {
+        AdminServerEntry::granted(
+            id,
+            addr.parse().unwrap(),
+            Role::Resolver.into(),
+            Some(member.clone()),
+            Some(cluster),
+            admin_proto::ServerState::Registered,
+        )
     };
     let map = AdminDomainMap {
         version: 1,

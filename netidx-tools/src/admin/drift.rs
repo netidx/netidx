@@ -50,12 +50,11 @@ fn describe(a: Agreement) -> String {
 }
 
 fn print(rows: &[ServerDrift], only_behind: bool) {
-    let shown: Vec<_> = rows
-        .iter()
-        .filter(|r| {
-            !only_behind || [r.perms, r.id_map].iter().flatten().any(|a| !a.is_current())
-        })
-        .collect();
+    let lagging = |r: &ServerDrift| {
+        r.config_drift
+            || [r.perms, r.id_map, r.config].iter().flatten().any(|a| !a.is_current())
+    };
+    let shown: Vec<_> = rows.iter().filter(|r| !only_behind || lagging(r)).collect();
     if shown.is_empty() {
         println!(
             "{}",
@@ -67,22 +66,41 @@ fn print(rows: &[ServerDrift], only_behind: bool) {
         );
         return;
     }
-    println!("{:<38}  {:<22}  {:<22}  {}", "SERVER", "ADDRESS", "PERMS", "ID-MAP");
+    println!(
+        "{:<38}  {:<22}  {:<22}  {:<22}  {}",
+        "SERVER", "ADDRESS", "PERMS", "ID-MAP", "CONFIG"
+    );
     for r in shown {
         let cell = |a: Option<Agreement>| a.map(describe).unwrap_or_else(|| "-".into());
+        let mut config = cell(r.config);
+        if r.config_drift {
+            config.push_str(" DRIFT");
+        }
         println!(
-            "{:<38}  {:<22}  {:<22}  {}",
+            "{:<38}  {:<22}  {:<22}  {:<22}  {}",
             r.server.to_string(),
             r.addr.to_string(),
             cell(r.perms),
             cell(r.id_map),
+            config,
+        );
+    }
+    // Drift is not lag: the version can be current while the file has been
+    // changed underneath it. Saying which it is saves an operator from
+    // waiting out a poll for something a poll will not fix.
+    if rows.iter().any(|r| r.config_drift) {
+        println!(
+            "\nDRIFT means the resolver config that server reported does not match the \
+             cluster\nthe CA granted it — a hand edit, or a document that would not \
+             load. The CA sends\nit a correct one on its next register; if DRIFT \
+             persists, look at that host's logs."
         );
     }
     // An "AHEAD" line is not a lag, it is a contradiction — say so rather than
     // leaving an operator to read past it as noise.
     if rows
         .iter()
-        .flat_map(|r| [r.perms, r.id_map])
+        .flat_map(|r| [r.perms, r.id_map, r.config])
         .flatten()
         .any(|a| matches!(a, Agreement::Ahead { .. }))
     {

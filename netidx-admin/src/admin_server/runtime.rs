@@ -200,10 +200,42 @@ pub(super) async fn report_facts(state: &Arc<Server>) -> bool {
     if state.has_ca().await {
         let Some(ca_dir) = state.ca_dir().await else { return true };
         let config_lock = state.config_lock.clone();
+        // The CA converges on its own models by the same route as everyone
+        // else, just without a round trip. It is usually a resolver and an
+        // id-map host too, and nothing else would ever bring it up to date.
+        //
+        // Before the report, so that what it reports about itself is what it
+        // has just finished applying rather than a poll behind.
+        if let Err(e) = converge_self(state).await {
+            warn!("admin-server: {e:#}");
+        }
+        // What we have applied, read the same way a member reads it before its
+        // register — the CA is a member too, and the report it files about
+        // itself has to come from the same place or it will disagree.
+        let report = RegisterRequest {
+            addr: cfg.listen,
+            resolver: local_resolver_data(&cfg).await.1,
+            id_map_version: state.applied_id_map_version().await,
+            perms_version: state.applied_perms_version().await,
+            config_version: state.applied_config_version().await,
+        };
+        let desired_config = state.rendered_config_version().await;
         let r = state
             .write_async(async move |state| {
+                let server_id = state.cfg.server_id;
                 let entry = own_ca_entry(&state.map, &cfg, resolver, facts.is_some());
-                if admin_domain::upsert_ca(&mut state.map, entry, facts)? {
+                let upserted = admin_domain::upsert_ca(&mut state.map, entry, facts)?;
+                // Then record the report through the very same call every
+                // other host's register makes, so the CA cannot come to
+                // describe itself by a different rule than it applies to
+                // everyone else.
+                let registered = admin_domain::register(
+                    &mut state.map,
+                    server_id,
+                    &report,
+                    desired_config,
+                )?;
+                if upserted || registered {
                     admin_domain::save_async(&config_lock, &ca_dir, &state.map).await?;
                 }
                 Ok::<_, anyhow::Error>(())
@@ -211,12 +243,6 @@ pub(super) async fn report_facts(state: &Arc<Server>) -> bool {
             .await;
         if let Err(e) = r {
             warn!("admin-server: recording our own resolver facts failed: {e:#}");
-        }
-        // The CA converges on its own models by the same route as everyone
-        // else, just without a round trip. It is usually a resolver and an
-        // id-map host too, and nothing else would ever bring it up to date.
-        if let Err(e) = converge_self(state).await {
-            warn!("admin-server: {e:#}");
         }
         return true;
     }

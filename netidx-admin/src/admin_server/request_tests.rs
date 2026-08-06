@@ -100,17 +100,14 @@ fn centralized_requirements_protect_all_mutations() {
     }));
     let ca = admin_proto::AdminServerId::new();
     let mut map = AdminDomainMap::empty(ca);
-    map.admin_servers.push(AdminServerEntry {
-        id: ca,
-        addr: "127.0.0.1:4565".parse().unwrap(),
-        roles: Role::Ca.into(),
-        resolver: None,
-        cluster: None,
-        state: admin_proto::ServerState::Registered,
-        reported_read_gate: None,
-        reported_id_map_version: None,
-        reported_perms_version: None,
-    });
+    map.admin_servers.push(AdminServerEntry::granted(
+        ca,
+        "127.0.0.1:4565".parse().unwrap(),
+        Role::Ca.into(),
+        None,
+        None,
+        admin_proto::ServerState::Registered,
+    ));
     assert_ca(&Request::ApplyCaState(ApplyCaStateRequest {
         operation_id,
         ca,

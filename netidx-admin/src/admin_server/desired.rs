@@ -20,6 +20,15 @@ use crate::admin_proto::{
 use anyhow::{Context, Result};
 use std::sync::Arc;
 
+/// What a server turned out to be missing, and what the CA wants it at.
+pub(crate) struct Missing {
+    pub(crate) updates: DesiredUpdate,
+    /// The config version the CA has rendered for this server, whether or not
+    /// it needed sending. Recorded in the map beside what the server reports,
+    /// so who is behind is answerable from the map alone.
+    pub(crate) config_version: Option<u64>,
+}
+
 /// CA-side: what `server` does not yet have, given what it reported.
 ///
 /// Cheap in the steady state — a server whose reported versions match the
@@ -29,7 +38,7 @@ pub(crate) async fn updates_for(
     state: &Arc<Server>,
     server: AdminServerId,
     req: &RegisterRequest,
-) -> Result<DesiredUpdate> {
+) -> Result<Missing> {
     let (cluster, holds_id_map) = state
         .read(move |state| {
             state
@@ -63,15 +72,17 @@ pub(crate) async fn updates_for(
     // topology moves means there is nothing to keep in sync — and the version
     // advances only when the document actually differs, so a member chasing it
     // can arrive.
-    updates.config = match render_config(state, server).await {
-        Ok(rendered) => rendered
-            .filter(|(version, _)| req.config_version.is_none_or(|have| have < *version)),
+    let rendered = match render_config(state, server).await {
+        Ok(rendered) => rendered,
         Err(e) => {
             log::warn!("admin-server: rendering the config for {server}: {e:#}");
             None
         }
-    }
-    .map(|(version, config)| VersionedResolverConfig { version, config });
+    };
+    let config_version = rendered.as_ref().map(|(version, _)| *version);
+    updates.config = rendered
+        .filter(|(version, _)| req.config_version.is_none_or(|have| have < *version))
+        .map(|(version, config)| VersionedResolverConfig { version, config });
     if holds_id_map {
         let reported = req.id_map_version;
         updates.id_map = state
@@ -89,7 +100,7 @@ pub(crate) async fn updates_for(
                 })
             });
     }
-    Ok(updates)
+    Ok(Missing { updates, config_version })
 }
 
 /// Render `server`'s resolver config and record it, returning the version it
@@ -119,6 +130,56 @@ async fn render_config(
         .await
 }
 
+/// Take ownership of the CA host's own resolver config, once.
+///
+/// Every other host hands its config to the CA at enrollment. The CA never
+/// enrolls, so without this there is nothing stored for it, [`render_config`]
+/// returns `None` on its first line, and the CA is the single host whose
+/// resolver config the CA does not own — the one host for which the topology
+/// push really is the mechanism rather than an optimization over the poll.
+///
+/// Seeded only when absent. It adopts the installed document once and is
+/// authoritative from then on, so this cannot become a way for an edit made on
+/// the CA's disk to overwrite what the CA decided.
+async fn adopt_own_config(state: &Arc<Server>) -> Result<()> {
+    let (server, path) = state
+        .read(|state| {
+            (
+                state.cfg.server_id,
+                state.cfg.roles.resolver.as_ref().map(|r| r.config.clone()),
+            )
+        })
+        .await;
+    let Some(path) = path else { return Ok(()) };
+    let already = state
+        .read_async(async move |state| match state.ca.as_ref() {
+            Some(ca) => {
+                ca.store.desired_configs().await.ok().map(|c| c.get(server).is_some())
+            }
+            None => None,
+        })
+        .await;
+    if already != Some(false) {
+        return Ok(());
+    }
+    let config = crate::resolver::ResolverConfig::load_async(&path)
+        .await
+        .with_context(|| format!("reading our own resolver config {}", path.display()))?
+        .into_file();
+    state
+        .write_async(async move |state| {
+            let Some(ca) = state.ca.as_ref() else { return Ok(()) };
+            let mut stored = ca.store.desired_configs().await?;
+            if stored.get(server).is_some() {
+                return Ok(());
+            }
+            stored.set(server, config);
+            ca.store.save_desired_configs(&stored).await
+        })
+        .await
+        .context("recording the CA host's own resolver config")
+}
+
 /// The CA bringing itself up to its own models.
 ///
 /// Same two halves as everyone else — work out what is missing, install it —
@@ -126,6 +187,7 @@ async fn render_config(
 /// rather than a shortcut is the point: a second path here is how the host
 /// holding the models would come to disagree with them.
 pub(crate) async fn converge_self(state: &Arc<Server>) -> Result<()> {
+    adopt_own_config(state).await?;
     let (server, addr) =
         state.read(|state| (state.cfg.server_id, state.cfg.listen)).await;
     let req = RegisterRequest {
@@ -135,8 +197,8 @@ pub(crate) async fn converge_self(state: &Arc<Server>) -> Result<()> {
         perms_version: state.applied_perms_version().await,
         config_version: state.applied_config_version().await,
     };
-    let updates = updates_for(state, server, &req).await?;
-    if updates.is_empty() { Ok(()) } else { apply(state, &updates).await }
+    let missing = updates_for(state, server, &req).await?;
+    if missing.updates.is_empty() { Ok(()) } else { apply(state, &missing.updates).await }
 }
 
 /// Member-side: install what the CA handed back.

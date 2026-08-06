@@ -26,6 +26,13 @@ pub struct ServerDrift {
     pub perms: Option<Agreement>,
     /// `None` when the server does not hold the id-map role.
     pub id_map: Option<Agreement>,
+    /// `None` when the CA has never rendered a config for this server.
+    pub config: Option<Agreement>,
+    /// The server last reported a resolver config that disagreed with the
+    /// cluster the CA granted it — a stale document, a hand edit, or one that
+    /// would not load. Distinct from being behind a version: a host can report
+    /// the current version and still have had its file changed underneath it.
+    pub config_drift: bool,
 }
 
 /// How one piece of state compares to what the CA recorded.
@@ -103,7 +110,17 @@ pub fn from_map(map: &AdminDomainMap) -> Vec<ServerDrift> {
                 .roles
                 .contains(Role::IdMap)
                 .then(|| Agreement::of(s.reported_id_map_version, map.id_map_version));
-            ServerDrift { server: s.id, addr: s.addr, perms, id_map }
+            let config = s
+                .config_version
+                .map(|want| Agreement::of(s.reported_config_version, Some(want)));
+            ServerDrift {
+                server: s.id,
+                addr: s.addr,
+                perms,
+                id_map,
+                config,
+                config_drift: s.reported_config_drift,
+            }
         })
         .collect();
     out.sort_by_key(|d| d.server);
@@ -133,6 +150,9 @@ mod tests {
             reported_read_gate: None,
             reported_id_map_version: id_map,
             reported_perms_version: perms,
+            reported_config_version: None,
+            reported_config_drift: false,
+            config_version: None,
         }
     }
 
@@ -238,5 +258,44 @@ mod tests {
         let mut s = server(Some(c), Role::Resolver.into(), None, None);
         s.state = ServerState::Enrolled;
         assert!(from_map(&map(vec![s], Some((c, Some(1))), None)).is_empty());
+    }
+
+    /// A server behind on its config is named, the same as one behind on
+    /// perms. Before the CA kept a per-server config version this was the one
+    /// piece of state it fully owned that the report could not describe.
+    #[test]
+    fn a_server_behind_on_its_config_is_named() {
+        let c = crate::admin_proto::ResolverClusterId::new();
+        let mut s = server(Some(c), Role::Resolver.into(), None, None);
+        s.config_version = Some(4);
+        s.reported_config_version = Some(2);
+        let d = from_map(&map(vec![s], Some((c, None)), None));
+        assert_eq!(d[0].config, Some(Agreement::Behind { reported: Some(2), want: 4 }));
+        assert!(!d[0].config_drift);
+    }
+
+    /// Drift is not lag. A host can report the version the CA rendered and
+    /// still have had its file changed underneath it, so the two are reported
+    /// separately — waiting out a poll fixes one and not the other.
+    #[test]
+    fn drift_is_reported_separately_from_being_behind() {
+        let c = crate::admin_proto::ResolverClusterId::new();
+        let mut s = server(Some(c), Role::Resolver.into(), None, None);
+        s.config_version = Some(4);
+        s.reported_config_version = Some(4);
+        s.reported_config_drift = true;
+        let d = from_map(&map(vec![s], Some((c, None)), None));
+        assert_eq!(d[0].config, Some(Agreement::Current { version: 4 }));
+        assert!(d[0].config_drift);
+    }
+
+    /// A server the CA has never rendered a config for reports nothing about
+    /// one, rather than reading as current.
+    #[test]
+    fn a_server_with_no_rendered_config_reports_none() {
+        let c = crate::admin_proto::ResolverClusterId::new();
+        let s = server(Some(c), Role::Resolver.into(), None, None);
+        let d = from_map(&map(vec![s], Some((c, None)), None));
+        assert_eq!(d[0].config, None);
     }
 }

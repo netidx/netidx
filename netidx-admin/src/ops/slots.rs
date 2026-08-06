@@ -1246,17 +1246,14 @@ mod tests {
         let cluster = ResolverClusterId::new();
         let listen = "10.0.0.10:4565".parse().unwrap();
         let mut map = AdminDomainMap::empty(server_id);
-        map.admin_servers.push(AdminServerEntry {
-            id: server_id,
-            addr: listen,
-            roles: Role::Ca | Role::Resolver,
-            resolver: None,
-            cluster: Some(cluster),
-            state: ServerState::Registered,
-            reported_read_gate: None,
-            reported_id_map_version: None,
-            reported_perms_version: None,
-        });
+        map.admin_servers.push(AdminServerEntry::granted(
+            server_id,
+            listen,
+            Role::Ca | Role::Resolver,
+            None,
+            Some(cluster),
+            ServerState::Registered,
+        ));
         map.resolver_clusters.push(ResolverClusterEntry {
             perms_version: None,
             id: cluster,

@@ -782,6 +782,12 @@ pub(super) fn roles_of(cfg: &AdminServerConfig) -> BitFlags<Role> {
 /// entry — re-deriving the entry from disk on every poll would route around
 /// that, and would drop the grant entirely on any poll where the resolver
 /// config failed to parse.
+///
+/// This establishes the grant only. What the CA has actually *applied* is
+/// recorded right after, by the same [`admin_domain::register`] every other
+/// host goes through — so the existing reported values are carried forward
+/// here rather than blanked, which would make the CA look like it had applied
+/// nothing on every poll.
 pub(super) fn own_ca_entry(
     map: &AdminDomainMap,
     cfg: &AdminServerConfig,
@@ -798,9 +804,12 @@ pub(super) fn own_ca_entry(
             .and_then(|s| s.cluster)
             .or_else(|| has_resolver.then(admin_proto::ResolverClusterId::new)),
         state: admin_proto::ServerState::Registered,
-        reported_read_gate: None,
-        reported_id_map_version: None,
-        reported_perms_version: None,
+        reported_read_gate: existing.and_then(|s| s.reported_read_gate),
+        reported_id_map_version: existing.and_then(|s| s.reported_id_map_version),
+        reported_perms_version: existing.and_then(|s| s.reported_perms_version),
+        reported_config_version: existing.and_then(|s| s.reported_config_version),
+        reported_config_drift: existing.is_some_and(|s| s.reported_config_drift),
+        config_version: existing.and_then(|s| s.config_version),
     }
 }
 
@@ -824,10 +833,13 @@ pub(super) async fn own_base(state: &Server) -> Option<String> {
         })
         .await
 }
-/// Whether a host reporting `reported` is behind the CA's id-map model.
+/// `Register` (peer-cert-gated): record what a server reports, and hand back
+/// whatever it turns out to be behind on.
 ///
-/// `None` — a host that has never applied anything, including one that has
-/// just enrolled — is behind anything established. A CA with no model
+/// The only thing that refuses a register is the absence of an approved
+/// enrollment grant. In particular a server whose resolver config disagrees
+/// with the CA is *not* refused — this response is the only way it would ever
+/// get a correct one.
 pub(super) async fn handle_register(
     state: &Arc<Server>,
     server_id: admin_proto::AdminServerId,
@@ -843,7 +855,6 @@ pub(super) async fn handle_register(
             };
         }
     };
-    let validation_req = req.clone();
     if let Err(e) = state
         .read(move |state| {
             state
@@ -854,15 +865,6 @@ pub(super) async fn handle_register(
                 .with_context(|| {
                     format!("server {server_id} has no approved enrollment grant")
                 })?;
-            let mut staged = state.map.clone();
-            admin_domain::register(
-                &mut staged,
-                server_id,
-                validation_req.addr,
-                validation_req.resolver.as_ref(),
-                validation_req.id_map_version,
-                validation_req.perms_version,
-            )?;
             Ok::<_, anyhow::Error>(())
         })
         .await
@@ -875,20 +877,19 @@ pub(super) async fn handle_register(
     // because it runs on every register from every server. It is also the
     // whole repair path: a server that was down for an edit is afterwards just
     // a server behind a version, and this is where it stops being one.
-    let updates = match super::desired::updates_for(state, server_id, &req).await {
-        Ok(updates) => updates,
+    let missing = match super::desired::updates_for(state, server_id, &req).await {
+        Ok(missing) => missing,
         Err(e) => return RegisterResponse::Err { reason: format!("{e:#}") },
     };
+    let super::desired::Missing { updates, config_version } = missing;
     let config_lock = state.config_lock.clone();
     let (response, fanout) = state
         .write_async(async move |state| {
             let updated = match admin_domain::register(
                 &mut state.map,
                 server_id,
-                req.addr,
-                req.resolver.as_ref(),
-                req.id_map_version,
-                req.perms_version,
+                &req,
+                config_version,
             ) {
                 Ok(updated) => updated,
                 Err(e) => {
