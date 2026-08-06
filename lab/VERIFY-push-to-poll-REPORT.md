@@ -198,11 +198,30 @@ And measured: **51s to revoke, 51s to restore**, against a one-hour cache — so
 without the invalidation this test would have shown the old membership
 indefinitely, which is exactly what the four-toggle test above did.
 
+**Degradation was measured, not assumed.** The invalidation socket was unlinked
+and only the *resolver* restarted, leaving the daemon running and answering
+queries — which is precisely an old daemon from the resolver's point of view.
+The subscriber was pointed at a single resolver first, because with two in its
+config a warm cache and a cold one answer the same question differently and
+the earlier attempts at this test proved nothing.
+
+```
+no invalidation socket, cache warmed with `engineering`, then revoked:
+  +30s hello   +60s hello   +90s hello   +120s hello   +150s hello   +180s hello
+socket restored (id-map unit restarted):
+  +15s Denied      <- flushed on reconnect
+```
+
+So with no socket the resolver works normally and holds its cached membership
+until the timeout, exactly as it did before any of this existed; and the flush
+on *connect* — the thing that covers invalidations published while
+disconnected — is confirmed by the same run.
+
 What remains is not the cache at all. The 51s is two 30s polls in series: the
 admin server's poll of the CA, which writes `id-map.json`, and then the
-daemon's poll of that file. Collapsing the second — the admin server signalling
-the daemon after it writes, which the daemon already supports via SIGHUP —
-would take this to roughly the admin poll alone. Worth doing, not done here.
+daemon's poll of that file. Eric's call: this is fine where it is. Collapsing
+the second would mean the admin server signalling the daemon after it writes,
+which the daemon already supports via SIGHUP.
 
 ### 8. Cluster members disagreed on perms until the first edit — FIXED (`75c97b87`)
 
