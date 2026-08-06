@@ -19,6 +19,11 @@ is exact and has no such failure mode.
 | publisher-hq | 192.168.50.17 | client, own cert |
 | workstation-eu | 192.168.60.18 | client, own cert |
 
+The last three fixes (compare-and-swap on edits, the socket id-map cache, and
+the CA owning cluster permissions) were verified against a **clean install**,
+not the domain the earlier findings came from, so nothing rests on state a
+previous run had left behind.
+
 ## The verification list, all six steps
 
 1. **Edits with everything up, then a cross-site subscribe.** Perms and id-map
@@ -117,47 +122,68 @@ test drives the real entry point and was confirmed to go red without the fix.
 Re-verified in the lab afterwards: a second edit correctly reported "no change"
 without dropping the first.
 
+That closed the window on the CA host but not the class — think-time in
+`$EDITOR` is unbounded, and two admins can read the same version from anywhere.
+So the class is closed by compare-and-swap (`33e92df6`): a read returns the
+version it hands out, an edit hands it back as `base_version`, and the CA
+records the document only if that still names the current version, answering
+`Stale` with what *is* current otherwise. The comparison is inside the same
+write lock as the write it guards.
+
+`perms set` / `perms remove` rebase onto the returned document and reapply, up
+to 4 times — their intent means the same thing against a new base. A `$EDITOR`
+document is not rebased and must not be: what the operator submitted is the
+intent, so the CLI prints both documents and refuses.
+
+Lab-verified: three `perms set` commands back to back, all three entries
+present afterwards.
+
 ### 6. "INCONSISTENT until every peer is updated" — FIXED (`935e65ba`)
 
 Approving a delegation with a member down told the operator the cluster was
 inconsistent and to re-run the command. Neither is true: step 3 proved the
 member converges by itself. The message now says so.
 
-### 7. An id-map change does not take effect for up to an hour — NEEDS A DECISION
-
-**The one finding with a security dimension, and it is not fixed.**
+### 7. An id-map change took up to an hour to be enforced — FIXED (`9a2be7a3`)
 
 `UserDb::ifo` (`netidx/src/resolver_server/auth.rs:147`) caches each identity's
-group membership for `id_map_timeout`, **default 3600s**
-(`resolver_server/config.rs:469`), and nothing invalidates it when the id-map
-changes.
+group membership for `id_map_timeout` and nothing invalidates it when the
+id-map changes. At the flat 3600s default that meant a revocation could take an
+hour, while `admin drift` reported the id-map converged on every host the whole
+time — the tooling asserting the opposite of what was being enforced.
 
 Demonstrated: with `/data` denying `users` and granting `engineering`, the
 subscriber's group was toggled between the two four times. The id-map reached
-every host each time (v15, v17, v19, v21 — `admin drift` reported every server
-current) and **the data plane never changed**: the subscribe succeeded in all
-four states, including the two where the identity was in `users` and must have
-been denied. Restarting the resolvers cleared the cache and the same identity
-was immediately `Denied`.
+every host each time (v15, v17, v19, v21, all reported current) and **the data
+plane never changed**: the subscribe succeeded in all four states, including
+the two where the identity was in `users` and had to be denied. Restarting the
+resolvers cleared the cache and the same identity was immediately `Denied`.
 
-So an operator who revokes someone's group membership, watches `admin drift`
-report it converged everywhere, and concludes the revocation is live, can be
-wrong by up to an hour. The tooling actively asserts the opposite of the truth.
+The default now comes from the source. `Command` forks `/bin/id`, which may go
+out to SSSD or AD and reflects a directory nobody here administers — an hour is
+right. `Socket` is a round trip to a local daemon holding the map in memory,
+and that map is what the admin plane edits, so the cache is purely the delay
+between revoking a group and enforcing it — a minute, the same order as the
+30s poll that delivered the change. An explicit setting still wins on either.
 
-Two candidate fixes, and the choice is a real design decision:
+Re-measured in the lab against a clean install, with the publisher granted by
+name so only the subscriber's group moved:
 
-- **Invalidate on change.** Have the id-map daemon report a generation with each
-  answer and have `UserDb` drop entries from an older one. Correct, but it is a
-  change to the id-map socket protocol.
-- **Shorten the default** for `IdMapType::Socket` only. Cheap, but it trades a
-  smaller window for more lookups and does not make revocation prompt.
+```
+move subscriber to `users`        -> Denied after 89s
+move it back to `engineering`     -> allowed again after 81s
+```
 
-The hour may well be deliberate for the *platform* mapper, where `/bin/id` is
-expensive and the source changes rarely. It looks wrong for the netidx
-id-mapper, which the admin plane edits and converges on purpose. Worth your
-call rather than mine.
+30s to converge plus up to 60s of cache, both directions. Previously neither
+direction happened at all without restarting the resolvers.
 
-### 8. Cluster members disagree on perms until the first edit — NEEDS A DECISION
+This bounds the staleness rather than removing it. Making revocation prompt
+needs the daemon to report a generation and `UserDb` to drop older entries,
+which is a change to the id-map socket protocol — still open, and still a
+reasonable thing to want. Installs that already wrote `"id_map_timeout": 3600`
+keep it until re-rendered.
+
+### 8. Cluster members disagreed on perms until the first edit — FIXED (`75c97b87`)
 
 Before any perms edit, the two members of cluster `/` held *different*
 documents:
@@ -167,24 +193,42 @@ documents:
 .12  "/": { "resolver-hq-b.netidx.test": "swlpd", "users": "swl" }
 ```
 
-`template/resolver.rs:291` seeds each host's perms with **its own** TLS name
-granted `swlpd` at the base, so the same subscription authorizes differently
-depending on which member a client reaches — silently, from install until
-someone makes a perms edit.
+`template/resolver.rs:291` seeded each host's perms with **its own** TLS name
+granted `swlpd` at the base — a resolver uses its own certificate as a client,
+so it needs rights at the base — which meant the same subscription authorized
+differently depending on which member it reached, silently, from install until
+someone made a perms edit.
 
-And the first edit resolves the divergence by taking one host's document as the
-model and propagating it. In the lab hq-b **lost** its own `swlpd` grant and
-gained hq-a's, as a side effect of an operator granting `/data` to
-`engineering`. That is both a silent revocation for hq-b and a silent privilege
-expansion for hq-a, on every member.
+And the first edit resolved the divergence by propagating one host's document
+to everyone. In the lab hq-b **lost** its own grant and gained hq-a's, as a
+side effect of granting `/data` to `engineering`: a silent revocation for one
+host and a silent extension of the other's rights across the cluster.
 
-The plan's Phase 2 called for seeding the model at cluster creation, which was
-not done. But seeding from `perms::default_seed` alone would strip every
-member's self-grant, so the fix has to also add each member's self-entity to the
-cluster model at enrollment and drop it at removal. That makes every resolver's
-cert granted at the cluster base on every member — defensible, since cluster
-members are already mutually trusted components, but it is a decision about
-privilege distribution rather than a clear-cut bug, so I have left it for you.
+Eric's ruling: the CA is authoritative for permissions, self-grants are just
+permissions the CA adds and propagates normally, and a non-CA admin server
+never owns permissions. So:
+
+- the CA adopts its own installed document as the cluster's, once, giving a
+  cluster a document from the moment it exists rather than from the first edit;
+- each member's own grant is added to that document as it enrols.
+
+The grant is *derived* from what the CA is issuing rather than requested by the
+enrollee — the only entry a host could legitimately ask for is the one for the
+identity the CA is about to give it, and the CA already knows that — so an
+enrolling host cannot ask for anything on someone else's behalf.
+
+Verified against a clean install: after hq-b joined, the cluster's one document
+held both grants, and both hosts converged on it.
+
+```
+"/": { "users": "swl",
+       "resolver-hq-a.netidx.test": "swlpd",
+       "resolver-hq-b.netidx.test": "swlpd" }
+```
+
+Still open: removing a server leaves its grant in the document. It is inert —
+the identity's certificate is revoked, so it no longer authenticates — but it
+is untidy.
 
 ### 9. `read-gate` demands `--server` while the shared help says it defaults — nit
 
