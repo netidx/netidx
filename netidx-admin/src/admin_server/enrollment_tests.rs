@@ -218,3 +218,95 @@ async fn every_member_of_a_cluster_is_granted_in_the_one_document() {
         "nothing to grant means nothing recorded, so no member is made to look behind"
     );
 }
+
+/// Removing a server takes its grant out of the cluster's document and its
+/// stored config out of the CA's store — and leaves every other member's
+/// grant exactly where it was.
+#[tokio::test]
+async fn a_removed_server_is_forgotten_but_its_peers_are_not() {
+    let dir = tempfile::tempdir().unwrap();
+    let lock =
+        crate::config_lock::ConfigDirLock::acquire_for_ca_dir(dir.path()).await.unwrap();
+    let ca_store = ca_store::CaDir::open(lock, dir.path()).await.unwrap();
+    let ca = admin_proto::AdminServerId::new();
+    let mut map = AdminDomainMap::empty(ca);
+
+    let enroll = |addr: &str, name: &str, cluster| {
+        let member = ResolverAddr {
+            addr: format!("{addr}:4564").parse().unwrap(),
+            auth: InfoAuth::Tls { name: name.to_string() },
+        };
+        admin_proto::EnrollmentRequest {
+            resolver_config: None,
+            listen: format!("{addr}:4565").parse().unwrap(),
+            roles: Role::Resolver.into(),
+            resolver_member: Some(member.clone()),
+            resolver_members: vec![member],
+            cluster,
+            replaces: None,
+        }
+    };
+
+    let first = enroll(
+        "10.0.0.10",
+        "a.example.com",
+        admin_proto::ResolverClusterPlacement::Create { base: "/eu".into() },
+    );
+    let id_a = admin_proto::AdminServerId::new();
+    let cluster = stage_enrollment(&mut map, id_a, &first).unwrap();
+    grant_member_self_perms(&ca_store, &mut map, cluster, &first).await.unwrap();
+    let second = enroll(
+        "10.0.0.11",
+        "b.example.com",
+        admin_proto::ResolverClusterPlacement::Join { cluster },
+    );
+    let id_b = admin_proto::AdminServerId::new();
+    stage_enrollment(&mut map, id_b, &second).unwrap();
+    grant_member_self_perms(&ca_store, &mut map, cluster, &second).await.unwrap();
+    // Give b a stored config too, so the removal has both to clean up.
+    {
+        let mut configs = ca_store.store.desired_configs().await.unwrap();
+        configs.set(
+            id_b,
+            netidx::resolver_server::config::file::Config {
+                children: vec![],
+                parent: None,
+                member_servers: vec![],
+                perms: crate::perms::empty(),
+                include_permissions: vec![],
+            },
+        );
+        ca_store.store.save_desired_configs(&configs).await.unwrap();
+    }
+
+    let mut after = map.clone();
+    assert!(admin_domain::remove(&mut after, id_b).unwrap());
+    forget_removed_server(&ca_store, &map, &mut after, id_b).await.unwrap();
+
+    let model = ca_store.store.perms_model().await.unwrap();
+    let perms = &model.get(cluster).expect("the cluster outlived the member").perms;
+    assert!(
+        crate::perms::lookup(perms, "/eu", "b.example.com").is_none(),
+        "the removed server's grant is gone"
+    );
+    assert_eq!(
+        crate::perms::lookup(perms, "/eu", "a.example.com").map(|b| b.as_str()),
+        Some("swlpd"),
+        "and the member that stayed keeps its own"
+    );
+    assert!(crate::perms::lookup(perms, "/eu", "users").is_some());
+    assert!(
+        ca_store.store.desired_configs().await.unwrap().get(id_b).is_none(),
+        "its stored resolver config is gone too"
+    );
+
+    // Removing the last member takes the cluster with it, so the whole
+    // document goes rather than one line of it.
+    let mut empty = after.clone();
+    assert!(admin_domain::remove(&mut empty, id_a).unwrap());
+    forget_removed_server(&ca_store, &after, &mut empty, id_a).await.unwrap();
+    assert!(
+        ca_store.store.perms_model().await.unwrap().get(cluster).is_none(),
+        "a cluster that no longer exists keeps no permissions"
+    );
+}

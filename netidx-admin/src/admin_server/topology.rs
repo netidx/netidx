@@ -1124,6 +1124,17 @@ async fn remove_server_prepare_inner(
             .map_err(|e| {
                 err(format!("revoking the server's serving certificates: {e:#}"))
             })?;
+            // Before the map is replaced, because `map` is the only place the
+            // removed server's cluster and identity still exist.
+            if let Err(e) =
+                super::enrollment::forget_removed_server(ca, map, &mut next, req.server)
+                    .await
+            {
+                return Err(err(format!(
+                    "forgetting the removed server's configuration and permissions: \
+                     {e:#}"
+                )));
+            }
             let config_lock = ca.config_lock();
             if let Err(e) = admin_domain::save_async(&config_lock, &ca_dir, &next).await {
                 return Err(err(format!("persisting the admin domain map: {e:#}")));

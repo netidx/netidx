@@ -243,6 +243,61 @@ async fn grant_member_self_perms(
     Ok(())
 }
 
+/// Forget everything the CA was keeping on behalf of a server it no longer
+/// has: its stored resolver config, and its own grant in its cluster's
+/// permissions.
+///
+/// The counterpart to [`grant_member_self_perms`]. Neither is load-bearing for
+/// security — a removed server's certificate is revoked, so its identity no
+/// longer authenticates and the entry is inert — but leaving them is how a
+/// document nobody edited grows entries for hosts nobody remembers, and an
+/// operator reading permissions should not have to know which names are ghosts.
+///
+/// `before` is the map as it was, because that is the only place the removed
+/// server's cluster and identity still exist; `after` is consulted for whether
+/// the cluster outlived it, since removing the last member deletes the cluster
+/// and then the whole document goes rather than one line of it.
+pub(super) async fn forget_removed_server(
+    ca: &ca_store::CaDir,
+    before: &AdminDomainMap,
+    after: &mut AdminDomainMap,
+    server: admin_proto::AdminServerId,
+) -> Result<()> {
+    let mut configs = ca.store.desired_configs().await?;
+    if configs.forget(server) {
+        ca.store.save_desired_configs(&configs).await?;
+    }
+    let Some(entry) = before.admin_servers.iter().find(|s| s.id == server) else {
+        return Ok(());
+    };
+    let Some(cluster) = entry.cluster else { return Ok(()) };
+    let mut model = ca.store.perms_model().await?;
+    match after.resolver_clusters.iter().find(|c| c.id == cluster) {
+        None => {
+            if model.forget(cluster) {
+                ca.store.save_perms_model(&model).await?;
+            }
+        }
+        Some(surviving) => {
+            let entity = match entry.resolver.as_ref().map(|r| &r.auth) {
+                Some(admin_proto::InfoAuth::Tls { name }) => name.clone(),
+                Some(admin_proto::InfoAuth::Krb5 { spn }) => spn.clone(),
+                Some(admin_proto::InfoAuth::Anonymous) | None => return Ok(()),
+            };
+            let base = surviving.base.clone();
+            let Some(recorded) = model.get(cluster) else { return Ok(()) };
+            let mut perms = recorded.perms.clone();
+            if !crate::perms::remove_entry(&mut perms, &base, &entity) {
+                return Ok(());
+            }
+            let version = model.set(cluster, &perms)?;
+            ca.store.save_perms_model(&model).await?;
+            admin_domain::set_perms_version(after, cluster, version);
+        }
+    }
+    Ok(())
+}
+
 /// Whether this cluster's seed should carry the shared `users` group grant.
 ///
 /// The seed's shared entry names a group, and with no id mapping there are no
