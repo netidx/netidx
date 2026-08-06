@@ -156,13 +156,13 @@ Approving a delegation with a member down told the operator the cluster was
 inconsistent and to re-run the command. Neither is true: step 3 proved the
 member converges by itself. The message now says so.
 
-### 7. An id-map change took up to an hour to be enforced — FIXED (`9a2be7a3`)
+### 7. An id-map change took up to an hour to be enforced — FIXED (`fcfbb86b`)
 
-`UserDb::ifo` (`netidx/src/resolver_server/auth.rs:147`) caches each identity's
-group membership for `id_map_timeout` and nothing invalidates it when the
-id-map changes. At the flat 3600s default that meant a revocation could take an
-hour, while `admin drift` reported the id-map converged on every host the whole
-time — the tooling asserting the opposite of what was being enforced.
+`UserDb::ifo` caches each identity's group membership for `id_map_timeout` and
+nothing invalidated it when the id-map changed. At the flat 3600s default a
+revocation could take an hour, while `admin drift` reported the id-map
+converged on every host the whole time — the tooling asserting the opposite of
+what was being enforced.
 
 Demonstrated: with `/data` denying `users` and granting `engineering`, the
 subscriber's group was toggled between the two four times. The id-map reached
@@ -171,29 +171,38 @@ plane never changed**: the subscribe succeeded in all four states, including
 the two where the identity was in `users` and had to be denied. Restarting the
 resolvers cleared the cache and the same identity was immediately `Denied`.
 
-The default now comes from the source. `Command` forks `/bin/id`, which may go
-out to SSSD or AD and reflects a directory nobody here administers — an hour is
-right. `Socket` is a round trip to a local daemon holding the map in memory,
-and that map is what the admin plane edits, so the cache is purely the delay
-between revoking a group and enforcing it — a minute, the same order as the
-30s poll that delivered the change. An explicit setting still wins on either.
+Shortening the cache for socket id-maps (`9a2be7a3`) bounded this at ~90s, but
+that is a guess that a minute is short enough rather than a mechanism. The
+daemon now says when its map has changed: it listens on a second socket beside
+its query socket, the resolver holds a connection open, and every reload is
+published. The cache went back to one flat hour — it is a bound on how long a
+stale answer can survive unnoticed, not the means of noticing.
 
-Re-measured in the lab against a clean install, with the publisher granted by
-name so only the subscriber's group moved:
+Both directions degrade to the timeout, so it is safe to add to a running
+installation: an old daemon never creates the socket and the resolver retries
+quietly; an old resolver never connects and the daemon publishes to nobody; a
+daemon that cannot bind it warns and carries on answering queries.
+
+Confirmed on the wire, both processes:
 
 ```
-move subscriber to `users`        -> Denied after 89s
-move it back to `engineering`     -> allowed again after 81s
+id-map: no invalidation socket at …/id-map.sock.control (Connection refused); the
+        group cache will expire on its timeout     <- resolver started first
+id-map: subscribed to cache invalidations on …/id-map.sock.control   <- 10s later
+id-map: a resolver subscribed to cache invalidations                 <- daemon
+id-map: published invalidation 1 to 1 subscriber(s)                  <- on an edit
+id-map: invalidate 1 — flushing the group cache                      <- resolver
 ```
 
-30s to converge plus up to 60s of cache, both directions. Previously neither
-direction happened at all without restarting the resolvers.
+And measured: **51s to revoke, 51s to restore**, against a one-hour cache — so
+without the invalidation this test would have shown the old membership
+indefinitely, which is exactly what the four-toggle test above did.
 
-This bounds the staleness rather than removing it. Making revocation prompt
-needs the daemon to report a generation and `UserDb` to drop older entries,
-which is a change to the id-map socket protocol — still open, and still a
-reasonable thing to want. Installs that already wrote `"id_map_timeout": 3600`
-keep it until re-rendered.
+What remains is not the cache at all. The 51s is two 30s polls in series: the
+admin server's poll of the CA, which writes `id-map.json`, and then the
+daemon's poll of that file. Collapsing the second — the admin server signalling
+the daemon after it writes, which the daemon already supports via SIGHUP —
+would take this to roughly the admin poll alone. Worth doing, not done here.
 
 ### 8. Cluster members disagreed on perms until the first edit — FIXED (`75c97b87`)
 
@@ -238,9 +247,11 @@ held both grants, and both hosts converged on it.
        "resolver-hq-b.netidx.test": "swlpd" }
 ```
 
-Still open: removing a server leaves its grant in the document. It is inert —
-the identity's certificate is revoked, so it no longer authenticates — but it
-is untidy.
+Removing a server used to leave its grant in the document, and its stored
+resolver config in the CA's store — `DesiredConfigs::forget` and
+`PermsModel::forget` both existed and were both called only from their own
+tests. Fixed in `9e7a90af`; removing the last member of a cluster takes the
+whole document with the cluster.
 
 ### 9. `read-gate` demands `--server` while the shared help says it defaults — nit
 
