@@ -466,20 +466,17 @@ pub mod file {
         IdMapType::Command
     }
 
-    /// How long a group-membership answer from `source` stays good, when the
-    /// config does not say.
+    /// How long a group-membership answer stays good, when the config does
+    /// not say.
     ///
-    /// The id-mapper daemon answers from memory over a unix socket, so asking
-    /// it often is cheap — and its map is what the admin plane edits, so the
-    /// cache is the delay between an operator revoking a group and the
-    /// resolver enforcing it. A minute keeps that on the same order as the
-    /// admin-plane poll that delivered the change in the first place, rather
-    /// than an hour behind it.
-    pub(crate) fn default_id_map_timeout(source: &IdMapType) -> u64 {
-        match source {
-            IdMapType::Socket => 60,
-            IdMapType::Command | IdMapType::DoNotMap => 3600,
-        }
+    /// An hour, because a lookup is not free and most identities' groups never
+    /// change. This is a bound on how long a stale answer can survive
+    /// unnoticed, not the means of noticing: the id-map daemon publishes
+    /// invalidations and the resolver flushes on them, so a change made
+    /// through the admin plane is enforced in seconds regardless of this. It
+    /// is what remains for a daemon too old to publish them.
+    pub(crate) fn default_id_map_timeout() -> u64 {
+        3600
     }
 
     fn default_hello_timeout() -> u64 {
@@ -781,9 +778,7 @@ impl Config {
             }
             check_member_server_auth(&m)?;
             let id_map_timeout = chrono::Duration::seconds(
-                m.id_map_timeout
-                    .unwrap_or_else(|| file::default_id_map_timeout(&m.id_map_type))
-                    as i64,
+                m.id_map_timeout.unwrap_or_else(file::default_id_map_timeout) as i64,
             );
             let id_map = match &m.id_map_type {
                 IdMapType::DoNotMap => IdMap::DoNotMap,
@@ -1227,36 +1222,31 @@ mod id_map_timeout_tests {
         .unwrap()
     }
 
-    /// The netidx id-mapper answers from memory over a local socket, and its
-    /// map is what the admin plane edits — so the cache is the delay between
-    /// an operator revoking a group and the resolver enforcing it. An hour
-    /// there meant `admin drift` could report a change converged everywhere
-    /// while every resolver still authorized on the old membership.
+    /// The cache timeout is a backstop, not the means of noticing a change:
+    /// the id-map daemon publishes invalidations and the resolver flushes on
+    /// them. So it is one number for every source, and a long one.
     #[test]
-    fn a_socket_id_map_defaults_to_a_short_cache() {
-        let c = member_with(&file::IdMapType::Socket, None);
-        assert_eq!(c.member_servers[0].id_map_timeout, chrono::Duration::seconds(60));
+    fn the_default_timeout_does_not_depend_on_the_source() {
+        for source in [file::IdMapType::Socket, file::IdMapType::Command] {
+            let c = member_with(&source, None);
+            assert_eq!(
+                c.member_servers[0].id_map_timeout,
+                chrono::Duration::seconds(3600),
+                "{source:?}"
+            );
+        }
     }
 
-    /// `/bin/id` may fork out to a directory nobody here administers, so it is
-    /// both expensive to ask and not ours to keep current.
+    /// An operator who names a timeout gets exactly it.
     #[test]
-    fn a_command_id_map_keeps_the_long_cache() {
-        let c = member_with(&file::IdMapType::Command, None);
-        assert_eq!(c.member_servers[0].id_map_timeout, chrono::Duration::seconds(3600));
-    }
-
-    /// The type only supplies a default. An operator who names a timeout gets
-    /// exactly it, on either source.
-    #[test]
-    fn an_explicit_timeout_wins_over_the_type() {
-        let c = member_with(&file::IdMapType::Socket, Some(7200));
-        assert_eq!(c.member_servers[0].id_map_timeout, chrono::Duration::seconds(7200));
+    fn an_explicit_timeout_is_honoured() {
+        let c = member_with(&file::IdMapType::Socket, Some(120));
+        assert_eq!(c.member_servers[0].id_map_timeout, chrono::Duration::seconds(120));
     }
 
     /// An unset timeout is left out of the file rather than written as null,
-    /// so a config the CA renders stays readable and keeps taking its default
-    /// from the type.
+    /// so a config the CA renders keeps taking whatever the default becomes
+    /// instead of pinning today's value into every host's document.
     #[test]
     fn an_unset_timeout_is_not_serialized() {
         let m = file::MemberServerBuilder::default()

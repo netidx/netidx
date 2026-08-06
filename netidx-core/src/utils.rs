@@ -40,6 +40,30 @@ use std::{
 /// and there is only one fact.
 pub const FS_TIMESTAMP_SETTLE: Duration = Duration::from_millis(50);
 
+/// Where the id-map daemon publishes cache invalidations, given the socket it
+/// answers queries on.
+///
+/// The resolver caches each identity's group membership, so a change to the
+/// map is not enforced until that entry expires. Rather than shorten the cache
+/// and hope, the daemon tells the resolver when its map has changed: it
+/// listens here as well, the resolver holds a connection open, and every
+/// reload is published to it.
+///
+/// Derived rather than configured, so an existing deployment gains it without
+/// anyone editing a file, and so neither end can be pointed at the wrong one.
+/// Both directions degrade to the plain cache timeout: an old daemon never
+/// creates this, and a new one publishes to nobody if no resolver connects.
+///
+/// It lives here because the two ends are in different crates and there is
+/// only one fact. (A path near the platform's `sun_path` limit may be too long
+/// with the suffix; the daemon logs and carries on, which is the same
+/// degradation as an old daemon.)
+pub fn id_map_control_socket(query_socket: &std::path::Path) -> std::path::PathBuf {
+    let mut p = query_socket.as_os_str().to_os_string();
+    p.push(".control");
+    std::path::PathBuf::from(p)
+}
+
 #[macro_export]
 macro_rules! try_cf {
     ($msg:expr, continue, $lbl:tt, $e:expr) => {

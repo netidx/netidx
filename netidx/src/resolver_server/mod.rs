@@ -49,6 +49,8 @@ use tokio::{
 
 pub mod auth;
 pub mod config;
+#[cfg(unix)]
+mod id_map_watch;
 pub(crate) mod secctx;
 mod shard_store;
 mod store;
@@ -942,6 +944,18 @@ async fn server_loop(
     });
     let mut stop = stop.fuse();
     let mut client_stops: Vec<oneshot::Sender<()>> = Vec::new();
+    // Hold a line open to the id-map daemon, if this member takes its
+    // identities from one, so a group revoked by an administrator stops being
+    // honoured when the daemon says so rather than when the cache happens to
+    // expire. Parked in `client_stops` because that is already drained at
+    // shutdown — the watch should end with the server, not outlive it.
+    #[cfg(unix)]
+    if let config::IdMap::Socket(path) = &ctx.cfg.id_map {
+        client_stops.push(id_map_watch::spawn(
+            netidx_core::utils::id_map_control_socket(std::path::Path::new(&**path)),
+            ctx.secctx.clone(),
+        ));
+    }
     let max_connections = ctx.cfg.max_connections;
     debug!("signaling ready");
     let mut listen_addr = listener.local_addr()?;

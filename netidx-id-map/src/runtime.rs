@@ -79,6 +79,13 @@ const MAX_QUERY_BYTES: usize = 1024;
 /// dropped, which is cheap on the kernel side.
 const MAX_INFLIGHT: usize = 32;
 
+/// Max resolvers subscribed to cache invalidations at once.
+///
+/// One host runs one resolver, so this is only a bound on a local peer that
+/// opens connections and never reads. Past it new subscribers are refused,
+/// which costs them the invalidations and nothing else.
+const MAX_CONTROL_SUBSCRIBERS: usize = 16;
+
 /// Parameters used to start the daemon.
 #[derive(Debug, Clone)]
 pub struct ServerParams {
@@ -173,9 +180,26 @@ impl Server {
             format!("chmod {:o} on {:?}", params.socket_mode, params.socket)
         })?;
 
+        // The invalidation socket is best-effort: without it a resolver falls
+        // back to expiring its cache on the timeout, which is what every
+        // resolver did before this existed. So a failure here is a warning,
+        // never a refusal to start — the daemon's job is answering queries.
+        let control_path = netidx_core::utils::id_map_control_socket(&params.socket);
+        let control = match bind_control(&control_path, params.socket_mode).await {
+            Ok(l) => Some(l),
+            Err(e) => {
+                warn!(
+                    "id-map: not publishing cache invalidations on {}: {e:#} — \
+                     resolvers will expire their caches on the timeout instead",
+                    control_path.display()
+                );
+                None
+            }
+        };
         let (stop_tx, stop_rx) = oneshot::channel();
         let config_path = params.config.clone();
-        let join = tokio::spawn(run_loop(listener, config_path, map, stamp, stop_rx));
+        let join =
+            tokio::spawn(run_loop(listener, control, config_path, map, stamp, stop_rx));
 
         info!(
             "id-map daemon ready on {} (config {})",
@@ -222,12 +246,19 @@ impl Server {
 /// handlers it spawns.
 async fn run_loop(
     listener: UnixListener,
+    control: Option<UnixListener>,
     config_path: PathBuf,
     mut map: Arc<IdMap>,
     mut stamp: Option<SystemTime>,
     stop: oneshot::Receiver<()>,
 ) {
     let inflight = Arc::new(AtomicUsize::new(0));
+    // Resolvers listening for "the map changed". Held right here in the loop
+    // for the same reason the map is: only this loop touches them, so there is
+    // nothing to lock. `generation` is for the logs at both ends — a resolver
+    // flushes on any invalidation, so nothing depends on its ordering.
+    let mut subscribers: Vec<UnixStream> = Vec::new();
+    let mut generation: u64 = 0;
     // SIGHUP is the manual reload override (see module docs). If the
     // handler can't be installed we log and carry on — the file
     // watcher is the normal reload path and queries still work. Held
@@ -268,6 +299,19 @@ async fn run_loop(
                 );
                 if let Some(m) = reload(&config_path, &mut map).await {
                     stamp = Some(m);
+                    generation += 1;
+                    publish_invalidation(&mut subscribers, generation).await;
+                }
+            }
+            client = accept_control(&control) => {
+                if subscribers.len() >= MAX_CONTROL_SUBSCRIBERS {
+                    warn!(
+                        "id-map: refusing an invalidation subscriber, already at \
+                         {MAX_CONTROL_SUBSCRIBERS}"
+                    );
+                } else {
+                    debug!("id-map: a resolver subscribed to cache invalidations");
+                    subscribers.push(client);
                 }
             }
             // Live reload from the config poll.
@@ -283,7 +327,15 @@ async fn run_loop(
                     // otherwise be remembered as already applied. A failed
                     // reload records `latest` so a config that cannot be
                     // parsed is retried when it changes, not every tick.
-                    stamp = reload(&config_path, &mut map).await.or(latest);
+                    let reloaded = reload(&config_path, &mut map).await;
+                    // Only a reload that actually replaced the map is worth
+                    // telling anyone about; a failed one kept the last-known-
+                    // good map, so nothing a resolver has cached is stale.
+                    if reloaded.is_some() {
+                        generation += 1;
+                        publish_invalidation(&mut subscribers, generation).await;
+                    }
+                    stamp = reloaded.or(latest);
                 }
             }
             r = listener.accept() => match r {
@@ -347,6 +399,80 @@ async fn recv_sighup(sighup: &mut Option<Signal>) -> Option<()> {
 /// still make progress on a single-threaded runtime while we wait.
 /// On success also returns the time of the descriptor the new map was read
 /// from, for the caller to record.
+/// Bind the invalidation socket.
+///
+/// No occupied-socket probe: the query socket's bind already established that
+/// no other daemon holds this pair, so anything left here is ours from a
+/// previous run. As there it is removed only if it is actually a socket —
+/// a regular file or a symlink at this path is operator misconfiguration and
+/// unlinking it would be the wrong repair.
+async fn bind_control(path: &Path, mode: u32) -> Result<UnixListener> {
+    use std::os::unix::fs::FileTypeExt;
+    match tokio::fs::symlink_metadata(path).await {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e).with_context(|| format!("stat {path:?} before bind")),
+        Ok(md) if md.file_type().is_socket() => {
+            let _ = tokio::fs::remove_file(path).await;
+        }
+        Ok(md) => bail!(
+            "{path:?} exists but is not a unix socket (file type: {:?})",
+            md.file_type()
+        ),
+    }
+    let listener =
+        UnixListener::bind(path).with_context(|| format!("binding {path:?}"))?;
+    set_socket_mode(path, mode).with_context(|| format!("chmod {mode:o} on {path:?}"))?;
+    Ok(listener)
+}
+
+/// Accept an invalidation subscriber, or never resolve when there is no
+/// invalidation socket.
+///
+/// Accept errors are retried in here rather than returned: this is one arm of
+/// the main `select`, and returning would take a transient failure and turn it
+/// into "no invalidations for the life of the process".
+async fn accept_control(listener: &Option<UnixListener>) -> UnixStream {
+    match listener {
+        None => std::future::pending().await,
+        Some(l) => loop {
+            match l.accept().await {
+                Ok((client, _)) => return client,
+                Err(e) => {
+                    warn!("id-map: invalidation accept failed: {e}");
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+            }
+        },
+    }
+}
+
+/// Tell every subscribed resolver that the map has changed.
+///
+/// One line per reload, and nothing is replayed: a resolver that has gone away
+/// fails the write and is dropped, and when it reconnects it flushes its cache
+/// on connect anyway. So a missed invalidation costs a reconnect, not
+/// correctness.
+async fn publish_invalidation(subscribers: &mut Vec<UnixStream>, generation: u64) {
+    if subscribers.is_empty() {
+        return;
+    }
+    let line = compact_str::format_compact!("invalidate {generation}\n");
+    let mut i = 0;
+    while i < subscribers.len() {
+        match subscribers[i].write_all(line.as_bytes()).await {
+            Ok(()) => i += 1,
+            Err(e) => {
+                debug!("id-map: dropping an invalidation subscriber: {e}");
+                subscribers.swap_remove(i);
+            }
+        }
+    }
+    debug!(
+        "id-map: published invalidation {generation} to {} subscriber(s)",
+        subscribers.len()
+    );
+}
+
 async fn reload(config_path: &Path, map: &mut Arc<IdMap>) -> Option<SystemTime> {
     let path = config_path.to_path_buf();
     match tokio::task::spawn_blocking(move || load_config(&path)).await {
@@ -489,7 +615,7 @@ mod tests {
     /// holds already matches the file. `netidx-admin`'s atomic write is where
     /// production pays this; a test that skipped it would be exercising a
     /// writer that no netidx tool is, and failing on the daemon's behalf.
-    fn write_config(path: &Path, map: &IdMap) {
+    pub(super) fn write_config(path: &Path, map: &IdMap) {
         let bytes = serde_json::to_vec_pretty(map).unwrap();
         let tmp = path.with_extension("json.tmp");
         std::fs::write(&tmp, &bytes).unwrap();
@@ -498,7 +624,7 @@ mod tests {
     }
 
     /// A map whose only group is `users`, with one identity per name in it.
-    fn map_of(names: &[&str]) -> IdMap {
+    pub(super) fn map_of(names: &[&str]) -> IdMap {
         let identities = names
             .iter()
             .map(|name| {
@@ -835,5 +961,113 @@ mod tests {
             .await
             .expect("shutdown_and_join hung — regression of the _stop drop-order bug")
             .expect("listener task returned an error");
+    }
+}
+
+#[cfg(test)]
+mod invalidation_tests {
+    use super::tests::{map_of, write_config};
+    use super::*;
+    use tokio::io::{AsyncBufReadExt, BufReader};
+
+    /// A reload is published to every subscribed resolver.
+    ///
+    /// This is what lets the resolver's group cache be long: it does not have
+    /// to be short enough to notice a change, because it is told.
+    #[tokio::test]
+    async fn a_reload_is_published_to_subscribers() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg_path = dir.path().join("id-map.json");
+        let sock_path = dir.path().join("id-map.sock");
+        write_config(&cfg_path, &map_of(&["alice.example.com"]));
+        let _server = Server::start(ServerParams {
+            socket: sock_path.clone(),
+            socket_mode: 0o600,
+            config: cfg_path.clone(),
+        })
+        .await
+        .unwrap();
+        let control = netidx_core::utils::id_map_control_socket(&sock_path);
+        let mut lines =
+            BufReader::new(UnixStream::connect(&control).await.unwrap()).lines();
+
+        write_config(&cfg_path, &map_of(&["alice.example.com", "bob.example.com"]));
+        let line = timeout(Duration::from_secs(5), lines.next_line())
+            .await
+            .expect("an invalidation should arrive within a poll interval")
+            .unwrap()
+            .unwrap();
+        assert!(line.starts_with("invalidate "), "got {line:?}");
+
+        // Every reload, not just the first. The resolver's watch died after
+        // one notification in an earlier iteration of a different watcher in
+        // this codebase, and nothing noticed for months.
+        write_config(&cfg_path, &map_of(&["alice.example.com"]));
+        let second = timeout(Duration::from_secs(5), lines.next_line())
+            .await
+            .expect("the second change must be published too")
+            .unwrap()
+            .unwrap();
+        assert!(second.starts_with("invalidate "), "got {second:?}");
+        assert_ne!(line, second, "the generation should move");
+    }
+
+    /// A reload that failed to parse kept the last-known-good map, so nothing
+    /// a resolver holds has gone stale and there is nothing to announce.
+    #[tokio::test]
+    async fn a_failed_reload_is_not_published() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg_path = dir.path().join("id-map.json");
+        let sock_path = dir.path().join("id-map.sock");
+        write_config(&cfg_path, &map_of(&["alice.example.com"]));
+        let _server = Server::start(ServerParams {
+            socket: sock_path.clone(),
+            socket_mode: 0o600,
+            config: cfg_path.clone(),
+        })
+        .await
+        .unwrap();
+        let control = netidx_core::utils::id_map_control_socket(&sock_path);
+        let mut lines =
+            BufReader::new(UnixStream::connect(&control).await.unwrap()).lines();
+        std::fs::write(&cfg_path, b"{ not json").unwrap();
+        std::thread::sleep(netidx_core::utils::FS_TIMESTAMP_SETTLE);
+        assert!(
+            timeout(Duration::from_secs(2), lines.next_line()).await.is_err(),
+            "a map that could not be parsed was never adopted, so nothing changed"
+        );
+        // And the daemon is still answering from the good map.
+        let mut s = UnixStream::connect(&sock_path).await.unwrap();
+        s.write_all(b"alice.example.com\n").await.unwrap();
+        s.shutdown().await.unwrap();
+        let mut out = String::new();
+        s.read_to_string(&mut out).await.unwrap();
+        assert!(out.contains("(alice.example.com)"), "got {out:?}");
+    }
+
+    /// The daemon serves queries whether or not anyone is listening for
+    /// invalidations — an old resolver never connects, and that is a supported
+    /// configuration rather than a degraded one.
+    #[tokio::test]
+    async fn queries_work_with_no_subscriber() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg_path = dir.path().join("id-map.json");
+        let sock_path = dir.path().join("id-map.sock");
+        write_config(&cfg_path, &map_of(&["alice.example.com"]));
+        let _server = Server::start(ServerParams {
+            socket: sock_path.clone(),
+            socket_mode: 0o600,
+            config: cfg_path.clone(),
+        })
+        .await
+        .unwrap();
+        write_config(&cfg_path, &map_of(&["alice.example.com", "bob.example.com"]));
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        let mut s = UnixStream::connect(&sock_path).await.unwrap();
+        s.write_all(b"bob.example.com\n").await.unwrap();
+        s.shutdown().await.unwrap();
+        let mut out = String::new();
+        s.read_to_string(&mut out).await.unwrap();
+        assert!(out.contains("(bob.example.com)"), "got {out:?}");
     }
 }

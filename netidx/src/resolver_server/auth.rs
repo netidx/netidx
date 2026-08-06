@@ -131,6 +131,20 @@ impl UserDb {
         }
     }
 
+    /// Forget every cached group lookup, so the next query for each identity
+    /// asks the mapper again.
+    ///
+    /// Only the lookups. `names`/`entities` are the interning tables, and the
+    /// compiled [`PMap`] refers to entities by the `Entity` handed out from
+    /// them — clearing those would not expire a cache, it would silently
+    /// repoint every permission entry in the running server.
+    // Portable; it is the *caller* that is unix-only, because the id-map
+    // daemon that asks for a flush speaks over a unix socket.
+    #[cfg_attr(not(unix), allow(dead_code))]
+    pub(crate) fn flush(&mut self) {
+        self.users.clear();
+    }
+
     fn entity(&mut self, name: &str) -> Entity {
         match self.entities.get(name) {
             Some(e) => *e,

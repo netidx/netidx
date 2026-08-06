@@ -195,6 +195,26 @@ impl SecCtx {
         }
     }
 
+    /// Forget every cached identity → groups lookup.
+    ///
+    /// Called when the id-map daemon says its map has changed. Until then the
+    /// cache is only expired by its timeout, which means a group an
+    /// administrator has revoked keeps being honoured until the entry ages
+    /// out — the change having reached the daemon says nothing about the
+    /// resolver having noticed.
+    #[cfg_attr(not(unix), allow(dead_code))]
+    pub(crate) async fn flush_user_cache(&self) {
+        async fn flush_one<S: 'static>(store: &RwLock<SecCtxData<S>>) {
+            store.write().await.users.flush();
+        }
+        match self {
+            SecCtx::Anonymous => (),
+            SecCtx::Krb5(a) => flush_one(&a.1).await,
+            SecCtx::Local(a) => flush_one(&a.1).await,
+            SecCtx::Tls(a) => flush_one(&a.1).await,
+        }
+    }
+
     pub(super) async fn new(cfg: &Config, member: &MemberServer) -> Result<Self> {
         let t = match &member.auth {
             Auth::Anonymous => SecCtx::Anonymous,
