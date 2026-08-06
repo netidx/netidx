@@ -416,7 +416,7 @@ async fn resolver_template_tls_round_trip() -> Result<()> {
     // Overwrite the empty starter the template's apply() dropped —
     // `id_map_engine::save` validates structurally before writing.
     let mut map = id_map_engine::empty();
-    id_map_engine::upsert_identity(&mut map, "resolver.example.com", 1000, "users", &[])?;
+    id_map_engine::upsert_identity(&mut map, "resolver.example.com", "users", &[])?;
     id_map_engine::save(&id_map_json, &map)?;
 
     // Start the id-map daemon in-process. The resolver's auth check
@@ -513,13 +513,7 @@ async fn revoked_certificate_is_refused_by_a_running_resolver() -> Result<()> {
     rt.apply(test_config_lock())?;
 
     let mut map = id_map_engine::empty();
-    id_map_engine::upsert_identity(
-        &mut map,
-        "resolver.revoked.example",
-        1000,
-        "users",
-        &[],
-    )?;
+    id_map_engine::upsert_identity(&mut map, "resolver.revoked.example", "users", &[])?;
     id_map_engine::save(&id_map_json, &map)?;
     let _id_map_daemon =
         IdMapServer::start(IdMapParams::new(id_map_sock, id_map_json)).await?;

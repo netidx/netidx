@@ -721,8 +721,7 @@ pub async fn fetch_id_map(
 /// `Ok(None)` means the peer does not hold the id-map role — checked from its
 /// hello rather than by asking, so a server that was granted the role but
 /// isn't running it is told apart from one that applied the edit. Otherwise
-/// the peer reports whether its map changed and the uid it holds, both of
-/// which only it can know.
+/// the peer reports whether its map changed, which only it can know.
 pub async fn push_id_map_edit(
     client: &AuthenticatedPkiClient,
     addr: SocketAddr,

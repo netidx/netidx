@@ -50,7 +50,7 @@ pub mod identity;
 pub mod policy;
 pub mod server_config;
 
-pub const PROTOCOL_VERSION: u32 = 9;
+pub const PROTOCOL_VERSION: u32 = 10;
 
 /// Conventional admin-server port (resolver is 4564).
 pub const DEFAULT_PORT: u16 = 4565;
@@ -513,11 +513,6 @@ pub enum Request {
     GetLocalIdMap,
     /// Admin-authenticated, sent to the **CA**: read the receiving host's
     /// id-map. Answered with [`GetIdMapResponse`].
-    ///
-    /// Deliberately one host's map, not a merged view: uids are allocated
-    /// locally by each receiver, so two hosts holding the same identity under
-    /// different uids are *correct*. Names and group membership are what must
-    /// agree, and those are what an edit propagates.
     #[pack(tag(46))]
     GetIdMap(GetIdMapRequest),
     /// Admin-authenticated, sent to the **CA**: apply one id-map operation
@@ -1361,14 +1356,12 @@ pub struct ApplyPermsEditRequest {
 
 pub type ApplyPermsEditResponse = RpcResult<()>;
 
-/// One id-map mutation, as an operation rather than a document.
+/// One id-map mutation, as an operation.
 ///
-/// Perms propagate as a whole file because every member must hold the same
-/// one. An id-map must not: a uid is allocated locally by the receiving host,
-/// because perms are keyed on *names* and the number is a per-host detail.
-/// Shipping a document would force one host's uids onto
-/// every other. So each host applies the *operation* and allocates its own
-/// numbers.
+/// This is the operator's verb — what `admin id-map add-user` means, and what
+/// the CA applies to its model after it signs an identity. It carries names
+/// only, because names are all an id-map holds: see the schema docs on
+/// [`netidx_id_map::file::IdMap`].
 #[derive(Debug, Clone, Serialize, Deserialize, Pack)]
 pub enum IdMapEdit {
     /// Register (or update) `san` with its groups, creating any that are
@@ -1468,12 +1461,6 @@ pub struct IdMapPropagationOk {
 pub type EditIdMapResponse = RpcResult<IdMapPropagationOk>;
 
 /// The receiving host's id-map.
-///
-/// Not a JSON document, unlike [`GetPermsResponse`]. Perms are text because
-/// the operator edits them as text — `admin perms edit` hands the document to
-/// `$EDITOR` and takes it back, so formatting is part of the artifact. An
-/// id-map is never edited that way over the admin plane; every change is an
-/// [`IdMapEdit`]. Nothing here wants a document, so nothing here ships one.
 pub type GetLocalIdMapResponse = RpcResult<IdMap>;
 
 /// Server → server: apply `edit` to this host's local id-map.
@@ -1495,12 +1482,6 @@ pub struct ApplyIdMapEditRequest {
 pub struct ApplyIdMapEditOk {
     /// Whether this host's map changed.
     pub changed: bool,
-    /// The uid this host holds for the identity the edit named, if it named
-    /// one. Allocated locally by each host — perms are keyed on *names* — so
-    /// two hosts reporting different uids for the same identity is correct,
-    /// not drift. Carried because that is exactly what makes an id-map
-    /// question answerable from a log.
-    pub uid: Option<u32>,
 }
 
 pub type ApplyIdMapEditResponse = RpcResult<ApplyIdMapEditOk>;
@@ -1854,7 +1835,7 @@ mod tests {
                 protocol_version: PROTOCOL_VERSION,
                 kind: NodeKind::Client,
             }),
-            vec![7, 0, 0, 0, 9, 2, 2]
+            vec![7, 0, 0, 0, 10, 2, 2]
         );
         assert_eq!(encode(&Request::GetMap), vec![2, 23]);
         assert_eq!(encode(&Request::Deregister), vec![2, 21]);
@@ -2317,19 +2298,13 @@ mod tests {
     /// that only the two of them agreed on, for a structure both already had.
     #[tokio::test]
     async fn the_id_map_crosses_the_wire_as_itself() {
-        use netidx_id_map::file::{Group, Identity};
-        use std::collections::BTreeMap;
+        use netidx_id_map::file::Identity;
         let mut map = IdMap::default();
-        map.default_uid = 65534;
-        map.groups.insert("users".into(), Group { gid: 100 });
-        map.groups.insert("wheel".into(), Group { gid: 10 });
+        map.groups.insert("users".into());
+        map.groups.insert("wheel".into());
         map.identities.insert(
             "alice.example.com".into(),
-            Identity {
-                uid: 1000,
-                primary_group: "users".into(),
-                groups: vec!["wheel".into()],
-            },
+            Identity { primary_group: "users".into(), groups: vec!["wheel".into()] },
         );
         let (mut a, mut b) = tokio::io::duplex(4096);
         let server = AdminServerId::new();
@@ -2354,7 +2329,7 @@ mod tests {
         }
         // An empty map is a real state — a host whose id-map daemon has never
         // registered anyone — and must not decode as an error or a truncation.
-        let empty = IdMap { groups: BTreeMap::new(), ..IdMap::default() };
+        let empty = IdMap::default();
         write_msg(&mut a, &GetLocalIdMapResponse::Ok(empty.clone())).await.unwrap();
         match read_msg::<_, GetLocalIdMapResponse>(&mut b).await.unwrap() {
             GetLocalIdMapResponse::Ok(got) => assert_eq!(got, empty),

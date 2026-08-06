@@ -714,7 +714,7 @@ pub async fn run_resolver(
     .await
 }
 
-/// Decide how the resolver maps authenticated identities to unix uid/gid (see
+/// Decide how the resolver maps authenticated identities to groups (see
 /// [`IdMapMode`]). `no_id_map` forces `Platform` (the historical "no daemon,
 /// /bin/id" behaviour). TLS always installs the netidx id-mapper — cert SANs
 /// have no `/bin/id` translation, so any other choice denies every non-anonymous
@@ -734,7 +734,7 @@ async fn resolve_id_map_choice(
         AuthChoice::Tls { .. } => {
             ans.note(
                 "installing the netidx id-mapper daemon (maps TLS cert identities \
-                 to unix uids; skip with --no-id-map)",
+                 to groups; skip with --no-id-map)",
             );
             Ok(IdMapMode::Netidx)
         }

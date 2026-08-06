@@ -37,13 +37,12 @@ fn add_identity_creates_its_groups_and_is_idempotent() {
         groups: vec!["ops".into()],
     };
     assert!(apply_edit(&mut map, &edit).unwrap());
-    assert!(map.groups.contains_key("users"));
-    assert!(map.groups.contains_key("ops"));
-    let uid = map.identities.get("alice.example.com").unwrap().uid;
-    // Re-applying the identical registration changes nothing, and above all
-    // does not renumber the identity.
+    assert!(map.groups.contains("users"));
+    assert!(map.groups.contains("ops"));
+    let before = map.identities.get("alice.example.com").unwrap().clone();
+    // Re-applying the identical registration changes nothing.
     assert!(!apply_edit(&mut map, &edit).unwrap());
-    assert_eq!(map.identities.get("alice.example.com").unwrap().uid, uid);
+    assert_eq!(map.identities.get("alice.example.com").unwrap(), &before);
 }
 
 /// A registration that only adds a group is still a change, even though the
@@ -61,7 +60,7 @@ fn add_identity_reports_a_new_group_as_a_change() {
     )
     .unwrap();
     assert!(changed);
-    assert!(map.groups.contains_key("oncall"));
+    assert!(map.groups.contains("oncall"));
 }
 
 /// The whole point of reporting `changed` instead of erroring: re-running an
@@ -105,14 +104,13 @@ fn group_lifecycle() {
     let mut map = empty();
     let add = IdMapEdit::AddGroup { name: "wheel".into() };
     assert!(apply_edit(&mut map, &add).unwrap());
-    let gid = map.groups.get("wheel").unwrap().gid;
-    // Already there — no change, and no renumbering.
+    // Already there — no change.
     assert!(!apply_edit(&mut map, &add).unwrap());
-    assert_eq!(map.groups.get("wheel").unwrap().gid, gid);
+    assert!(map.groups.contains("wheel"));
     assert!(
         apply_edit(&mut map, &IdMapEdit::RemoveGroup { name: "wheel".into() }).unwrap()
     );
-    assert!(!map.groups.contains_key("wheel"));
+    assert!(!map.groups.contains("wheel"));
 }
 
 /// Removing a group out from under its members would leave the identities
@@ -127,7 +125,7 @@ fn a_group_in_use_cannot_be_removed() {
         format!("{err:#}").contains("alice.example.com"),
         "the error should name who still holds it: {err:#}"
     );
-    assert!(map.groups.contains_key("ops"));
+    assert!(map.groups.contains("ops"));
 }
 
 #[test]

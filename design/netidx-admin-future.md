@@ -111,19 +111,21 @@ the socket path in `Socket` mode.
 
 ```json
 {
-  "$default_uid": 65534,
-  "$default_gid": 65534,
-  "groups": {
-    "wheel": { "gid": 10 },
-    "adm":   { "gid": 4 },
-    "users": { "gid": 100 }
-  },
+  "$default_group": null,
+  "groups": ["adm", "users", "wheel"],
   "identities": {
-    "alice.example.com":    { "uid": 1000, "primary_group": "users", "groups": ["wheel", "adm"] },
-    "resolver.example.com": { "uid": 100,  "primary_group": "users", "groups": [] }
+    "alice.example.com":    { "primary_group": "users", "groups": ["wheel", "adm"] },
+    "resolver.example.com": { "primary_group": "users", "groups": [] }
   }
 }
 ```
+
+There are no uids or gids in it. The resolver's `Mapper::parse_output` reads
+only the parenthesized *names* out of the line above and discards every number,
+so the daemon writes a constant placeholder wherever the `/bin/id` format
+demands one. The only caller that ever wanted a real number is
+`Mapper::user(uid)` — the local-auth peer-credentials shim — and this daemon is
+never configured on that path.
 
 ### Crate layout (mirrors `netidx-activation`)
 

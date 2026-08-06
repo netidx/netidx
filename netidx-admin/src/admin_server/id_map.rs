@@ -2,15 +2,14 @@
 //!
 //! The shape mirrors [`super::permissions`] — authenticate at the CA, push to
 //! every host that holds the state, report per-peer results — with one
-//! deliberate difference: perms propagate as a whole document, an id-map
-//! propagates as an *operation*.
+//! difference: perms propagate as a whole document, an id-map propagates as an
+//! *operation*.
 //!
-//! That is forced by the data: a uid is allocated locally by the receiving
-//! host, because perms are keyed on *names* and the number is a per-host
-//! detail. Shipping a document would impose one host's uids on every other.
-//! Shipping the operation lets each host allocate its own, and costs nothing:
-//! there is no read-modify-write, so no lost update, and a retry after a
-//! partial push is a no-op where it landed.
+//! That difference is now only historical. It was justified by uids being
+//! allocated per host, and the id-map no longer holds any — see the schema
+//! docs on [`netidx_id_map::file::IdMap`]. What the operation form still buys
+//! is that there is no read-modify-write, so no lost update, and a retry after
+//! a partial push is a no-op where it landed.
 //!
 //! The fanout target is every registered admin server holding `Role::IdMap`,
 //! which is the same set the CA pushes a registration to after it signs an
@@ -70,10 +69,7 @@ pub(super) async fn apply_edit_local(
     if let Some(version) = version {
         crate::version_stamp::record(&map_path, version).await?;
     }
-    // Read back rather than trusting the edit: on a re-registration the host
-    // keeps the uid it already had, which is the number worth reporting.
-    let uid = edit.identity().and_then(|san| map.identities.get(san)).map(|i| i.uid);
-    Ok(ApplyIdMapEditOk { changed, uid })
+    Ok(ApplyIdMapEditOk { changed })
 }
 
 /// Bring one host up to the CA's model.
@@ -161,7 +157,7 @@ pub(super) async fn reconcile_to_target(
             name: model
                 .shape()
                 .groups
-                .keys()
+                .iter()
                 .next()
                 .context("an established model has at least the base group")?
                 .to_string(),

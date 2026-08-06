@@ -772,8 +772,8 @@ pub(super) async fn push_registrations(
     for (id, addr, result) in results {
         match result {
             Ok(Some(ok)) => info!(
-                "admin-server: registered {} (uid {:?}) on {addr}",
-                plan.name, ok.uid
+                "admin-server: registered {} on {addr} (changed: {})",
+                plan.name, ok.changed
             ),
             Ok(None) => (),
             Err(e) => warnings.push(format!(

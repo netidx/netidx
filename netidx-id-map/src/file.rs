@@ -1,14 +1,27 @@
 //! On-disk JSON schema for the id-map daemon.
 //!
-//! The schema is deliberately small: a flat `identities` table keyed
-//! by netidx name (typically the TLS SubjectAltName DNS entry), a
-//! `groups` table mapping group name → gid, and two scalar fallbacks
-//! (`$default_uid` / `$default_gid`) for queries that don't match any
-//! identity. The leading `$` on the default keys avoids colliding
-//! with any real identity / group name in JSON.
+//! The schema is deliberately small: a flat `identities` table keyed by netidx
+//! name (typically the TLS SubjectAltName DNS entry), a `groups` set, and a
+//! `$default_group` fallback for queries that don't match any identity. The
+//! leading `$` avoids colliding with any real identity or group name in JSON.
 //!
-//! The runtime daemon parses this once at startup, holds it in
-//! memory, and answers queries from the resolver over a unix socket.
+//! **There are no uids or gids here, on purpose.** The resolver never reads
+//! one: `Mapper::parse_output` walks the `/bin/id`-style line this daemon emits
+//! pulling out the parenthesized *names* and discards every number, so what a
+//! query answers with is a primary group name and a set of group names. The
+//! daemon emits [`PLACEHOLDER_ID`] wherever the format demands a number.
+//!
+//! The one caller that ever wanted a real number is `Mapper::user(uid)`, the
+//! local-auth peer-credentials shim, and this daemon is never configured on
+//! that path — `IdMapMode` in `netidx-admin` is documented as meaningful only
+//! for TLS and Kerberos. Storing numbers for it would be worse than useless:
+//! they were allocated from 1000 with no relation to the host's `/etc/passwd`,
+//! so reversing a real kernel uid through them could name the wrong identity.
+//! With no table to consult, a numeric query falls through to the defaults and
+//! that misconfiguration fails closed instead.
+//!
+//! The runtime daemon parses this once at startup, holds it in memory, and
+//! answers queries from the resolver over a unix socket.
 //!
 //! These types are also what the admin plane moves between hosts, so they
 //! implement `Pack` as well as serde. JSON is the on-disk form because an
@@ -20,30 +33,27 @@ use anyhow::{Context, Result};
 use arcstr::ArcStr;
 use derive_builder::Builder;
 use netidx_derive::Pack;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
-/// A group definition: just the numeric gid for now. Wrapping in a
-/// struct gives us room to add per-group attributes later (description,
-/// admin contacts, etc.) without breaking on-disk back-compat — JSON's
-/// `deny_unknown_fields` is strict enough to catch typos but liberal
-/// enough to let us add optional fields.
-#[derive(Debug, Clone, Serialize, Deserialize, Builder, Pack, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct Group {
-    pub gid: u32,
-}
+/// The number this daemon writes wherever the `/bin/id` line format demands
+/// one. It means nothing — see the module docs.
+///
+/// A constant rather than something derived per identity: a number that varied
+/// would invite a reader to depend on it. The nobody id is the right constant
+/// because if anything ever does read one, that is the least-privileged answer
+/// it could get.
+pub const PLACEHOLDER_ID: u32 = 65534;
 
 /// One identity row in the map. Maps a netidx name (the TLS
-/// SubjectAltName, usually) to a unix uid + group membership.
+/// SubjectAltName, usually) to its group membership.
 #[derive(Debug, Clone, Serialize, Deserialize, Builder, Pack, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Identity {
-    pub uid: u32,
     /// Name of the primary group (must exist in the top-level
-    /// `groups` table or validation fails).
+    /// `groups` set or validation fails).
     pub primary_group: ArcStr,
     /// Additional groups this identity belongs to. Each must also
-    /// exist in the top-level `groups` table.
+    /// exist in the top-level `groups` set.
     #[serde(default)]
     #[builder(default)]
     pub groups: Vec<ArcStr>,
@@ -51,22 +61,22 @@ pub struct Identity {
 
 /// The full id-map file. Hand-edited as JSON; loaded and saved
 /// atomically by the engine layer.
-#[derive(Debug, Clone, Serialize, Deserialize, Builder, Pack, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, Builder, Pack, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct IdMap {
-    /// Uid returned for queries that don't match any identity.
-    /// Defaults to the nobody-uid (65534 on Linux) when omitted.
-    #[serde(default = "default_default_uid", rename = "$default_uid")]
-    #[builder(default = "default_default_uid()")]
-    pub default_uid: u32,
-    /// Gid returned for queries that don't match any identity.
-    #[serde(default = "default_default_gid", rename = "$default_gid")]
-    #[builder(default = "default_default_gid()")]
-    pub default_gid: u32,
-    /// Group table: group name → gid.
+    /// The group an identity that isn't in the map belongs to, if any.
+    ///
+    /// `None` — the default — means it belongs to no group at all, and the
+    /// answer names the conventional `nogroup`, which no perms entry should
+    /// match. Setting it grants every unknown identity that group, so it is a
+    /// deliberate act.
+    #[serde(default, rename = "$default_group")]
+    #[builder(default)]
+    pub default_group: Option<ArcStr>,
+    /// Every group that exists.
     #[serde(default)]
     #[builder(default)]
-    pub groups: BTreeMap<ArcStr, Group>,
+    pub groups: BTreeSet<ArcStr>,
     /// Identity table: netidx name → identity record.
     #[serde(default)]
     #[builder(default)]
@@ -106,30 +116,11 @@ fn check_delimiter_chars(role: &str, s: &str) -> Result<()> {
     Ok(())
 }
 
-fn default_default_uid() -> u32 {
-    65534
-}
-
-fn default_default_gid() -> u32 {
-    65534
-}
-
-impl Default for IdMap {
-    fn default() -> Self {
-        Self {
-            default_uid: default_default_uid(),
-            default_gid: default_default_gid(),
-            groups: BTreeMap::new(),
-            identities: BTreeMap::new(),
-        }
-    }
-}
-
 impl IdMap {
-    /// Structural validation. Four invariants are enforced:
+    /// Structural validation. Three invariants are enforced:
     ///
-    /// 1. Every group referenced by an identity (primary or secondary)
-    ///    must exist in the `groups` table.
+    /// 1. Every group referenced by an identity (primary or secondary), and
+    ///    `$default_group` if set, must exist in the `groups` set.
     /// 2. No identity or group name may contain a character that the
     ///    resolver's `/bin/id`-style parser uses as a delimiter — `(`,
     ///    `)`, `,`, `=`, or any whitespace. The resolver's
@@ -143,14 +134,9 @@ impl IdMap {
     ///    identity named `"1000"` is unreachable by name — a query
     ///    for `"1000"` always goes through the uid path. Catching
     ///    this at save time prevents silent misrouting.
-    /// 4. No two identities may share a uid. Reverse lookup via
-    ///    `lookup_by_uid` returns the first BTreeMap match; duplicate
-    ///    uids make the reverse mapping order-dependent. The
-    ///    resolver's TLS path doesn't query by uid, but the
-    ///    local-auth peer-credentials shim
-    ///    (`netidx/src/os/unix.rs::Mapper::user`) does, so a
-    ///    socket-mode local-auth deployment would silently pick one
-    ///    of the colliding names.
+    ///
+    /// There used to be a fourth, that no two identities share a uid. It went
+    /// with the uids: see the module docs.
     ///
     /// Run at load + before save; the daemon also runs it before
     /// swapping a reloaded map into the live slot.
@@ -166,20 +152,15 @@ impl IdMap {
                 );
             }
         }
-        for name in self.groups.keys() {
+        for name in &self.groups {
             check_delimiter_chars("group name", name.as_str())?;
         }
-        let mut seen_uids: BTreeMap<u32, &str> = BTreeMap::new();
+        if let Some(g) = &self.default_group
+            && !self.groups.contains(g)
+        {
+            bail!("$default_group {:?} is not in the groups set", g.as_str());
+        }
         for (name, ident) in &self.identities {
-            if let Some(prev) = seen_uids.insert(ident.uid, name.as_str()) {
-                bail!(
-                    "uid {} is shared by identities {:?} and {:?}; reverse \
-                     lookups by uid would be order-dependent",
-                    ident.uid,
-                    prev,
-                    name.as_str(),
-                );
-            }
             check_delimiter_chars(
                 "identity primary_group",
                 ident.primary_group.as_str(),
@@ -187,17 +168,17 @@ impl IdMap {
             for g in &ident.groups {
                 check_delimiter_chars("identity secondary group", g.as_str())?;
             }
-            if !self.groups.contains_key(&ident.primary_group) {
+            if !self.groups.contains(&ident.primary_group) {
                 bail!(
-                    "identity {:?}: primary_group {:?} is not in the groups table",
+                    "identity {:?}: primary_group {:?} is not in the groups set",
                     name.as_str(),
                     ident.primary_group.as_str(),
                 );
             }
             for g in &ident.groups {
-                if !self.groups.contains_key(g) {
+                if !self.groups.contains(g) {
                     bail!(
-                        "identity {:?}: group {:?} is not in the groups table",
+                        "identity {:?}: group {:?} is not in the groups set",
                         name.as_str(),
                         g.as_str(),
                     );
@@ -213,19 +194,12 @@ impl IdMap {
         self.identities.get(name)
     }
 
-    /// Reverse lookup by uid. Returns the first matching name —
-    /// duplicate uids are caller error.
-    pub fn lookup_by_uid(&self, uid: u32) -> Option<(&ArcStr, &Identity)> {
-        self.identities.iter().find(|(_, i)| i.uid == uid)
-    }
-
     /// Format the `/bin/id`-style response for a name query. The
     /// resolver's existing parser only reads the parenthesized values
     /// after each `<key>=` so the line is deliberately simple.
     ///
-    /// Falls back to the `$default_uid` / `$default_gid` defaults
-    /// when the name is unknown, mirroring how `/bin/id` would
-    /// respond for a non-existent user.
+    /// Falls back to `$default_group` when the name is unknown, mirroring how
+    /// `/bin/id` would respond for a non-existent user.
     pub fn format_id_line_for_name(&self, query: &str) -> String {
         match self.lookup_by_name(query) {
             Some(ident) => self.format_id_line(query, ident),
@@ -234,58 +208,44 @@ impl IdMap {
     }
 
     /// Format the `/bin/id`-style response for a uid query.
+    ///
+    /// Always the defaults: this map holds no uids, so there is nothing to
+    /// reverse. The only caller that asks is the resolver's local-auth
+    /// peer-credentials shim, which this daemon is not meant to serve — see the
+    /// module docs. Answering with the defaults rather than a guess is what
+    /// makes that misconfiguration fail closed.
     pub fn format_id_line_for_uid(&self, uid: u32) -> String {
-        match self.lookup_by_uid(uid) {
-            Some((name, ident)) => self.format_id_line(name.as_str(), ident),
-            // Fall back as if the query were the literal uid string —
-            // the resolver only uses the parsed name token anyway, and
-            // this gives us a single defaults-rendering path.
-            None => {
-                let uid_str = uid.to_string();
-                self.format_default_id_line(&uid_str)
-            }
-        }
+        // The query echoed back as the name token, as for any unknown name.
+        // The resolver reads only the parsed token, so this is honest about
+        // having found nothing.
+        self.format_default_id_line(&uid.to_string())
     }
 
-    /// Defaults-only line. Uses the real group name for `$default_gid`
-    /// when it is registered in the `groups` table (so perms keyed on
-    /// that group still match) — otherwise emits the literal
-    /// `(nogroup)` token, which the resolver will treat as a distinct
-    /// group with no perms.
+    /// Defaults-only line. Names `$default_group` when one is set, so perms
+    /// keyed on that group still match — otherwise emits the literal
+    /// `(nogroup)` token, which the resolver treats as a distinct group with
+    /// no perms.
     fn format_default_id_line(&self, name_token: &str) -> String {
-        let (gid_name, gid) = self
-            .groups
-            .iter()
-            .find(|(_, g)| g.gid == self.default_gid)
-            .map(|(n, g)| (n.as_str(), g.gid))
-            .unwrap_or(("nogroup", self.default_gid));
+        let group = self.default_group.as_deref().unwrap_or("nogroup");
         format!(
-            "uid={uid}({name_token}) gid={gid}({gid_name}) groups={gid}({gid_name})\n",
-            uid = self.default_uid,
+            "uid={id}({name_token}) gid={id}({group}) groups={id}({group})\n",
+            id = PLACEHOLDER_ID,
         )
     }
 
     fn format_id_line(&self, name: &str, ident: &Identity) -> String {
-        let primary_gid = self
-            .groups
-            .get(&ident.primary_group)
-            .map(|g| g.gid)
-            .unwrap_or(self.default_gid);
+        let id = PLACEHOLDER_ID;
         let mut out = format!(
-            "uid={uid}({name}) gid={gid}({pg})",
-            uid = ident.uid,
-            name = name,
-            gid = primary_gid,
+            "uid={id}({name}) gid={id}({pg})",
             pg = ident.primary_group.as_str(),
         );
         // The resolver parses "groups=" by scanning parenthesized
         // tokens — the primary group must appear here too so the
         // membership set is complete (matching /bin/id's behavior).
         let mut groups_field =
-            format!(" groups={primary_gid}({pg})", pg = ident.primary_group.as_str());
+            format!(" groups={id}({pg})", pg = ident.primary_group.as_str());
         for g in &ident.groups {
-            let gid = self.groups.get(g).map(|x| x.gid).unwrap_or(self.default_gid);
-            groups_field.push_str(&format!(",{gid}({name})", name = g.as_str()));
+            groups_field.push_str(&format!(",{id}({name})", name = g.as_str()));
         }
         out.push_str(&groups_field);
         out.push('\n');
@@ -324,20 +284,18 @@ pub fn parse_bytes(bytes: &[u8]) -> Result<IdMap> {
 mod tests {
     use super::*;
 
+    fn ident(primary: &str, groups: &[&str]) -> Identity {
+        Identity {
+            primary_group: ArcStr::from(primary),
+            groups: groups.iter().map(|g| ArcStr::from(*g)).collect(),
+        }
+    }
+
     fn sample() -> IdMap {
-        let mut groups = BTreeMap::new();
-        groups.insert(ArcStr::from("users"), Group { gid: 100 });
-        groups.insert(ArcStr::from("wheel"), Group { gid: 10 });
+        let groups = ["users", "wheel"].into_iter().map(ArcStr::from).collect();
         let mut identities = BTreeMap::new();
-        identities.insert(
-            ArcStr::from("alice.example.com"),
-            Identity {
-                uid: 1000,
-                primary_group: ArcStr::from("users"),
-                groups: vec![ArcStr::from("wheel")],
-            },
-        );
-        IdMap { default_uid: 65534, default_gid: 65534, groups, identities }
+        identities.insert(ArcStr::from("alice.example.com"), ident("users", &["wheel"]));
+        IdMap { default_group: None, groups, identities }
     }
 
     #[test]
@@ -360,10 +318,7 @@ mod tests {
         // resolver's parser is byte-faithful; we have to reject at
         // save time.
         let mut m = sample();
-        m.identities.insert(
-            ArcStr::from("alice) gid=0(root"),
-            Identity { uid: 1, primary_group: ArcStr::from("users"), groups: vec![] },
-        );
+        m.identities.insert(ArcStr::from("alice) gid=0(root"), ident("users", &[]));
         let err = m.validate().unwrap_err();
         assert!(format!("{err:#}").contains("forbidden character"));
     }
@@ -371,7 +326,7 @@ mod tests {
     #[test]
     fn validate_rejects_comma_in_group_name() {
         let mut m = sample();
-        m.groups.insert(ArcStr::from("wheel,root"), Group { gid: 1 });
+        m.groups.insert(ArcStr::from("wheel,root"));
         let err = m.validate().unwrap_err();
         assert!(format!("{err:#}").contains("forbidden character"));
     }
@@ -381,10 +336,7 @@ mod tests {
         let mut m = sample();
         // Have to register the bogus name so the missing-group check
         // doesn't fire first; the delimiter check runs ahead of it.
-        m.identities.insert(
-            ArcStr::from("bob.example.com"),
-            Identity { uid: 2, primary_group: ArcStr::from("ev(il"), groups: vec![] },
-        );
+        m.identities.insert(ArcStr::from("bob.example.com"), ident("ev(il", &[]));
         let err = m.validate().unwrap_err();
         assert!(format!("{err:#}").contains("forbidden character"));
     }
@@ -396,10 +348,7 @@ mod tests {
         // lookup — every query for it would route through the uid
         // path. Catch at save time.
         let mut m = sample();
-        m.identities.insert(
-            ArcStr::from("1000"),
-            Identity { uid: 2000, primary_group: ArcStr::from("users"), groups: vec![] },
-        );
+        m.identities.insert(ArcStr::from("1000"), ident("users", &[]));
         let err = m.validate().unwrap_err();
         let msg = format!("{err:#}");
         assert!(
@@ -409,29 +358,19 @@ mod tests {
     }
 
     #[test]
-    fn validate_rejects_duplicate_uids() {
+    fn validate_rejects_a_default_group_that_does_not_exist() {
         let mut m = sample();
-        // alice.example.com already has uid 1000; add a second row
-        // claiming the same uid.
-        m.identities.insert(
-            ArcStr::from("bob.example.com"),
-            Identity { uid: 1000, primary_group: ArcStr::from("users"), groups: vec![] },
-        );
+        m.default_group = Some(ArcStr::from("dragons"));
         let err = m.validate().unwrap_err();
-        let msg = format!("{err:#}");
-        assert!(
-            msg.contains("uid 1000 is shared"),
-            "expected duplicate-uid error, got: {msg}",
-        );
+        assert!(format!("{err:#}").contains("$default_group"));
+        m.default_group = Some(ArcStr::from("users"));
+        m.validate().unwrap();
     }
 
     #[test]
     fn validate_rejects_empty_names() {
         let mut m = sample();
-        m.identities.insert(
-            ArcStr::from(""),
-            Identity { uid: 1, primary_group: ArcStr::from("users"), groups: vec![] },
-        );
+        m.identities.insert(ArcStr::from(""), ident("users", &[]));
         assert!(m.validate().is_err());
     }
 
@@ -453,24 +392,60 @@ mod tests {
         // `groups=` and reads parenthesized names after each).
         let m = sample();
         let s = m.format_id_line_for_name("alice.example.com");
-        assert!(s.contains("uid=1000(alice.example.com)"));
-        assert!(s.contains("gid=100(users)"));
+        assert!(s.contains("uid=65534(alice.example.com)"));
+        assert!(s.contains("gid=65534(users)"));
         // Primary group appears first in `groups=`, then secondaries.
-        assert!(s.contains("groups=100(users),10(wheel)"));
+        assert!(s.contains("groups=65534(users),65534(wheel)"));
         assert!(s.ends_with('\n'));
     }
 
+    /// The names are the whole answer, and they must survive the resolver's
+    /// parser unchanged now that every number beside them is the same
+    /// constant.
+    ///
+    /// `extract` is `Mapper::parse_output` (`netidx/src/os/unix.rs:146`)
+    /// reproduced faithfully, including the part that surprises: it scans from
+    /// the key to the *end of the line*, so asking for `gid=` also sweeps up
+    /// everything in `groups=`. The resolver takes element 0 and discards the
+    /// rest, which is why the primary group has to come first.
     #[test]
-    fn format_id_line_for_uid_round_trips() {
+    fn the_names_are_what_a_reader_gets_back() {
+        let extract = |line: &str, key: &str| -> Vec<String> {
+            let mut out = Vec::new();
+            let mut s = &line[line.find(key).expect("key present")..];
+            while let Some(op) = s.find('(') {
+                let cp = s.find(')').expect("balanced");
+                out.push(s[op + 1..cp].to_string());
+                s = &s[cp + 1..];
+            }
+            out
+        };
+        let m = sample();
+        let s = m.format_id_line_for_name("alice.example.com");
+        assert_eq!(extract(&s, "gid=")[0], "users", "the primary group comes first");
+        assert_eq!(extract(&s, "groups="), vec!["users", "wheel"]);
+        // Unknown identities land in no group at all, so nothing keyed on a
+        // group name can match them.
+        let s = m.format_id_line_for_name("ghost.example.com");
+        assert_eq!(extract(&s, "gid=")[0], "nogroup");
+    }
+
+    /// A uid query has nothing to reverse — this map holds no uids — so it
+    /// answers with the defaults rather than guessing at an identity. That is
+    /// what makes `auth: Local` with `id_map_type: Socket` fail closed.
+    #[test]
+    fn a_uid_query_never_names_an_identity() {
         let m = sample();
         let s = m.format_id_line_for_uid(1000);
-        assert!(s.contains("uid=1000(alice.example.com)"));
+        assert!(!s.contains("alice"), "a uid must not resolve to a name: {s}");
+        assert!(s.contains("uid=65534(1000)"));
+        assert!(s.contains("gid=65534(nogroup)"));
     }
 
     #[test]
     fn unknown_name_falls_back_to_defaults() {
-        // Defaults point at gid 65534 which is NOT in the groups
-        // table, so the fallback emits the literal `nogroup` token.
+        // No `$default_group`, so the fallback emits the literal `nogroup`
+        // token, which the resolver treats as a group no perms entry matches.
         let m = sample();
         let s = m.format_id_line_for_name("nobody.example.com");
         assert!(s.contains("uid=65534(nobody.example.com)"));
@@ -478,28 +453,15 @@ mod tests {
     }
 
     #[test]
-    fn unknown_name_uses_real_group_name_when_default_gid_registered() {
-        // Operator set $default_gid = 100, which IS in the groups
-        // table as "users". The fallback line should say
-        // `gid=100(users)`, not `gid=100(nogroup)` — otherwise perms
-        // keyed on the real group name silently don't match.
+    fn unknown_name_uses_the_default_group_when_one_is_set() {
+        // Setting `$default_group` grants every unknown identity that group,
+        // so the fallback line has to name it — otherwise perms keyed on it
+        // silently don't match.
         let mut m = sample();
-        m.default_gid = 100; // matches the "users" gid in sample()
+        m.default_group = Some(ArcStr::from("users"));
         let s = m.format_id_line_for_name("nobody.example.com");
-        assert!(
-            s.contains("gid=100(users)"),
-            "fallback should use the real group name; got: {s}"
-        );
-        assert!(s.contains("groups=100(users)"));
-    }
-
-    #[test]
-    fn unknown_uid_falls_back_to_defaults_with_group_name() {
-        let mut m = sample();
-        m.default_gid = 100;
-        let s = m.format_id_line_for_uid(99999);
-        assert!(s.contains("uid=65534(99999)"));
-        assert!(s.contains("gid=100(users)"));
+        assert!(s.contains("gid=65534(users)"), "got: {s}");
+        assert!(s.contains("groups=65534(users)"));
     }
 
     #[test]
@@ -521,20 +483,18 @@ mod tests {
         assert!(buf.is_empty());
     }
 
-    /// The defaults are two of the four fields and are easy to lose in a
-    /// wire change — a map that decodes with `groups` and `identities` right
-    /// but `$default_uid` reset to nobody looks correct until an unknown
-    /// principal shows up.
+    /// `$default_group` is easy to lose in a wire change — a map that decodes
+    /// with `groups` and `identities` right but the default dropped looks
+    /// correct until an unknown principal shows up and silently gets nothing.
     #[test]
-    fn pack_carries_the_defaults() {
+    fn pack_carries_the_default_group() {
         use netidx_core::pack::Pack;
         let mut m = sample();
-        m.default_uid = 1;
-        m.default_gid = 2;
+        m.default_group = Some(ArcStr::from("users"));
         let mut buf = bytes::BytesMut::new();
         m.encode(&mut buf).unwrap();
         let back = IdMap::decode(&mut buf).unwrap();
-        assert_eq!((back.default_uid, back.default_gid), (1, 2));
+        assert_eq!(back.default_group.as_deref(), Some("users"));
     }
 
     #[test]
@@ -551,12 +511,13 @@ mod tests {
 
     #[test]
     fn default_keys_use_dollar_prefix() {
-        // The `$default_uid` / `$default_gid` rename is load-bearing —
-        // without the leading `$` they'd collide with potential group
-        // or identity names in tooling. Catch a rename regression.
-        let json = serde_json::to_value(&IdMap::default()).unwrap();
-        assert!(json.get("$default_uid").is_some());
-        assert!(json.get("$default_gid").is_some());
-        assert!(json.get("default_uid").is_none());
+        // The `$default_group` rename is load-bearing — without the leading
+        // `$` it would collide with a real group or identity name in tooling.
+        // Catch a rename regression.
+        let mut m = IdMap::default();
+        m.default_group = Some(ArcStr::from("users"));
+        let json = serde_json::to_value(&m).unwrap();
+        assert!(json.get("$default_group").is_some());
+        assert!(json.get("default_group").is_none());
     }
 }

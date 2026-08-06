@@ -18,7 +18,7 @@ use crate::{
     config_lock::ConfigDirLock,
     id_map, offline_ca,
 };
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, bail};
 use std::{path::PathBuf, time::Duration};
 
 // -- CA sign -----------------------------------------------------------------
@@ -42,8 +42,8 @@ pub enum SignSan {
 pub enum IdMapAction {
     /// `--no-id-map`: never register.
     Skip,
-    /// `--id-map-group`: register with these groups (and `--uid`) non-interactively.
-    Register { groups: Vec<String>, uid: Option<u32> },
+    /// `--id-map-group`: register with these groups non-interactively.
+    Register { groups: Vec<String> },
     /// Neither flag: prompt interactively when a map exists; strict CLI skips
     /// (matching the old non-TTY behaviour — scripts register explicitly).
     Ask,
@@ -51,14 +51,12 @@ pub enum IdMapAction {
 
 /// The prior id-map record an [`IdMapResult::Registered`] replaced, if any.
 pub struct PrevIdentity {
-    pub uid: u32,
     pub primary_group: String,
 }
 
 /// A successful id-map registration.
 pub struct IdMapRegistration {
     pub name: String,
-    pub uid: u32,
     pub primary: String,
     /// `Some` when this updated an existing entry.
     pub previous: Option<PrevIdentity>,
@@ -180,8 +178,8 @@ async fn resolve_san(
 
 /// The post-sign id-map registration (sign only). Skips cleanly when there is
 /// no map / no identity name; registers non-interactively for `Register`, and
-/// prompts (groups then uid) for `Ask` under an interactive frontend. Group and
-/// uid validity is enforced by [`id_map::upsert_identity`].
+/// prompts for the groups under an interactive frontend. Group validity is
+/// enforced by [`id_map::upsert_identity`].
 async fn register_id_map(
     ans: &mut dyn Answerer,
     config_lock: &ConfigDirLock,
@@ -189,16 +187,16 @@ async fn register_id_map(
     san: &[SanEntry],
     action: IdMapAction,
 ) -> Result<IdMapResult> {
-    // `groups`/`uid` are `Some` when supplied by flags; `None` means "prompt"
+    // `groups` is `Some` when supplied by a flag; `None` means "prompt"
     // (interactive) — `Ask` under a strict answerer has already returned above.
-    let (flag_groups, flag_uid) = match action {
+    let flag_groups = match action {
         IdMapAction::Skip => return Ok(IdMapResult::NotRequested),
-        IdMapAction::Register { groups, uid } => (Some(groups), uid),
+        IdMapAction::Register { groups } => Some(groups),
         IdMapAction::Ask => {
             if !ans.interactive() {
                 return Ok(IdMapResult::NotRequested);
             }
-            (None, None)
+            None
         }
     };
     // The id-map identity name is what the resolver sees on the wire: the
@@ -222,7 +220,7 @@ async fn register_id_map(
         Some(g) => g,
         None => {
             // Interactive: show valid groups, prompt (blank = decline).
-            let mut names: Vec<&str> = map.groups.keys().map(|k| k.as_str()).collect();
+            let mut names: Vec<&str> = map.groups.iter().map(|k| k.as_str()).collect();
             names.sort_unstable();
             ans.note(&format!("available groups: {}", names.join(", ")));
             let typed = ans
@@ -244,33 +242,13 @@ async fn register_id_map(
     if groups.is_empty() {
         bail!("no id-map groups specified — at least the primary group is required");
     }
-    let uid = match flag_uid {
-        Some(u) => u,
-        None => {
-            let default = id_map::next_uid(&map).to_string();
-            let typed = ans
-                .text(Field::Uid, None, Some(&default), true)
-                .await?
-                .ok_or_else(|| anyhow!("a uid is required to register in the id-map"))?;
-            typed
-                .trim()
-                .parse::<u32>()
-                .with_context(|| format!("parsing uid {typed:?}"))?
-        }
-    };
     let primary = groups[0].clone();
     let secondary: Vec<&str> = groups[1..].iter().map(|s| s.as_str()).collect();
-    let previous =
-        id_map::upsert_identity(map, &identity_name, uid, &primary, &secondary)?.map(
-            |old| PrevIdentity {
-                uid: old.uid,
-                primary_group: old.primary_group.to_string(),
-            },
-        );
+    let previous = id_map::upsert_identity(map, &identity_name, &primary, &secondary)?
+        .map(|old| PrevIdentity { primary_group: old.primary_group.to_string() });
     edit.save().await?;
     Ok(IdMapResult::Registered(IdMapRegistration {
         name: identity_name,
-        uid,
         primary,
         previous,
     }))

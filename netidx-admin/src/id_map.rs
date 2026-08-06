@@ -15,8 +15,7 @@ use netidx_admin_proto::IdMapEdit;
 use std::path::{Path, PathBuf};
 
 pub use netidx_id_map::file::{
-    Group, GroupBuilder, IdMap, IdMapBuilder, Identity, IdentityBuilder, Query,
-    check_name_chars, parse_bytes,
+    IdMap, IdMapBuilder, Identity, IdentityBuilder, Query, check_name_chars, parse_bytes,
 };
 
 /// Canonical user path for the id-map JSON
@@ -66,11 +65,10 @@ pub async fn load_async<P: AsRef<Path>>(path: P) -> Result<IdMap> {
 
 /// Validate, then atomically save at mode 0600.
 ///
-/// The id-map JSON is the policy file mapping netidx names to unix
-/// uids — anyone who can read it knows the full who-becomes-whom
-/// table. We treat it like a credential rather than a config: same
-/// mode (0o600) as the daemon's default socket so the read surface
-/// is the same for both.
+/// The id-map JSON is the policy file mapping netidx names to groups —
+/// anyone who can read it knows the full who-belongs-to-what table. We
+/// treat it like a credential rather than a config: same mode (0o600) as
+/// the daemon's default socket so the read surface is the same for both.
 pub fn save<P: AsRef<Path>>(path: P, map: &IdMap) -> Result<()> {
     map.validate().context("id-map structural validation")?;
     let bytes = serde_json::to_vec_pretty(map).context("serialize id-map JSON")?;
@@ -165,26 +163,23 @@ impl IdMapSession {
     }
 }
 
-/// Starter map with a single `users` group at gid 100 — matches the
-/// conventional Linux `/etc/group` line for `users` and gives the
-/// `ca sign` flow a sensible default group to assign new identities
-/// to without forcing the operator to define one up front. The
-/// `$default_gid` for unknown queries stays 65534 (nobody) so an
-/// unrecognised principal doesn't accidentally land in `users`.
+/// Starter map with a single `users` group — it gives the `ca sign` flow a
+/// sensible default group to assign new identities to without forcing the
+/// operator to define one up front. `$default_group` stays unset, so an
+/// unrecognised principal does not accidentally land in `users`.
 pub fn empty() -> IdMap {
     let mut m = IdMap::default();
-    m.groups.insert(ArcStr::from("users"), Group { gid: 100 });
+    m.groups.insert(ArcStr::from("users"));
     m
 }
 
 // ---- editor helpers ----------------------------------------------------
 
-/// Insert or update a group. Returns the previous gid for `name`,
-/// if any. The group becomes immediately available as a
-/// primary/secondary target for identities.
-pub fn upsert_group(map: &mut IdMap, name: &str, gid: u32) -> Option<u32> {
-    let prev = map.groups.insert(ArcStr::from(name), Group { gid });
-    prev.map(|g| g.gid)
+/// Create a group if it isn't there, reporting whether that changed anything.
+/// The group becomes immediately available as a primary/secondary target for
+/// identities.
+pub fn upsert_group(map: &mut IdMap, name: &str) -> bool {
+    map.groups.insert(ArcStr::from(name))
 }
 
 /// Remove a group. Fails if any identity still references it (we
@@ -209,31 +204,29 @@ pub fn remove_group(map: &mut IdMap, name: &str) -> Result<()> {
             "cannot remove group {name:?}: still referenced by identities {dependents:?}"
         );
     }
-    if map.groups.remove(name).is_none() {
+    if !map.groups.remove(name) {
         bail!("no such group {name:?}");
     }
     Ok(())
 }
 
 /// Insert or update an identity. The primary group must already exist
-/// in the groups table; secondary groups likewise.
+/// in the groups set; secondary groups likewise.
 pub fn upsert_identity(
     map: &mut IdMap,
     name: &str,
-    uid: u32,
     primary_group: &str,
     groups: &[&str],
 ) -> Result<Option<Identity>> {
-    if !map.groups.contains_key(primary_group) {
-        bail!("primary_group {primary_group:?} is not in the groups table");
+    if !map.groups.contains(primary_group) {
+        bail!("primary_group {primary_group:?} is not in the groups set");
     }
     for g in groups {
-        if !map.groups.contains_key(*g) {
-            bail!("group {g:?} is not in the groups table");
+        if !map.groups.contains(*g) {
+            bail!("group {g:?} is not in the groups set");
         }
     }
     let ident = Identity {
-        uid,
         primary_group: ArcStr::from(primary_group),
         groups: groups.iter().map(|g| ArcStr::from(*g)).collect(),
     };
@@ -248,7 +241,7 @@ pub fn remove_identity(map: &mut IdMap, name: &str) -> Option<Identity> {
 /// Add `group` to `name`'s secondary group list. No-op if already
 /// present. Fails if either is unknown.
 pub fn add_group_member(map: &mut IdMap, name: &str, group: &str) -> Result<()> {
-    if !map.groups.contains_key(group) {
+    if !map.groups.contains(group) {
         bail!("no such group {group:?}");
     }
     let ident = map
@@ -282,35 +275,15 @@ pub fn remove_group_member(map: &mut IdMap, name: &str, group: &str) -> Result<(
     Ok(())
 }
 
-/// Set the defaults returned for unknown queries.
-pub fn set_defaults(map: &mut IdMap, default_uid: u32, default_gid: u32) {
-    map.default_uid = default_uid;
-    map.default_gid = default_gid;
+/// Set the group an identity that isn't in the map belongs to. `None` means
+/// no group at all, which is the default — see the schema docs.
+pub fn set_default_group(map: &mut IdMap, group: Option<&str>) {
+    map.default_group = group.map(ArcStr::from);
 }
 
-/// Next free uid: `max(existing uids) + 1`, clamped to start at 1000.
-/// Deterministic and stable, and clear of low system uids. uids are
-/// local to each id-map — perms are keyed on *names* — so per-host
-/// allocation needs no cross-host coordination.
-pub fn next_uid(map: &IdMap) -> u32 {
-    match map.identities.values().map(|i| i.uid).max() {
-        Some(n) if n >= 1000 => n + 1,
-        _ => 1000,
-    }
-}
-
-/// Next free gid: same scheme as [`next_uid`], over the groups table.
-pub fn next_gid(map: &IdMap) -> u32 {
-    match map.groups.values().map(|g| g.gid).max() {
-        Some(n) if n >= 1000 => n + 1,
-        _ => 1000,
-    }
-}
-
-/// Zero-touch registration: ensure every named group exists (creating
-/// missing ones with allocated gids), then upsert `name` — an existing
-/// identity keeps its uid (idempotent re-registration), a new one gets
-/// [`next_uid`]. Returns the identity's uid.
+/// Zero-touch registration: ensure every named group exists, then upsert
+/// `name`. Idempotent — re-registering an identity that is already there with
+/// the same groups changes nothing.
 ///
 /// Names are checked against the id-map delimiter rules up front so a
 /// admin domain caller gets a clear refusal instead of a save-time
@@ -320,7 +293,7 @@ pub fn register_identity(
     name: &str,
     primary_group: &str,
     groups: &[&str],
-) -> Result<u32> {
+) -> Result<()> {
     check_name_chars("identity name", name)?;
     if name.parse::<u32>().is_ok() {
         bail!("identity name {name:?} parses as a u32; it would be unreachable by name");
@@ -330,17 +303,10 @@ pub fn register_identity(
         check_name_chars("group name", g)?;
     }
     for g in std::iter::once(primary_group).chain(groups.iter().copied()) {
-        if !map.groups.contains_key(g) {
-            let gid = next_gid(map);
-            upsert_group(map, g, gid);
-        }
+        upsert_group(map, g);
     }
-    let uid = match map.identities.get(name) {
-        Some(existing) => existing.uid,
-        None => next_uid(map),
-    };
-    upsert_identity(map, name, uid, primary_group, groups)?;
-    Ok(uid)
+    upsert_identity(map, name, primary_group, groups)?;
+    Ok(())
 }
 
 /// Load the map at `path`, or the empty map when there is no file yet.
@@ -383,7 +349,7 @@ pub fn apply_edit(map: &mut IdMap, edit: &IdMapEdit) -> Result<bool> {
             // a change even when the identity record ends up identical.
             let creates_group = std::iter::once(primary_group.as_str())
                 .chain(gs.iter().copied())
-                .any(|g| !map.groups.contains_key(g));
+                .any(|g| !map.groups.contains(g));
             let before = map.identities.get(san.as_str()).cloned();
             register_identity(map, san, primary_group, &gs)?;
             Ok(creates_group || map.identities.get(san.as_str()) != before.as_ref())
@@ -391,15 +357,14 @@ pub fn apply_edit(map: &mut IdMap, edit: &IdMapEdit) -> Result<bool> {
         IdMapEdit::RemoveIdentity { san } => Ok(remove_identity(map, san).is_some()),
         IdMapEdit::AddGroup { name } => {
             check_name_chars("group name", name)?;
-            if map.groups.contains_key(name.as_str()) {
+            if map.groups.contains(name.as_str()) {
                 return Ok(false);
             }
-            let gid = next_gid(map);
-            upsert_group(map, name, gid);
+            upsert_group(map, name);
             Ok(true)
         }
         IdMapEdit::RemoveGroup { name } => {
-            if !map.groups.contains_key(name.as_str()) {
+            if !map.groups.contains(name.as_str()) {
                 return Ok(false);
             }
             // Still errors when an identity references it — that would
@@ -480,19 +445,18 @@ mod tests {
 
         let mut m = edit(dir.path()).await;
         assert!(!m.existed(), "a fresh directory has no id-map");
-        set_defaults(m.map_mut(), 65534, 65534);
-        upsert_group(m.map_mut(), "users", 100);
-        upsert_group(m.map_mut(), "wheel", 10);
+        upsert_group(m.map_mut(), "users");
+        upsert_group(m.map_mut(), "wheel");
         m.save().await.unwrap();
 
         let mut m = edit(dir.path()).await;
         assert!(m.existed(), "the saved map is found on reopen");
-        upsert_identity(m.map_mut(), "alice.example.com", 1000, "users", &["wheel"])
-            .unwrap();
+        upsert_identity(m.map_mut(), "alice.example.com", "users", &["wheel"]).unwrap();
         m.save().await.unwrap();
 
         let loaded = load(&path).unwrap();
-        assert_eq!(loaded.lookup_by_name("alice.example.com").unwrap().uid, 1000);
+        let alice = loaded.lookup_by_name("alice.example.com").unwrap();
+        assert_eq!(alice.primary_group.as_str(), "users");
         assert_eq!(loaded.groups.len(), 2);
 
         // Removing the primary group via membership must be refused — it would
@@ -518,7 +482,7 @@ mod tests {
     async fn an_identity_cannot_name_a_group_that_does_not_exist() {
         let dir = tempfile::tempdir().unwrap();
         let mut m = edit(dir.path()).await;
-        let e = upsert_identity(m.map_mut(), "alice", 1000, "ghost", &[]).unwrap_err();
+        let e = upsert_identity(m.map_mut(), "alice", "ghost", &[]).unwrap_err();
         assert!(format!("{e:#}").contains("primary_group"), "got {e:#}");
     }
 
@@ -544,9 +508,9 @@ mod tests {
 
     fn seed() -> IdMap {
         let mut m = empty();
-        upsert_group(&mut m, "users", 100);
-        upsert_group(&mut m, "wheel", 10);
-        upsert_identity(&mut m, "alice.example.com", 1000, "users", &["wheel"]).unwrap();
+        upsert_group(&mut m, "users");
+        upsert_group(&mut m, "wheel");
+        upsert_identity(&mut m, "alice.example.com", "users", &["wheel"]).unwrap();
         m
     }
 
@@ -577,21 +541,18 @@ mod tests {
     #[test]
     fn remove_group_succeeds_when_unused() {
         let mut m = seed();
-        upsert_group(&mut m, "spare", 200);
+        upsert_group(&mut m, "spare");
         remove_group(&mut m, "spare").unwrap();
-        assert!(!m.groups.contains_key("spare"));
+        assert!(!m.groups.contains("spare"));
     }
 
     #[test]
     fn upsert_identity_validates_groups() {
         let mut m = seed();
         // Unknown primary.
-        assert!(upsert_identity(&mut m, "bob.example.com", 1001, "ghost", &[]).is_err());
+        assert!(upsert_identity(&mut m, "bob.example.com", "ghost", &[]).is_err());
         // Unknown secondary.
-        assert!(
-            upsert_identity(&mut m, "bob.example.com", 1001, "users", &["ghost"])
-                .is_err()
-        );
+        assert!(upsert_identity(&mut m, "bob.example.com", "users", &["ghost"]).is_err());
     }
 
     #[test]
@@ -611,33 +572,25 @@ mod tests {
     }
 
     #[test]
-    fn next_uid_and_gid_allocate_from_1000() {
-        let m = IdMap::default();
-        assert_eq!(next_uid(&m), 1000);
-        assert_eq!(next_gid(&m), 1000);
-        let m = seed(); // alice has uid 1000; users gid 100, wheel gid 10
-        assert_eq!(next_uid(&m), 1001);
-        assert_eq!(next_gid(&m), 1000, "low system gids don't shift the base");
-    }
-
-    #[test]
     fn register_identity_is_zero_touch_and_idempotent() {
         let mut m = IdMap::default();
-        // Fresh map: groups don't exist yet — they're created with
-        // allocated gids; the identity gets the first free uid.
-        let uid =
-            register_identity(&mut m, "eric.ryu-oh.org", "users", &["wheel"]).unwrap();
-        assert_eq!(uid, 1000);
-        assert!(m.groups.contains_key("users"));
-        assert!(m.groups.contains_key("wheel"));
-        assert_ne!(m.groups["users"].gid, m.groups["wheel"].gid);
+        // Fresh map: the groups don't exist yet and are created.
+        register_identity(&mut m, "eric.ryu-oh.org", "users", &["wheel"]).unwrap();
+        assert!(m.groups.contains("users"));
+        assert!(m.groups.contains("wheel"));
         m.validate().unwrap();
-        // Re-registration (a node re-joining) keeps the uid.
-        let again = register_identity(&mut m, "eric.ryu-oh.org", "users", &[]).unwrap();
-        assert_eq!(again, uid);
-        // A second identity gets the next uid.
-        let bob = register_identity(&mut m, "bob.ryu-oh.org", "users", &[]).unwrap();
-        assert_eq!(bob, 1001);
+        // Re-registration (a node re-joining) with fewer groups replaces the
+        // record rather than merging into it.
+        register_identity(&mut m, "eric.ryu-oh.org", "users", &[]).unwrap();
+        let eric = m.lookup_by_name("eric.ryu-oh.org").unwrap();
+        assert_eq!(eric.primary_group.as_str(), "users");
+        assert!(eric.groups.is_empty());
+        // The group it left behind is not swept up — an empty group is not an
+        // error, and another identity may still be about to use it.
+        assert!(m.groups.contains("wheel"));
+        register_identity(&mut m, "bob.ryu-oh.org", "users", &[]).unwrap();
+        assert_eq!(m.identities.len(), 2);
+        m.validate().unwrap();
     }
 
     #[test]
@@ -690,7 +643,7 @@ mod tests {
         let mut m = IdMap::default();
         m.identities.insert(
             ArcStr::from("alice"),
-            Identity { uid: 1000, primary_group: ArcStr::from("ghost"), groups: vec![] },
+            Identity { primary_group: ArcStr::from("ghost"), groups: vec![] },
         );
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("id-map.json");

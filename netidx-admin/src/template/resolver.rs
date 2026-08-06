@@ -17,8 +17,8 @@ use netidx::resolver_server::config::{ReadGate, file::IdMapType};
 use std::{net::SocketAddr, path::PathBuf};
 
 /// How the resolver maps an authenticated identity (a TLS cert SAN, or
-/// a kerberos principal with realm) to a unix uid/gid set for permission
-/// checks. Only meaningful for [`AuthChoice::Tls`] / [`AuthChoice::Krb5`]
+/// a kerberos principal with realm) to the group set permission checks are
+/// keyed on. Only meaningful for [`AuthChoice::Tls`] / [`AuthChoice::Krb5`]
 /// — anonymous has no user, and local goes through `Mapper::user(uid)`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IdMapMode {
@@ -97,7 +97,7 @@ pub struct ResolverParams {
     /// The CLI fills this from `std::env::current_exe()` when the
     /// operator doesn't pass `--netidx-binary`.
     pub netidx_binary: PathBuf,
-    /// How to map authenticated identities to unix uid/gid (see
+    /// How to map authenticated identities to groups (see
     /// [`IdMapMode`]). [`IdMapMode::Netidx`] installs the id-mapper
     /// daemon — the resolver member gets `id_map_type: Socket`, an
     /// `id-map.unit` is emitted alongside `resolver.unit`, and a starter
@@ -972,11 +972,10 @@ mod tests {
 
         // Operator populates the map.
         let mut populated = id_map_engine::empty();
-        id_map_engine::upsert_group(&mut populated, "users", 100);
+        id_map_engine::upsert_group(&mut populated, "users");
         id_map_engine::upsert_identity(
             &mut populated,
             "resolver.example.com",
-            1000,
             "users",
             &[],
         )
@@ -987,7 +986,7 @@ mod tests {
         resolver(&p).unwrap().apply_test(out.path()).unwrap();
         let after = id_map_engine::load(&id_map_path).unwrap();
         assert!(after.lookup_by_name("resolver.example.com").is_some());
-        assert!(after.groups.contains_key("users"));
+        assert!(after.groups.contains("users"));
     }
 
     /// Anonymous and Local auth must NOT get id-map auto-installation

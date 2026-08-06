@@ -2,11 +2,9 @@
 //!
 //! Every id-map host holds its own map file. This is what they are all
 //! supposed to agree about: which identities exist, which groups exist, and
-//! who belongs to what. It is deliberately not what they agree about
-//! *numerically* — a uid is allocated locally by each host, because the
-//! resolver keys permissions on names and the number is a per-host detail.
-//! That is why an edit propagates as an operation rather than as a document,
-//! and it is why this model has no uids to propagate.
+//! who belongs to what. That is the whole content of an id-map — it holds no
+//! numbers at all, because the resolver reads only names out of the answer.
+//! See the schema docs on [`netidx_id_map::file::IdMap`].
 //!
 //! The CA writes this in the same step that authorizes an edit, so it records
 //! what the admin domain is supposed to look like whether or not every host
@@ -39,9 +37,6 @@ pub struct IdMapModel {
     /// every host uses — decides what each operation means here exactly as it
     /// means there. A second implementation of the same semantics is precisely
     /// how a model comes to disagree with the hosts it claims to describe.
-    ///
-    /// The uid and gid numbers in it are an artifact of reusing the type. They
-    /// are never read, never compared, and never propagated.
     shape: IdMap,
 }
 
@@ -58,7 +53,7 @@ impl IdMapModel {
         self.version > 0
     }
 
-    /// The shape, for diffing a host against. uids in it are meaningless.
+    /// The shape, for diffing a host against.
     pub fn shape(&self) -> &IdMap {
         &self.shape
     }
@@ -84,9 +79,7 @@ impl IdMapModel {
     /// The operations that bring `host` to this model — empty when it already
     /// agrees.
     ///
-    /// Compares names and membership only. A uid difference is not a
-    /// difference: each host allocates its own, and re-registering an identity
-    /// keeps the number it already had.
+    /// Compares names and membership, which is everything a map holds.
     ///
     /// **Order is the whole difficulty.** Each step has to be applicable when
     /// it runs, against the applier's own invariants — a group cannot be
@@ -104,8 +97,8 @@ impl IdMapModel {
         }
         let mut out = Vec::new();
         // 1. Groups the host is missing, before anything can name them.
-        for name in self.shape.groups.keys() {
-            if !host.groups.contains_key(name) {
+        for name in self.shape.groups.iter() {
+            if !host.groups.contains(name) {
                 out.push(IdMapEdit::AddGroup { name: name.to_string() });
             }
         }
@@ -144,8 +137,8 @@ impl IdMapModel {
             }
         }
         // 5. Groups the model does not have, once nothing references them.
-        for name in host.groups.keys() {
-            if !self.shape.groups.contains_key(name) {
+        for name in host.groups.iter() {
+            if !self.shape.groups.contains(name) {
                 out.push(IdMapEdit::RemoveGroup { name: name.to_string() });
             }
         }
@@ -192,11 +185,10 @@ mod tests {
             model.apply(e).unwrap();
             apply_edit(&mut host, e).unwrap();
         }
-        // Names and membership must agree. uids are per-host and are not part
-        // of the comparison — the model's are meaningless.
+        // Names and membership must agree — that is all a map holds.
         assert_eq!(
-            model.shape().groups.keys().collect::<Vec<_>>(),
-            host.groups.keys().collect::<Vec<_>>()
+            model.shape().groups.iter().collect::<Vec<_>>(),
+            host.groups.iter().collect::<Vec<_>>()
         );
         for (name, ident) in &host.identities {
             let m = model.shape().identities.get(name).expect("identity in model");
@@ -230,10 +222,10 @@ mod tests {
     fn the_model_and_a_host_start_from_the_same_base() {
         let model = IdMapModel::default();
         let host = empty();
-        assert!(host.groups.contains_key("users"), "the base map seeds `users`");
+        assert!(host.groups.contains("users"), "the base map seeds `users`");
         assert_eq!(
-            model.shape().groups.keys().collect::<Vec<_>>(),
-            host.groups.keys().collect::<Vec<_>>()
+            model.shape().groups.iter().collect::<Vec<_>>(),
+            host.groups.iter().collect::<Vec<_>>()
         );
         assert!(model.shape().identities.is_empty());
     }
@@ -348,7 +340,6 @@ mod tests {
         ] {
             apply_edit(&mut host, &e).unwrap();
         }
-        let uid = host.identities.get("alice.example.com").unwrap().uid;
         assert_converges(&model, &mut host);
         // The revoked membership is gone, not merely absent from the others.
         assert!(
@@ -369,10 +360,8 @@ mod tests {
                 .any(|g| g.as_str() == "oncall")
         );
         assert!(!host.identities.contains_key("bob.example.com"));
-        assert!(!host.groups.contains_key("legacy"));
+        assert!(!host.groups.contains("legacy"));
         assert!(host.identities.contains_key("carol.example.com"));
-        // Converging must not renumber an identity the host already had.
-        assert_eq!(host.identities.get("alice.example.com").unwrap().uid, uid);
     }
 
     /// The ordering trap: a group can only be dropped once nothing holds it,
@@ -403,7 +392,7 @@ mod tests {
             )
             .expect("its group is removed");
         assert!(rm_ident < rm_group, "the holder has to go first: {edits:?}");
-        assert!(!host.groups.contains_key("doomed"));
+        assert!(!host.groups.contains("doomed"));
     }
 
     /// The mirror trap: an identity cannot name a group that does not exist

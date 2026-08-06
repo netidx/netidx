@@ -121,8 +121,6 @@ pub enum Field {
     RecoveryPassword,
     /// The human-readable reason recorded for a revocation.
     RevokeReason,
-    /// The unix uid a newly signed offline identity maps to.
-    Uid,
     /// Whether to sign a CSR with the SAN it already carries (offline `ca sign`).
     AcceptCsrSan,
     /// Whether an admin may mint and scope other admins.
@@ -436,12 +434,6 @@ impl Field {
                 label: "revocation reason",
                 help: "A short human-readable reason recorded with the \
                        revocation.",
-            },
-            Uid => FieldInfo {
-                flag: "--uid",
-                label: "unix uid",
-                help: "The unix user id a newly signed identity maps to in the \
-                       resolver's id-map.",
             },
             AcceptCsrSan => FieldInfo {
                 flag: "--accept-csr-san",

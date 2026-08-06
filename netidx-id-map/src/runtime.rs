@@ -9,6 +9,10 @@
 //! server closes the connection
 //! ```
 //!
+//! Every `N`/`M`/`G` above is [`crate::file::PLACEHOLDER_ID`] and means
+//! nothing — the resolver reads only the parenthesized names. The map holds no
+//! numbers to put there; see the [`crate::file`] docs.
+//!
 //! The current [`crate::file::IdMap`] lives as a plain `Arc<IdMap>`
 //! local to [`run_loop`]; each accepted connection is handed a clone of
 //! it, and a reload just rebinds that local to a fresh `Arc`. There is
@@ -16,29 +20,17 @@
 //! does so between `select` branches. Two event sources, both handled
 //! as extra arms of that one `select`, can trigger a re-read:
 //!
-//! - An `extended-notify` watch on the config file fires whenever
-//!   the file is modified or replaced (atomic-write rename-into-place
-//!   shows up as a Create event for the parent-dir watcher). This is
-//!   the normal path — operators editing `id-map.json` directly or
-//!   running `netidx admin id-map …` get reload-for-free. The watcher
-//!   forwards its event batches straight onto a channel (the
-//!   `extended-notify` crate implements its handler trait for an mpsc
-//!   sender) and `run_loop` reloads on anything that arrives — we don't
-//!   inspect the events. That includes the synthetic `Established`
-//!   event, so the watch going live triggers one reload that re-reads
-//!   the file and catches any change made between startup and arming.
-//!   If the watcher can't be set up on a given platform we just lose
-//!   live reload and fall back to SIGHUP.
-//! - `SIGHUP` is kept as a manual override for the rare case where a
-//!   filesystem doesn't deliver notifications (network mounts, some
-//!   container setups) or the operator wants to force a reload after
-//!   editing through some channel the watcher didn't catch.
+//! - The config poll: every [`POLL_INTERVAL`] the loop compares the file's
+//!   modification time against the one it recorded for what it is serving.
+//!   This is the normal path — operators editing `id-map.json` directly or
+//!   running `netidx admin id-map …` get reload-for-free. A poll rather than a
+//!   filesystem watch for one small file; see [`POLL_INTERVAL`] for why.
+//! - `SIGHUP` is kept as a manual override for an operator who doesn't want to
+//!   wait out an interval.
 //!
-//! Either way, parse failures keep the last-known-good map in place
-//! so a botched edit can't lock out every TLS identity. Apart from the
-//! watcher's internal task (owned by the `extended-notify` crate), the
-//! only tasks this module spawns are `run_loop` and one short-lived
-//! task per accepted connection.
+//! Either way, parse failures keep the last-known-good map in place so a
+//! botched edit can't lock out every TLS identity. The only tasks this module
+//! spawns are `run_loop` and one short-lived task per accepted connection.
 //!
 //! This file is `unix`-only — `tokio::net::UnixListener` and
 //! `tokio::signal::unix` aren't available elsewhere and the resolver's
@@ -480,7 +472,7 @@ fn set_socket_mode(path: &Path, mode: u32) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::file::{Group, Identity};
+    use crate::file::{Identity, PLACEHOLDER_ID};
     use arcstr::ArcStr;
     use std::collections::BTreeMap;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -505,43 +497,49 @@ mod tests {
         std::thread::sleep(netidx_core::utils::FS_TIMESTAMP_SETTLE);
     }
 
-    /// A map with `users` at gid 100 and one identity per `(name, uid)`, each
-    /// in `users` and nothing else.
-    fn map_of(identities: &[(&str, u32)]) -> IdMap {
-        let mut groups = BTreeMap::new();
-        groups.insert(ArcStr::from("users"), Group { gid: 100 });
-        let identities = identities
+    /// A map whose only group is `users`, with one identity per name in it.
+    fn map_of(names: &[&str]) -> IdMap {
+        let identities = names
             .iter()
-            .map(|(name, uid)| {
+            .map(|name| {
                 (
                     ArcStr::from(*name),
-                    Identity {
-                        uid: *uid,
-                        primary_group: ArcStr::from("users"),
-                        groups: vec![],
-                    },
+                    Identity { primary_group: ArcStr::from("users"), groups: vec![] },
                 )
             })
             .collect();
-        IdMap { default_uid: 65534, default_gid: 65534, groups, identities }
+        IdMap {
+            default_group: None,
+            groups: [ArcStr::from("users")].into_iter().collect(),
+            identities,
+        }
+    }
+
+    /// Whether the daemon knows this identity. Group membership is the whole
+    /// answer now — an identity in the map resolves to its groups, one that
+    /// isn't gets `nogroup`, and the numbers beside them are the same
+    /// placeholder either way.
+    fn is_known(line: &str) -> bool {
+        assert!(!line.contains("nogroup") || !line.contains("(users)"));
+        line.contains("(users)")
     }
 
     fn write_sample(path: &Path) {
-        let mut groups = BTreeMap::new();
-        groups.insert(ArcStr::from("users"), Group { gid: 100 });
-        groups.insert(ArcStr::from("wheel"), Group { gid: 10 });
         let mut identities = BTreeMap::new();
         identities.insert(
             ArcStr::from("alice.example.com"),
             Identity {
-                uid: 1000,
                 primary_group: ArcStr::from("users"),
                 groups: vec![ArcStr::from("wheel")],
             },
         );
         write_config(
             path,
-            &IdMap { default_uid: 65534, default_gid: 65534, groups, identities },
+            &IdMap {
+                default_group: None,
+                groups: ["users", "wheel"].into_iter().map(ArcStr::from).collect(),
+                identities,
+            },
         );
     }
 
@@ -568,9 +566,10 @@ mod tests {
         .await
         .unwrap();
         let s = query(&sock_path, "alice.example.com").await;
-        assert!(s.contains("uid=1000(alice.example.com)"), "got {s:?}");
-        assert!(s.contains("gid=100(users)"), "got {s:?}");
-        assert!(s.contains("groups=100(users),10(wheel)"), "got {s:?}");
+        let id = PLACEHOLDER_ID;
+        assert!(s.contains(&format!("uid={id}(alice.example.com)")), "got {s:?}");
+        assert!(s.contains(&format!("gid={id}(users)")), "got {s:?}");
+        assert!(s.contains(&format!("groups={id}(users),{id}(wheel)")), "got {s:?}");
     }
 
     #[tokio::test]
@@ -586,8 +585,13 @@ mod tests {
         })
         .await
         .unwrap();
+        // Nothing to reverse: the map holds no uids. The daemon answers with
+        // the defaults rather than guessing, which is what makes `auth: Local`
+        // with `id_map_type: Socket` fail closed instead of naming the wrong
+        // identity. See the `file` module docs.
         let s = query(&sock_path, "1000").await;
-        assert!(s.contains("uid=1000(alice.example.com)"), "got {s:?}");
+        assert!(!s.contains("alice"), "a uid must not resolve to a name: {s:?}");
+        assert!(s.contains("(nogroup)"), "got {s:?}");
     }
 
     #[tokio::test]
@@ -604,7 +608,9 @@ mod tests {
         .await
         .unwrap();
         let s = query(&sock_path, "ghost.example.com").await;
-        assert!(s.contains("uid=65534(ghost.example.com)"), "got {s:?}");
+        let id = PLACEHOLDER_ID;
+        assert!(s.contains(&format!("uid={id}(ghost.example.com)")), "got {s:?}");
+        assert!(s.contains("(nogroup)"), "got {s:?}");
     }
 
     #[tokio::test]
@@ -721,24 +727,18 @@ mod tests {
         .await
         .unwrap();
         // Initial map has alice but not bob.
-        let s = query(&sock_path, "alice.example.com").await;
-        assert!(s.contains("uid=1000(alice.example.com)"), "got {s:?}");
-        // bob is unknown, so the daemon falls back to the default uid.
-        let s = query(&sock_path, "bob.example.com").await;
-        assert!(s.contains("uid=65534(bob.example.com)"), "got {s:?}");
+        assert!(is_known(&query(&sock_path, "alice.example.com").await));
+        assert!(!is_known(&query(&sock_path, "bob.example.com").await));
 
-        write_config(
-            &cfg_path,
-            &map_of(&[("alice.example.com", 1000), ("bob.example.com", 1001)]),
-        );
+        write_config(&cfg_path, &map_of(&["alice.example.com", "bob.example.com"]));
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
         loop {
             let s = query(&sock_path, "bob.example.com").await;
-            if s.contains("uid=1001(bob.example.com)") {
+            if is_known(&s) {
                 return;
             }
             if std::time::Instant::now() >= deadline {
-                panic!("watcher did not reload within 10s; last bob query: {s:?}",);
+                panic!("daemon did not reload within 10s; last bob query: {s:?}");
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
@@ -748,8 +748,8 @@ mod tests {
     /// its config, not just the first. Every `id-map.json` update (enrollment,
     /// `netidx admin id-map …`) renames a sibling temp file over the target — a
     /// fresh inode each time — and the daemon has to notice all of them, or the
-    /// first enrollment registers and every one after it silently maps to the
-    /// default uid (denied). `config_watcher_reloads_on_modify` does a single
+    /// first enrollment registers and every one after it silently resolves to
+    /// no group (denied). `config_watcher_reloads_on_modify` does a single
     /// replace, so it passed while an earlier version of this bug was live.
     #[tokio::test]
     async fn config_watcher_reloads_on_repeated_modify() {
@@ -770,17 +770,15 @@ mod tests {
             .iter()
             .map(|name| format!("{name}.example.com"))
             .collect();
-        let mut in_map = vec![("alice.example.com", 1000)];
+        let mut in_map = vec!["alice.example.com"];
         for (i, host) in hosts.iter().enumerate() {
-            let uid = 1001 + i as u32;
-            in_map.push((host.as_str(), uid));
+            in_map.push(host.as_str());
             write_config(&cfg_path, &map_of(&in_map));
 
-            let want = format!("uid={uid}({host})");
             let deadline = std::time::Instant::now() + Duration::from_secs(10);
             loop {
                 let s = query(&sock_path, &host).await;
-                if s.contains(&want) {
+                if is_known(&s) {
                     break;
                 }
                 if std::time::Instant::now() >= deadline {

@@ -769,14 +769,9 @@ pub(crate) struct SignArgs {
     pub no_id_map: bool,
     /// Register the signed identity in the local id-map under these groups
     /// (repeatable; the first is primary). Enables non-interactive id-map
-    /// registration; requires `--uid`. Omit to prompt (interactive) or skip
-    /// (strict).
+    /// registration. Omit to prompt (interactive) or skip (strict).
     #[arg(long = "id-map-group", num_args = 1)]
     pub id_map_group: Vec<String>,
-    /// The unix uid the signed identity maps to. Required with
-    /// `--id-map-group`.
-    #[arg(long, requires = "id_map_group")]
-    pub uid: Option<u32>,
     #[command(flatten)]
     pub recovery: RecoveryAuth,
 }
@@ -1947,15 +1942,14 @@ fn sign_san_choice(p: &SignArgs) -> Result<offline_ops::SignSan> {
     })
 }
 
-/// Build the post-sign id-map action from `--no-id-map` / `--id-map-group` /
-/// `--uid` (`--uid` requires `--id-map-group`, enforced by clap). Which guard
-/// the map is written under is the engine's call, not a flag's.
+/// Build the post-sign id-map action from `--no-id-map` / `--id-map-group`.
+/// Which guard the map is written under is the engine's call, not a flag's.
 #[cfg(unix)]
 fn id_map_choice(p: &SignArgs) -> offline_ops::IdMapAction {
     if p.no_id_map {
         offline_ops::IdMapAction::Skip
     } else if !p.id_map_group.is_empty() {
-        offline_ops::IdMapAction::Register { groups: p.id_map_group.clone(), uid: p.uid }
+        offline_ops::IdMapAction::Register { groups: p.id_map_group.clone() }
     } else {
         offline_ops::IdMapAction::Ask
     }
@@ -1993,15 +1987,10 @@ fn print_id_map_result(r: &offline_ops::IdMapResult) {
         ),
         IdMapResult::Registered(reg) => match &reg.previous {
             Some(old) => println!(
-                "updated id-map: {} (was uid={} primary={})",
-                reg.name, old.uid, old.primary_group,
+                "updated id-map: {} (was primary={})",
+                reg.name, old.primary_group,
             ),
-            None => {
-                println!(
-                    "added to id-map: {} uid={} primary={}",
-                    reg.name, reg.uid, reg.primary
-                )
-            }
+            None => println!("added to id-map: {} primary={}", reg.name, reg.primary),
         },
     }
 }
@@ -2434,7 +2423,6 @@ mod tests {
             out: Some(cert_path.clone()),
             no_id_map: true,
             id_map_group: vec![],
-            uid: None,
             recovery: RecoveryAuth {
                 recovery_password_file: None,
                 recovery_password_stdin: false,
@@ -2492,7 +2480,6 @@ mod tests {
             out: Some(scratch.path().join("out.pem")),
             no_id_map: true,
             id_map_group: vec![],
-            uid: None,
             recovery: RecoveryAuth {
                 recovery_password_file: None,
                 recovery_password_stdin: false,
@@ -2539,7 +2526,6 @@ mod tests {
             out: Some(scratch.path().join("out.pem")),
             no_id_map: true,
             id_map_group: vec![],
-            uid: None,
             recovery: RecoveryAuth {
                 recovery_password_file: None,
                 recovery_password_stdin: false,
@@ -2588,7 +2574,6 @@ mod tests {
             out: Some(scratch.path().join("out.pem")),
             no_id_map: true,
             id_map_group: vec![],
-            uid: None,
             recovery: RecoveryAuth {
                 recovery_password_file: None,
                 recovery_password_stdin: false,
