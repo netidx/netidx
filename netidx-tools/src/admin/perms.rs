@@ -13,9 +13,12 @@
 //! command that edits a perms file in place: that is how two members of one
 //! resolver cluster come to disagree.
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use clap::{Args, Subcommand};
-use netidx_admin::{ops::perms as perms_ops, perms};
+use netidx_admin::{
+    ops::{EditResult, perms as perms_ops},
+    perms,
+};
 
 use super::{
     answer_cli::RemoteAuthFlags,
@@ -106,14 +109,33 @@ fn edit(f: Flags) -> Result<()> {
     // Render the resolver cluster's current perms into the editor and parse
     // back what the operator leaves. This is one of the two places perms are
     // text; past it the document travels as itself.
-    let current = rt.block_on(perms_ops::show_perms(&target, &f.at))?;
+    let (base, current) = rt.block_on(perms_ops::read_perms_versioned(&target, &f.at))?;
     let edited = editor::edit_with_validation(&perms::render(&current)?, perms::parse)?;
-    let version = rt.block_on(perms_ops::edit_perms(&target, &f.at, &edited))?;
-    report_recorded(
-        &netidx_admin::ops::RecordedEdit { version, changed: true },
-        Recorded::Perms { at: &f.at },
-    );
-    Ok(())
+    // A whole-document edit cannot be rebased on the operator's behalf: what
+    // they submitted *is* the intent, and merging it with someone else's is a
+    // judgement only they can make. So a conflict is reported, with their work
+    // printed rather than dropped.
+    match rt.block_on(perms_ops::edit_perms(&target, &f.at, &edited, base))? {
+        EditResult::Recorded(ok) => {
+            report_recorded(&ok, Recorded::Perms { at: &f.at });
+            Ok(())
+        }
+        EditResult::Stale { current_version, current } => {
+            eprintln!(
+                "refused: the perms of {:?} were at version {} when you started \
+                 editing and are at version {} now — someone else changed them, and \
+                 recording this document would erase what they did.\n\n\
+                 What is there now:\n{}\n\
+                 Your edit, unrecorded:\n{}",
+                f.at,
+                base.map(|v| v.to_string()).unwrap_or_else(|| "none".into()),
+                current_version.map(|v| v.to_string()).unwrap_or_else(|| "none".into()),
+                perms::render(&current)?,
+                perms::render(&edited)?,
+            );
+            bail!("the perms changed while you were editing them")
+        }
+    }
 }
 
 fn set(f: Flags, path: String, entity: String, bits: String) -> Result<()> {

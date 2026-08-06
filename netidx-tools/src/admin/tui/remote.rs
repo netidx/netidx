@@ -1566,7 +1566,7 @@ async fn edit_perms(
     // One session for the read and the write, so a remote edit collects a
     // password once and keeps it across the operator's think-time.
     let resolved = admin_target(ans, &target).await?;
-    let current = perms::show_perms(&resolved, &at).await?;
+    let (base, current) = perms::read_perms_versioned(&resolved, &at).await?;
     let seed = perms_file::render(&current)?;
     // `EditValidator` is shared with the policy and unit editors, so it hands
     // back text; the document is parsed once more below. The parse inside the
@@ -1575,7 +1575,22 @@ async fn edit_perms(
     let validate: super::answer::EditValidator =
         Box::new(|s: &str| perms_file::parse(s).and_then(|p| perms_file::render(&p)));
     let edited = perms_file::parse(&ans.edit(seed, validate).await?)?;
-    let version = perms::edit_perms(&resolved, &at, &edited).await?;
+    // Think-time is exactly when someone else's edit lands, so the CA is told
+    // which version this was edited from and refuses it if that is no longer
+    // current. Nothing is merged on the operator's behalf — a whole document
+    // is their whole intent — so a conflict comes back to them.
+    let version = match perms::edit_perms(&resolved, &at, &edited, base).await? {
+        netidx_admin::ops::EditResult::Recorded(ok) => ok.version,
+        netidx_admin::ops::EditResult::Stale { current_version, .. } => {
+            bail!(
+                "The perms at {at:?} changed while you were editing: you started from \
+                 version {}, and they are at version {} now. Nothing was recorded — \
+                 re-open the editor to work from what is there now.",
+                base.map(|v| v.to_string()).unwrap_or_else(|| "none".into()),
+                current_version.map(|v| v.to_string()).unwrap_or_else(|| "none".into()),
+            )
+        }
+    };
     // Recorded, not yet everywhere: members converge on this version at their
     // next register, and the resolver then reloads on its own file poll. The
     // Servers panel shows who has caught up — a count taken here would be

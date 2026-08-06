@@ -854,7 +854,7 @@ pub async fn read_perms(
     expected: &CaIdentity,
     credential: admin_proto::AdminCredential,
     target_path: &str,
-) -> Result<crate::perms::PMap> {
+) -> Result<(Option<u64>, crate::perms::PMap)> {
     let mut tls = connect_ca_pinned(addr, kind, expected).await?;
     admin_proto::write_msg(
         &mut tls,
@@ -865,7 +865,7 @@ pub async fn read_perms(
     )
     .await?;
     match admin_proto::read_msg::<_, ReadPermsResponse>(&mut tls).await? {
-        ReadPermsResponse::Ok(ReadPermsOk { perms, .. }) => Ok(perms),
+        ReadPermsResponse::Ok(ReadPermsOk { perms, version, .. }) => Ok((version, perms)),
         ReadPermsResponse::Err { reason } => Err(admin_refusal(
             expected,
             &credential,
@@ -884,7 +884,8 @@ pub async fn edit_perms(
     credential: admin_proto::AdminCredential,
     target_path: &str,
     perms: &crate::perms::PMap,
-) -> Result<u64> {
+    base_version: Option<u64>,
+) -> Result<admin_proto::EditOutcome> {
     let mut tls = connect_ca_pinned(addr, kind, expected).await?;
     admin_proto::write_msg(
         &mut tls,
@@ -892,11 +893,12 @@ pub async fn edit_perms(
             credential: credential.clone(),
             target_path: target_path.to_string(),
             perms: perms.clone(),
+            base_version,
         }),
     )
     .await?;
     match admin_proto::read_msg::<_, EditPermsResponse>(&mut tls).await? {
-        EditPermsResponse::Ok(ok) => Ok(ok.version),
+        EditPermsResponse::Ok(outcome) => Ok(outcome),
         EditPermsResponse::Err { reason } => Err(admin_refusal(
             expected,
             &credential,

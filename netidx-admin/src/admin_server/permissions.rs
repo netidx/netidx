@@ -142,7 +142,9 @@ async fn confine_local_perms(
 /// hint the local socket deliberately does not trust — and `None` at a CA that
 /// has never recorded perms for this cluster, where the local file is still
 /// the only answer there is.
-async fn own_cluster_model_perms(state: &Arc<Server>) -> Option<crate::perms::PMap> {
+async fn own_cluster_model_perms(
+    state: &Arc<Server>,
+) -> Option<(u64, crate::perms::PMap)> {
     if !state.has_ca().await {
         return None;
     }
@@ -163,7 +165,7 @@ async fn own_cluster_model_perms(state: &Arc<Server>) -> Option<crate::perms::PM
         })
         .await?
         .get(cluster)
-        .map(|p| p.perms.clone())
+        .map(|p| (p.version, p.perms.clone()))
 }
 
 /// Admin → CA permissions read. Authentication and policy are checked
@@ -206,13 +208,20 @@ pub(super) async fn handle_read_perms(
     if local {
         let (server, addr) =
             state.read(move |state| (state.cfg.server_id, state.cfg.listen)).await;
-        if let Some(perms) = own_cluster_model_perms(state).await {
-            return ReadPermsResponse::Ok(ReadPermsOk { server, addr, perms });
+        if let Some((version, perms)) = own_cluster_model_perms(state).await {
+            return ReadPermsResponse::Ok(ReadPermsOk {
+                server,
+                addr,
+                perms,
+                version: Some(version),
+            });
         }
+        // No model, so no version: an edit built on this is based on the CA
+        // holding nothing, and stays valid only while that is true.
         let read = handle_get_perms(state).await;
         return match read {
             GetPermsResponse::Ok(perms) => {
-                ReadPermsResponse::Ok(ReadPermsOk { server, addr, perms })
+                ReadPermsResponse::Ok(ReadPermsOk { server, addr, perms, version: None })
             }
             GetPermsResponse::Err { reason } => err(reason),
         };
@@ -234,7 +243,7 @@ pub(super) async fn handle_read_perms(
     // takes the first that answers, so a member that was down for an edit and
     // is up now hands back its stale document, and whatever is built on it
     // gets propagated over everyone else's correct one.
-    if let Some(perms) = state
+    if let Some(recorded) = state
         .read_async(async move |state| match state.ca.as_ref() {
             Some(ca) => ca.store.perms_model().await.ok(),
             None => None,
@@ -244,7 +253,12 @@ pub(super) async fn handle_read_perms(
     {
         let (server, addr) =
             state.read(move |state| (state.cfg.server_id, state.cfg.listen)).await;
-        return ReadPermsResponse::Ok(ReadPermsOk { server, addr, perms: perms.perms });
+        return ReadPermsResponse::Ok(ReadPermsOk {
+            server,
+            addr,
+            perms: recorded.perms,
+            version: Some(recorded.version),
+        });
     }
     audit(
         &state.ca_dir().await.expect("CA role held"),
@@ -269,7 +283,14 @@ pub(super) async fn handle_read_perms(
         .await;
         match result {
             Ok(Ok(perms)) => {
-                return ReadPermsResponse::Ok(ReadPermsOk { server, addr, perms });
+                // A member's copy, because the CA has no model. There is no
+                // version to base an edit on until one is established.
+                return ReadPermsResponse::Ok(ReadPermsOk {
+                    server,
+                    addr,
+                    perms,
+                    version: None,
+                });
             }
             Ok(Err(e)) => failures.push(format!("{server} at {addr}: {e:#}")),
             Err(_) => failures.push(format!(
@@ -381,16 +402,24 @@ fn cluster_for(
 }
 
 /// Record `perms` as `cluster`'s authoritative permissions, returning the
-/// version it is now at.
+/// version it is now at — provided `base_version` still names the version the
+/// editor started from.
 ///
-/// Under the state write lock, so two concurrent edits cannot both read the
-/// same version and write over each other. That lock is also what will let the
-/// read-modify-write behind `perms set` collapse into the CA.
+/// The whole document is submitted, so it erases anything the editor did not
+/// see. That is only safe if nothing has changed underneath it, which is what
+/// `base_version` establishes: a mismatch means someone else has edited since,
+/// and writing anyway would silently drop their change. Such an edit is
+/// refused and handed the current document instead.
+///
+/// The comparison happens **inside the write lock**, with the write it guards.
+/// Checking the version and then recording under separate locks would leave a
+/// window between them that is exactly the race the check exists to close.
 pub(super) async fn record_in_model(
     state: &Arc<Server>,
     cluster: admin_proto::ResolverClusterId,
     perms: &crate::perms::PMap,
-) -> Result<(u64, bool)> {
+    base_version: Option<u64>,
+) -> Result<admin_proto::EditOutcome> {
     let perms = perms.clone();
     let config_lock = state.config_lock.clone();
     let ca_dir = state.ca_dir().await.context("this host does not hold the CA")?;
@@ -400,6 +429,15 @@ pub(super) async fn record_in_model(
                 &state.ca.as_ref().context("this host does not hold the CA")?.store;
             let mut model = store.perms_model().await?;
             let before = model.get(cluster).map(|p| p.version);
+            if before != base_version {
+                return Ok(admin_proto::EditOutcome::Stale {
+                    current_version: before,
+                    current: model
+                        .get(cluster)
+                        .map(|p| p.perms.clone())
+                        .unwrap_or_else(crate::perms::empty),
+                });
+            }
             let version = model.set(cluster, &perms)?;
             let changed = before != Some(version);
             if changed {
@@ -416,7 +454,10 @@ pub(super) async fn record_in_model(
                         .await?;
                 }
             }
-            Ok((version, changed))
+            Ok(admin_proto::EditOutcome::Recorded(admin_proto::RecordedOk {
+                version,
+                changed,
+            }))
         })
         .await
 }
@@ -464,17 +505,30 @@ pub(super) async fn handle_edit_perms(
             }
         }
     };
-    let (version, changed) = match record_in_model(state, cluster, &req.perms).await {
-        Ok(recorded) => recorded,
-        Err(e) => return err(format!("{e:#}")),
+    let outcome =
+        match record_in_model(state, cluster, &req.perms, req.base_version).await {
+            Ok(outcome) => outcome,
+            Err(e) => return err(format!("{e:#}")),
+        };
+    // A refused edit changed nothing, so there is nothing to audit as a change
+    // — but it is worth a line, because a burst of them is two admins editing
+    // the same cluster and that is something an operator wants to see.
+    let entry = match &outcome {
+        admin_proto::EditOutcome::Recorded(ok) => {
+            format!("version {} at {}", ok.version, req.target_path)
+        }
+        admin_proto::EditOutcome::Stale { current_version, .. } => format!(
+            "refused as stale at {}: based on {:?}, current is {current_version:?}",
+            req.target_path, req.base_version
+        ),
     };
     audit(
         &state.ca_dir().await.expect("CA role held"),
         &authd.admin,
         "edit-perms",
-        &format!("version {version} at {}", req.target_path),
+        &entry,
         Duration::ZERO,
     )
     .await;
-    EditPermsResponse::Ok(admin_proto::RecordedOk { version, changed })
+    EditPermsResponse::Ok(outcome)
 }

@@ -83,6 +83,71 @@ async fn a_local_read_on_the_ca_host_comes_from_the_model_not_the_file() {
     );
 }
 
+/// An edit submits the whole document, so it erases anything the editor did
+/// not see. The CA therefore refuses one whose base version is no longer
+/// current, and hands back what is.
+///
+/// Without this, two admins editing the same cluster — or one editor and one
+/// `perms set` — silently drop each other's work, and both are told "ok".
+#[tokio::test]
+async fn an_edit_from_a_stale_version_is_refused_and_given_the_current_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let lock = ConfigDirLock::acquire_for_ca_dir(dir.path()).await.unwrap();
+    let ca = ca_store::CaDir::open(lock, dir.path()).await.unwrap();
+    let state = test_server(Some(ca));
+    let cluster = admin_proto::ResolverClusterId::new();
+
+    let with = |path: &str, entity: &str| {
+        let mut p = crate::perms::empty();
+        crate::perms::add_entry(&mut p, path, entity, "swl").unwrap();
+        p
+    };
+
+    // Nothing recorded yet, so an edit based on "no model" is the current one.
+    let first =
+        record_in_model(&state, cluster, &with("/a", "alice"), None).await.unwrap();
+    let admin_proto::EditOutcome::Recorded(first) = first else {
+        panic!("the first edit had a current base")
+    };
+    assert_eq!(first.version, 1);
+
+    // A second editor that also read "no model" — it started before the first
+    // landed. Its document would erase alice, so it is refused.
+    let stale = record_in_model(&state, cluster, &with("/b", "bob"), None).await.unwrap();
+    let admin_proto::EditOutcome::Stale { current_version, current } = stale else {
+        panic!("an edit based on a version that has moved must not be recorded")
+    };
+    assert_eq!(current_version, Some(1));
+    assert_eq!(
+        crate::perms::lookup(&current, "/a", "alice").map(|b| b.as_str()),
+        Some("swl"),
+        "the refusal carries what is current, so the caller can rebase on it"
+    );
+
+    // Rebased onto what it was given, the same intent records.
+    let mut rebased = current;
+    crate::perms::add_entry(&mut rebased, "/b", "bob", "swl").unwrap();
+    let ok = record_in_model(&state, cluster, &rebased, current_version).await.unwrap();
+    let admin_proto::EditOutcome::Recorded(ok) = ok else {
+        panic!("a rebased edit is current again")
+    };
+    assert_eq!(ok.version, 2);
+    assert!(ok.changed);
+
+    // And alice survived, which is the whole point.
+    let after = state
+        .read_async(async move |state| {
+            state.ca.as_ref().unwrap().store.perms_model().await.unwrap()
+        })
+        .await
+        .get(cluster)
+        .unwrap()
+        .perms
+        .clone();
+    assert!(crate::perms::lookup(&after, "/a", "alice").is_some());
+    assert!(crate::perms::lookup(&after, "/b", "bob").is_some());
+}
+
 #[test]
 fn perms_reads_and_edits_share_the_same_scope_authorization() {
     let role = ca_vault::Authenticated {

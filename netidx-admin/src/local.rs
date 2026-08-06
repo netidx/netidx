@@ -346,7 +346,7 @@ pub async fn list_admins(
 pub async fn read_perms(
     cfg_path: &Path,
     target_path: &str,
-) -> Result<crate::perms::PMap> {
+) -> Result<(Option<u64>, crate::perms::PMap)> {
     let mut s = connect(cfg_path).await?;
     let (admin, password) = no_creds();
     netidx_admin_proto::write_msg(
@@ -358,7 +358,7 @@ pub async fn read_perms(
     )
     .await?;
     match netidx_admin_proto::read_msg::<_, ReadPermsResponse>(&mut s).await? {
-        ReadPermsResponse::Ok(ReadPermsOk { perms, .. }) => Ok(perms),
+        ReadPermsResponse::Ok(ReadPermsOk { perms, version, .. }) => Ok((version, perms)),
         ReadPermsResponse::Err { reason } => bail!("the admin daemon refused: {reason}"),
     }
 }
@@ -373,7 +373,8 @@ pub async fn edit_perms(
     cfg_path: &Path,
     target_path: &str,
     perms: &crate::perms::PMap,
-) -> Result<u64> {
+    base_version: Option<u64>,
+) -> Result<netidx_admin_proto::EditOutcome> {
     let mut s = connect(cfg_path).await?;
     let (admin, password) = no_creds();
     netidx_admin_proto::write_msg(
@@ -382,11 +383,12 @@ pub async fn edit_perms(
             credential: netidx_admin_proto::AdminCredential::Password { admin, password },
             target_path: target_path.to_string(),
             perms: perms.clone(),
+            base_version,
         }),
     )
     .await?;
     match netidx_admin_proto::read_msg::<_, EditPermsResponse>(&mut s).await? {
-        EditPermsResponse::Ok(ok) => Ok(ok.version),
+        EditPermsResponse::Ok(outcome) => Ok(outcome),
         EditPermsResponse::Err { reason } => bail!("the CA refused: {reason}"),
     }
 }

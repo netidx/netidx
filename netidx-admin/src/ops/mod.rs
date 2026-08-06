@@ -67,6 +67,27 @@ pub struct RecordedEdit {
     pub changed: bool,
 }
 
+/// What a whole-document edit did.
+///
+/// Submitting a whole document erases anything the editor did not see, so the
+/// CA refuses one whose base version is no longer current rather than silently
+/// dropping whatever landed in between. That refusal is not a failure — the
+/// caller did nothing wrong — so it is an outcome with the current document
+/// attached, and the caller decides whether their intent survives a rebase.
+///
+/// Entry-level edits (`set_entry`, `remove_entry`) rebase themselves and never
+/// return this; a `$EDITOR` document reaches its operator.
+pub enum EditResult {
+    Recorded(RecordedEdit),
+    Stale {
+        /// The version the CA holds now. `None` means it holds no model.
+        current_version: Option<u64>,
+        /// What is there now, so the caller can show or rebase onto it
+        /// without another round trip.
+        current: crate::perms::PMap,
+    },
+}
+
 /// A pinned, authenticated remote-admin session: the admin server to talk to,
 /// its confirmed identity (later connections verify against *this* CA, not a
 /// re-presented one), and the admin credentials authorizing the operation.

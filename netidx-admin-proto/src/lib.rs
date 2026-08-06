@@ -50,7 +50,7 @@ pub mod identity;
 pub mod policy;
 pub mod server_config;
 
-pub const PROTOCOL_VERSION: u32 = 11;
+pub const PROTOCOL_VERSION: u32 = 12;
 
 /// Conventional admin-server port (resolver is 4564).
 pub const DEFAULT_PORT: u16 = 4565;
@@ -1518,6 +1518,15 @@ pub struct ReadPermsOk {
     pub server: AdminServerId,
     pub addr: SocketAddr,
     pub perms: PMap,
+    /// The model version this document is at, to be handed back as
+    /// [`EditPermsRequest::base_version`] by whoever edits it.
+    ///
+    /// `None` is not "unknown" — it is the CA holding no model for this
+    /// cluster yet, which is a state an edit can legitimately be based on and
+    /// which an edit from someone else can take away.
+    #[serde(default)]
+    #[pack(default)]
+    pub version: Option<u64>,
 }
 
 pub type ReadPermsResponse = RpcResult<ReadPermsOk>;
@@ -1535,6 +1544,19 @@ pub struct EditPermsRequest {
     /// The base path of the resolver cluster whose perms to edit (e.g. `/eu`).
     pub target_path: String,
     pub perms: PMap,
+    /// The version this document was edited from, as
+    /// [`ReadPermsOk::version`] reported it.
+    ///
+    /// A whole document is submitted, so anything the editor did not see is
+    /// erased by it. The CA therefore refuses the write unless this still
+    /// names the current version, and answers [`EditOutcome::Stale`] with the
+    /// document that is current so the caller can rebase.
+    ///
+    /// `None` means "based on the CA holding no model", which is only current
+    /// while that remains true.
+    #[serde(default)]
+    #[pack(default)]
+    pub base_version: Option<u64>,
 }
 
 /// What an edit records, and the version members will converge on.
@@ -1556,7 +1578,25 @@ pub struct RecordedOk {
     pub changed: bool,
 }
 
-pub type EditPermsResponse = RpcResult<RecordedOk>;
+/// What an edit did, or what stopped it.
+///
+/// A stale edit is not an error: nothing went wrong, the caller simply edited
+/// a document someone else has since replaced. It has a typed answer — the
+/// document that is current — where an error has only a reason, so the two are
+/// different shapes rather than a string the caller would have to parse.
+#[derive(Debug, Clone, Serialize, Deserialize, Pack)]
+pub enum EditOutcome {
+    #[pack(tag(0))]
+    Recorded(RecordedOk),
+    /// Refused: `base_version` is no longer current, so applying this whole
+    /// document would erase whatever changed in between. Carries what is
+    /// current, so a caller whose intent survives a rebase can reapply it
+    /// without another round trip.
+    #[pack(tag(1))]
+    Stale { current_version: Option<u64>, current: PMap },
+}
+
+pub type EditPermsResponse = RpcResult<EditOutcome>;
 
 /// Server → server: apply a permissions edit to the local resolver perms.
 #[derive(Debug, Clone, Serialize, Deserialize, Pack)]
@@ -2089,7 +2129,7 @@ mod tests {
                 protocol_version: PROTOCOL_VERSION,
                 kind: NodeKind::Client,
             }),
-            vec![7, 0, 0, 0, 11, 2, 2]
+            vec![7, 0, 0, 0, 12, 2, 2]
         );
         assert_eq!(encode(&Request::GetMap), vec![2, 23]);
         assert_eq!(encode(&Request::Deregister), vec![2, 21]);
@@ -2195,6 +2235,7 @@ mod tests {
             server,
             addr: "127.0.0.1:4565".parse().unwrap(),
             perms: perms.clone(),
+            version: Some(9),
         });
         write_msg(&mut a, &response).await.unwrap();
         match read_msg::<_, ReadPermsResponse>(&mut b).await.unwrap() {
@@ -2202,10 +2243,15 @@ mod tests {
                 server: got,
                 addr,
                 perms: got_perms,
+                version,
             }) => {
                 assert_eq!(got, server);
                 assert_eq!(addr, "127.0.0.1:4565".parse().unwrap());
                 assert_eq!(got_perms, perms);
+                // The version rides with the document it describes: an editor
+                // that got one without the other could not tell the CA what it
+                // based on.
+                assert_eq!(version, Some(9));
             }
             ReadPermsResponse::Err { reason } => panic!("unexpected error: {reason}"),
         }
