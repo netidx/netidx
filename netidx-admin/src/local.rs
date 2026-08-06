@@ -388,7 +388,7 @@ pub async fn edit_perms(
 }
 
 /// Read this host's id-map over the control socket.
-pub async fn get_id_map(cfg_path: &Path) -> Result<String> {
+pub async fn get_id_map(cfg_path: &Path) -> Result<crate::id_map::IdMap> {
     let mut s = connect(cfg_path).await?;
     let (admin, password) = no_creds();
     netidx_admin_proto::write_msg(
@@ -401,7 +401,7 @@ pub async fn get_id_map(cfg_path: &Path) -> Result<String> {
     match netidx_admin_proto::read_msg::<_, netidx_admin_proto::GetIdMapResponse>(&mut s)
         .await?
     {
-        netidx_admin_proto::GetIdMapResponse::Ok(ok) => Ok(ok.id_map_json),
+        netidx_admin_proto::GetIdMapResponse::Ok(ok) => Ok(ok.id_map),
         netidx_admin_proto::GetIdMapResponse::Err { reason } => {
             bail!("the admin daemon refused: {reason}")
         }

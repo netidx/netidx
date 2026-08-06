@@ -55,6 +55,7 @@ use crate::{
         SetAdminPolicyRequest, SignOk, SignRequest, SignResponse,
     },
     fingerprint::Fingerprint,
+    id_map::IdMap,
     tls_tofu::TofuVerifier,
 };
 use anyhow::{Context, Result, anyhow, bail};
@@ -693,7 +694,7 @@ pub async fn fetch_id_map(
     target_id: admin_proto::AdminServerId,
     target_ca: bool,
     home_ca: CertificateDer<'static>,
-) -> Result<Option<String>> {
+) -> Result<Option<IdMap>> {
     let (mut tls, hello) = connect_pki_target(
         client,
         addr,
@@ -707,7 +708,7 @@ pub async fn fetch_id_map(
     admin_proto::write_msg(&mut tls, &Request::GetLocalIdMap).await?;
     match admin_proto::read_msg::<_, admin_proto::GetLocalIdMapResponse>(&mut tls).await?
     {
-        admin_proto::GetLocalIdMapResponse::Ok(json) => Ok(Some(json)),
+        admin_proto::GetLocalIdMapResponse::Ok(map) => Ok(Some(map)),
         admin_proto::GetLocalIdMapResponse::Err { reason } => {
             bail!("peer refused the id-map read: {reason}")
         }
@@ -912,7 +913,7 @@ pub async fn get_id_map(
     kind: NodeKind,
     expected: &CaIdentity,
     credential: admin_proto::AdminCredential,
-) -> Result<String> {
+) -> Result<IdMap> {
     let mut tls = connect_ca_pinned(addr, kind, expected).await?;
     admin_proto::write_msg(
         &mut tls,
@@ -922,7 +923,7 @@ pub async fn get_id_map(
     )
     .await?;
     match admin_proto::read_msg::<_, admin_proto::GetIdMapResponse>(&mut tls).await? {
-        admin_proto::GetIdMapResponse::Ok(ok) => Ok(ok.id_map_json),
+        admin_proto::GetIdMapResponse::Ok(ok) => Ok(ok.id_map),
         admin_proto::GetIdMapResponse::Err { reason } => Err(admin_refusal(
             expected,
             &credential,

@@ -715,18 +715,13 @@ impl Server {
         crate::version_stamp::read(&path).await
     }
 
-    /// This host's id-map, serialized for the wire.
-    async fn read_id_map(&self) -> Result<String> {
+    /// This host's id-map.
+    async fn read_id_map(&self) -> Result<crate::id_map::IdMap> {
         let path = self
             .read(move |state| state.cfg.roles.id_map.as_ref().map(|r| r.map.clone()))
             .await
             .context("this host has no id-map role — no map to read")?;
-        let map = if tokio::fs::try_exists(&path).await.unwrap_or(false) {
-            crate::id_map::load_async(&path).await?
-        } else {
-            crate::id_map::empty()
-        };
-        serde_json::to_string(&map).context("serializing id-map")
+        crate::id_map::load_or_empty_async(&path).await
     }
 
     async fn apply_referral_edit(

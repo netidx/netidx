@@ -39,6 +39,7 @@ use enumflags2::{BitFlags, bitflags};
 use netidx::resolver_server::config::ReadGate;
 use netidx_core::pack::Pack;
 use netidx_derive::Pack;
+use netidx_id_map::file::IdMap;
 use serde_derive::{Deserialize, Serialize};
 use std::{net::SocketAddr, time::Duration};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -49,7 +50,7 @@ pub mod identity;
 pub mod policy;
 pub mod server_config;
 
-pub const PROTOCOL_VERSION: u32 = 7;
+pub const PROTOCOL_VERSION: u32 = 8;
 
 /// Conventional admin-server port (resolver is 4564).
 pub const DEFAULT_PORT: u16 = 4565;
@@ -1433,7 +1434,7 @@ pub struct GetIdMapRequest {
 pub struct GetIdMapOk {
     pub server: AdminServerId,
     pub addr: SocketAddr,
-    pub id_map_json: String,
+    pub id_map: IdMap,
 }
 
 pub type GetIdMapResponse = RpcResult<GetIdMapOk>;
@@ -1461,8 +1462,14 @@ pub struct IdMapPropagationOk {
 
 pub type EditIdMapResponse = RpcResult<IdMapPropagationOk>;
 
-/// The receiving host's id-map, serialized. Mirrors [`GetPermsResponse`].
-pub type GetLocalIdMapResponse = RpcResult<String>;
+/// The receiving host's id-map.
+///
+/// Not a JSON document, unlike [`GetPermsResponse`]. Perms are text because
+/// the operator edits them as text — `admin perms edit` hands the document to
+/// `$EDITOR` and takes it back, so formatting is part of the artifact. An
+/// id-map is never edited that way over the admin plane; every change is an
+/// [`IdMapEdit`]. Nothing here wants a document, so nothing here ships one.
+pub type GetLocalIdMapResponse = RpcResult<IdMap>;
 
 /// Server → server: apply `edit` to this host's local id-map.
 #[derive(Debug, Clone, Serialize, Deserialize, Pack)]
@@ -1842,7 +1849,7 @@ mod tests {
                 protocol_version: PROTOCOL_VERSION,
                 kind: NodeKind::Client,
             }),
-            vec![7, 0, 0, 0, 7, 2, 2]
+            vec![7, 0, 0, 0, 8, 2, 2]
         );
         assert_eq!(encode(&Request::GetMap), vec![2, 23]);
         assert_eq!(encode(&Request::Deregister), vec![2, 21]);
@@ -2282,6 +2289,57 @@ mod tests {
                 assert_eq!(peers[0].server, server);
             }
             RevokeResponse::Err { reason } => panic!("err: {reason}"),
+        }
+    }
+
+    /// The id-map crosses the wire as itself, not as a JSON document. It used
+    /// to be a `String`, which meant the CA parsed a host's map back out of
+    /// text before it could diff it — a serializer, a parser, and a schema
+    /// that only the two of them agreed on, for a structure both already had.
+    #[tokio::test]
+    async fn the_id_map_crosses_the_wire_as_itself() {
+        use netidx_id_map::file::{Group, Identity};
+        use std::collections::BTreeMap;
+        let mut map = IdMap::default();
+        map.default_uid = 65534;
+        map.groups.insert("users".into(), Group { gid: 100 });
+        map.groups.insert("wheel".into(), Group { gid: 10 });
+        map.identities.insert(
+            "alice.example.com".into(),
+            Identity {
+                uid: 1000,
+                primary_group: "users".into(),
+                groups: vec!["wheel".into()],
+            },
+        );
+        let (mut a, mut b) = tokio::io::duplex(4096);
+        let server = AdminServerId::new();
+        let addr: SocketAddr = "10.0.0.2:4565".parse().unwrap();
+        write_msg(
+            &mut a,
+            &GetIdMapResponse::Ok(GetIdMapOk { server, addr, id_map: map.clone() }),
+        )
+        .await
+        .unwrap();
+        match read_msg::<_, GetIdMapResponse>(&mut b).await.unwrap() {
+            GetIdMapResponse::Ok(ok) => {
+                assert_eq!(ok.server, server);
+                assert_eq!(ok.id_map, map);
+            }
+            GetIdMapResponse::Err { reason } => panic!("err: {reason}"),
+        }
+        write_msg(&mut a, &GetLocalIdMapResponse::Ok(map.clone())).await.unwrap();
+        match read_msg::<_, GetLocalIdMapResponse>(&mut b).await.unwrap() {
+            GetLocalIdMapResponse::Ok(got) => assert_eq!(got, map),
+            GetLocalIdMapResponse::Err { reason } => panic!("err: {reason}"),
+        }
+        // An empty map is a real state — a host whose id-map daemon has never
+        // registered anyone — and must not decode as an error or a truncation.
+        let empty = IdMap { groups: BTreeMap::new(), ..IdMap::default() };
+        write_msg(&mut a, &GetLocalIdMapResponse::Ok(empty.clone())).await.unwrap();
+        match read_msg::<_, GetLocalIdMapResponse>(&mut b).await.unwrap() {
+            GetLocalIdMapResponse::Ok(got) => assert_eq!(got, empty),
+            GetLocalIdMapResponse::Err { reason } => panic!("err: {reason}"),
         }
     }
 

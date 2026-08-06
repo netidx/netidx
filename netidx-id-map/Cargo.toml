@@ -15,9 +15,12 @@ categories = ["network-programming"]
 [dependencies]
 anyhow = { workspace = true }
 arcstr = { workspace = true }
+bytes = { workspace = true }
 derive_builder = { workspace = true }
 enumflags2 = { workspace = true }
 log = { workspace = true }
+netidx-core = { path = "../netidx-core", version = "0.32.0" }
+netidx-derive = { path = "../netidx-derive", version = "0.32.0" }
 parking_lot = { workspace = true }
 serde = { workspace = true }
 serde_derive = { workspace = true }

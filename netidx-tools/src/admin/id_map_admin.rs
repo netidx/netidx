@@ -143,8 +143,8 @@ fn target(
 fn show(f: Flags) -> Result<()> {
     let rt = runtime()?;
     let target = target(&rt, &f)?;
-    let json = rt.block_on(id_map_ops::show_id_map(&target))?;
-    println!("{}", netidx_admin::perms::pretty(&json)?);
+    let map = rt.block_on(id_map_ops::show_id_map(&target))?;
+    println!("{}", serde_json::to_string_pretty(&map)?);
     Ok(())
 }
 

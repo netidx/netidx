@@ -9,10 +9,17 @@
 //!
 //! The runtime daemon parses this once at startup, holds it in
 //! memory, and answers queries from the resolver over a unix socket.
+//!
+//! These types are also what the admin plane moves between hosts, so they
+//! implement `Pack` as well as serde. JSON is the on-disk form because an
+//! operator reads and hand-edits the file; Pack is the wire form because
+//! nothing on the wire is a document. Adding a field means appending it and
+//! marking it `#[pack(default)]`, the same rule the admin protocol follows.
 
 use anyhow::{Context, Result};
 use arcstr::ArcStr;
 use derive_builder::Builder;
+use netidx_derive::Pack;
 use std::collections::BTreeMap;
 
 /// A group definition: just the numeric gid for now. Wrapping in a
@@ -20,7 +27,7 @@ use std::collections::BTreeMap;
 /// admin contacts, etc.) without breaking on-disk back-compat — JSON's
 /// `deny_unknown_fields` is strict enough to catch typos but liberal
 /// enough to let us add optional fields.
-#[derive(Debug, Clone, Serialize, Deserialize, Builder, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, Builder, Pack, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Group {
     pub gid: u32,
@@ -28,7 +35,7 @@ pub struct Group {
 
 /// One identity row in the map. Maps a netidx name (the TLS
 /// SubjectAltName, usually) to a unix uid + group membership.
-#[derive(Debug, Clone, Serialize, Deserialize, Builder, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, Builder, Pack, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct Identity {
     pub uid: u32,
@@ -44,7 +51,7 @@ pub struct Identity {
 
 /// The full id-map file. Hand-edited as JSON; loaded and saved
 /// atomically by the engine layer.
-#[derive(Debug, Clone, Serialize, Deserialize, Builder, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, Builder, Pack, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct IdMap {
     /// Uid returned for queries that don't match any identity.
@@ -501,6 +508,33 @@ mod tests {
         let bytes = serde_json::to_vec_pretty(&m).unwrap();
         let back = parse_bytes(&bytes).unwrap();
         assert_eq!(back, m);
+    }
+
+    #[test]
+    fn pack_round_trip() {
+        use netidx_core::pack::Pack;
+        let m = sample();
+        let mut buf = bytes::BytesMut::new();
+        m.encode(&mut buf).unwrap();
+        assert_eq!(buf.len(), m.encoded_len());
+        assert_eq!(IdMap::decode(&mut buf).unwrap(), m);
+        assert!(buf.is_empty());
+    }
+
+    /// The defaults are two of the four fields and are easy to lose in a
+    /// wire change — a map that decodes with `groups` and `identities` right
+    /// but `$default_uid` reset to nobody looks correct until an unknown
+    /// principal shows up.
+    #[test]
+    fn pack_carries_the_defaults() {
+        use netidx_core::pack::Pack;
+        let mut m = sample();
+        m.default_uid = 1;
+        m.default_gid = 2;
+        let mut buf = bytes::BytesMut::new();
+        m.encode(&mut buf).unwrap();
+        let back = IdMap::decode(&mut buf).unwrap();
+        assert_eq!((back.default_uid, back.default_gid), (1, 2));
     }
 
     #[test]

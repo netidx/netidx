@@ -17,17 +17,18 @@ use super::{AdminTarget, AppliedEdit};
 use crate::local;
 use crate::{
     admin_proto::{IdMapEdit, NodeKind},
+    id_map::IdMap,
     transport,
 };
 use anyhow::Result;
 
-/// Read one host's id-map, as JSON.
+/// Read one host's id-map.
 ///
 /// One host's, not a merged view: two hosts holding the same identity under
 /// different uids are both correct, so there is nothing to merge. Names and
 /// group membership are what must agree, and those are what an edit
 /// propagates.
-pub async fn show_id_map(target: &AdminTarget) -> Result<String> {
+pub async fn show_id_map(target: &AdminTarget) -> Result<IdMap> {
     match target {
         AdminTarget::Remote { session } => {
             transport::get_id_map(

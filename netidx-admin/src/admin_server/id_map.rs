@@ -111,19 +111,16 @@ pub(super) async fn reconcile_to_target(
     let client = state.outbound_client().await?;
     let home_ca = state.home_ca_der.clone();
     let host: crate::id_map::IdMap = if server == ca {
-        serde_json::from_str(&state.read_id_map().await?)
-            .context("parsing this host's own id-map")?
+        state.read_id_map().await?
     } else {
-        let json = tokio::time::timeout(
+        let fetched = tokio::time::timeout(
             PUSH_TIMEOUT,
             transport::fetch_id_map(&client, addr, server, false, home_ca.clone()),
         )
         .await
         .map_err(|_| anyhow!("timed out after {}s", PUSH_TIMEOUT.as_secs()))??;
-        match json {
-            Some(json) => {
-                serde_json::from_str(&json).context("parsing the peer's id-map")?
-            }
+        match fetched {
+            Some(map) => map,
             // It holds the grant but is not running the role. Nothing to
             // reconcile, and nothing wrong with saying so quietly — the map
             // already records the grant, and an operator asking why will see
@@ -251,7 +248,7 @@ pub(super) async fn handle_get_local_id_map(
     state: &Server,
 ) -> admin_proto::GetLocalIdMapResponse {
     match state.read_id_map().await {
-        Ok(json) => admin_proto::GetLocalIdMapResponse::Ok(json),
+        Ok(map) => admin_proto::GetLocalIdMapResponse::Ok(map),
         Err(e) => admin_proto::GetLocalIdMapResponse::Err { reason: format!("{e:#}") },
     }
 }
@@ -353,7 +350,7 @@ pub(super) async fn handle_get_id_map(
     let (server, addr) =
         state.read(|state| (state.cfg.server_id, state.cfg.listen)).await;
     match state.read_id_map().await {
-        Ok(id_map_json) => GetIdMapResponse::Ok(GetIdMapOk { server, addr, id_map_json }),
+        Ok(id_map) => GetIdMapResponse::Ok(GetIdMapOk { server, addr, id_map }),
         Err(e) => err(format!("{e:#}")),
     }
 }
