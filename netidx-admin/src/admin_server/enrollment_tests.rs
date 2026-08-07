@@ -310,3 +310,52 @@ async fn a_removed_server_is_forgotten_but_its_peers_are_not() {
         "a cluster that no longer exists keeps no permissions"
     );
 }
+
+/// A krb5 member is granted by its principal, the same as a TLS member is by
+/// its SAN.
+///
+/// The whole lab runs on TLS, so this arm has no other coverage — and the
+/// grant it writes is the one that lets a resolver host use its own credential
+/// as a client, which is exactly the thing that silently went missing before
+/// the CA owned these.
+#[tokio::test]
+async fn a_krb5_member_is_granted_by_its_principal() {
+    let dir = tempfile::tempdir().unwrap();
+    let lock =
+        crate::config_lock::ConfigDirLock::acquire_for_ca_dir(dir.path()).await.unwrap();
+    let ca_store = ca_store::CaDir::open(lock, dir.path()).await.unwrap();
+    let ca = admin_proto::AdminServerId::new();
+    let mut map = AdminDomainMap::empty(ca);
+    let member = ResolverAddr {
+        addr: "10.0.0.10:4564".parse().unwrap(),
+        auth: InfoAuth::Krb5 { spn: "netidx/resolver.example.com@EXAMPLE.COM".into() },
+    };
+    let req = admin_proto::EnrollmentRequest {
+        resolver_config: None,
+        listen: "10.0.0.10:4565".parse().unwrap(),
+        roles: Role::Resolver.into(),
+        resolver_member: Some(member.clone()),
+        resolver_members: vec![member],
+        cluster: admin_proto::ResolverClusterPlacement::Create { base: "/eu".into() },
+        replaces: None,
+    };
+    let id = admin_proto::AdminServerId::new();
+    let cluster = stage_enrollment(&mut map, id, &req).unwrap();
+    grant_member_self_perms(&ca_store, &mut map, cluster, &req).await.unwrap();
+    let model = ca_store.store.perms_model().await.unwrap();
+    let perms = &model.get(cluster).unwrap().perms;
+    assert_eq!(
+        crate::perms::lookup(perms, "/eu", "netidx/resolver.example.com@EXAMPLE.COM")
+            .map(|b| b.as_str()),
+        Some("swlpd"),
+    );
+
+    // And it comes back out on removal, like any other.
+    let mut after = map.clone();
+    assert!(admin_domain::remove(&mut after, id).unwrap());
+    forget_removed_server(&ca_store, &map, &mut after, id).await.unwrap();
+    assert!(
+        ca_store.store.perms_model().await.unwrap().get(cluster).is_none(),
+        "that was the only member, so the cluster and its document both go"
+    );
+}
