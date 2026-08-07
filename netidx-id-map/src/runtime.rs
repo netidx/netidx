@@ -86,6 +86,23 @@ const MAX_INFLIGHT: usize = 32;
 /// which costs them the invalidations and nothing else.
 const MAX_CONTROL_SUBSCRIBERS: usize = 16;
 
+/// How long one subscriber may take to accept an invalidation before it is
+/// disconnected.
+///
+/// Publishing happens inside the main `select`, so every millisecond spent
+/// waiting on a subscriber is a millisecond the daemon answers no queries and
+/// notices no reload. A local socket takes a twenty byte line without waiting
+/// unless its peer has stopped reading entirely, so a subscriber that misses
+/// this is wedged rather than slow, and waiting on it longer would only spread
+/// its problem to everyone else. Per subscriber rather than per round so that
+/// one wedged subscriber cannot cost a healthy one its line; a round is
+/// therefore bounded by [`MAX_CONTROL_SUBSCRIBERS`] times this.
+///
+/// Disconnecting costs the subscriber nothing it does not get back: the
+/// resolver flushes its cache when it connects, so the reconnect delivers what
+/// the dropped write was carrying.
+const PUBLISH_TIMEOUT: Duration = Duration::from_millis(100);
+
 /// Parameters used to start the daemon.
 #[derive(Debug, Clone)]
 pub struct ServerParams {
@@ -452,6 +469,11 @@ async fn accept_control(listener: &Option<UnixListener>) -> UnixStream {
 /// fails the write and is dropped, and when it reconnects it flushes its cache
 /// on connect anyway. So a missed invalidation costs a reconnect, not
 /// correctness.
+///
+/// A subscriber that does not accept its line within [`PUBLISH_TIMEOUT`] is
+/// dropped for the same reason and at the same cost. Without that the daemon
+/// would stop serving queries for as long as its slowest subscriber took to
+/// read — one wedged resolver would take the id-map down for everyone.
 async fn publish_invalidation(subscribers: &mut Vec<UnixStream>, generation: u64) {
     if subscribers.is_empty() {
         return;
@@ -459,10 +481,14 @@ async fn publish_invalidation(subscribers: &mut Vec<UnixStream>, generation: u64
     let line = compact_str::format_compact!("invalidate {generation}\n");
     let mut i = 0;
     while i < subscribers.len() {
-        match subscribers[i].write_all(line.as_bytes()).await {
-            Ok(()) => i += 1,
-            Err(e) => {
+        match timeout(PUBLISH_TIMEOUT, subscribers[i].write_all(line.as_bytes())).await {
+            Ok(Ok(())) => i += 1,
+            Ok(Err(e)) => {
                 debug!("id-map: dropping an invalidation subscriber: {e}");
+                subscribers.swap_remove(i);
+            }
+            Err(_) => {
+                warn!("id-map: dropping an invalidation subscriber that stopped reading");
                 subscribers.swap_remove(i);
             }
         }
@@ -1043,6 +1069,39 @@ mod invalidation_tests {
         let mut out = String::new();
         s.read_to_string(&mut out).await.unwrap();
         assert!(out.contains("(alice.example.com)"), "got {out:?}");
+    }
+
+    /// A subscriber that stops reading is disconnected, not waited on.
+    ///
+    /// Publishing runs in the daemon's one long lived task, so a write that
+    /// waits on a wedged subscriber is a daemon that answers nothing — every
+    /// query and every reload, for as long as that subscriber takes.
+    #[tokio::test]
+    async fn a_subscriber_that_stops_reading_is_dropped() {
+        // Kept alive and never read, so the socket buffer fills and the write
+        // that overflows it has nowhere to go.
+        let (subscriber, _wedged) = UnixStream::pair().unwrap();
+        let mut subscribers = vec![subscriber];
+        let mut generation = 0;
+        let start = std::time::Instant::now();
+        while !subscribers.is_empty() {
+            generation += 1;
+            assert!(
+                generation < 1_000_000,
+                "the buffer never filled, so no write ever had to wait"
+            );
+            timeout(
+                Duration::from_secs(5),
+                publish_invalidation(&mut subscribers, generation),
+            )
+            .await
+            .expect("a publish waited on a subscriber that will never read");
+        }
+        assert!(
+            start.elapsed() >= PUBLISH_TIMEOUT,
+            "dropped in {:?} — that was an error, not the timeout under test",
+            start.elapsed()
+        );
     }
 
     /// The daemon serves queries whether or not anyone is listening for
