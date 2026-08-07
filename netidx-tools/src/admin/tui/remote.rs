@@ -1296,7 +1296,7 @@ async fn set_read_gate(
     use netidx_admin::ops::service;
     service::set_read_gate(
         ans,
-        conn.server,
+        Some(conn.server),
         None,
         Some(conn.admin.clone()),
         None,

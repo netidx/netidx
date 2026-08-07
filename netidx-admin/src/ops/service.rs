@@ -90,13 +90,16 @@ pub async fn control_remote(
 /// but not answering is a service-control state like any other.
 pub async fn set_read_gate(
     ans: &mut dyn Answerer,
-    server: SocketAddr,
+    server: Option<SocketAddr>,
     ca_dir: Option<PathBuf>,
     admin: Option<String>,
     password: Option<Secret>,
     target_server: AdminServerId,
     gate: netidx::resolver_server::config::ReadGate,
 ) -> Result<()> {
+    // Which admin server to ask is the library's decision, not a frontend's,
+    // and it is the same decision for all three of them.
+    let server = crate::ops::own_admin_server_addr(server)?;
     let sess = open_admin_session(ans, Some(server), ca_dir, admin, password).await?;
     // State the risk here, where the member's *current* gate is actually
     // known. A caller that addresses a member by id has no way to compute it

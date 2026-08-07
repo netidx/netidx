@@ -177,6 +177,39 @@ pub enum AdminTarget {
     Remote { session: AdminSession },
 }
 
+/// The address of the admin server to contact, defaulting to this host's own.
+///
+/// The counterpart to [`resolve_admin_target`] for operations that exist only
+/// in their authenticated-admin form and so have no local-socket variant to
+/// fall back to. They still need an address, and the machine the operator is
+/// standing on is not one they should have to type — every `--server` in the
+/// admin CLI says it defaults to this host's own admin server, and this is
+/// what makes that true for them too.
+///
+/// Note what it does *not* do: the returned address is used to open a pinned
+/// TLS session and authenticate a named admin, exactly as any other address
+/// would be. Defaulting here saves typing, it does not make an operation
+/// local, and it grants nobody anything they did not already have.
+#[cfg(unix)]
+pub fn own_admin_server_addr(server: Option<SocketAddr>) -> Result<SocketAddr> {
+    if let Some(addr) = server {
+        return Ok(addr);
+    }
+    let cfg_path = paths::discover_admin_server_config().context(
+        "no --server given and no admin server on this host to default to — pass \
+         --server <ip:port>",
+    )?;
+    Ok(crate::admin_server_config::load(&cfg_path)
+        .with_context(|| format!("reading this host's admin server config {cfg_path:?}"))?
+        .listen)
+}
+
+/// On a platform with no local admin server there is nothing to default to.
+#[cfg(not(unix))]
+pub fn own_admin_server_addr(server: Option<SocketAddr>) -> Result<SocketAddr> {
+    server.context("a remote admin server address is required on this platform")
+}
+
 /// Resolve which admin server a management op runs against: `Some(addr)` opens a
 /// pinned [`AdminSession`] ([`AdminTarget::Remote`]); `None` selects this host's
 /// own admin server over its local control socket ([`AdminTarget::Local`]),

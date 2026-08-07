@@ -38,10 +38,12 @@ pub(crate) struct ReadGateFlags {
 }
 
 pub(crate) fn read_gate(f: ReadGateFlags) -> Result<()> {
-    let server = f
-        .auth
-        .server_addr()?
-        .context("setting a read gate requires --server <ADMIN-SERVER>")?;
+    // No `--server` means this host's own admin server, as it does everywhere
+    // else — `set_read_gate` resolves it. The interlock on an operation that
+    // takes a member out of service is `--target`, an immutable UUID the
+    // operator has to look up; making them also type the address of the
+    // machine they are standing on adds ceremony, not safety.
+    let server = f.auth.server_addr()?;
     let gate = if f.shut {
         ReadGate::Yes
     } else if f.open {
