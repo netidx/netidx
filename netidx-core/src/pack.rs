@@ -184,61 +184,6 @@ impl<T: Pack + Any + Send + Sync + Poolable> Pack for GPooled<T> {
     }
 }
 
-impl Pack for net::SocketAddr {
-    fn encoded_len(&self) -> usize {
-        match self {
-            net::SocketAddr::V4(_) => 7,
-            net::SocketAddr::V6(_) => 27,
-        }
-    }
-
-    fn encode(&self, buf: &mut impl BufMut) -> Result<(), PackError> {
-        match self {
-            net::SocketAddr::V4(v4) => {
-                buf.put_u8(0);
-                buf.put_u32(u32::from_be_bytes(v4.ip().octets()));
-                buf.put_u16(v4.port());
-            }
-            net::SocketAddr::V6(v6) => {
-                buf.put_u8(1);
-                for s in &v6.ip().segments() {
-                    buf.put_u16(*s);
-                }
-                buf.put_u16(v6.port());
-                buf.put_u32(v6.flowinfo());
-                buf.put_u32(v6.scope_id());
-            }
-        }
-        Ok(())
-    }
-
-    fn decode(buf: &mut impl Buf) -> Result<Self, PackError> {
-        match <u8 as Pack>::decode(buf)? {
-            0 => {
-                let ip =
-                    net::Ipv4Addr::from(u32::to_be_bytes(<u32 as Pack>::decode(buf)?));
-                let port = <u16 as Pack>::decode(buf)?;
-                Ok(net::SocketAddr::V4(net::SocketAddrV4::new(ip, port)))
-            }
-            1 => {
-                let mut segments = [0u16; 8];
-                for i in 0..8 {
-                    segments[i] = <u16 as Pack>::decode(buf)?;
-                }
-                let port = <u16 as Pack>::decode(buf)?;
-                let flowinfo = <u32 as Pack>::decode(buf)?;
-                let scope_id = <u32 as Pack>::decode(buf)?;
-                let ip = net::Ipv6Addr::from(segments);
-                let v6 = net::SocketAddrV6::new(ip, port, flowinfo, scope_id);
-                Ok(net::SocketAddr::V6(v6))
-            }
-            _ => return Err(PackError::UnknownTag),
-        }
-    }
-}
-
-/// An IP address without a port. The tag/format mirrors [`net::SocketAddr`]'s
-/// so the two read the same on the wire.
 impl Pack for net::IpAddr {
     fn encoded_len(&self) -> usize {
         match self {
@@ -276,6 +221,46 @@ impl Pack for net::IpAddr {
                 Ok(net::IpAddr::V6(net::Ipv6Addr::from(segments)))
             }
             _ => Err(PackError::UnknownTag),
+        }
+    }
+}
+
+/// An [`net::IpAddr`] followed by the port, and for v6 the flowinfo and scope
+/// id. A socket address therefore begins with exactly the bytes of the address
+/// it contains.
+impl Pack for net::SocketAddr {
+    fn encoded_len(&self) -> usize {
+        <net::IpAddr as Pack>::encoded_len(&self.ip())
+            + match self {
+                net::SocketAddr::V4(_) => 2,
+                net::SocketAddr::V6(_) => 10,
+            }
+    }
+
+    fn encode(&self, buf: &mut impl BufMut) -> Result<(), PackError> {
+        <net::IpAddr as Pack>::encode(&self.ip(), buf)?;
+        buf.put_u16(self.port());
+        if let net::SocketAddr::V6(v6) = self {
+            buf.put_u32(v6.flowinfo());
+            buf.put_u32(v6.scope_id());
+        }
+        Ok(())
+    }
+
+    fn decode(buf: &mut impl Buf) -> Result<Self, PackError> {
+        match <net::IpAddr as Pack>::decode(buf)? {
+            net::IpAddr::V4(ip) => {
+                let port = <u16 as Pack>::decode(buf)?;
+                Ok(net::SocketAddr::V4(net::SocketAddrV4::new(ip, port)))
+            }
+            net::IpAddr::V6(ip) => {
+                let port = <u16 as Pack>::decode(buf)?;
+                let flowinfo = <u32 as Pack>::decode(buf)?;
+                let scope_id = <u32 as Pack>::decode(buf)?;
+                Ok(net::SocketAddr::V6(net::SocketAddrV6::new(
+                    ip, port, flowinfo, scope_id,
+                )))
+            }
         }
     }
 }
