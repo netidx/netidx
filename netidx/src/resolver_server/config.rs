@@ -172,13 +172,11 @@ pub(crate) fn check_addrs<T: Clone + Into<resolver::Auth>>(
 
 /// The permissions format.
 ///
-/// JSON on disk, because an operator reads and hand-edits it; [`Pack`] on the
+/// JSON on disk, because an operator reads and hand-edits it; Pack on the
 /// wire, because the admin plane moves it between hosts and nothing there is a
 /// document. The bits stay opaque strings here — the resolver compiles them
 /// when it builds its runtime map, and `netidx-admin` checks them before it
 /// writes — so this type carries the file's shape, not its meaning.
-///
-/// [`Pack`]: netidx_core::pack::Pack
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Pack)]
 pub struct PMap(pub HashMap<ArcStr, HashMap<Entity, Permissions>>);
 
