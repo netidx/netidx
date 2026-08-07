@@ -10,6 +10,7 @@ use crate::{
 };
 use anyhow::{Context, Result};
 use arcstr::ArcStr;
+use netidx_derive::Pack;
 use serde_json::from_str;
 use std::{
     collections::{
@@ -40,9 +41,7 @@ type Entity = ArcStr;
 /// without stopping it: `Yes` makes it stop answering subscribers while its
 /// records age out, and it survives a restart of that host because it lives
 /// in the config.
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, netidx_derive::Pack,
-)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Pack)]
 pub enum ReadGate {
     /// Serve reads.
     No,
@@ -180,7 +179,7 @@ pub(crate) fn check_addrs<T: Clone + Into<resolver::Auth>>(
 /// writes — so this type carries the file's shape, not its meaning.
 ///
 /// [`Pack`]: netidx_core::pack::Pack
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, netidx_derive::Pack)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Pack)]
 pub struct PMap(pub HashMap<ArcStr, HashMap<Entity, Permissions>>);
 
 impl Default for PMap {
@@ -330,6 +329,7 @@ pub mod file {
     use anyhow::Result;
     use arcstr::ArcStr;
     use derive_builder::Builder;
+    use netidx_derive::Pack;
     use poolshark::global::GPooled;
     use std::{
         net::{IpAddr, Ipv4Addr, SocketAddr},
@@ -342,9 +342,7 @@ pub mod file {
     /// host to the CA at enrollment, so the CA can be authoritative for that
     /// host's resolver config afterwards. The TLS variant names *paths*, not
     /// key material.
-    #[derive(
-        Debug, Clone, PartialEq, Eq, Serialize, Deserialize, netidx_derive::Pack,
-    )]
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Pack)]
     #[serde(deny_unknown_fields)]
     pub enum Auth {
         #[pack(tag(0))]
@@ -369,9 +367,7 @@ pub mod file {
     }
 
     /// Type of authentication used by this `Referral`
-    #[derive(
-        Debug, Clone, PartialEq, Eq, Serialize, Deserialize, netidx_derive::Pack,
-    )]
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Pack)]
     #[serde(deny_unknown_fields)]
     pub enum RefAuth {
         #[pack(tag(0))]
@@ -396,9 +392,7 @@ pub mod file {
     }
 
     /// A referral to another resolver server
-    #[derive(
-        Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Builder, netidx_derive::Pack,
-    )]
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Builder, Pack)]
     #[serde(deny_unknown_fields)]
     pub struct Referral {
         /// The path where the referred cluster attaches to the tree
@@ -449,9 +443,7 @@ pub mod file {
     }
 
     /// The type of user id mapping to perform
-    #[derive(
-        Debug, Clone, PartialEq, Eq, Serialize, Deserialize, netidx_derive::Pack,
-    )]
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Pack)]
     #[serde(deny_unknown_fields)]
     pub enum IdMapType {
         /// Don't map user ids at all
@@ -505,9 +497,7 @@ pub mod file {
     /// enrollment, which is what lets the CA render that host's whole resolver
     /// config afterwards rather than patching the topology into a file it does
     /// not otherwise understand.
-    #[derive(
-        Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Builder, netidx_derive::Pack,
-    )]
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Builder, Pack)]
     #[serde(deny_unknown_fields)]
     pub struct MemberServer {
         /// The advertised external address and port of this
@@ -595,9 +585,7 @@ pub mod file {
     /// `Pack` as well as serde: the CA is authoritative for this document and
     /// hands it to the host it belongs to. JSON stays the on-disk form, which
     /// is what an operator reads.
-    #[derive(
-        Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Builder, netidx_derive::Pack,
-    )]
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Builder, Pack)]
     #[serde(deny_unknown_fields)]
     pub struct Config {
         /// A list of referrals to child clusters, if any
