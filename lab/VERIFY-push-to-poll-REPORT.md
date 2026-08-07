@@ -272,22 +272,19 @@ resolver config in the CA's store — `DesiredConfigs::forget` and
 tests. Fixed in `9e7a90af`; removing the last member of a cluster takes the
 whole document with the cluster.
 
-### 9. `read-gate` demands `--server` while the shared help says it defaults — nit
+### 9. `read-gate` demanded `--server` while its flag promised a default — FIXED (`34ff3258`)
 
-`netidx admin resolver read-gate` fails with `setting a read gate requires
---server <ADMIN-SERVER>` when run on the CA host, though the shared `--server`
-help says it "Defaults to this host's own admin server". Every other admin
-command falls back to the local control socket via `resolve_admin_target`;
-`set_read_gate` takes a `SocketAddr` and cannot. Either the fallback should be
-added or the help should stop promising it.
+Every admin command's `--server` carries the same help — "Defaults to this
+host's own admin server" — and `read-gate` was the one that made its absence an
+error, so on the CA host an operator had to type the address of the machine
+they were standing on.
 
-## Notes for the next pass
+Not a missing fallback. `resolve_admin_target` answers `None` with the local
+control socket, and `SetReadGate` has no local form: it is
+`RequestRequirements::Admin`, a named admin authenticated against policy, while
+that socket authorizes on-box root with no credential. So the default is an
+*address* — this host's admin-server `listen` — used to open a pinned TLS
+session and authenticate an admin exactly as a typed one would be.
 
-- `strings` is not installed on the Debian guests. Compare binary hashes
-  instead — exact, and it cannot be fooled by a probe string that only exists
-  in an uncommitted change.
-- The working tree is shared with other agents; `desired_config.rs` was deleted
-  under me mid-session for the second time. `redeploy-head.sh` builds from
-  `git archive HEAD` for this reason.
-- A backgrounded publisher started over ssh is killed when the session ends.
-  Use `systemd-run --unit=...`.
+Verified on the CA host: `read-gate --target <id> --shut` with no `--server`
+resolved `192.168.50.11:4565`, shut the gate, and opened it again.
