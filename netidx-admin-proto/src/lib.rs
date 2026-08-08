@@ -522,6 +522,20 @@ pub enum Request {
     /// [`EditIdMapResponse`].
     #[pack(tag(47))]
     EditIdMap(EditIdMapRequest),
+    /// Admin-authenticated, sent to the **CA**: replace the caller's OWN
+    /// password. The only request a `must_change` credential may send, so it
+    /// authenticates through a path that deliberately skips that gate — an
+    /// admin locked out of everything else must still be able to get out.
+    /// Answered with [`AdminMgmtResponse`].
+    #[pack(tag(49))]
+    ChangePassword(ChangePasswordRequest),
+    /// Admin-authenticated, sent to the **CA**: replace a role admin's
+    /// password with a one-time key and lock the slot to
+    /// [`Request::ChangePassword`] until its holder chooses one. Gated on
+    /// `may_manage_admins` plus the target's authority being within the
+    /// caller's. Answered with [`AdminMgmtResponse`].
+    #[pack(tag(50))]
+    ResetPassword(ResetPasswordRequest),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Pack)]
@@ -623,7 +637,24 @@ pub struct LoginOk {
     pub idle_timeout_secs: u64,
 }
 
-pub type LoginResponse = RpcResult<LoginOk>;
+/// Response to [`Request::Login`]. Shaped like [`RpcResult<LoginOk>`], whose
+/// tags it keeps, plus a third case that a `reason` string could not carry: a
+/// frontend has to *route* on "change your password" (the TUI opens its
+/// change-password screen) and sniffing an error message for that is exactly
+/// the fragile coupling a variant exists to prevent.
+#[derive(Debug, Clone, Serialize, Deserialize, Pack)]
+pub enum LoginResponse {
+    #[pack(tag(0))]
+    Ok(LoginOk),
+    #[pack(tag(1))]
+    Err { reason: String },
+    /// The password verified but the slot is one-time: nothing is authorized
+    /// until [`Request::ChangePassword`] replaces it. Sent only *after* the
+    /// password checks out — answering it earlier would name which accounts
+    /// are mid-reset to anyone who can guess a login.
+    #[pack(tag(2))]
+    PasswordChangeRequired { admin: String },
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, Pack)]
 pub struct LogoutRequest {
@@ -1743,6 +1774,37 @@ pub struct AddRoleAdminRequest {
     pub name: String,
     pub new_password: Secret,
     pub policy: crate::policy::Policy,
+    /// Mark the minted slot one-time: `new_password` authorizes nothing but
+    /// [`Request::ChangePassword`] until its holder chooses one. What the
+    /// current client always sends — an admin who did not pick their own
+    /// password should never hold a working one. Defaults to `false` so a
+    /// pre-`must_change` encoding still decodes to what it meant.
+    #[serde(default)]
+    #[pack(default)]
+    pub must_change: bool,
+}
+
+/// Admin → CA: replace the **caller's own** password. There is no target
+/// field by construction: the slot rekeyed is the one the credential
+/// authenticated, so this request can never reach another admin's slot. The
+/// one request a `must_change` credential may send.
+#[derive(Debug, Clone, Serialize, Deserialize, Pack)]
+pub struct ChangePasswordRequest {
+    pub credential: AdminCredential,
+    pub new_password: Secret,
+}
+
+/// Admin → CA: replace role admin `target`'s password with a one-time
+/// `new_password` the caller generated, and mark the slot `must_change`.
+/// Gated on `may_manage_admins` *and* on `target`'s current authority being
+/// within the caller's — unlike a rescope or a removal this hands the caller
+/// a credential for the target, so a manager who could reset an admin broader
+/// than itself could simply become it.
+#[derive(Debug, Clone, Serialize, Deserialize, Pack)]
+pub struct ResetPasswordRequest {
+    pub credential: AdminCredential,
+    pub target: String,
+    pub new_password: Secret,
 }
 
 /// Admin → CA: replace role admin `target`'s policy with `policy` (same gate
@@ -2020,6 +2082,27 @@ mod tests {
         replaces: Option<AdminServerId>,
     }
 
+    #[derive(netidx_derive::Pack)]
+    struct AddRoleAdminBeforeMustChange {
+        credential: AdminCredential,
+        name: String,
+        new_password: Secret,
+        policy: crate::policy::Policy,
+    }
+
+    #[derive(netidx_derive::Pack)]
+    struct AdminInfoBeforeMustChange {
+        slot_id: uuid::Uuid,
+        admin: String,
+        kind: crate::policy::SlotKind,
+        policy: crate::policy::Policy,
+    }
+
+    /// [`LoginResponse`] as it was before it grew a third case: literally
+    /// `RpcResult<LoginOk>`, whose tags the hand-written enum must still
+    /// match. Encoded by this alias, decoded by the real type.
+    type LoginResponseBeforePasswordChange = RpcResult<LoginOk>;
+
     #[test]
     fn secret_is_redacted_but_round_trips() {
         let s = Secret("hunter2".to_string());
@@ -2120,6 +2203,65 @@ mod tests {
         });
         let enroll = EnrollRequest::decode(&mut old.as_slice()).unwrap();
         assert!(enroll.resolver_config.is_none());
+
+        // A pre-`must_change` add-role means what it always meant: an admin
+        // holding a password its manager chose, working immediately. The
+        // default has to be `false` or replaying an old request would lock the
+        // new admin out of the account it just created.
+        let old = encode(&AddRoleAdminBeforeMustChange {
+            credential: AdminCredential::password("admin", "pw"),
+            name: "ops1".into(),
+            new_password: Secret("pw".into()),
+            policy: crate::policy::superuser_policy(),
+        });
+        let add = AddRoleAdminRequest::decode(&mut old.as_slice()).unwrap();
+        assert!(!add.must_change);
+
+        let old = encode(&AdminInfoBeforeMustChange {
+            slot_id: uuid::Uuid::nil(),
+            admin: "ops1".into(),
+            kind: crate::policy::SlotKind::Role,
+            policy: crate::policy::superuser_policy(),
+        });
+        let info = crate::policy::AdminInfo::decode(&mut old.as_slice()).unwrap();
+        assert!(!info.must_change);
+    }
+
+    /// [`LoginResponse`] stopped being a `RpcResult<LoginOk>` alias when it
+    /// grew `PasswordChangeRequired`. Its first two tags are the whole
+    /// compatibility claim: an encoding produced by the alias must still
+    /// decode, and to the same thing.
+    #[test]
+    fn login_response_kept_the_rpc_result_tags_it_replaced() {
+        let ok = encode(&LoginResponseBeforePasswordChange::Ok(LoginOk {
+            admin: "ops1".into(),
+            token: Secret("tok".into()),
+            issued_unix: 1,
+            absolute_deadline_unix: 2,
+            idle_timeout_secs: 3,
+        }));
+        match LoginResponse::decode(&mut ok.as_slice()).unwrap() {
+            LoginResponse::Ok(ok) => {
+                assert_eq!(ok.admin, "ops1");
+                assert_eq!(ok.token.0, "tok");
+                assert_eq!(ok.absolute_deadline_unix, 2);
+            }
+            other => panic!("old Ok decoded as {other:?}"),
+        }
+
+        let err = encode(&LoginResponseBeforePasswordChange::Err {
+            reason: "authentication failed".into(),
+        });
+        match LoginResponse::decode(&mut err.as_slice()).unwrap() {
+            LoginResponse::Err { reason } => assert_eq!(reason, "authentication failed"),
+            other => panic!("old Err decoded as {other:?}"),
+        }
+
+        // Tags frozen at their `RpcResult` values, with the new case appended
+        // past them (variant tag is the second byte, as in
+        // `protocol_epoch_and_request_tags_have_frozen_pack_bytes`).
+        let new = encode(&LoginResponse::PasswordChangeRequired { admin: "ops1".into() });
+        assert_eq!((ok[1], err[1], new[1]), (0, 1, 2));
     }
 
     #[test]

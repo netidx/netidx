@@ -414,6 +414,7 @@ fn deciding_a_delegation_requires_authority_over_the_parent_cluster() {
     let scoped = |scope: &str| crate::ca_vault::Authenticated {
         slot_id: uuid::Uuid::new_v4(),
         credential_revision: 0,
+        must_change: false,
         admin: "eu-ops".to_string(),
         policy: netidx_admin_proto::policy::Policy {
             allowed_san: vec![],

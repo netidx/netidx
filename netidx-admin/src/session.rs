@@ -168,7 +168,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut vault = CAVault::new(dir.path().to_path_buf());
         vault.create(b"mock-ca-key", "recovery", "rpw", policy("/")).await.unwrap();
-        vault.add_role_slot("alice", "pw", policy("/eu")).await.unwrap();
+        vault.add_role_slot("alice", "pw", policy("/eu"), false).await.unwrap();
         (dir, vault)
     }
 
@@ -177,6 +177,11 @@ mod tests {
         match store.login_authenticated(authenticated) {
             LoginResponse::Ok(LoginOk { token, .. }) => token,
             LoginResponse::Err { reason } => panic!("{reason}"),
+            // The store never produces this — the handler answers it before
+            // reaching here, having refused to mint a session at all.
+            LoginResponse::PasswordChangeRequired { admin } => {
+                panic!("{admin} was asked to change its password by the session store")
+            }
         }
     }
 
@@ -211,7 +216,7 @@ mod tests {
         assert_eq!(store.authenticate_session(&vault, token).unwrap().policy, reduced);
 
         vault.remove_slot("alice", false).await.unwrap();
-        vault.add_role_slot("alice", "pw", policy("/eu")).await.unwrap();
+        vault.add_role_slot("alice", "pw", policy("/eu"), false).await.unwrap();
         assert!(store.authenticate_session(&vault, token).is_err());
 
         let mut expiring = SessionStore::default();

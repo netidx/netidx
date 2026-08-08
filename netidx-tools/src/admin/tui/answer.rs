@@ -14,7 +14,9 @@ use super::{theme, widgets};
 use anyhow::{Result, anyhow};
 use crossterm::event::{KeyCode, KeyModifiers};
 use netidx_admin::{
-    answer::{AdminDomainChoice, AdminDomainOption, Answerer, Field, Progress},
+    answer::{
+        AdminDomainChoice, AdminDomainOption, Answerer, Field, OneTimeSecret, Progress,
+    },
     transport::CaIdentity,
 };
 use netidx_admin_proto::{Secret, fingerprint::Fingerprint};
@@ -112,7 +114,8 @@ pub(super) enum UiRequest {
         validate: EditValidator,
         reply: oneshot::Sender<Result<String>>,
     },
-    Recovery {
+    OneTimeSecret {
+        secret: OneTimeSecret,
         password: String,
         reply: oneshot::Sender<Result<()>>,
     },
@@ -291,9 +294,13 @@ impl Answerer for TuiAnswerer {
         let _ = self.tx.send(UiRequest::Warn(message.to_string()));
     }
 
-    async fn show_recovery_password(&mut self, password: &str) -> Result<()> {
+    async fn show_one_time_secret(
+        &mut self,
+        secret: OneTimeSecret,
+        password: &str,
+    ) -> Result<()> {
         let password = password.to_string();
-        self.ask(|reply| UiRequest::Recovery { password, reply }).await
+        self.ask(|reply| UiRequest::OneTimeSecret { secret, password, reply }).await
     }
 }
 
@@ -354,7 +361,8 @@ pub(super) enum Modal {
         code: Fingerprint,
         reply: Option<oneshot::Sender<Result<()>>>,
     },
-    Recovery {
+    OneTimeSecret {
+        secret: OneTimeSecret,
         password: String,
         reply: Option<oneshot::Sender<Result<()>>>,
     },
@@ -426,8 +434,8 @@ impl Modal {
             UiRequest::AnnounceIdentity { body, code, reply } => {
                 Some(Modal::AnnounceIdentity { body, code, reply: Some(reply) })
             }
-            UiRequest::Recovery { password, reply } => {
-                Some(Modal::Recovery { password, reply: Some(reply) })
+            UiRequest::OneTimeSecret { secret, password, reply } => {
+                Some(Modal::OneTimeSecret { secret, password, reply: Some(reply) })
             }
             // Non-blocking requests: they carry no reply channel, so there is
             // nothing to put on screen and nothing to answer. Every BLOCKING
@@ -455,7 +463,7 @@ impl Modal {
             | Modal::Identity { .. }
             | Modal::Announce { .. }
             | Modal::AnnounceIdentity { .. }
-            | Modal::Recovery { .. } => None,
+            | Modal::OneTimeSecret { .. } => None,
         }
     }
 
@@ -698,7 +706,7 @@ impl Modal {
                     _ => false,
                 }
             }
-            Modal::Recovery { reply, .. } => match code {
+            Modal::OneTimeSecret { reply, .. } => match code {
                 KeyCode::Enter | KeyCode::Char(' ') => {
                     if let Some(tx) = reply.take() {
                         let _ = tx.send(Ok(()));
@@ -1059,33 +1067,45 @@ impl Modal {
                 )));
                 popup(f, screen, "Certificate authority created", lines, 64);
             }
-            Modal::Recovery { password, .. } => {
+            Modal::OneTimeSecret { secret, password, .. } => {
                 let pw = Style::default()
                     .bg(Color::Rgb(255, 249, 196))
                     .fg(Color::Rgb(0, 0, 0))
                     .add_modifier(Modifier::BOLD);
-                let lines = vec![
-                    Line::from(Span::styled(
-                        "CA recovery password — shown once, never stored:",
-                        theme::panel_style(),
-                    )),
-                    Line::from(""),
-                    Line::from(Span::styled(password.clone(), pw)),
-                    Line::from(""),
-                    Line::from(Span::styled(
+                let (title, heading, advice) = match secret {
+                    OneTimeSecret::CaRecovery => (
+                        "CA recovery password".to_string(),
+                        "CA recovery password — shown once, never stored:".to_string(),
                         "Use this password to unlock the CA key in an emergency. Write it \
                          down and store it in a safe place now — it is the only off-box \
                          credential that can unlock the CA key, and there is no second \
-                         chance to read it.",
-                        theme::panel_style(),
-                    )),
+                         chance to read it."
+                            .to_string(),
+                    ),
+                    OneTimeSecret::AdminPassword { admin } => (
+                        format!("One-time password for {admin}"),
+                        format!("{admin}'s one-time password — shown once, never stored:"),
+                        format!(
+                            "Give this to {admin} over a channel you trust. It lets them \
+                             set a password and nothing else — every other command is \
+                             refused until they do. There is no second chance to read it, \
+                             but you can issue another with Reset password."
+                        ),
+                    ),
+                };
+                let lines = vec![
+                    Line::from(Span::styled(heading, theme::panel_style())),
+                    Line::from(""),
+                    Line::from(Span::styled(password.clone(), pw)),
+                    Line::from(""),
+                    Line::from(Span::styled(advice, theme::panel_style())),
                     Line::from(""),
                     Line::from(Span::styled(
                         " Enter — I have saved it ",
                         theme::selected_style(),
                     )),
                 ];
-                popup(f, screen, "CA recovery password", lines, 66);
+                popup(f, screen, &title, lines, 66);
             }
         }
     }
@@ -1276,7 +1296,8 @@ mod tests {
     #[test]
     fn recovery_modal_requires_and_reports_explicit_acknowledgement() {
         let (tx, mut rx) = oneshot::channel();
-        let mut modal = Modal::from_request(UiRequest::Recovery {
+        let mut modal = Modal::from_request(UiRequest::OneTimeSecret {
+            secret: OneTimeSecret::CaRecovery,
             password: "AAAA BBBB".into(),
             reply: tx,
         })
@@ -1328,10 +1349,13 @@ mod tests {
                     .unwrap();
                     assert!(modal.on_key(KeyCode::Enter));
                 }
-                UiRequest::Recovery { password, reply } => {
-                    let mut modal =
-                        Modal::from_request(UiRequest::Recovery { password, reply })
-                            .unwrap();
+                UiRequest::OneTimeSecret { secret, password, reply } => {
+                    let mut modal = Modal::from_request(UiRequest::OneTimeSecret {
+                        secret,
+                        password,
+                        reply,
+                    })
+                    .unwrap();
                     assert!(modal.on_key(KeyCode::Esc));
                     cancelled = true;
                     break;

@@ -255,7 +255,8 @@ pub async fn enroll(
         .context("reading SignResponse")
 }
 
-/// Mint a new role admin `name` with `policy` and `new_password`.
+/// Mint a new role admin `name` with `policy` and the one-time
+/// `new_password` the caller generated.
 pub async fn add_role_admin(
     cfg_path: &Path,
     name: &str,
@@ -271,6 +272,34 @@ pub async fn add_role_admin(
             name: name.to_string(),
             new_password: Secret(new_password.to_string()),
             policy,
+            must_change: true,
+        }),
+    )
+    .await?;
+    match netidx_admin_proto::read_msg::<_, AdminMgmtResponse>(&mut s).await? {
+        AdminMgmtResponse::Ok(()) => Ok(()),
+        AdminMgmtResponse::Err { reason } => bail!("the CA refused: {reason}"),
+    }
+}
+
+/// Reset role admin `target`'s password to the one-time `new_password` the
+/// caller generated.
+///
+/// There is no local `change_password`: the control socket authenticates by
+/// unix credentials, so the caller holds no keyslot of its own to rekey.
+pub async fn reset_password(
+    cfg_path: &Path,
+    target: &str,
+    new_password: &str,
+) -> Result<()> {
+    let mut s = connect(cfg_path).await?;
+    let (admin, password) = no_creds();
+    netidx_admin_proto::write_msg(
+        &mut s,
+        &Request::ResetPassword(netidx_admin_proto::ResetPasswordRequest {
+            credential: netidx_admin_proto::AdminCredential::Password { admin, password },
+            target: target.to_string(),
+            new_password: Secret(new_password.to_string()),
         }),
     )
     .await?;

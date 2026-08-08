@@ -117,6 +117,11 @@ pub enum Field {
     AdminName,
     /// The admin password authenticating a remote operation.
     AdminPassword,
+    /// The replacement an admin is choosing for its own password. Distinct
+    /// from [`Field::AdminPassword`] because change-password asks for both in
+    /// one flow, and "Administrator password" twice with different meanings
+    /// is how someone types the old one into the new one.
+    NewAdminPassword,
     /// The off-box CA recovery password (unlocks the CA key offline).
     RecoveryPassword,
     /// The human-readable reason recorded for a revocation.
@@ -421,6 +426,13 @@ impl Field {
                 help: "The password for the named admin. Never echoed or \
                        stored.",
             },
+            NewAdminPassword => FieldInfo {
+                flag: "--new-password-file",
+                label: "new password",
+                help: "The password to replace your current one with. Supplied \
+                       from a file for scripts so it never appears on a command \
+                       line; never echoed or stored.",
+            },
             RecoveryPassword => FieldInfo {
                 flag: "--recovery-password-file",
                 label: "CA recovery password",
@@ -712,13 +724,38 @@ pub trait Answerer: Send {
     /// about (sealing unavailable, keychain save failed, enrollment denied).
     fn warn(&mut self, message: &str);
 
-    /// Present the CA recovery password — generated once at CA init, shown
-    /// once, and **never persisted**. This is the off-box break-glass secret
-    /// the operator must copy into a safe now; there is no second chance to
-    /// read it. Distinct from [`note`] because it must be impossible to miss:
-    /// a CLI prints a boxed banner, a TUI renders a modal that forces
+    /// Present a generated password that is shown once and **never
+    /// persisted** — there is no second chance to read it. Distinct from
+    /// [`note`](Self::note) because it must be impossible to miss: a CLI
+    /// prints a boxed banner, a TUI renders a modal that forces
     /// acknowledgment before continuing.
-    async fn show_recovery_password(&mut self, password: &str) -> Result<()>;
+    ///
+    /// `secret` says which one it is; the frontend supplies the wording,
+    /// since what the operator must *do* with it differs (lock it in a safe
+    /// versus hand it to a colleague) and phrasing is the frontend's job.
+    async fn show_one_time_secret(
+        &mut self,
+        secret: OneTimeSecret,
+        password: &str,
+    ) -> Result<()>;
+}
+
+/// Which shown-once secret [`Answerer::show_one_time_secret`] is presenting.
+///
+/// Owns its name rather than borrowing: a frontend may have to hand this to
+/// its UI thread before rendering (the TUI does), and a lifetime here would
+/// buy an owned mirror of the same two cases on the other side of that
+/// channel. One allocation, on a path that stops to talk to a human anyway.
+#[derive(Debug, Clone)]
+pub enum OneTimeSecret {
+    /// The off-box CA break-glass credential, generated at init or rotate.
+    /// The only credential that can unlock the CA key away from the box, so
+    /// losing it and the machine loses the CA.
+    CaRecovery,
+    /// A one-time key for `admin`, from a reset or a freshly minted role
+    /// admin. Authorizes only its own replacement, so the operator's job is
+    /// to convey it, not to guard it indefinitely.
+    AdminPassword { admin: String },
 }
 
 /// A scripted [`Answerer`] for engine tests: it hands back queued answers and
@@ -851,7 +888,11 @@ pub(crate) mod testing {
 
         fn warn(&mut self, _message: &str) {}
 
-        async fn show_recovery_password(&mut self, _password: &str) -> Result<()> {
+        async fn show_one_time_secret(
+            &mut self,
+            _secret: OneTimeSecret,
+            _password: &str,
+        ) -> Result<()> {
             Ok(())
         }
     }

@@ -50,6 +50,38 @@ pub mod service;
 #[cfg(unix)]
 pub mod slots;
 
+/// The CA verified the password and refused to go further: the slot holds a
+/// one-time key that authorizes only its own replacement.
+///
+/// A typed error rather than a message because frontends must *route* on it —
+/// the TUI opens its change-password screen, the strict CLI prints what to
+/// run — and routing on the text of an error is the coupling that breaks the
+/// first time someone rewords it. Recover it from an [`anyhow::Error`] with
+/// [`password_change_required`].
+#[derive(Debug, Clone)]
+pub struct PasswordChangeRequired {
+    pub admin: String,
+}
+
+impl std::fmt::Display for PasswordChangeRequired {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}'s password was reset and must be changed before anything else — run \
+             `netidx admin ca admin change-password`",
+            self.admin
+        )
+    }
+}
+
+impl std::error::Error for PasswordChangeRequired {}
+
+/// Recover a [`PasswordChangeRequired`] from an error returned by any admin
+/// operation, or `None` if it failed for some other reason.
+pub fn password_change_required(e: &anyhow::Error) -> Option<&PasswordChangeRequired> {
+    e.downcast_ref::<PasswordChangeRequired>()
+}
+
 /// The outcome of an edit: the model version the CA recorded, and whether that
 /// was a change.
 ///

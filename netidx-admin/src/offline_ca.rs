@@ -18,7 +18,7 @@ use crate::{
     answer::{Answerer, Field},
     ca::{Ca, IssueParams, IssuedFiles, SanEntry},
     ca_store::{CAStore, CaDir, QueuedReq},
-    ca_vault::{self, CAVault, Unlocked},
+    ca_vault::{CAVault, Unlocked},
     config_lock::ConfigDirLock,
     paths,
 };
@@ -235,7 +235,7 @@ pub async fn try_unlock_with_keytab(cadir: &CaDir, keytab: &Path) -> KeytabOutco
 /// caller obtains `typed` from the operator (via the Answerer) and hands it
 /// here.
 pub fn unlock_with_recovery(cadir: &CaDir, typed: &str) -> Result<Unlocked> {
-    let pw = ca_vault::normalize_recovery_password(typed);
+    let pw = crate::password::normalize_crockford_password(typed);
     cadir.vault.unlock(&pw)
 }
 
@@ -356,7 +356,7 @@ async fn recovery_unlock(
     dir: &Path,
 ) -> Result<Unlocked> {
     let typed = ans.secret(Field::RecoveryPassword, None).await?;
-    let password = ca_vault::normalize_recovery_password(typed.as_str());
+    let password = crate::password::normalize_crockford_password(typed.as_str());
     cadir
         .vault
         .unlock_async(&password)
@@ -461,9 +461,9 @@ mod tests {
         };
         Ca::init(&params, None).unwrap();
         let key = std::fs::read(dir.join("private.key")).unwrap();
-        let mut vault = ca_vault::CAVault::new(dir.to_path_buf());
+        let mut vault = CAVault::new(dir.to_path_buf());
         let _lock = ConfigDirLock::acquire_for_ca_dir(dir).await.unwrap();
-        let recovery_pw = ca_vault::gen_recovery_password();
+        let recovery_pw = crate::password::gen_crockford_password();
         vault
             .create(
                 &key,
@@ -500,7 +500,7 @@ mod tests {
         // must ALSO unlock: `unlock_with_recovery` folds the quads back out.
         // Without the normalize step the spaces would make this fail, so this
         // is the regression guard for the normalize round-trip.
-        let grouped = ca_vault::group_recovery_password(&recovery_pw);
+        let grouped = crate::password::group_crockford_password(&recovery_pw);
         assert_ne!(&*grouped, &*recovery_pw, "grouping must actually change the string");
         let u2 = unlock_with_recovery(&cadir, &grouped).unwrap();
         assert_eq!(u2.admin, netidx_admin_proto::policy::RECOVERY_ADMIN);

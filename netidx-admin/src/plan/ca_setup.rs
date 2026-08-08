@@ -11,7 +11,7 @@
 
 use crate::{
     admin_proto::Role,
-    answer::{Answerer, Field},
+    answer::{Answerer, Field, OneTimeSecret},
     atomic,
     fingerprint::Fingerprint,
     plan::enroll,
@@ -297,7 +297,7 @@ pub async fn seal_ca_recovery(
     key_pem: &Zeroizing<Vec<u8>>,
     lifetimes: CaLifetimes,
 ) -> Result<(Zeroizing<String>, ca_store::CaDir)> {
-    let recovery_pw = ca_vault::gen_recovery_password();
+    let recovery_pw = crate::password::gen_crockford_password();
     let mut cadir = ca_store::CaDir::open(config_lock, dir)
         .await
         .context("opening the new CA directory")?;
@@ -723,13 +723,25 @@ pub async fn tpm_gate(ans: &mut dyn Answerer, insecure_no_tpm: bool) -> Result<b
 }
 
 /// Present the recovery password exactly once through the dedicated
-/// [`Answerer::show_recovery_password`] seam (a CLI boxes it with a
+/// [`Answerer::show_one_time_secret`] seam (a CLI boxes it with a
 /// store-it-in-a-safe warning, a TUI forces acknowledgment). It is never
 /// persisted, so this is the only time it is shown.
 #[cfg(unix)]
 pub async fn show_recovery_password(ans: &mut dyn Answerer, pw: &str) -> Result<()> {
-    let grouped = ca_vault::group_recovery_password(pw);
-    ans.show_recovery_password(&grouped).await
+    show_generated_password(ans, OneTimeSecret::CaRecovery, pw).await
+}
+
+/// Present a generated password in the grouped form an operator transcribes
+/// from, through the shown-once seam. Both callers — the CA recovery
+/// credential and an admin's one-time key — go through here so the grouping
+/// (and the fact that it is shown exactly once) is decided in one place.
+pub async fn show_generated_password(
+    ans: &mut dyn Answerer,
+    secret: OneTimeSecret,
+    pw: &str,
+) -> Result<()> {
+    let grouped = crate::password::group_crockford_password(pw);
+    ans.show_one_time_secret(secret, &grouped).await
 }
 
 /// Show the CA's own identity (fingerprint + identicon) as an out-of-band
@@ -824,7 +836,10 @@ pub async fn setup_superuser(
     policy.service_control_scopes = vec!["/".to_string()];
     let mut secret = confirm_new_password(ans, Field::AdminPassword).await?;
     let pw = Zeroizing::new(std::mem::take(&mut secret.0));
-    cadir.vault.add_role_slot(&name, &pw, policy).await?;
+    // Not `must_change`: the operator standing here typed this password
+    // themselves. Forcing a change would ask them to replace a secret they
+    // just chose, and an unattended install would have nobody to ask.
+    cadir.vault.add_role_slot(&name, &pw, policy, false).await?;
     ans.note(&format_compact!(
         "superuser role admin {name:?} created — it manages admins, edits perms, \
          and enrolls servers, but never unlocks the CA key (the server signs)."

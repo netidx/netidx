@@ -945,6 +945,19 @@ async fn run_app(terminal: &mut ratatui::DefaultTerminal) -> Result<()> {
                 cluster_op = Some(Box::pin(admin_domains::poll_clusters(pending)));
             }
         }
+        // A connect the CA turned away with "change your password first".
+        // Launched here rather than from `apply` so it goes through the normal
+        // op path — progress, modals, and result overlay all behave as usual.
+        if op.is_none()
+            && let Some(conn) = app.remote.take_change_password()
+        {
+            launch(
+                &mut app,
+                &ui_tx,
+                &mut op,
+                Action::Remote(remote::RemoteAction::ChangePassword { conn }),
+            );
+        }
         tokio::select! {
             biased;
             Some(req) = ui_rx.recv() => match req {

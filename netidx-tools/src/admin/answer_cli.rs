@@ -6,7 +6,9 @@
 
 use anyhow::{Context, Result, bail};
 use netidx_admin::{
-    answer::{AdminDomainChoice, AdminDomainOption, Answerer, Field, Progress},
+    answer::{
+        AdminDomainChoice, AdminDomainOption, Answerer, Field, OneTimeSecret, Progress,
+    },
     transport::CaIdentity,
 };
 use netidx_admin_proto::{Secret, fingerprint::Fingerprint};
@@ -386,25 +388,40 @@ impl Answerer for FlagAnswerer {
         let _ = writeln!(std::io::stderr(), "warning: {m}");
     }
 
-    async fn show_recovery_password(&mut self, password: &str) -> Result<()> {
-        // The one-time, never-stored CA break-glass secret. Boxed on stdout
-        // (the operator must copy it) with the store-it-in-a-safe warning.
+    async fn show_one_time_secret(
+        &mut self,
+        secret: OneTimeSecret,
+        password: &str,
+    ) -> Result<()> {
+        // Never stored, shown once. Boxed on stdout because the operator has
+        // to copy it; the advice differs because what they do with it does.
         let bar = "─".repeat(password.chars().count() + 2);
         let mut out = std::io::stdout();
         writeln!(out)?;
         writeln!(out, "┌{bar}┐")?;
         writeln!(out, "│ {password} │")?;
         writeln!(out, "└{bar}┘")?;
-        writeln!(
-            out,
-            "This is the CA RECOVERY PASSWORD. Write it down and lock it in a safe.\n\
-             It is shown ONCE and never stored. It is the only OFF-box credential\n\
-             that can unlock the CA key — to mint a new admin or rotate the box's\n\
-             own credential. If you lose it AND this machine, the CA is unrecoverable;\n\
-             while the machine lives you can mint a fresh one with\n\
-             `netidx admin ca recovery rotate`.\n"
-        )?;
-        out.flush().context("flushing the CA recovery password")?;
+        match secret {
+            OneTimeSecret::CaRecovery => writeln!(
+                out,
+                "This is the CA RECOVERY PASSWORD. Write it down and lock it in a safe.\n\
+                 It is shown ONCE and never stored. It is the only OFF-box credential\n\
+                 that can unlock the CA key — to mint a new admin or rotate the box's\n\
+                 own credential. If you lose it AND this machine, the CA is unrecoverable;\n\
+                 while the machine lives you can mint a fresh one with\n\
+                 `netidx admin ca recovery rotate`.\n"
+            )?,
+            OneTimeSecret::AdminPassword { admin } => writeln!(
+                out,
+                "This is a ONE-TIME PASSWORD for {admin}. Give it to them over a channel\n\
+                 you trust. It is shown ONCE and never stored. It authorizes nothing but\n\
+                 its own replacement: {admin} runs `netidx admin ca admin change-password`\n\
+                 to set a real password, and until then every other command is refused.\n\
+                 If it is lost, issue another with\n\
+                 `netidx admin ca admin reset-password {admin}`.\n"
+            )?,
+        }
+        out.flush().context("flushing a one-time password")?;
         Ok(())
     }
 }

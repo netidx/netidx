@@ -64,6 +64,7 @@ fn enrollment_policy_enforces_scope_roles_and_invariants() {
     let role_admin = ca_vault::Authenticated {
         slot_id: uuid::Uuid::new_v4(),
         credential_revision: 0,
+        must_change: false,
         admin: "eu-ops".into(),
         policy: netidx_admin_proto::policy::Policy {
             allowed_san: vec![],

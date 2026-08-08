@@ -111,6 +111,13 @@ pub struct AdminInfo {
     pub admin: String,
     pub kind: SlotKind,
     pub policy: Policy,
+    /// The slot holds a machine-generated password that authorizes nothing
+    /// but its own replacement — a freshly minted or reset admin who has not
+    /// chosen a password yet. Reported so the roster shows who is still
+    /// holding a one-time key.
+    #[serde(default)]
+    #[pack(default)]
+    pub must_change: bool,
 }
 
 /// The minimal policy carried by the box's `autorenew` signing slot. It

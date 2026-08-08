@@ -214,6 +214,7 @@ mod state_tests {
                         "alice",
                         "new",
                         netidx_admin_proto::policy::recovery_policy(),
+                        false,
                     )
                     .await
                     .unwrap();
@@ -264,6 +265,75 @@ mod state_tests {
             )
             .is_err()
         );
+    }
+
+    /// The one-time-password refusal lives in `authenticate`, the funnel every
+    /// admin handler resolves its caller through — so it covers ops that did
+    /// not exist when it was written, rather than a list someone maintains.
+    /// The single exemption is `authenticate_for_password_change`, whose only
+    /// caller is the op that clears the flag.
+    ///
+    /// This asserts the funnel itself, not a set of handlers: if the gate were
+    /// moved into individual ops, or a new op resolved its caller some other
+    /// way, that is exactly what this stops catching.
+    #[tokio::test]
+    async fn a_one_time_password_authorizes_nothing_but_its_own_replacement() {
+        use super::auth::authenticate_for_password_change;
+        let dir = tempfile::tempdir().unwrap();
+        let lock = ConfigDirLock::acquire_for_ca_dir(dir.path()).await.unwrap();
+        let mut ca = ca_store::CaDir::open(lock, dir.path()).await.unwrap();
+        ca.vault
+            .create(
+                b"mock-ca-key",
+                "recovery",
+                "rpw",
+                netidx_admin_proto::policy::recovery_policy(),
+            )
+            .await
+            .unwrap();
+        let key = crate::password::gen_crockford_password();
+        ca.vault
+            .add_role_slot(
+                "alice",
+                &key,
+                netidx_admin_proto::policy::superuser_policy(),
+                true,
+            )
+            .await
+            .unwrap();
+
+        let authenticated = ca.vault.authenticate("alice", &key).unwrap();
+        let credential = admin_proto::AdminCredential::password("alice", key.as_str());
+        let prepared = PreparedAdminAuthentication::Password(Ok(authenticated));
+
+        // Every op: refused, and told what to do about it. Note the policy is
+        // the superuser's — authority is irrelevant while the flag is set.
+        // Matched rather than `unwrap_err`: `Authenticated` has no `Debug`.
+        match authenticate(&mut ca, &credential, &prepared) {
+            Ok(a) => {
+                panic!("{} authenticated while holding a one-time password", a.admin)
+            }
+            Err(refused) => assert!(refused.contains("change-password"), "{refused}"),
+        }
+
+        // The exemption: same credential, same prepared authentication.
+        let allowed =
+            authenticate_for_password_change(&mut ca, &credential, &prepared).unwrap();
+        assert_eq!(allowed.admin, "alice");
+        assert!(allowed.must_change);
+
+        // And once a password is chosen, the gate lifts for everything.
+        let rekey = ca
+            .vault
+            .snapshot()
+            .unwrap()
+            .prepare_role_rekey("alice", "chosen-pw", false)
+            .unwrap();
+        ca.vault.install_role_rekey(rekey).await.unwrap();
+        let authenticated = ca.vault.authenticate("alice", "chosen-pw").unwrap();
+        let credential = admin_proto::AdminCredential::password("alice", "chosen-pw");
+        let prepared = PreparedAdminAuthentication::Password(Ok(authenticated));
+        assert_eq!(authenticate(&mut ca, &credential, &prepared).unwrap().admin, "alice");
     }
 
     #[tokio::test]

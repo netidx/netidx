@@ -167,7 +167,9 @@ impl Panel {
         match self {
             Panel::Queue => "a approve · d deny · R renewals · r refresh · Esc back",
             Panel::Delegations => "a approve · d deny · r refresh · Esc back",
-            Panel::Roster => "a add · e edit-policy · d remove · r refresh · Esc back",
+            Panel::Roster => {
+                "a add · e edit-policy · p reset-password · d remove · r refresh · Esc back"
+            }
             Panel::Servers => {
                 "g read gate · c reconcile CA · x force-remove · r refresh · Esc back"
             }
@@ -274,8 +276,16 @@ pub(super) enum RemoteAction {
     /// Revoke one issued certificate by serial (glyph-gated, reason prompted).
     /// Irreversible — gated by a yes/no confirm before it runs.
     Revoke { target: PanelTarget, serial: u64, glyph: Option<Fingerprint> },
-    /// Mint a new role admin (name + initial password + policy via `$EDITOR`).
+    /// Mint a new role admin (name + policy via `$EDITOR`); the CA's one-time
+    /// password is shown once when it returns.
     AddAdmin { target: PanelTarget },
+    /// Issue an admin a one-time password. Confirm-gated: it revokes the
+    /// password they have and closes their sessions.
+    ResetPassword { target: PanelTarget, name: String },
+    /// Change the password of the admin this session authenticated as. Also
+    /// the destination when a connect is answered "change it first", which is
+    /// why it carries the connection rather than a `PanelTarget`.
+    ChangePassword { conn: RemoteConn },
     /// Replace an admin's policy (edited as JSON in `$EDITOR`).
     SetPolicy { target: PanelTarget, name: String },
     /// Remove a role admin. Gated by a yes/no confirm before it runs.
@@ -334,6 +344,8 @@ impl RemoteAction {
             RemoteAction::DenyDelegation { .. } => "Denying delegation".to_string(),
             RemoteAction::Revoke { .. } => "Revoking certificate".to_string(),
             RemoteAction::AddAdmin { .. } => "Adding an admin".to_string(),
+            RemoteAction::ResetPassword { .. } => "Resetting a password".to_string(),
+            RemoteAction::ChangePassword { .. } => "Changing your password".to_string(),
             RemoteAction::SetPolicy { .. } => "Setting policy".to_string(),
             RemoteAction::RemoveAdmin { .. } => "Removing an admin".to_string(),
             RemoteAction::RemoveServer { .. } => "Removing a server".to_string(),
@@ -381,6 +393,12 @@ impl RemoteAction {
                 "Remove admin {name:?}? Their password will no longer authenticate \
                  to this CA."
             )),
+            RemoteAction::ResetPassword { name, .. } => Some(format!(
+                "Reset {name:?}'s password? The password they have stops working \
+                 immediately and every session they hold is closed. You will get a \
+                 one-time password to give them, which lets them set a new one and \
+                 nothing else."
+            )),
             RemoteAction::RemoveServer { server, addr, cluster, .. } => Some(format!(
                 "Force-remove dead server {server}?\n\nLast address: {addr}\nResolver cluster: {cluster}\n\nThis permanently revokes every serving certificate for that immutable identity and removes its enrollment grant. The active CA cannot be removed. No service will be restarted."
             )),
@@ -414,6 +432,7 @@ impl RemoteAction {
             | RemoteAction::DenyDelegation { .. }
             | RemoteAction::AddAdmin { .. }
             | RemoteAction::SetPolicy { .. }
+            | RemoteAction::ChangePassword { .. }
             | RemoteAction::ReconcileCa { .. }
             | RemoteAction::ListResolverClusters { .. }
             | RemoteAction::EditPerms { .. }
@@ -442,6 +461,8 @@ impl RemoteAction {
             | RemoteAction::AddAdmin { .. }
             | RemoteAction::SetPolicy { .. }
             | RemoteAction::RemoveAdmin { .. }
+            | RemoteAction::ResetPassword { .. }
+            | RemoteAction::ChangePassword { .. }
             | RemoteAction::RemoveServer { .. }
             | RemoteAction::SetReadGate { .. }
             | RemoteAction::ReconcileCa { .. }
@@ -457,7 +478,13 @@ impl RemoteAction {
     pub(super) fn glyph(&self) -> Option<Fingerprint> {
         match self {
             RemoteAction::Connect { .. } | RemoteAction::Discover => None,
-            RemoteAction::Logout { conn } => Some(conn.confirmed_fp),
+            // Both already confirmed the glyph — logout on the connect that
+            // established the session, change-password on the connect that was
+            // turned away with "change it first". Re-asking would make the
+            // operator confirm the same CA twice in one gesture.
+            RemoteAction::Logout { conn } | RemoteAction::ChangePassword { conn } => {
+                Some(conn.confirmed_fp)
+            }
             RemoteAction::Refresh { target, .. }
             | RemoteAction::Approve { target, .. }
             | RemoteAction::ApproveRenewals { target }
@@ -468,6 +495,7 @@ impl RemoteAction {
             | RemoteAction::AddAdmin { target }
             | RemoteAction::SetPolicy { target, .. }
             | RemoteAction::RemoveAdmin { target, .. }
+            | RemoteAction::ResetPassword { target, .. }
             | RemoteAction::RemoveServer { target, .. }
             | RemoteAction::SetReadGate { target, .. }
             | RemoteAction::ReconcileCa { target }
@@ -507,6 +535,10 @@ pub(super) struct ServiceServerRow {
 /// A result a completed op applies to [`RemoteState`].
 pub(super) enum RemoteUpdate {
     Connected(RemoteConn),
+    /// The password verified but authorizes only its own replacement. Carries
+    /// the confirmed connection so the follow-up change-password does not
+    /// re-run the glyph ceremony.
+    MustChangePassword(RemoteConn),
     LoggedOut,
     Rows {
         panel: Panel,
@@ -571,6 +603,10 @@ pub(super) async fn run(
             revoke(ans, target.into_remote()?, serial, glyph).await
         }
         RemoteAction::AddAdmin { target } => add_admin(ans, target).await,
+        RemoteAction::ResetPassword { target, name } => {
+            reset_password(ans, target, name).await
+        }
+        RemoteAction::ChangePassword { conn } => change_password(ans, conn).await,
         RemoteAction::SetPolicy { target, name } => set_policy(ans, target, name).await,
         RemoteAction::RemoveAdmin { target, name } => {
             remove_admin(ans, target, name).await
@@ -616,20 +652,43 @@ async fn connect(
     // only then asks for a password (unless a valid cache already exists).
     let session = ops::open_admin_session(ans, Some(server), None, None, None).await?;
     let admin = session.admin.clone();
-    // The TUI outlives the login, so an unsealable token is still worth holding
-    // for the run rather than refusing to connect.
-    if let Some(logged) =
-        ops::cache_session(&session, ops::Retention::ProcessLifetime).await?
-        && let Some(why) = logged.unsealed
-    {
-        ans.note(&format!("{why}; this login will be retained only until the TUI exits"));
-    }
     let conn = RemoteConn {
         server: session.server,
         domain: session.identity.domain.clone(),
         confirmed_fp: session.identity.fingerprint,
         admin,
     };
+    // The TUI outlives the login, so an unsealable token is still worth holding
+    // for the run rather than refusing to connect.
+    match ops::cache_session(&session, ops::Retention::ProcessLifetime).await {
+        Ok(Some(logged)) => {
+            if let Some(why) = logged.unsealed {
+                ans.note(&format!(
+                    "{why}; this login will be retained only until the TUI exits"
+                ));
+            }
+        }
+        Ok(None) => (),
+        // Not a failed connect: the password was right, and the CA is telling
+        // us the only thing this credential can do. Go straight to setting a
+        // new one rather than reporting an error the operator can't act on
+        // from here. A reset bumps the slot's credential revision, so no
+        // cached session can mask this — every such login lands here.
+        Err(e) => match ops::password_change_required(&e) {
+            Some(_) => {
+                return Ok(super::action::Outcome::remote_toast(
+                    "Password change required",
+                    vec![format!(
+                        "{}'s password was reset and must be changed before anything \
+                         else. Setting it now.",
+                        conn.admin
+                    )],
+                    RemoteUpdate::MustChangePassword(conn),
+                ));
+            }
+            None => return Err(e),
+        },
+    }
     // Remember this admin domain (by its confirmed identity) for next time.
     let mut known = KnownAdminDomains::load();
     if known.upsert(&id.domain, server, id.fingerprint) {
@@ -1462,19 +1521,85 @@ async fn add_admin(
         .text(Field::AdminName, None, None, true)
         .await?
         .context("an admin name is required")?;
-    let password = ans.secret(Field::AdminPassword, None).await?;
     let seed = ca_setup::policy_json(&ca_setup::policy_template())?;
     let edited = ans.edit(seed, policy_validator()).await?;
     let policy = ca_setup::parse_policy_json(&edited)?;
     let at = admin_target(ans, &target).await?;
-    add_role_admin(&at, &name, &password, policy).await?;
+    // No password prompt: the CA mints a one-time key and we show it once.
+    // Nothing here ever learns a password the new admin will keep using.
+    let password = add_role_admin(&at, &name, policy).await?;
+    show_one_time_password(ans, &name, &password).await?;
     let rows = roster_rows(ans, &target).await?;
     Ok(super::action::Outcome::remote_after(
         "Admin added",
-        vec![format!("Added role admin {name:?}.")],
+        vec![format!(
+            "Added role admin {name:?}. They must set a password before they can do \
+             anything."
+        )],
         Panel::Roster,
         rows,
     ))
+}
+
+async fn reset_password(
+    ans: &mut TuiAnswerer,
+    target: PanelTarget,
+    name: String,
+) -> Result<super::action::Outcome> {
+    use netidx_admin::ops::roster::reset_password;
+    let at = admin_target(ans, &target).await?;
+    let password = reset_password(&at, &name).await?;
+    show_one_time_password(ans, &name, &password).await?;
+    let rows = roster_rows(ans, &target).await?;
+    Ok(super::action::Outcome::remote_after(
+        "Password reset",
+        vec![format!(
+            "{name:?} now holds a one-time password and every session they had is \
+             closed. They must set a new password before anything else works."
+        )],
+        Panel::Roster,
+        rows,
+    ))
+}
+
+/// Change the password of the admin `conn` authenticated as. Reached from the
+/// roster, and from a connect attempt the CA answered with "change it first" —
+/// which is why it takes a bare [`RemoteConn`] rather than a `PanelTarget`:
+/// in the second case there is no established session yet.
+async fn change_password(
+    ans: &mut TuiAnswerer,
+    conn: RemoteConn,
+) -> Result<super::action::Outcome> {
+    use netidx_admin::ops::roster::change_password;
+    let at = admin_target(ans, &PanelTarget::Remote(conn.clone())).await?;
+    change_password(ans, &at, None).await?;
+    // Back to the landing screen: the credential this session was built on no
+    // longer exists, so there is nothing to carry forward. Connecting again
+    // with the new password is the honest next step, not a papered-over reuse.
+    Ok(super::action::Outcome::remote_toast(
+        "Password changed",
+        vec![format!(
+            "{}'s password is set. Connect again to start working.",
+            conn.admin
+        )],
+        RemoteUpdate::LoggedOut,
+    ))
+}
+
+/// Show a one-time password through the shown-once seam — the same modal the
+/// CA recovery password gets, since the operator has exactly one chance to
+/// read either.
+async fn show_one_time_password(
+    ans: &mut TuiAnswerer,
+    admin: &str,
+    password: &str,
+) -> Result<()> {
+    ca_setup::show_generated_password(
+        ans,
+        netidx_admin::answer::OneTimeSecret::AdminPassword { admin: admin.to_string() },
+        password,
+    )
+    .await
 }
 
 async fn set_policy(
@@ -1754,6 +1879,11 @@ pub(super) struct RemoteState {
     poll: Vec<PollState>,
     /// Cursor over the *visible* (Present) admin domains on the landing screen.
     domain_list: ListState,
+    /// A connect the CA answered "change your password first". Drained by the
+    /// event loop into a change-password op — the operator typed a correct
+    /// password, so the next thing they should see is the prompt for its
+    /// replacement, not a refusal.
+    change_password: Option<RemoteConn>,
     error: Option<String>,
     /// The panel-menu cursor.
     menu: ListState,
@@ -1828,6 +1958,7 @@ impl RemoteState {
             domains: known.domains,
             poll,
             domain_list,
+            change_password: None,
             error: None,
             menu,
             rows: Vec::new(),
@@ -1888,6 +2019,13 @@ impl RemoteState {
             .collect()
     }
 
+    /// The connection a login was turned away on with "change your password
+    /// first", if one is waiting. Taken (not borrowed) so the event loop
+    /// launches exactly one change-password op for it.
+    pub(super) fn take_change_password(&mut self) -> Option<RemoteConn> {
+        self.change_password.take()
+    }
+
     /// Saved admin domains not yet polled; marks each `Polling` so the event loop
     /// launches exactly one poll pass. Only polls on the landing screen.
     pub(super) fn take_pending_poll(&mut self) -> Vec<(usize, KnownAdminDomain)> {
@@ -1923,6 +2061,16 @@ impl RemoteState {
                 self.target = Some(PanelTarget::Remote(conn));
                 self.screen = Screen::Menu;
                 self.error = None;
+            }
+            // No session was established — the credential authorizes only its
+            // own replacement — so no target is set. Queue the change and let
+            // the event loop run it; the operator sees the password prompt
+            // rather than a dead end.
+            RemoteUpdate::MustChangePassword(conn) => {
+                self.target = None;
+                self.screen = Screen::AdminDomains;
+                self.error = None;
+                self.change_password = Some(conn);
             }
             RemoteUpdate::LoggedOut => {
                 self.target = None;
@@ -2451,6 +2599,9 @@ impl RemoteState {
             KeyCode::Char('e') => self
                 .selected_name()
                 .map(|name| Action::Remote(RemoteAction::SetPolicy { target, name })),
+            KeyCode::Char('p') => self
+                .selected_name()
+                .map(|name| Action::Remote(RemoteAction::ResetPassword { target, name })),
             KeyCode::Char('d') => self
                 .selected_name()
                 .map(|name| Action::Remote(RemoteAction::RemoveAdmin { target, name })),

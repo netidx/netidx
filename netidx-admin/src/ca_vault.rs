@@ -22,7 +22,7 @@
 //!
 //! On-disk: `<ca-dir>/vault.json`, mode 0600.
 
-use crate::atomic;
+use crate::{atomic, password::fold_if_one_time};
 use aes_gcm::{Aes256Gcm, Key, KeyInit, Nonce, aead::Aead};
 use anyhow::{Context, Result, anyhow, bail};
 use argon2::{Algorithm, Argon2, Params, Version};
@@ -36,26 +36,6 @@ use zeroize::Zeroizing;
 use netidx_admin_proto::policy::RECOVERY_ADMIN;
 use netidx_admin_proto::policy::{AdminInfo, Policy, SlotKind, is_reserved_admin};
 
-/// File name of the vault within a CA directory. Its presence (rather
-/// than a bare `private.key`) marks a CA as vault-protected.
-pub const VAULT_FILE: &str = "vault.json";
-const VAULT_VERSION: u32 = 1;
-
-/// The off-box break-glass signing credential the operator stores in a
-/// safe — the only key-recovery credential that ever leaves the box.
-/// Minted once at init via [`create`]; rotated on-box via
-/// `admin ca recovery rotate`. With [`crate::admin_server::AUTORENEW_ADMIN`]
-/// these are the only two signing (master-key-holding) slots.
-/// Crockford base32 alphabet (digits + uppercase, excluding I L O U — the
-/// characters easiest to confuse written down or read aloud). The recovery
-/// password is rendered in this alphabet so it survives a trip through a
-/// safe and a human's handwriting.
-const CROCKFORD32: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
-
-/// Bytes of entropy in a recovery password — 160 bits (a multiple of 5, so
-/// it renders to exactly 32 base32 chars with no padding).
-const RECOVERY_ENTROPY_BYTES: usize = 20;
-
 /// A long random password for a **signing** slot (the box-held `autorenew`
 /// credential), kept in a `Zeroizing` buffer that wipes on drop. Unlike a
 /// recovery password this is never read by a human — it lives only in the
@@ -66,63 +46,16 @@ pub fn random_signing_password() -> Zeroizing<String> {
     Zeroizing::new(format!("{}{}", crate::ca_store::new_id(), crate::ca_store::new_id()))
 }
 
-/// Generate a fresh recovery-slot password: 160 bits rendered as 32
-/// Crockford base32 characters. This canonical string is the actual slot
-/// password; [`group_recovery_password`] renders it in quads for the
-/// operator to copy, and [`normalize_recovery_password`] folds a re-typed
-/// copy back to it. Never persisted — printed exactly once at init/rotate.
-pub fn gen_recovery_password() -> Zeroizing<String> {
-    let mut bytes = Zeroizing::new([0u8; RECOVERY_ENTROPY_BYTES]);
-    rand::rng().fill_bytes(&mut bytes[..]);
-    let mut out = String::with_capacity(32);
-    let (mut acc, mut bits) = (0u16, 0u32);
-    for &b in bytes.iter() {
-        acc = (acc << 8) | b as u16;
-        bits += 8;
-        while bits >= 5 {
-            bits -= 5;
-            out.push(CROCKFORD32[((acc >> bits) & 0x1f) as usize] as char);
-        }
-    }
-    // 160 bits / 5 == 32 chars exactly; no leftover bits to pad.
-    Zeroizing::new(out)
-}
+/// File name of the vault within a CA directory. Its presence (rather
+/// than a bare `private.key`) marks a CA as vault-protected.
+pub const VAULT_FILE: &str = "vault.json";
+const VAULT_VERSION: u32 = 1;
 
-/// Render a recovery password in 4-character quads separated by spaces
-/// (e.g. `45QD 567D 8H2K …`) for the boxed one-time display. Grouping only
-/// aids transcription; [`normalize_recovery_password`] strips it back out.
-/// The result is `Zeroizing` (it holds the full secret) — the same care
-/// [`gen_recovery_password`] takes, kept across this hop.
-pub fn group_recovery_password(pw: &str) -> Zeroizing<String> {
-    let mut out = String::with_capacity(pw.len() + pw.len() / 4);
-    for (i, c) in pw.chars().enumerate() {
-        if i > 0 && i % 4 == 0 {
-            out.push(' ');
-        }
-        out.push(c);
-    }
-    Zeroizing::new(out)
-}
-
-/// Fold an operator-typed recovery password back to the canonical form
-/// [`gen_recovery_password`] produced: drop whitespace and hyphens,
-/// uppercase, and apply Crockford's digit substitutions (O→0, I/L→1) so a
-/// transcription that confused those characters still unlocks. The result is
-/// `Zeroizing` — it is the secret that goes to `unlock`.
-pub fn normalize_recovery_password(typed: &str) -> Zeroizing<String> {
-    Zeroizing::new(
-        typed
-            .chars()
-            .filter_map(|c| match c.to_ascii_uppercase() {
-                ' ' | '-' | '\t' | '\n' | '\r' => None,
-                'O' => Some('0'),
-                'I' | 'L' => Some('1'),
-                c => Some(c),
-            })
-            .collect(),
-    )
-}
-
+/// The off-box break-glass signing credential the operator stores in a
+/// safe — the only key-recovery credential that ever leaves the box.
+/// Minted once at init via [`create`]; rotated on-box via
+/// `admin ca recovery rotate`. With [`crate::admin_server::AUTORENEW_ADMIN`]
+/// these are the only two signing (master-key-holding) slots.
 // Argon2id cost. Per the design doc: 64 MiB / t=3 / p=4 in production;
 // the params are stored *per slot*, so `unlock` always uses whatever a
 // slot was created with — which lets the test build derive cheaply
@@ -160,6 +93,11 @@ pub struct Authenticated {
     pub admin: String,
     pub policy: Policy,
     pub kind: SlotKind,
+    /// The password that produced this is a one-time key: it proves who the
+    /// caller is and nothing else. Carried here rather than re-read at each
+    /// gate so the single authentication funnel can refuse on it — see
+    /// `admin_server::auth::authenticate`.
+    pub must_change: bool,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -194,6 +132,13 @@ struct Slot {
     #[serde(default = "default_slot_kind")]
     kind: SlotKind,
     policy: Policy,
+    /// This slot's password was generated, not chosen — by `add-role` or by
+    /// `reset-password` — and authorizes only its own replacement. Cleared
+    /// when its holder sets one. A `must_change` slot always holds a
+    /// [`gen_crockford_password`] value, which is what lets `authenticate`
+    /// fold the typed form (see [`normalize_crockford_password`]).
+    #[serde(default)]
+    must_change: bool,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -218,6 +163,24 @@ pub struct VaultSnapshot {
 
 pub struct PreparedRoleSlot {
     slot: Slot,
+}
+
+/// A role slot re-wrapped under a new password, ready to install. Carries the
+/// revision it was prepared against so the commit refuses a slot that moved
+/// while the (deliberately slow) KDF ran.
+pub struct PreparedRoleRekey {
+    previous: (uuid::Uuid, u64),
+    replacement: Slot,
+}
+
+impl PreparedRoleRekey {
+    /// Whether this rekey was derived against exactly that slot at that
+    /// revision. Change-password uses it to prove the rekey it is about to
+    /// install belongs to the caller's own slot and not to whoever else was
+    /// preparing one at the same moment.
+    pub fn targets(&self, slot_id: uuid::Uuid, credential_revision: u64) -> bool {
+        self.previous == (slot_id, credential_revision)
+    }
 }
 
 pub struct PreparedSigningReplacement {
@@ -251,8 +214,18 @@ impl VaultSnapshot {
         new_admin: &str,
         new_password: &str,
         policy: Policy,
+        must_change: bool,
     ) -> Result<PreparedRoleSlot> {
-        prepare_role_slot(&self.vault, new_admin, new_password, policy)
+        prepare_role_slot(&self.vault, new_admin, new_password, policy, must_change)
+    }
+
+    pub fn prepare_role_rekey(
+        &self,
+        target_admin: &str,
+        new_password: &str,
+        must_change: bool,
+    ) -> Result<PreparedRoleRekey> {
+        prepare_role_rekey(&self.vault, target_admin, new_password, must_change)
     }
 
     pub fn prepare_signing_replacement(
@@ -504,13 +477,14 @@ impl CAVault {
         new_admin: &str,
         new_password: &str,
         policy: Policy,
+        must_change: bool,
     ) -> Result<()> {
         let mut vault = self.current()?.clone();
         let snapshot = vault.clone();
         let new_admin = new_admin.to_string();
         let new_password = Zeroizing::new(new_password.to_string());
         let prepared = tokio::task::spawn_blocking(move || {
-            prepare_role_slot(&snapshot, &new_admin, &new_password, policy)
+            prepare_role_slot(&snapshot, &new_admin, &new_password, policy, must_change)
         })
         .await
         .context("role-slot creation task panicked")??;
@@ -525,6 +499,27 @@ impl CAVault {
         let mut vault = self.current()?.clone();
         validate_new_role_slot(&vault, &prepared.slot.admin)?;
         vault.slots.push(prepared.slot);
+        self.commit(vault).await
+    }
+
+    /// Install a [`PreparedRoleRekey`], replacing the target slot in place.
+    /// [`ensure_slot_revision`] is the whole point: the KDF runs off the write
+    /// lock, so between prepare and commit the slot could have been reset by
+    /// someone else, removed, or re-added under the same name. Any of those
+    /// refuses rather than silently reinstating a password the vault has
+    /// already moved past.
+    pub async fn install_role_rekey(
+        &mut self,
+        prepared: PreparedRoleRekey,
+    ) -> Result<()> {
+        let mut vault = self.current()?.clone();
+        let idx = ensure_slot_revision(&vault, prepared.previous)?;
+        if vault.slots[idx].kind != SlotKind::Role {
+            bail!(
+                "the target slot became a signing keyslot while its rekey was prepared"
+            );
+        }
+        vault.slots[idx] = prepared.replacement;
         self.commit(vault).await
     }
 
@@ -629,6 +624,7 @@ impl CAVault {
                 admin: s.admin.clone(),
                 kind: s.kind,
                 policy: s.policy.clone(),
+                must_change: s.must_change,
             })
             .collect())
     }
@@ -677,6 +673,7 @@ impl CAVault {
             admin: slot.admin.clone(),
             policy: slot.policy.clone(),
             kind: slot.kind,
+            must_change: slot.must_change,
         })
     }
 
@@ -755,12 +752,65 @@ fn prepare_role_slot(
     new_admin: &str,
     new_password: &str,
     policy: Policy,
+    must_change: bool,
 ) -> Result<PreparedRoleSlot> {
     validate_new_role_slot(vault, new_admin)?;
     let mut verifier = Zeroizing::new([0u8; 32]);
     rand::rng().fill_bytes(&mut verifier[..]);
-    Ok(PreparedRoleSlot {
-        slot: make_slot(&verifier, SlotKind::Role, new_admin, new_password, policy)?,
+    let new_password = fold_if_one_time(new_password, must_change);
+    let mut slot =
+        make_slot(&verifier, SlotKind::Role, new_admin, &new_password, policy)?;
+    slot.must_change = must_change;
+    Ok(PreparedRoleSlot { slot })
+}
+
+/// Re-wrap role slot `target_admin` under `new_password`, in place. The slot
+/// keeps its id, name, tier, and policy, and its `credential_revision` goes
+/// up by one — which is what evicts every session issued against the old
+/// password (see [`CAVault::resolve_session_slot`]).
+///
+/// A role slot's `wrap` holds a throwaway verifier, so replacing it needs
+/// neither MK nor the old password: a fresh random verifier under the new
+/// KDF is as good as the one it replaces. **All** authority to call this
+/// therefore lives in the caller — self-service change-password proves the
+/// old password by authenticating first, and reset-password proves
+/// `may_manage_admins` plus the target being within the caller's own scope.
+fn prepare_role_rekey(
+    vault: &VaultFile,
+    target_admin: &str,
+    new_password: &str,
+    must_change: bool,
+) -> Result<PreparedRoleRekey> {
+    let previous = vault
+        .slots
+        .iter()
+        .find(|slot| slot.admin == target_admin)
+        .ok_or_else(|| anyhow!("no admin named {target_admin:?}"))?;
+    if previous.kind != SlotKind::Role {
+        bail!(
+            "{target_admin:?} is a signing keyslot; its password is rotated with \
+             `netidx admin ca recovery rotate` or `netidx admin ca auto-approve --rotate`"
+        );
+    }
+    let mut verifier = Zeroizing::new([0u8; 32]);
+    rand::rng().fill_bytes(&mut verifier[..]);
+    let new_password = fold_if_one_time(new_password, must_change);
+    let mut replacement = make_slot(
+        &verifier,
+        SlotKind::Role,
+        target_admin,
+        &new_password,
+        previous.policy.clone(),
+    )?;
+    replacement.id = previous.id;
+    replacement.credential_revision = previous
+        .credential_revision
+        .checked_add(1)
+        .context("the role-slot credential revision is exhausted")?;
+    replacement.must_change = must_change;
+    Ok(PreparedRoleRekey {
+        previous: (previous.id, previous.credential_revision),
+        replacement,
     })
 }
 
@@ -800,9 +850,15 @@ fn authenticate(vault: &VaultFile, admin: &str, password: &str) -> Result<Authen
             continue;
         }
         named = true;
+        // A `must_change` slot always holds a generated Crockford password, so
+        // fold the typed form back to canonical: the operator was shown it in
+        // quads and may retype it that way, or in lower case. Deterministic,
+        // one derivation, no second attempt — and it can never reach a
+        // human-chosen password, which lives only on slots without the flag.
+        let typed = fold_if_one_time(password, slot.must_change);
         let salt = b64d(&slot.kdf.salt).context("vault: slot salt")?;
         let kek = derive_kek(
-            password.as_bytes(),
+            typed.as_bytes(),
             &salt,
             slot.kdf.m_cost_kib,
             slot.kdf.t_cost,
@@ -815,6 +871,7 @@ fn authenticate(vault: &VaultFile, admin: &str, password: &str) -> Result<Authen
                 admin: slot.admin.clone(),
                 policy: slot.policy.clone(),
                 kind: slot.kind,
+                must_change: slot.must_change,
             });
         }
     }
@@ -862,6 +919,12 @@ fn recover_mk(vault: &VaultFile, password: &str) -> Result<(usize, Zeroizing<[u8
 
 /// Build a slot wrapping `secret` (MK for a signing slot, a random
 /// verifier for a role slot) under a fresh Argon2id KDF of `password`.
+///
+/// Always `must_change: false`. The two role constructors set it after,
+/// which is what keeps a signing slot from ever carrying it: no signing path
+/// mentions the field, so none can set it. A one-time master key would be a
+/// slot whose holder must unlock the CA to replace the credential that
+/// unlocks the CA.
 fn make_slot(
     secret: &[u8; 32],
     kind: SlotKind,
@@ -891,6 +954,7 @@ fn make_slot(
         wrap,
         kind,
         policy,
+        must_change: false,
     })
 }
 
@@ -984,6 +1048,9 @@ async fn read_vault(path: &Path) -> Result<VaultFile> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::password::{
+        gen_crockford_password, group_crockford_password, normalize_crockford_password,
+    };
 
     fn pol(san: &str) -> Policy {
         Policy {
@@ -1116,7 +1183,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut v = CAVault::new(dir.path().to_path_buf());
         v.create(KEY, "recovery", "rpw", pol("*.a")).await.unwrap();
-        v.add_role_slot("eve", "epw", role_pol("/eu")).await.unwrap();
+        v.add_role_slot("eve", "epw", role_pol("/eu"), false).await.unwrap();
         assert!(v.replace_signing_slot("epw", "recovery", "x", pol("*")).await.is_err());
         assert!(
             v.replace_signing_slot("wrong", "recovery", "x", pol("*")).await.is_err()
@@ -1129,12 +1196,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut v = CAVault::new(dir.path().to_path_buf());
         v.create(KEY, "recovery", "rpw", pol("*.a")).await.unwrap();
-        v.add_role_slot("eve", "old", role_pol("/eu")).await.unwrap();
+        v.add_role_slot("eve", "old", role_pol("/eu"), false).await.unwrap();
         let snapshot = v.snapshot().unwrap();
         let authenticated = snapshot.authenticate("eve", "old").unwrap();
 
         v.remove_slot("eve", false).await.unwrap();
-        v.add_role_slot("eve", "new", role_pol("/us")).await.unwrap();
+        v.add_role_slot("eve", "new", role_pol("/us"), false).await.unwrap();
 
         assert!(snapshot.authenticate("eve", "old").is_ok());
         assert!(
@@ -1156,10 +1223,10 @@ mod tests {
         let prepared = v
             .snapshot()
             .unwrap()
-            .prepare_role_slot("eve", "first", role_pol("/eu"))
+            .prepare_role_slot("eve", "first", role_pol("/eu"), false)
             .unwrap();
 
-        v.add_role_slot("eve", "second", role_pol("/us")).await.unwrap();
+        v.add_role_slot("eve", "second", role_pol("/us"), false).await.unwrap();
 
         assert!(v.add_prepared_role_slot(prepared).await.is_err());
         assert!(v.authenticate("eve", "first").is_err());
@@ -1224,7 +1291,7 @@ mod tests {
             v.add_signing_slot("nope", "autorenew", "apw", pol("*.b")).await.is_err()
         );
         // A role password is not signing authority either.
-        v.add_role_slot("eve", "epw", role_pol("/eu")).await.unwrap();
+        v.add_role_slot("eve", "epw", role_pol("/eu"), false).await.unwrap();
         assert!(v.add_signing_slot("epw", "autorenew", "apw", pol("*")).await.is_err());
         // Duplicate name rejected.
         assert!(v.add_signing_slot("rpw", "recovery", "x", pol("*")).await.is_err());
@@ -1237,7 +1304,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut v = CAVault::new(dir.path().to_path_buf());
         v.create(KEY, "recovery", "rpw", pol("*.a")).await.unwrap();
-        v.add_role_slot("eve", "epw", role_pol("/eu")).await.unwrap();
+        v.add_role_slot("eve", "epw", role_pol("/eu"), false).await.unwrap();
 
         // A role authenticates and gets its scoped policy, but NEVER unlocks.
         let a = v.authenticate("eve", "epw").unwrap();
@@ -1263,7 +1330,7 @@ mod tests {
         let mut v = CAVault::new(dir.path().to_path_buf());
         v.create(KEY, "recovery", "rpw", pol("*.a")).await.unwrap();
         v.add_signing_slot("rpw", "autorenew", "apw", pol("*.b")).await.unwrap();
-        v.add_role_slot("eve", "epw", role_pol("/eu")).await.unwrap();
+        v.add_role_slot("eve", "epw", role_pol("/eu"), false).await.unwrap();
 
         // Removing a role never trips the guard.
         v.remove_slot("eve", false).await.unwrap();
@@ -1281,7 +1348,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut v = CAVault::new(dir.path().to_path_buf());
         v.create(KEY, "recovery", "rpw", pol("*.a")).await.unwrap();
-        v.add_role_slot("eve", "epw", role_pol("/eu")).await.unwrap();
+        v.add_role_slot("eve", "epw", role_pol("/eu"), false).await.unwrap();
         let mut admins = v.list_admins().unwrap();
         admins.sort_by(|a, b| a.admin.cmp(&b.admin));
         let kinds: Vec<_> = admins.iter().map(|a| (a.admin.clone(), a.kind)).collect();
@@ -1302,28 +1369,10 @@ mod tests {
         let mut v = CAVault::new(dir.path().to_path_buf());
         v.create(KEY, "recovery", "rpw", pol("*.a")).await.unwrap();
         // A role admin may never take a reserved signing-slot name (any case).
-        assert!(v.add_role_slot("recovery", "x", role_pol("/")).await.is_err());
-        assert!(v.add_role_slot("AutoRenew", "x", role_pol("/")).await.is_err());
+        assert!(v.add_role_slot("recovery", "x", role_pol("/"), false).await.is_err());
+        assert!(v.add_role_slot("AutoRenew", "x", role_pol("/"), false).await.is_err());
         assert!(is_reserved_admin("recovery") && is_reserved_admin("AUTORENEW"));
         assert!(!is_reserved_admin("eve"));
-    }
-
-    #[test]
-    fn recovery_password_roundtrips_through_display_and_renentry() {
-        let pw = gen_recovery_password();
-        // 160 bits of Crockford base32 == 32 chars from the alphabet.
-        assert_eq!(pw.len(), 32);
-        assert!(pw.chars().all(|c| CROCKFORD32.contains(&(c as u8))));
-        // Grouped for display: 8 quads separated by 7 spaces.
-        let shown = group_recovery_password(&pw);
-        assert_eq!(shown.split(' ').count(), 8);
-        assert!(shown.split(' ').all(|q| q.len() == 4));
-        // Re-typing the grouped form (or with confusable chars) folds back.
-        assert_eq!(*normalize_recovery_password(&shown), *pw);
-        // Two fresh passwords differ (RNG is actually consulted).
-        assert_ne!(*gen_recovery_password(), *pw);
-        // Crockford leniency: O→0, I/L→1, lowercase, stray hyphens.
-        assert_eq!(normalize_recovery_password("o0-iI lL-ab").as_str(), "001111AB");
     }
 
     #[tokio::test]
@@ -1332,10 +1381,10 @@ mod tests {
         // re-typed in grouped/confusable form normalizes back and unlocks.
         let dir = tempfile::tempdir().unwrap();
         let mut v = CAVault::new(dir.path().to_path_buf());
-        let pw = gen_recovery_password();
+        let pw = gen_crockford_password();
         v.create(KEY, RECOVERY_ADMIN, &pw, pol("*.a")).await.unwrap();
         assert!(v.unlock(&pw).is_ok());
-        let retyped = normalize_recovery_password(&group_recovery_password(&pw));
+        let retyped = normalize_crockford_password(&group_crockford_password(&pw));
         assert!(v.unlock(&retyped).is_ok());
     }
 
@@ -1381,5 +1430,148 @@ mod tests {
         // key AEAD now fails its tag → clean error, not garbage.
         let vault = CAVault::open(dir.path().to_path_buf()).await.unwrap();
         assert!(vault.unlock("apw").is_err());
+    }
+
+    /// A rekey keeps the slot's identity and policy and replaces only the
+    /// credential — and bumps `credential_revision`, which is what evicts
+    /// every session issued against the old password.
+    #[tokio::test]
+    async fn a_role_rekey_replaces_the_credential_and_evicts_sessions() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut v = CAVault::new(dir.path().to_path_buf());
+        v.create(KEY, "recovery", "rpw", pol("*.a")).await.unwrap();
+        v.add_role_slot("eve", "old", role_pol("/eu"), false).await.unwrap();
+        let before = v.authenticate("eve", "old").unwrap();
+        assert!(!before.must_change);
+
+        let prepared =
+            v.snapshot().unwrap().prepare_role_rekey("eve", "new", false).unwrap();
+        v.install_role_rekey(prepared).await.unwrap();
+
+        assert!(v.authenticate("eve", "old").is_err(), "the old password must be dead");
+        let after = v.authenticate("eve", "new").unwrap();
+        // Same slot, same policy — this is a credential change, not a new admin.
+        assert_eq!(after.slot_id, before.slot_id);
+        assert_eq!(after.policy, role_pol("/eu"));
+        assert_eq!(after.kind, SlotKind::Role);
+        // …and every session minted against the old revision stops resolving.
+        assert_eq!(after.credential_revision, before.credential_revision + 1);
+        assert!(
+            v.resolve_session_slot(before.slot_id, before.credential_revision).is_err()
+        );
+    }
+
+    /// A prepared rekey is derived off the write lock, so it names the slot
+    /// revision it was built against and refuses to install over anything
+    /// else. Two administrators resetting the same admin at once must not
+    /// leave the loser's password installed after the winner's.
+    #[tokio::test]
+    async fn a_stale_role_rekey_refuses_to_install() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut v = CAVault::new(dir.path().to_path_buf());
+        v.create(KEY, "recovery", "rpw", pol("*.a")).await.unwrap();
+        v.add_role_slot("eve", "old", role_pol("/eu"), false).await.unwrap();
+        let stale =
+            v.snapshot().unwrap().prepare_role_rekey("eve", "mine", false).unwrap();
+
+        let winner =
+            v.snapshot().unwrap().prepare_role_rekey("eve", "theirs", false).unwrap();
+        v.install_role_rekey(winner).await.unwrap();
+
+        assert!(v.install_role_rekey(stale).await.is_err());
+        assert!(v.authenticate("eve", "mine").is_err());
+        assert!(v.authenticate("eve", "theirs").is_ok());
+    }
+
+    /// Reset installs a generated password and marks the slot one-time; the
+    /// admin's own change clears the mark. `must_change` reaching
+    /// `Authenticated` is what lets the server's single authentication funnel
+    /// refuse everything else in between.
+    #[tokio::test]
+    async fn must_change_is_set_by_a_reset_and_cleared_by_a_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut v = CAVault::new(dir.path().to_path_buf());
+        v.create(KEY, "recovery", "rpw", pol("*.a")).await.unwrap();
+        let key = gen_crockford_password();
+        v.add_role_slot("eve", &key, role_pol("/eu"), true).await.unwrap();
+        assert!(v.authenticate("eve", &key).unwrap().must_change);
+        assert!(
+            v.list_admins().unwrap().iter().any(|a| a.admin == "eve" && a.must_change)
+        );
+
+        let prepared =
+            v.snapshot().unwrap().prepare_role_rekey("eve", "chosen-pw", false).unwrap();
+        v.install_role_rekey(prepared).await.unwrap();
+        assert!(!v.authenticate("eve", "chosen-pw").unwrap().must_change);
+        assert!(
+            v.list_admins().unwrap().iter().any(|a| a.admin == "eve" && !a.must_change)
+        );
+    }
+
+    /// A one-time key is shown in quads and uppercase; an operator may retype
+    /// it that way, or in lower case, or with the substitutions Crockford
+    /// exists to absorb. Only a `must_change` slot folds the input — once a
+    /// human has chosen a password, it is matched exactly, so two passwords
+    /// differing only in `O` versus `0` stay distinct.
+    #[tokio::test]
+    async fn a_one_time_key_authenticates_as_typed_but_a_chosen_password_does_not_fold() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut v = CAVault::new(dir.path().to_path_buf());
+        v.create(KEY, "recovery", "rpw", pol("*.a")).await.unwrap();
+        let key = gen_crockford_password();
+        v.add_role_slot("eve", &key, role_pol("/eu"), true).await.unwrap();
+
+        // As shown (quads), lower-cased, and with the confusable characters
+        // an operator reading it aloud would produce.
+        let shown = group_crockford_password(&key);
+        assert!(v.authenticate("eve", &shown).is_ok());
+        assert!(v.authenticate("eve", &shown.to_lowercase()).is_ok());
+        assert!(
+            v.authenticate("eve", &shown.replace('0', "O").replace('1', "l")).is_ok()
+        );
+
+        // The fold happens on the *store* side too, so a client that sent the
+        // key in the grouped form it displayed still installs a usable
+        // credential. Before that, such a slot could never be authenticated:
+        // the stored derivation was of the grouped text and every attempt was
+        // folded to canonical before comparison.
+        let mut v3 = CAVault::new(tempfile::tempdir().unwrap().keep());
+        v3.create(KEY, "recovery", "rpw", pol("*.a")).await.unwrap();
+        let grouped = group_crockford_password(&gen_crockford_password());
+        v3.add_role_slot("eve", &grouped, role_pol("/eu"), true).await.unwrap();
+        assert!(v3.authenticate("eve", &grouped).is_ok());
+        assert!(
+            v3.authenticate("eve", &normalize_crockford_password(&grouped)).is_ok(),
+            "canonical and as-displayed must be the same credential"
+        );
+
+        // A chosen password is matched exactly: folding it would collapse
+        // distinct passwords onto each other.
+        let mut v2 = CAVault::new(tempfile::tempdir().unwrap().keep());
+        v2.create(KEY, "recovery", "rpw", pol("*.a")).await.unwrap();
+        v2.add_role_slot("eve", "pOlicy1", role_pol("/eu"), false).await.unwrap();
+        assert!(v2.authenticate("eve", "pOlicy1").is_ok());
+        assert!(v2.authenticate("eve", "p0licy1").is_err());
+        assert!(v2.authenticate("eve", "policy1").is_err());
+    }
+
+    /// `recovery` and `autorenew` wrap the master key. A one-time signing slot
+    /// would be a credential whose holder must unlock the CA in order to
+    /// replace the credential that unlocks the CA, so the role rekey refuses
+    /// them outright — the rotate ops exist for that.
+    #[tokio::test]
+    async fn a_signing_slot_cannot_be_role_rekeyed() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut v = CAVault::new(dir.path().to_path_buf());
+        v.create(KEY, RECOVERY_ADMIN, "rpw", pol("*.a")).await.unwrap();
+        // Matched rather than `unwrap_err`: `PreparedRoleRekey` deliberately
+        // has no `Debug`, since it carries a slot's key material.
+        let e = match v.snapshot().unwrap().prepare_role_rekey(RECOVERY_ADMIN, "x", true)
+        {
+            Ok(_) => panic!("a signing slot must not be role-rekeyable"),
+            Err(e) => e,
+        };
+        assert!(format!("{e:#}").contains("signing keyslot"), "{e:#}");
+        assert!(v.unlock("rpw").is_ok(), "the signing slot must be untouched");
     }
 }

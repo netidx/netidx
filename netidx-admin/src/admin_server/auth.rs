@@ -27,14 +27,50 @@ pub(super) fn local_superuser() -> ca_vault::Authenticated {
         admin: "local".to_string(),
         policy: netidx_admin_proto::policy::superuser_policy(),
         kind: netidx_admin_proto::policy::SlotKind::Signing,
+        // Synthetic — there is no slot behind it and so no password to
+        // change. Root on the box is already root on the box.
+        must_change: false,
     }
 }
 
-/// Resolve a caller's credential to its live vault slot. Both credential kinds
-/// are validated during the prepare phase (see
+/// The refusal a one-time credential gets from everything but
+/// [`Request::ChangePassword`](admin_proto::Request::ChangePassword). One
+/// string so the CLI's advice and the TUI's routing agree on what happened.
+pub(super) const MUST_CHANGE_PASSWORD: &str = concat!(
+    "your password was reset and must be changed before you can do anything ",
+    "else — run `netidx admin ca admin change-password`"
+);
+
+/// Resolve a caller's credential to its live vault slot, and refuse a slot
+/// still holding a one-time password.
+///
+/// The `must_change` check lives here, at the single funnel every handler
+/// reaches authentication through, rather than in each op: a handler added
+/// later inherits the refusal without anyone having to remember it. The one
+/// op that must work anyway goes through
+/// [`authenticate_for_password_change`] — an explicit exemption at one call
+/// site, not a gap in the default.
+///
+/// Both credential kinds are validated during the prepare phase (see
 /// [`prepare_admin_authentication`]); this revalidates the prepared result
 /// against the live vault, so a slot removed or rotated in between is refused.
 pub(super) fn authenticate(
+    ca: &mut ca_store::CaDir,
+    credential: &admin_proto::AdminCredential,
+    prepared: &PreparedAdminAuthentication,
+) -> std::result::Result<ca_vault::Authenticated, String> {
+    let authd = authenticate_for_password_change(ca, credential, prepared)?;
+    if authd.must_change {
+        return Err(MUST_CHANGE_PASSWORD.to_string());
+    }
+    Ok(authd)
+}
+
+/// [`authenticate`] without the one-time-password refusal — the caller has
+/// established that the request being served *is* the password change. Never
+/// call it for anything else: it is the exemption, and its only legitimate
+/// use is the op that clears the flag.
+pub(super) fn authenticate_for_password_change(
     ca: &mut ca_store::CaDir,
     credential: &admin_proto::AdminCredential,
     prepared: &PreparedAdminAuthentication,
@@ -158,6 +194,18 @@ impl PreparedAdminAuthentication {
             Self::Password(Ok(_)) | Self::Session(Ok(_)) => None,
         }
     }
+
+    /// The admin this credential belongs to, once it has verified. The one
+    /// caller is change-password, which needs a slot name to derive the
+    /// replacement for *before* it takes the write lock — and must take that
+    /// name from the credential rather than the request, so no admin can aim
+    /// a password change at someone else's slot.
+    pub(super) fn admin_name(&self) -> Option<String> {
+        match self {
+            Self::Password(Ok(a)) | Self::Session(Ok(a)) => Some(a.admin.clone()),
+            Self::Password(Err(_)) | Self::Session(Err(_)) => None,
+        }
+    }
 }
 
 pub(super) struct PreparedServerUnlock(
@@ -272,9 +320,38 @@ pub(super) async fn prepare_role_slot(
     let name = req.name.clone();
     let password = req.new_password.clone();
     let policy = req.policy.clone();
+    let must_change = req.must_change;
     run_signing(signs, move || {
         snapshot
-            .prepare_role_slot(&name, password.as_str(), policy)
+            .prepare_role_slot(&name, password.as_str(), policy, must_change)
+            .map_err(|e| format!("{e:#}"))
+    })
+    .await
+    .map_err(|e| format!("preparing the administrator slot: {e:#}"))?
+}
+
+/// Derive the replacement slot for a password change or reset. Like
+/// [`prepare_role_slot`] this runs the (deliberately slow) Argon2 derivation
+/// on the bounded signing pool, off the state write lock; the revision it
+/// captures is rechecked at commit.
+pub(super) async fn prepare_role_rekey(
+    state: &Arc<Server>,
+    signs: &Arc<Semaphore>,
+    target: &str,
+    new_password: &admin_proto::Secret,
+    must_change: bool,
+) -> std::result::Result<ca_vault::PreparedRoleRekey, String> {
+    let snapshot = state
+        .read(move |state| {
+            state.ca.as_ref().context("this host does not hold the CA")?.vault.snapshot()
+        })
+        .await
+        .map_err(|e| format!("reading the CA vault: {e:#}"))?;
+    let target = target.to_string();
+    let password = new_password.clone();
+    run_signing(signs, move || {
+        snapshot
+            .prepare_role_rekey(&target, password.as_str(), must_change)
             .map_err(|e| format!("{e:#}"))
     })
     .await

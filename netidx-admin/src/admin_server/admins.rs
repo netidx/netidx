@@ -1,8 +1,8 @@
 use super::{
     MutableState, Server, audit,
     auth::{
-        PreparedAdminAuthentication, authenticate, broad_admin, local_superuser,
-        scope_covers, signing_slot,
+        PreparedAdminAuthentication, authenticate, authenticate_for_password_change,
+        broad_admin, local_superuser, safe_auth_failure, scope_covers, signing_slot,
     },
 };
 use crate::{
@@ -30,7 +30,18 @@ pub(super) async fn handle_login(
             let ca = state.ca.as_mut().expect("CA role held");
             match &req.credential {
                 admin_proto::AdminCredential::Password { .. } => {
-                    match authenticate(ca, &req.credential, prepared) {
+                    // Deliberately the ungated resolution: a one-time password
+                    // has to get past *authentication* to be told it must be
+                    // changed. Answering that before the password verifies
+                    // would name which accounts are mid-reset to anyone who
+                    // can guess a login. No session is minted either way.
+                    match authenticate_for_password_change(ca, &req.credential, prepared)
+                    {
+                        Ok(authenticated) if authenticated.must_change => {
+                            admin_proto::LoginResponse::PasswordChangeRequired {
+                                admin: authenticated.admin,
+                            }
+                        }
                         Ok(authenticated) => {
                             ca.sessions.login_authenticated(authenticated)
                         }
@@ -203,6 +214,32 @@ fn policy_within(
     Ok(())
 }
 
+/// The manage-scope rule: a managing role admin may act on a target only if
+/// the target's **current** authority is within its own.
+///
+/// [`policy_within`] answers a different question — what may be *granted* —
+/// and on its own it leaves the target's existing authority unexamined. That
+/// gap is what makes reset-password dangerous: a manager with a narrow scope
+/// could reset the superuser, read the one-time key off its own terminal, and
+/// log in as it. The same check covers rescope and removal, where the damage
+/// is destructive rather than acquisitive (demoting or deleting an admin
+/// above you) but the rule that forbids it is the same one.
+///
+/// Signing slots bypass, as everywhere else: they hold the key, so there is
+/// nothing above them to protect.
+fn manageable(
+    caller: &ca_vault::Authenticated,
+    target: &str,
+    target_policy: &netidx_admin_proto::policy::Policy,
+) -> std::result::Result<(), String> {
+    if signing_slot(caller) {
+        return Ok(());
+    }
+    policy_within(&caller.policy, target_policy).map_err(|reason| {
+        format!("{target:?} holds authority you do not: {reason}. You can only manage admins within your own scope.")
+    })
+}
+
 /// Whether `target` is the only ROLE admin carrying `may_manage_admins`.
 /// Removing or demoting it would strand remote admin management — only the
 /// off-box recovery password (a signing slot) could restore it. We refuse
@@ -330,6 +367,9 @@ async fn handle_set_admin_policy_inner(
     if kind != netidx_admin_proto::policy::SlotKind::Role {
         return err("remote admin management operates on role admins only".to_string());
     }
+    if let Err(reason) = manageable(&authd, &req.target, &current) {
+        return err(reason);
+    }
     // Don't let a rescope strand admin management by demoting the last role
     // manager.
     if current.may_manage_admins && !req.policy.may_manage_admins {
@@ -403,6 +443,9 @@ async fn handle_remove_admin_inner(
     if kind != netidx_admin_proto::policy::SlotKind::Role {
         return err("remote admin management operates on role admins only".to_string());
     }
+    if let Err(reason) = manageable(&authd, &req.target, &current) {
+        return err(reason);
+    }
     if current.may_manage_admins {
         match last_role_manager(vault, &req.target) {
             Ok(true) => {
@@ -419,6 +462,159 @@ async fn handle_remove_admin_inner(
     match vault.remove_slot(&req.target, false).await {
         Ok(()) => {
             audit(&dir, &authd.admin, "remove-admin", &req.target, Duration::ZERO).await;
+            AdminMgmtResponse::Ok(())
+        }
+        Err(e) => err(format!("{e:#}")),
+    }
+}
+
+/// `ChangePassword`: replace the **caller's own** password (CA-only).
+///
+/// The one op a one-time credential may drive, so it authenticates through
+/// [`authenticate_for_password_change`] rather than the gated funnel. Two
+/// things keep that exemption narrow: the slot rekeyed is `authd.slot_id` —
+/// the request carries no target, so no name can redirect it — and a signing
+/// slot is refused outright.
+pub(super) async fn handle_change_password(
+    state: &Server,
+    req: &admin_proto::ChangePasswordRequest,
+    authentication: &PreparedAdminAuthentication,
+    local: bool,
+    prepared: PreparedRekey,
+) -> AdminMgmtResponse {
+    let req = req.clone();
+    state
+        .write_async(async move |state| {
+            handle_change_password_inner(state, &req, authentication, local, prepared)
+                .await
+        })
+        .await
+}
+
+/// A rekey whose KDF has run, or the reason it could not. Both new-password
+/// ops prepare off the write lock and commit under it.
+pub(super) type PreparedRekey = std::result::Result<ca_vault::PreparedRoleRekey, String>;
+
+async fn handle_change_password_inner(
+    state: &mut MutableState,
+    req: &admin_proto::ChangePasswordRequest,
+    authentication: &PreparedAdminAuthentication,
+    local: bool,
+    prepared: PreparedRekey,
+) -> AdminMgmtResponse {
+    let err = |reason: String| AdminMgmtResponse::Err { reason };
+    let Some(ca) = state.ca.as_mut() else {
+        return err("admin management must be sent to the CA host".to_string());
+    };
+    // Not the local superuser: `SO_PEERCRED` root has no keyslot, so there is
+    // no password of its own to change. Saying so beats rekeying nothing.
+    if local {
+        return err("the local control socket authenticates by unix credentials, not a \
+             password — there is nothing to change. To reset a role admin's password \
+             use `netidx admin ca admin reset-password <name>`."
+            .to_string());
+    }
+    let authd =
+        match authenticate_for_password_change(ca, &req.credential, authentication) {
+            Ok(a) => a,
+            Err(reason) => return err(safe_auth_failure(&req.credential, reason)),
+        };
+    if signing_slot(&authd) {
+        return err(format!(
+            "{:?} is a system-managed signing slot; rotate it with `netidx admin ca \
+             recovery rotate` or `netidx admin ca auto-approve --rotate`",
+            authd.admin
+        ));
+    }
+    let dir = ca.dir().to_path_buf();
+    let vault = &mut ca.vault;
+    let prepared = match prepared {
+        Ok(prepared) => prepared,
+        Err(reason) => return err(reason),
+    };
+    // The prepared rekey names the slot by the id + revision it was derived
+    // against; install refuses if either moved. Cross-check that it is *this*
+    // caller's slot, so a prepare built for someone else can never install
+    // here even if the two raced.
+    if !prepared.targets(authd.slot_id, authd.credential_revision) {
+        return err(
+            "your keyslot changed while the new password was prepared; try again"
+                .to_string(),
+        );
+    }
+    match vault.install_role_rekey(prepared).await {
+        Ok(()) => {
+            audit(&dir, &authd.admin, "change-password", &authd.admin, Duration::ZERO)
+                .await;
+            AdminMgmtResponse::Ok(())
+        }
+        Err(e) => err(format!("{e:#}")),
+    }
+}
+
+/// `ResetPassword`: replace a role admin's password with the caller's
+/// one-time key and lock the slot to `ChangePassword` (CA-only).
+pub(super) async fn handle_reset_password(
+    state: &Server,
+    req: &admin_proto::ResetPasswordRequest,
+    authentication: &PreparedAdminAuthentication,
+    local: bool,
+    prepared: PreparedRekey,
+) -> AdminMgmtResponse {
+    let req = req.clone();
+    state
+        .write_async(async move |state| {
+            handle_reset_password_inner(state, &req, authentication, local, prepared)
+                .await
+        })
+        .await
+}
+
+async fn handle_reset_password_inner(
+    state: &mut MutableState,
+    req: &admin_proto::ResetPasswordRequest,
+    authentication: &PreparedAdminAuthentication,
+    local: bool,
+    prepared: PreparedRekey,
+) -> AdminMgmtResponse {
+    let err = |reason: String| AdminMgmtResponse::Err { reason };
+    let Some(ca) = state.ca.as_mut() else {
+        return err("admin management must be sent to the CA host".to_string());
+    };
+    let authd = match authorize_admin_mgmt(ca, &req.credential, authentication, local) {
+        Ok(a) => a,
+        Err(reason) => return err(reason),
+    };
+    if netidx_admin_proto::policy::is_reserved_admin(&req.target) {
+        return err(format!(
+            "{:?} is a system-managed signing slot — rotate it with `recovery rotate` \
+             / `auto-approve --rotate`, its password cannot be reset here",
+            req.target
+        ));
+    }
+    let dir = ca.dir().to_path_buf();
+    let vault = &mut ca.vault;
+    let (kind, current) = match vault.slot_policy(&req.target) {
+        Ok(kp) => kp,
+        Err(_) => return err(format!("no admin named {:?}", req.target)),
+    };
+    if kind != netidx_admin_proto::policy::SlotKind::Role {
+        return err("remote admin management operates on role admins only".to_string());
+    }
+    // The check that makes reset safe. Unlike a rescope or a removal, this
+    // hands the caller a working credential for the target — so a manager may
+    // only reset an admin it could not gain anything by becoming.
+    if let Err(reason) = manageable(&authd, &req.target, &current) {
+        return err(reason);
+    }
+    let prepared = match prepared {
+        Ok(prepared) => prepared,
+        Err(reason) => return err(reason),
+    };
+    match vault.install_role_rekey(prepared).await {
+        Ok(()) => {
+            audit(&dir, &authd.admin, "reset-password", &req.target, Duration::ZERO)
+                .await;
             AdminMgmtResponse::Ok(())
         }
         Err(e) => err(format!("{e:#}")),
@@ -626,5 +822,129 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    fn role_admin(name: &str, policy: Policy) -> ca_vault::Authenticated {
+        ca_vault::Authenticated {
+            slot_id: uuid::Uuid::new_v4(),
+            credential_revision: 0,
+            admin: name.to_string(),
+            policy,
+            kind: netidx_admin_proto::policy::SlotKind::Role,
+            must_change: false,
+        }
+    }
+
+    /// The manage-scope rule, one capability at a time — the mirror of
+    /// `a_role_admin_can_only_grant_a_subset_of_itself` for the target's
+    /// *existing* authority. `manageable` delegates to `policy_within`, which
+    /// destructures `Policy` with no `..`, so a new capability lands in both.
+    ///
+    /// Without this, reset-password is an escalation primitive: a manager
+    /// scoped to `/eu` resets the superuser, reads the one-time key off its
+    /// own terminal, and sets a password for an account that can do anything.
+    #[test]
+    fn a_role_admin_can_only_manage_admins_within_its_own_scope() {
+        let scoped = |f: fn(&mut Policy)| {
+            let mut p = pol();
+            f(&mut p);
+            p
+        };
+        let manager = |f: fn(&mut Policy)| {
+            let mut p = pol();
+            p.may_manage_admins = true;
+            f(&mut p);
+            role_admin("eu-ops", p)
+        };
+        for (name, caller, within, beyond) in [
+            (
+                "allowed_san",
+                manager(|p| p.allowed_san = vec!["*.eu.example".into()]),
+                scoped(|p| p.allowed_san = vec!["a.eu.example".into()]),
+                scoped(|p| p.allowed_san = vec!["a.ap.example".into()]),
+            ),
+            (
+                "max_validity",
+                manager(|p| p.max_validity = Duration::from_secs(3600)),
+                scoped(|p| p.max_validity = Duration::from_secs(60)),
+                scoped(|p| p.max_validity = Duration::from_secs(7200)),
+            ),
+            (
+                "id_map_groups",
+                manager(|p| p.id_map_groups = vec!["users".into()]),
+                scoped(|p| p.id_map_groups = vec!["users".into()]),
+                scoped(|p| p.id_map_groups = vec!["wheel".into()]),
+            ),
+            (
+                "server_enroll_scopes",
+                manager(|p| p.server_enroll_scopes = vec!["/eu".into()]),
+                scoped(|p| p.server_enroll_scopes = vec!["/eu/x".into()]),
+                scoped(|p| p.server_enroll_scopes = vec!["/".into()]),
+            ),
+            (
+                "server_enroll_roles",
+                manager(|p| p.server_enroll_roles = admin_proto::Role::Resolver.into()),
+                scoped(|p| p.server_enroll_roles = admin_proto::Role::Resolver.into()),
+                scoped(|p| p.server_enroll_roles = admin_proto::Role::Ca.into()),
+            ),
+            (
+                "perms_edit_scopes",
+                manager(|p| p.perms_edit_scopes = vec!["/eu".into()]),
+                scoped(|p| p.perms_edit_scopes = vec!["/eu/x".into()]),
+                scoped(|p| p.perms_edit_scopes = vec!["/".into()]),
+            ),
+            (
+                "service_control_scopes",
+                manager(|p| p.service_control_scopes = vec!["/eu".into()]),
+                scoped(|p| p.service_control_scopes = vec!["/eu/x".into()]),
+                scoped(|p| p.service_control_scopes = vec!["/".into()]),
+            ),
+        ] {
+            assert!(
+                manageable(&caller, "target", &within).is_ok(),
+                "{name}: a target within scope must be manageable"
+            );
+            assert!(
+                manageable(&caller, "target", &beyond).is_err(),
+                "{name}: a target holding MORE than the caller must not be"
+            );
+        }
+        // Peers still manage each other: the rule bounds authority, it does
+        // not make every manager an island. Two admins with the same scope
+        // can each reset the other — which is what keeps a locked-out admin
+        // recoverable without reaching for the off-box recovery password.
+        let peer = manager(|p| p.perms_edit_scopes = vec!["/eu".into()]);
+        assert!(
+            manageable(
+                &peer,
+                "peer",
+                &scoped(|p| {
+                    p.may_manage_admins = true;
+                    p.perms_edit_scopes = vec!["/eu".into()];
+                })
+            )
+            .is_ok()
+        );
+    }
+
+    /// The founding signing credentials bypass the manage-scope rule, exactly
+    /// as they bypass no-escalation. They hold the master key, so there is no
+    /// authority above them the rule could be protecting.
+    #[test]
+    fn a_signing_slot_may_manage_any_admin() {
+        let mut recovery = role_admin("recovery", pol());
+        recovery.kind = netidx_admin_proto::policy::SlotKind::Signing;
+        let superuser = netidx_admin_proto::policy::superuser_policy();
+        assert!(manageable(&recovery, "superuser", &superuser).is_ok());
+        // …and the local control-socket superuser, which authorizes as one.
+        assert!(manageable(&local_superuser(), "superuser", &superuser).is_ok());
+        // The same target refuses a role admin that does not hold it.
+        let narrow = role_admin("eu-ops", {
+            let mut p = pol();
+            p.may_manage_admins = true;
+            p.perms_edit_scopes = vec!["/eu".into()];
+            p
+        });
+        assert!(manageable(&narrow, "superuser", &superuser).is_err());
     }
 }

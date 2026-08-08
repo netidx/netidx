@@ -3,7 +3,7 @@ use anyhow::anyhow;
 use anyhow::{Context, Result, bail};
 use clap::{Args, Subcommand};
 use netidx_admin::{
-    answer::Answerer,
+    answer::{Answerer, OneTimeSecret},
     atomic,
     csr::{self, Subject},
     ops::{
@@ -361,7 +361,8 @@ pub(crate) enum AdminCmd {
     /// add an admin keyslot (a new password that can sign)
     Add(AdminAddArgs),
     /// add a role keyslot: authenticates and may edit perms in scope, but
-    /// can NEVER unlock the CA key or sign certs
+    /// can NEVER unlock the CA key or sign certs. Prints a one-time password
+    /// the new admin must replace before it can do anything
     AddRole(AdminAddRoleArgs),
     /// revoke an admin keyslot
     Remove(AdminRemoveArgs),
@@ -369,6 +370,31 @@ pub(crate) enum AdminCmd {
     SetPolicy(AdminSetPolicyArgs),
     /// list admin keyslots and their issuance policy
     List(AdminScopeArgs),
+    /// change your own password (the current one authorizes the change)
+    ChangePassword(AdminChangePasswordArgs),
+    /// issue an admin a one-time password, revoking the one they have and
+    /// ending their sessions. They must set a new password before anything
+    /// else works
+    ResetPassword(AdminResetPasswordArgs),
+}
+
+#[derive(Args, Debug)]
+pub(crate) struct AdminChangePasswordArgs {
+    /// Read the new password from a file (never on the command line).
+    /// Prompted when omitted.
+    #[arg(long = "new-password-file")]
+    new_password_file: Option<PathBuf>,
+    #[command(flatten)]
+    auth: RemoteAuthFlags,
+}
+
+#[derive(Args, Debug)]
+pub(crate) struct AdminResetPasswordArgs {
+    /// The admin whose password to reset.
+    #[arg(value_name = "NAME")]
+    name: String,
+    #[command(flatten)]
+    auth: RemoteAuthFlags,
 }
 
 #[derive(Args, Debug)]
@@ -459,10 +485,6 @@ pub(crate) struct AdminAddRoleArgs {
     /// Name of the new role admin.
     #[arg(value_name = "NAME")]
     name: String,
-    /// Read the new role admin's initial password from a file (never on the
-    /// command line).
-    #[arg(long = "new-password-file")]
-    new_password_file: PathBuf,
     #[command(flatten)]
     policy: PolicyFlags,
     #[command(flatten)]
@@ -1534,6 +1556,14 @@ fn print_admin_list(admins: &[AdminInfo]) {
             SlotKind::Signing => "signing",
             SlotKind::Role => "role",
         };
+        // Worth a column of its own: an admin holding a one-time password can
+        // do nothing until they replace it, which is otherwise indistinguishable
+        // from a working admin that just isn't logging in.
+        let tier = if info.must_change {
+            format!("{tier}, must change password")
+        } else {
+            tier.to_string()
+        };
         // Destructured with no `..`, so a new capability can't be added to
         // Policy without an operator ever being shown it.
         let Policy {
@@ -1610,6 +1640,8 @@ fn admin(cmd: AdminCmd) -> Result<()> {
         AdminCmd::SetPolicy(a) => admin_set_policy(a),
         AdminCmd::Remove(a) => admin_remove(a),
         AdminCmd::List(a) => admin_list(a),
+        AdminCmd::ChangePassword(a) => admin_change_password(a),
+        AdminCmd::ResetPassword(a) => admin_reset_password(a),
     }
 }
 
@@ -1636,10 +1668,66 @@ fn admin_add_role(a: AdminAddRoleArgs) -> Result<()> {
         &cn,
         domain.as_deref(),
     ))?;
-    let new_password = read_new_password(&a.new_password_file)?;
-    rt.block_on(roster_ops::add_role_admin(&target, &a.name, &new_password, policy))?;
+    let password = rt.block_on(roster_ops::add_role_admin(&target, &a.name, policy))?;
     report_admin_target("added role admin", &a.name, &target);
+    rt.block_on(show_one_time_password(&mut ans, &a.name, &password))?;
     Ok(())
+}
+
+/// `ca admin change-password` — replace your own password. The credential you
+/// authenticate with is the one being replaced, which is why this works while
+/// a one-time password has everything else refused.
+fn admin_change_password(a: AdminChangePasswordArgs) -> Result<()> {
+    let mut ans = a.auth.answerer()?;
+    let server = a.auth.server_addr()?;
+    let rt = runtime()?;
+    let target = rt.block_on(ops::resolve_admin_target(
+        &mut ans,
+        server,
+        a.auth.ca_dir.clone(),
+        a.auth.admin.clone(),
+        None,
+    ))?;
+    let new_password =
+        a.new_password_file.as_deref().map(read_new_password).transpose()?;
+    rt.block_on(roster_ops::change_password(&mut ans, &target, new_password))?;
+    println!("password changed");
+    Ok(())
+}
+
+/// `ca admin reset-password <name>` — issue `name` a one-time password. Ends
+/// their sessions, so it doubles as "lock this admin out now".
+fn admin_reset_password(a: AdminResetPasswordArgs) -> Result<()> {
+    let mut ans = a.auth.answerer()?;
+    let server = a.auth.server_addr()?;
+    let rt = runtime()?;
+    let target = rt.block_on(ops::resolve_admin_target(
+        &mut ans,
+        server,
+        a.auth.ca_dir.clone(),
+        a.auth.admin.clone(),
+        None,
+    ))?;
+    let password = rt.block_on(roster_ops::reset_password(&target, &a.name))?;
+    report_admin_target("reset the password for admin", &a.name, &target);
+    rt.block_on(show_one_time_password(&mut ans, &a.name, &password))?;
+    Ok(())
+}
+
+/// Show a one-time password through the shown-once seam, so it gets the same
+/// boxed treatment (and the same "there is no second chance" framing) as the
+/// CA recovery password.
+async fn show_one_time_password(
+    ans: &mut dyn Answerer,
+    admin: &str,
+    password: &str,
+) -> Result<()> {
+    ca_setup::show_generated_password(
+        ans,
+        OneTimeSecret::AdminPassword { admin: admin.to_string() },
+        password,
+    )
+    .await
 }
 
 /// `ca admin set-policy <name>` — replace an admin's policy wholesale.

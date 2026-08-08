@@ -71,6 +71,7 @@ fn scoped_admin(kind: SlotKind, allowed_san: &[&str]) -> crate::ca_vault::Authen
     crate::ca_vault::Authenticated {
         slot_id: uuid::Uuid::new_v4(),
         credential_revision: 0,
+        must_change: false,
         admin: "eu-ops".to_string(),
         policy: netidx_admin_proto::policy::Policy {
             allowed_san: allowed_san.iter().map(|s| s.to_string()).collect(),

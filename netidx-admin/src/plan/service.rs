@@ -122,6 +122,7 @@ pub async fn offer(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::answer::OneTimeSecret;
 
     #[test]
     fn service_need_merge_ranks_system_over_user_over_none() {
@@ -216,7 +217,11 @@ mod tests {
         fn progress(&mut self, _p: crate::answer::Progress) {}
         fn note(&mut self, _m: &str) {}
         fn warn(&mut self, _m: &str) {}
-        async fn show_recovery_password(&mut self, _p: &str) -> Result<()> {
+        async fn show_one_time_secret(
+            &mut self,
+            _secret: OneTimeSecret,
+            _p: &str,
+        ) -> Result<()> {
             Ok(())
         }
     }

@@ -449,7 +449,7 @@ pub(super) async fn rotate_recovery(
         Ok(captured) => captured,
         Err(e) => return err(format!("{e:#}")),
     };
-    let new_pw = ca_vault::gen_recovery_password();
+    let new_pw = crate::password::gen_crockford_password();
     let worker_new_pw = new_pw.clone();
     let prepared = match run_signing(signs, move || {
         snapshot.prepare_signing_replacement(

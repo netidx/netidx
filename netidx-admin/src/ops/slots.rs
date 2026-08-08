@@ -179,7 +179,7 @@ pub async fn auto_approve(
         CaAccess::Offline { config, lock, .. } => {
             let insecure_no_tpm = ca_setup::tpm_gate(ans, insecure_no_tpm).await?;
             let typed = ans.secret(Field::RecoveryPassword, None).await?;
-            let recovery = ca_vault::normalize_recovery_password(typed.as_str());
+            let recovery = crate::password::normalize_crockford_password(typed.as_str());
             let mut cadir = CaDir::open(lock.clone(), &ca_dir).await.context(
                 "setting up autorenew needs exclusive access; the admin server must be stopped",
             )?;
@@ -269,7 +269,7 @@ pub async fn recovery_rotate(
                     keytab.display()
                 )
             })?;
-            let new_pw = ca_vault::gen_recovery_password();
+            let new_pw = crate::password::gen_crockford_password();
             cadir
                 .vault
                 .replace_signing_slot(
@@ -322,7 +322,7 @@ pub async fn recover_ca(
     lock.require_descendant(&ca_dir)?;
     lock.require_contained(&config_path)?;
     let typed = ans.secret(Field::RecoveryPassword, None).await?;
-    let recovery = ca_vault::normalize_recovery_password(typed.as_str());
+    let recovery = crate::password::normalize_crockford_password(typed.as_str());
     let insecure_no_tpm = ca_setup::tpm_gate(ans, insecure_no_tpm).await?;
     let autorenew_keytab = offline_ca::autorenew_keytab_path()?;
     recover_ca_with_password_and_lock(
@@ -1189,7 +1189,7 @@ mod tests {
         };
         let ca = Ca::init(&params, None).unwrap();
         let key = std::fs::read(ca_dir.join("private.key")).unwrap();
-        let recovery = ca_vault::gen_recovery_password();
+        let recovery = crate::password::gen_crockford_password();
         let old_autorenew = "old-machine-sealed-autorenew".to_string();
         let mut vault = CAVault::new(ca_dir.clone());
         vault
@@ -1341,7 +1341,7 @@ mod tests {
         Ca::init(&params, None).unwrap();
         let key = std::fs::read(dir.join("private.key")).unwrap();
         let mut vault = CAVault::new(dir.to_path_buf());
-        let recovery_pw = ca_vault::gen_recovery_password();
+        let recovery_pw = crate::password::gen_crockford_password();
         vault
             .create(
                 &key,

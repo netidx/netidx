@@ -91,6 +91,9 @@ pub mod offline_ca;
 /// revocation, admin roster, service control, and permissions — that the
 /// strict CLI, the TUI, and Atlas all drive.
 pub mod ops;
+/// Machine-generated passwords in a transcribable alphabet. Portable — only
+/// *storing* one needs the vault.
+pub mod password;
 pub mod paths;
 pub mod perms;
 /// The CA's authoritative copy of each resolver cluster's permissions.

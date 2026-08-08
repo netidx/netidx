@@ -586,7 +586,7 @@ mod tests {
     use super::*;
     use crate::{
         admin_proto::Secret,
-        answer::{AdminDomainChoice, AdminDomainOption, Progress},
+        answer::{AdminDomainChoice, AdminDomainOption, OneTimeSecret, Progress},
         fingerprint::Fingerprint,
         provenance::InstallRole,
         template::{RenderedTemplate, TlsCopyJob},
@@ -676,7 +676,11 @@ mod tests {
 
         fn warn(&mut self, _message: &str) {}
 
-        async fn show_recovery_password(&mut self, _password: &str) -> Result<()> {
+        async fn show_one_time_secret(
+            &mut self,
+            _secret: OneTimeSecret,
+            _password: &str,
+        ) -> Result<()> {
             unreachable!()
         }
     }

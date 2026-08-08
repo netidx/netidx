@@ -567,6 +567,12 @@ pub async fn login(
             idle_timeout_secs,
         }),
         admin_proto::LoginResponse::Err { reason } => bail!("login refused: {reason}"),
+        // Typed, not a message: the caller has to act on this (open a
+        // change-password screen, tell the operator what to run), and the
+        // password it just proved is the credential that change will use.
+        admin_proto::LoginResponse::PasswordChangeRequired { admin } => {
+            return Err(anyhow::Error::new(crate::ops::PasswordChangeRequired { admin }));
+        }
     }
 }
 
@@ -966,9 +972,9 @@ pub async fn edit_id_map(
     }
 }
 
-/// Admin → CA (pinned): mint a new role admin `name` with `policy` and
-/// `new_password`. The server gates on the caller's management authority and
-/// enforces `policy ⊆ caller`.
+/// Admin → CA (pinned): mint a new role admin `name` with `policy` and the
+/// one-time `new_password` the caller generated. The server gates on the
+/// caller's management authority and enforces `policy ⊆ caller`.
 #[allow(clippy::too_many_arguments)]
 pub async fn add_role_admin(
     addr: SocketAddr,
@@ -987,6 +993,61 @@ pub async fn add_role_admin(
             name: name.to_string(),
             new_password: admin_proto::Secret(new_password.to_string()),
             policy,
+            must_change: true,
+        }),
+    )
+    .await?;
+    match admin_proto::read_msg::<_, AdminMgmtResponse>(&mut tls).await? {
+        AdminMgmtResponse::Ok(()) => Ok(()),
+        AdminMgmtResponse::Err { reason } => {
+            Err(admin_refusal(expected, &credential, "the CA refused", reason))
+        }
+    }
+}
+
+/// Admin → CA (pinned): replace the caller's own password. The request names
+/// no target — the slot changed is the one `credential` authenticates.
+pub async fn change_password(
+    addr: SocketAddr,
+    kind: NodeKind,
+    expected: &CaIdentity,
+    credential: admin_proto::AdminCredential,
+    new_password: &str,
+) -> Result<()> {
+    let mut tls = connect_ca_pinned(addr, kind, expected).await?;
+    admin_proto::write_msg(
+        &mut tls,
+        &Request::ChangePassword(admin_proto::ChangePasswordRequest {
+            credential: credential.clone(),
+            new_password: admin_proto::Secret(new_password.to_string()),
+        }),
+    )
+    .await?;
+    match admin_proto::read_msg::<_, AdminMgmtResponse>(&mut tls).await? {
+        AdminMgmtResponse::Ok(()) => Ok(()),
+        AdminMgmtResponse::Err { reason } => {
+            Err(admin_refusal(expected, &credential, "the CA refused", reason))
+        }
+    }
+}
+
+/// Admin → CA (pinned): replace role admin `target`'s password with the
+/// one-time `new_password` the caller generated, evicting its sessions.
+pub async fn reset_password(
+    addr: SocketAddr,
+    kind: NodeKind,
+    expected: &CaIdentity,
+    credential: admin_proto::AdminCredential,
+    target: &str,
+    new_password: &str,
+) -> Result<()> {
+    let mut tls = connect_ca_pinned(addr, kind, expected).await?;
+    admin_proto::write_msg(
+        &mut tls,
+        &Request::ResetPassword(admin_proto::ResetPasswordRequest {
+            credential: credential.clone(),
+            target: target.to_string(),
+            new_password: admin_proto::Secret(new_password.to_string()),
         }),
     )
     .await?;

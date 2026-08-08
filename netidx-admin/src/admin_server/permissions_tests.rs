@@ -153,6 +153,7 @@ fn perms_reads_and_edits_share_the_same_scope_authorization() {
     let role = ca_vault::Authenticated {
         slot_id: uuid::Uuid::new_v4(),
         credential_revision: 0,
+        must_change: false,
         admin: "eu-ops".into(),
         policy: netidx_admin_proto::policy::Policy {
             allowed_san: vec![],
