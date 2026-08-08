@@ -3509,6 +3509,62 @@ mod tests {
         );
     }
 
+    /// `p` on the roster is the reset, and it must target the *selected*
+    /// admin — the destructive roster keys all read from the cursor, so a
+    /// mis-wired one would reset whoever happened to be first in the list.
+    /// Reserved signing slots render as `RowKey::None`, which is what keeps
+    /// the key from ever aiming at `recovery` / `autorenew`.
+    #[test]
+    fn the_roster_reset_key_targets_the_selected_admin_and_never_a_signing_slot() {
+        let mut s = RemoteState::new();
+        let target = PanelTarget::Remote(a_conn("10.0.0.1:4565"));
+        s.target = Some(target.clone());
+        s.screen = Screen::Panel(Panel::Roster);
+        s.rows = vec![
+            PanelRow {
+                text: "recovery [signing]".to_string(),
+                key: RowKey::None,
+                detail: vec![],
+            },
+            PanelRow {
+                text: "eu-ops [role]".to_string(),
+                key: RowKey::Name("eu-ops".to_string()),
+                detail: vec![],
+            },
+        ];
+
+        s.list.select(Some(1));
+        match s.on_key_roster(KeyCode::Char('p'), target.clone()) {
+            Some(Action::Remote(RemoteAction::ResetPassword { name, .. })) => {
+                assert_eq!(name, "eu-ops")
+            }
+            other => {
+                panic!("expected a reset for the selected admin: {:?}", other.is_some())
+            }
+        }
+
+        // The signing slot yields no action at all.
+        s.list.select(Some(0));
+        assert!(s.on_key_roster(KeyCode::Char('p'), target).is_none());
+        assert!(Panel::Roster.keys().contains("reset-password"));
+    }
+
+    /// A login the CA answered "change your password first" is not a failed
+    /// connect: no session exists, so no target is set, and the queued
+    /// connection drives one change-password op — exactly one, or the
+    /// operator gets asked for a new password on every pass of the event loop.
+    #[test]
+    fn a_must_change_login_queues_exactly_one_password_change() {
+        let mut s = RemoteState::new();
+        let conn = a_conn("10.0.0.1:4565");
+        s.apply(RemoteUpdate::MustChangePassword(conn.clone()));
+
+        assert!(s.target.is_none(), "no session was established");
+        assert!(matches!(s.screen, Screen::AdminDomains));
+        assert_eq!(s.take_change_password().map(|c| c.admin), Some(conn.admin));
+        assert!(s.take_change_password().is_none(), "it must not fire twice");
+    }
+
     /// The Servers panel with two rows: the CA, open, and a satellite still
     /// inside a 45-minute join gate.
     fn a_servers_panel() -> RemoteState {
