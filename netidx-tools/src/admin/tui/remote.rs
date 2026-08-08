@@ -1439,7 +1439,16 @@ fn roster_row(a: &netidx_admin_proto::policy::AdminInfo) -> PanelRow {
         SlotKind::Role => "role",
     };
     let reserved = is_reserved_admin(&a.admin);
-    let tag = if reserved { "  (system slot)" } else { "" };
+    let tag = if reserved {
+        "  (system slot)"
+    } else if a.must_change {
+        // On the list line, not only in the detail pane: an admin holding a
+        // one-time password can do nothing until they replace it, and that is
+        // indistinguishable from a working admin who simply isn't logging in.
+        "  (must set a password)"
+    } else {
+        ""
+    };
     let key = if reserved { RowKey::None } else { RowKey::Name(a.admin.clone()) };
     // The list line is just identity; the granted authorities go in the detail
     // pane below, spelled out rather than crammed into a cryptic one-liner.
@@ -1484,7 +1493,17 @@ fn policy_detail(a: &netidx_admin_proto::policy::AdminInfo) -> Vec<(String, Stri
     let scope =
         |v: &[String]| if v.is_empty() { "(none)".to_string() } else { v.join(", ") };
     let yesno = |b: bool| if b { "yes".to_string() } else { "no".to_string() };
-    vec![
+    let mut detail = Vec::new();
+    if a.must_change {
+        // First line, above the grants: none of them are in force yet.
+        detail.push((
+            "Status".to_string(),
+            "holds a one-time password — every command is refused until they set \
+             one of their own"
+                .to_string(),
+        ));
+    }
+    detail.extend([
         ("May issue certs for (SAN)".to_string(), scope(allowed_san)),
         (
             "Max validity it may grant".to_string(),
@@ -1496,7 +1515,8 @@ fn policy_detail(a: &netidx_admin_proto::policy::AdminInfo) -> Vec<(String, Stri
         ("Manage other admins".to_string(), yesno(*may_manage_admins)),
         ("Edit permissions under".to_string(), scope(perms_edit_scopes)),
         ("Control services under".to_string(), scope(service_control_scopes)),
-    ]
+    ]);
+    detail
 }
 
 /// The `$EDITOR` validator for a policy JSON blob: it must parse as a `Policy`;
@@ -3507,6 +3527,35 @@ mod tests {
             out.contains("Control services under"),
             "service-scope label missing: {out:?}"
         );
+    }
+
+    /// An admin holding a one-time password is inert until they replace it,
+    /// and that is indistinguishable from a working admin who simply is not
+    /// logging in — so the roster has to say so on the row, not only in the
+    /// detail pane. The strict CLI's `ca admin list` says it too; the two
+    /// views of one roster disagreeing is how an operator gets misled.
+    #[test]
+    fn the_roster_says_which_admins_still_hold_a_one_time_password() {
+        use netidx_admin_proto::policy::{AdminInfo, SlotKind, superuser_policy};
+        let info = |admin: &str, must_change| AdminInfo {
+            slot_id: Default::default(),
+            admin: admin.to_string(),
+            kind: SlotKind::Role,
+            policy: superuser_policy(),
+            must_change,
+        };
+
+        let fresh = roster_row(&info("ops1", true));
+        assert!(fresh.text.contains("must set a password"), "{:?}", fresh.text);
+        assert_eq!(
+            fresh.detail.first().map(|(label, _)| label.as_str()),
+            Some("Status"),
+            "the reason must lead the detail pane, above grants not yet in force"
+        );
+
+        let settled = roster_row(&info("ops2", false));
+        assert!(!settled.text.contains("must set"), "{:?}", settled.text);
+        assert!(settled.detail.iter().all(|(label, _)| label != "Status"));
     }
 
     /// `p` on the roster is the reset, and it must target the *selected*
