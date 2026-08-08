@@ -143,7 +143,6 @@ struct SecretSlot {
 impl SecretSlot {
     /// A slot with no supplied value; a `secret()` call on it errors, naming
     /// `flags`. For a purpose this command doesn't accept a secret for.
-    #[cfg(unix)]
     fn none(flags: (&'static str, &'static str)) -> Self {
         SecretSlot { value: None, flags }
     }
@@ -185,6 +184,11 @@ const RECOVERY_FLAGS: (&str, &str) =
 // The single-secret flag for commands that take exactly one password (remote
 // admin, `ca init`, `host tls join`) — no collapse is possible with one.
 const PASSWORD_FLAGS: (&str, &str) = ("--password-file", "--password-stdin");
+// The replacement an admin sets for its own password. Its own slot, never
+// sharing with `admin`: change-password is the one command that needs two
+// distinct passwords at once, and collapsing them would let the old password
+// silently become the new one.
+const NEW_PASSWORD_FLAGS: (&str, &str) = ("--new-password-file", "--new-password-stdin");
 
 /// The strict-CLI answerer: three purpose-scoped secret slots plus the CA glyph
 /// the operator obtained out of band (a presented identity must match it — there
@@ -192,6 +196,7 @@ const PASSWORD_FLAGS: (&str, &str) = ("--password-file", "--password-stdin");
 pub(crate) struct FlagAnswerer {
     key: SecretSlot,
     admin: SecretSlot,
+    new_admin: SecretSlot,
     recovery: SecretSlot,
     accept_glyph: Option<Fingerprint>,
 }
@@ -208,9 +213,22 @@ impl FlagAnswerer {
         FlagAnswerer {
             key: SecretSlot { value: password.clone(), flags: PASSWORD_FLAGS },
             admin: SecretSlot { value: password.clone(), flags: PASSWORD_FLAGS },
+            // Deliberately empty: a command wanting a *new* password supplies
+            // it through `with_new_password`. Defaulting it to `password`
+            // would make `change-password --password-file p` set the password
+            // it just authenticated with.
+            new_admin: SecretSlot::none(NEW_PASSWORD_FLAGS),
             recovery: SecretSlot { value: password, flags: PASSWORD_FLAGS },
             accept_glyph,
         }
+    }
+
+    /// Supply the replacement password for `ca admin change-password`, the one
+    /// command that needs a second, distinct secret. Separate from the
+    /// constructors so no other command can accidentally acquire one.
+    pub(crate) fn with_new_password(mut self, new: Option<Zeroizing<String>>) -> Self {
+        self.new_admin = SecretSlot { value: new, flags: NEW_PASSWORD_FLAGS };
+        self
     }
 
     /// The offline CA-vault answerer: the single secret is the recovery password
@@ -221,6 +239,7 @@ impl FlagAnswerer {
         FlagAnswerer {
             key: SecretSlot { value: recovery.clone(), flags: RECOVERY_FLAGS },
             admin: SecretSlot::none(ADMIN_FLAGS),
+            new_admin: SecretSlot::none(NEW_PASSWORD_FLAGS),
             recovery: SecretSlot { value: recovery, flags: RECOVERY_FLAGS },
             accept_glyph: None,
         }
@@ -240,10 +259,22 @@ impl FlagAnswerer {
         Ok(FlagAnswerer {
             key: SecretSlot::read(key_file, key_stdin, KEY_FLAGS)?,
             admin: SecretSlot::read(admin_file, admin_stdin, ADMIN_FLAGS)?,
+            // An install creates the founding admin; it never replaces a
+            // password, so there is nothing to supply here.
+            new_admin: SecretSlot::none(NEW_PASSWORD_FLAGS),
             recovery: SecretSlot::read(recovery_file, recovery_stdin, RECOVERY_FLAGS)?,
             accept_glyph,
         })
     }
+}
+
+/// Read the replacement password for `ca admin change-password` from its own
+/// file/stdin flags (never argv).
+pub(crate) fn read_new_password_secret(
+    file: Option<&Path>,
+    stdin: bool,
+) -> Result<Option<Zeroizing<String>>> {
+    read_secret(file, stdin, NEW_PASSWORD_FLAGS)
 }
 
 /// Parse an out-of-band `--accept-glyph` fingerprint (if present).
@@ -337,6 +368,7 @@ impl Answerer for FlagAnswerer {
         let slot = match field {
             Field::KeyPassword => &self.key,
             Field::AdminPassword | Field::AdminPasswordConfirm => &self.admin,
+            Field::NewAdminPassword => &self.new_admin,
             Field::RecoveryPassword => &self.recovery,
             other => {
                 bail!("internal error: secret() requested for non-secret field {other:?}")
@@ -423,5 +455,39 @@ impl Answerer for FlagAnswerer {
         }
         out.flush().context("flushing a one-time password")?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `change-password` is the one command holding two distinct passwords at
+    /// once. If its new-password slot shared the `--password-file` value the
+    /// way `key` / `admin` / `recovery` do, the command would "succeed" by
+    /// setting the password it just authenticated with — a no-op that reports
+    /// success, which is worse than an error.
+    #[tokio::test]
+    async fn the_new_password_never_collapses_into_the_authenticating_one() {
+        let current = Some(Zeroizing::new("current-pw".to_string()));
+        let mut ans = FlagAnswerer::single(current.clone(), None);
+
+        // Without an explicit new password, asking for one names its own flag
+        // rather than quietly handing back the current password.
+        let e = ans.secret(Field::NewAdminPassword, None).await.unwrap_err();
+        let msg = format!("{e:#}");
+        assert!(msg.contains("--new-password-file"), "{msg}");
+        assert!(!msg.contains("--password-file"), "cited the wrong flag: {msg}");
+        // The authenticating password is still available, from its own flag.
+        assert_eq!(ans.secret(Field::AdminPassword, None).await.unwrap().0, "current-pw");
+
+        // With one supplied, the two stay distinct.
+        let mut ans = FlagAnswerer::single(current, None)
+            .with_new_password(Some(Zeroizing::new("replacement-pw".to_string())));
+        assert_eq!(ans.secret(Field::AdminPassword, None).await.unwrap().0, "current-pw");
+        assert_eq!(
+            ans.secret(Field::NewAdminPassword, None).await.unwrap().0,
+            "replacement-pw"
+        );
     }
 }

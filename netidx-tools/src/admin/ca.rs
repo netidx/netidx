@@ -384,6 +384,13 @@ pub(crate) struct AdminChangePasswordArgs {
     /// Prompted when omitted.
     #[arg(long = "new-password-file")]
     new_password_file: Option<PathBuf>,
+    /// Read the new password from stdin. Only usable when the *current*
+    /// password comes from a file — one stdin cannot carry two secrets.
+    #[arg(
+        long = "new-password-stdin",
+        conflicts_with_all = ["new_password_file"]
+    )]
+    new_password_stdin: bool,
     #[command(flatten)]
     auth: RemoteAuthFlags,
 }
@@ -1590,14 +1597,6 @@ fn print_admin_list(admins: &[AdminInfo]) {
     }
 }
 
-/// Read the new role admin's initial password from `--new-password-file` (never
-/// on argv) into a [`Secret`].
-fn read_new_password(path: &Path) -> Result<admin_proto::Secret> {
-    let s = std::fs::read_to_string(path)
-        .with_context(|| format!("reading --new-password-file {}", path.display()))?;
-    Ok(admin_proto::Secret(s.trim_end_matches(['\n', '\r']).to_string()))
-}
-
 /// The CA CN + domain that seed the `*.<domain>` SAN suggestion: a remote CA
 /// reports its domain in the pinned identity; a local CA is read off its own
 /// certificate.
@@ -1678,7 +1677,11 @@ fn admin_add_role(a: AdminAddRoleArgs) -> Result<()> {
 /// authenticate with is the one being replaced, which is why this works while
 /// a one-time password has everything else refused.
 fn admin_change_password(a: AdminChangePasswordArgs) -> Result<()> {
-    let mut ans = a.auth.answerer()?;
+    let new_password = super::answer_cli::read_new_password_secret(
+        a.new_password_file.as_deref(),
+        a.new_password_stdin,
+    )?;
+    let mut ans = a.auth.answerer()?.with_new_password(new_password);
     let server = a.auth.server_addr()?;
     let rt = runtime()?;
     let target = rt.block_on(ops::resolve_admin_target(
@@ -1688,9 +1691,9 @@ fn admin_change_password(a: AdminChangePasswordArgs) -> Result<()> {
         a.auth.admin.clone(),
         None,
     ))?;
-    let new_password =
-        a.new_password_file.as_deref().map(read_new_password).transpose()?;
-    rt.block_on(roster_ops::change_password(&mut ans, &target, new_password))?;
+    // `None`: the answerer holds the new password (or will prompt for it), so
+    // it is read once, in one place, whichever way it was supplied.
+    rt.block_on(roster_ops::change_password(&mut ans, &target, None))?;
     println!("password changed");
     Ok(())
 }
