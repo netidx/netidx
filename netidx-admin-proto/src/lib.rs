@@ -3,7 +3,7 @@
 //!
 //! The types are cross-platform: a Windows node speaks this to a unix admin
 //! server. The outer 4-byte big-endian length bounds allocation and isolates
-//! one message; Pack's own length wrapping provides field evolution.
+//! one message.
 //!
 //! A connection is: TLS accept, [`ClientHello`] / [`ServerHello`]
 //! exchange, then exactly **one** [`Request`] and its response. One
@@ -13,26 +13,21 @@
 //!
 //! # Protocol evolution
 //!
-//! [`PROTOCOL_VERSION`] is an epoch, not a release number. Peers require exact
-//! equality before a request (and therefore before a credential) is sent. Keep
-//! the epoch unchanged for compatible extensions:
+//! This protocol has never shipped, so **no compatibility is maintained**.
+//! There is no older peer to accommodate: change a message into whatever
+//! shape is right and bump [`PROTOCOL_VERSION`], which peers compare for
+//! exact equality before a request — and therefore before a credential — is
+//! sent. A mismatch is refused at the hello with both versions named.
 //!
-//! - never reorder fields; append fields and mark each new field
-//!   `#[pack(default)]` so a newer decoder accepts an older message;
-//! - never reuse an enum tag; every variant has an explicit tag, and a new
-//!   variant must use a new tag;
-//! - send a new enum variant only when the exchange itself proves peer
-//!   support (for example, it responds to a new request); otherwise bump the
-//!   epoch;
-//! - retain deprecated fields in their original positions, and reject
-//!   conflicting old/new replacement fields while both exist;
-//! - choose conservative defaults: absence must not grant authority or enable
-//!   a security-sensitive behavior.
+//! That means no defaulted fields standing in for an encoding nobody ever
+//! produced, no deprecated fields held in place, and no fixtures asserting
+//! that last month's layout still decodes. Every field in a message is a
+//! field the sender wrote, and a message that does not decode in full is an
+//! error rather than a shape half-filled with defaults.
 //!
-//! Increment the epoch for removals, field reordering, tag changes, changed
-//! semantics, or a security rule that requires an older receiver to understand
-//! new information. A hard break intentionally requires upgrading admin
-//! servers, clients, and renewal daemons together.
+//! Reconsider all of this at the first release: from then on there are peers
+//! in the field, an epoch bump is an outage, and appending with defaults
+//! becomes the cheap way to evolve rather than a lie about history.
 
 use anyhow::{Context, Result, bail};
 use enumflags2::{BitFlags, bitflags};
@@ -678,17 +673,14 @@ pub struct RevokeRequest {
 pub struct RevokeOk {
     /// Non-fatal revocation/signing follow-ups.
     #[serde(default)]
-    #[pack(default)]
     pub warnings: Vec<String>,
     /// The immediate CRL-distribution operation, when this response came
     /// from a protocol-v6 CA.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[pack(default)]
     pub operation_id: Option<OperationId>,
     /// One deterministic result for every registered admin server that
     /// should enforce the new CRL.
     #[serde(default)]
-    #[pack(default)]
     pub peers: Vec<PeerResult>,
 }
 
@@ -759,13 +751,11 @@ pub struct SignRequest {
     /// against the allowed set in their policy. Empty ⇒ don't
     /// register this identity on the admin domain's id-map hosts.
     #[serde(default)]
-    #[pack(default)]
     pub id_map_groups: Vec<String>,
     /// Restore-time replacement of this exact still-live certificate serial.
     /// The approving administrator sees and authorizes the replacement; the
     /// CA issues the new key and immediately revokes this serial.
     #[serde(default)]
-    #[pack(default)]
     pub replaces_serial: Option<u64>,
 }
 
@@ -797,7 +787,6 @@ pub struct EnrollRequest {
     /// revokes all of its live serving certificates. Never accepted for the
     /// active CA.
     #[serde(default)]
-    #[pack(default)]
     pub replaces: Option<AdminServerId>,
     /// This host's resolver config as it was installed, verbatim.
     ///
@@ -813,7 +802,6 @@ pub struct EnrollRequest {
     ///
     /// `None` from a host with no resolver.
     #[serde(default)]
-    #[pack(default)]
     pub resolver_config: Option<netidx::resolver_server::config::file::Config>,
 }
 
@@ -833,7 +821,6 @@ pub struct EnrollmentRequest {
     pub resolver_members: Vec<ResolverAddr>,
     pub cluster: ResolverClusterPlacement,
     #[serde(default)]
-    #[pack(default)]
     pub replaces: Option<AdminServerId>,
     /// This host's resolver config as it was installed, verbatim.
     ///
@@ -849,7 +836,6 @@ pub struct EnrollmentRequest {
     ///
     /// `None` from a host with no resolver.
     #[serde(default)]
-    #[pack(default)]
     pub resolver_config: Option<netidx::resolver_server::config::file::Config>,
 }
 
@@ -868,11 +854,9 @@ pub struct SignOk {
     /// this response is valid regardless; the client shows these to
     /// the operator.
     #[serde(default)]
-    #[pack(default)]
     pub warnings: Vec<String>,
     /// Present when issuance triggered an id-map fanout.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[pack(default)]
     pub operation_id: Option<OperationId>,
 }
 
@@ -900,11 +884,9 @@ pub struct EnqueueRequest {
     /// whose policy covers the requested resolver cluster base and roles; the request code
     /// ceremony is the same as any queued request.
     #[serde(default)]
-    #[pack(default)]
     pub enrollment: Option<EnrollmentRequest>,
     /// Restore-time replacement of an exact still-live leaf certificate.
     #[serde(default)]
-    #[pack(default)]
     pub replaces_serial: Option<u64>,
 }
 
@@ -964,24 +946,20 @@ pub struct QueueEntry {
     /// no glyph matching needed; safe to batch-approve (and what
     /// `autorenew` approves).
     #[serde(default)]
-    #[pack(default)]
     pub verified_renewal: bool,
     /// `Some` ⇒ an admin-server enrollment (see
     /// [`EnqueueRequest::enroll_listen`]): approval signs the reserved
     /// [`SERVING_SAN`] and requires scoped server-enrollment authority; id-map groups
     /// don't apply.
     #[serde(default)]
-    #[pack(default)]
     pub enrollment: Option<EnrollmentRequest>,
     /// Authoritative base of the requested resolver cluster. For `Create` this
     /// repeats the requested base; for `Join` the CA resolves the stable resolver cluster
     /// ID through its map so approval UIs can show both identity and scope.
     #[serde(default)]
-    #[pack(default)]
     pub cluster_base: Option<String>,
     /// Exact live leaf serial replaced when this restore request is approved.
     #[serde(default)]
-    #[pack(default)]
     pub replaces_serial: Option<u64>,
 }
 
@@ -1000,10 +978,8 @@ pub struct ApproveRequest {
 #[derive(Debug, Clone, Serialize, Deserialize, Pack)]
 pub struct ApproveOk {
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[pack(default)]
     pub operation_id: Option<OperationId>,
     #[serde(default)]
-    #[pack(default)]
     pub warnings: Vec<String>,
 }
 
@@ -1235,7 +1211,6 @@ pub struct AdminServerEntry {
     /// records what the host said it is doing, not what the CA told it to
     /// do, so an operator can see a push that never landed.
     #[serde(default)]
-    #[pack(default)]
     pub reported_read_gate: Option<ReadGate>,
     /// The id-map model version this host last applied, or `None` if it holds
     /// no id-map or has never applied anything. Like `reported_read_gate` this
@@ -1243,20 +1218,17 @@ pub struct AdminServerEntry {
     /// a version below the CA's model is a host that missed a change, and it
     /// is the CA noticing that, rather than an operator, which repairs it.
     #[serde(default)]
-    #[pack(default)]
     pub reported_id_map_version: Option<u64>,
     /// The perms model version this member's document is at. Below its
     /// cluster's model means it missed an edit — and, before the CA kept a
     /// model at all, meant it could be read back as the truth for the next
     /// one.
     #[serde(default)]
-    #[pack(default)]
     pub reported_perms_version: Option<u64>,
     /// The version of the CA-rendered resolver config this host's file is at.
-    /// `None` when it runs no resolver, or when its config predates the CA
-    /// keeping one.
+    /// `None` when it runs no resolver, or when the CA has rendered none for
+    /// it yet.
     #[serde(default)]
-    #[pack(default)]
     pub reported_config_version: Option<u64>,
     /// Whether the resolver facts this host last reported disagreed with the
     /// cluster the CA granted it — a stale document, a hand edit, or a config
@@ -1268,7 +1240,6 @@ pub struct AdminServerEntry {
     /// rejecting, because a host's reported facts are never adopted into the
     /// map in the first place.
     #[serde(default)]
-    #[pack(default)]
     pub reported_config_drift: bool,
     /// The version of the config the CA has rendered for this server, against
     /// which `reported_config_version` is compared.
@@ -1278,7 +1249,6 @@ pub struct AdminServerEntry {
     /// behind" answerable by anyone who can read the map, in one round trip
     /// and with no privileged call.
     #[serde(default)]
-    #[pack(default)]
     pub config_version: Option<u64>,
 }
 
@@ -1331,7 +1301,6 @@ pub struct ResolverClusterEntry {
     /// call. `None` means no perms edit has ever been made for this cluster,
     /// which is not the same as every member being current.
     #[serde(default)]
-    #[pack(default)]
     pub perms_version: Option<u64>,
 }
 
@@ -1349,7 +1318,6 @@ pub struct AdminDomainMap {
     /// the same reason [`ResolverClusterEntry::perms_version`] is per cluster:
     /// so drift is a question the map answers.
     #[serde(default)]
-    #[pack(default)]
     pub id_map_version: Option<u64>,
     pub ca: AdminServerId,
     pub admin_servers: Vec<AdminServerEntry>,
@@ -1397,20 +1365,17 @@ pub struct RegisterRequest {
     /// The id-map model version this host has applied. `None` from a host
     /// with no id-map role, or one that has never applied an edit.
     #[serde(default)]
-    #[pack(default)]
     pub id_map_version: Option<u64>,
     /// The perms model version this host's resolver cluster document is at.
     /// One number suffices: a member belongs to exactly one cluster. `None`
     /// from a host with no resolver, or one whose cluster has never had an
     /// edit propagated to it.
     #[serde(default)]
-    #[pack(default)]
     pub perms_version: Option<u64>,
     /// The version of the CA-rendered resolver config this host has written.
     /// `None` from a host with no resolver, or one installed before the CA
     /// rendered configs.
     #[serde(default)]
-    #[pack(default)]
     pub config_version: Option<u64>,
 }
 
@@ -1445,17 +1410,14 @@ pub struct RegisterOk {
 pub struct DesiredUpdate {
     /// This server's resolver cluster's permissions.
     #[serde(default)]
-    #[pack(default)]
     pub perms: Option<VersionedPerms>,
     /// The admin domain's id-map.
     #[serde(default)]
-    #[pack(default)]
     pub id_map: Option<VersionedIdMap>,
     /// This server's whole resolver config, rendered by the CA from the block
     /// this host handed over at enrollment plus its cluster's current
     /// topology.
     #[serde(default)]
-    #[pack(default)]
     pub config: Option<VersionedResolverConfig>,
 }
 
@@ -1502,24 +1464,18 @@ pub struct RemoveServerRequest {
 pub struct RemoveServerOk {
     pub version: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[pack(default)]
     pub operation_id: Option<OperationId>,
     #[serde(default)]
-    #[pack(default)]
     pub revoked: u64,
     #[serde(default)]
-    #[pack(default)]
     pub removed: bool,
     #[serde(default)]
-    #[pack(default)]
     pub affected_clusters: Vec<String>,
     #[serde(default)]
-    #[pack(default)]
     pub peers: Vec<PeerResult>,
     /// Immediate CRL-distribution results. Separate from `peers`, which
     /// reports referral-topology reconciliation for the same operation.
     #[serde(default)]
-    #[pack(default)]
     pub crl_peers: Vec<PeerResult>,
     /// Whether the departing member was told to stop answering read clients.
     ///
@@ -1529,7 +1485,6 @@ pub struct RemoveServerOk {
     /// result of telling it, so an operator who can see it failed knows to go
     /// and stop that host.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[pack(default)]
     pub gated: Option<PeerResult>,
 }
 
@@ -1558,7 +1513,6 @@ pub struct ReadPermsOk {
     /// cluster yet, which is a state an edit can legitimately be based on and
     /// which an edit from someone else can take away.
     #[serde(default)]
-    #[pack(default)]
     pub version: Option<u64>,
 }
 
@@ -1588,7 +1542,6 @@ pub struct EditPermsRequest {
     /// `None` means "based on the CA holding no model", which is only current
     /// while that remains true.
     #[serde(default)]
-    #[pack(default)]
     pub base_version: Option<u64>,
 }
 
@@ -1777,12 +1730,11 @@ pub struct AddRoleAdminRequest {
     pub new_password: Secret,
     pub policy: crate::policy::Policy,
     /// Mark the minted slot one-time: `new_password` authorizes nothing but
-    /// [`Request::ChangePassword`] until its holder chooses one. What the
-    /// current client always sends — an admin who did not pick their own
-    /// password should never hold a working one. Defaults to `false` so a
-    /// pre-`must_change` encoding still decodes to what it meant.
-    #[serde(default)]
-    #[pack(default)]
+    /// [`Request::ChangePassword`] until its holder chooses one. Always
+    /// `true` from every client there is — an admin who did not pick their
+    /// own password should never hold a working one — but the CA reads the
+    /// field rather than assuming it, so a client that means otherwise has
+    /// to say so.
     pub must_change: bool,
 }
 
@@ -2021,98 +1973,6 @@ mod tests {
         bytes
     }
 
-    #[derive(Debug, PartialEq, netidx_derive::Pack)]
-    struct OldMessage {
-        value: u32,
-    }
-
-    #[derive(Debug, PartialEq, netidx_derive::Pack)]
-    struct NewMessage {
-        value: u32,
-        #[pack(default)]
-        restricted: bool,
-    }
-
-    #[derive(netidx_derive::Pack)]
-    struct SignRequestBeforeGroups {
-        kind: NodeKind,
-        credential: AdminCredential,
-        csr_pem: String,
-        requested_name: String,
-        requested_validity: Duration,
-    }
-
-    #[derive(netidx_derive::Pack)]
-    struct PolicyBeforeRoleGrants {
-        allowed_san: Vec<String>,
-        max_validity: Duration,
-    }
-
-    #[derive(netidx_derive::Pack)]
-    struct EnrollmentBeforeReplacement {
-        listen: SocketAddr,
-        roles: BitFlags<Role>,
-        resolver_member: Option<ResolverAddr>,
-        resolver_members: Vec<ResolverAddr>,
-        cluster: ResolverClusterPlacement,
-    }
-
-    #[derive(netidx_derive::Pack)]
-    struct EnrollBeforeReplacement {
-        credential: AdminCredential,
-        csr_pem: String,
-        listen: SocketAddr,
-        roles: BitFlags<Role>,
-        resolver_member: Option<ResolverAddr>,
-        resolver_members: Vec<ResolverAddr>,
-        cluster: ResolverClusterPlacement,
-        renew_identity: Option<AdminServerId>,
-    }
-
-    #[derive(netidx_derive::Pack)]
-    struct EnrollmentBeforeResolverConfig {
-        listen: SocketAddr,
-        roles: BitFlags<Role>,
-        resolver_member: Option<ResolverAddr>,
-        resolver_members: Vec<ResolverAddr>,
-        cluster: ResolverClusterPlacement,
-        replaces: Option<AdminServerId>,
-    }
-
-    #[derive(netidx_derive::Pack)]
-    struct EnrollBeforeResolverConfig {
-        credential: AdminCredential,
-        csr_pem: String,
-        listen: SocketAddr,
-        roles: BitFlags<Role>,
-        resolver_member: Option<ResolverAddr>,
-        resolver_members: Vec<ResolverAddr>,
-        cluster: ResolverClusterPlacement,
-        renew_identity: Option<AdminServerId>,
-        replaces: Option<AdminServerId>,
-    }
-
-    #[derive(netidx_derive::Pack)]
-    struct AddRoleAdminBeforeMustChange {
-        credential: AdminCredential,
-        name: String,
-        new_password: Secret,
-        policy: crate::policy::Policy,
-    }
-
-    #[derive(netidx_derive::Pack)]
-    struct AdminInfoBeforeMustChange {
-        slot_id: uuid::Uuid,
-        admin: String,
-        kind: crate::policy::SlotKind,
-        policy: crate::policy::Policy,
-    }
-
-    /// [`LoginResponse`] as it was before it grew a third case: literally
-    /// `RpcResult<LoginOk>`, whose tags the hand-written enum must still
-    /// match. Encoded by this alias, decoded by the real type.
-    type LoginResponseBeforePasswordChange = RpcResult<LoginOk>;
-
     #[test]
     fn secret_is_redacted_but_round_trips() {
         let s = Secret("hunter2".to_string());
@@ -2121,157 +1981,6 @@ mod tests {
         s.encode(&mut encoded).unwrap();
         let back = Secret::decode(&mut encoded.as_slice()).unwrap();
         assert_eq!(back.0, "hunter2");
-    }
-
-    #[test]
-    fn pack_fields_evolve_in_both_directions() {
-        let old = encode(&OldMessage { value: 42 });
-        assert_eq!(
-            NewMessage::decode(&mut old.as_slice()).unwrap(),
-            NewMessage { value: 42, restricted: false }
-        );
-
-        let new = encode(&NewMessage { value: 7, restricted: true });
-        assert_eq!(
-            OldMessage::decode(&mut new.as_slice()).unwrap(),
-            OldMessage { value: 7 }
-        );
-    }
-
-    #[test]
-    fn real_appended_fields_default_without_granting_authority() {
-        let old = encode(&SignRequestBeforeGroups {
-            kind: NodeKind::Client,
-            credential: AdminCredential::password("alice", "pw"),
-            csr_pem: "CSR".into(),
-            requested_name: "alice.example.com".into(),
-            requested_validity: Duration::from_secs(86400),
-        });
-        let request = SignRequest::decode(&mut old.as_slice()).unwrap();
-        assert!(request.id_map_groups.is_empty());
-        assert_eq!(request.replaces_serial, None);
-
-        let old = encode(&PolicyBeforeRoleGrants {
-            allowed_san: vec!["*.example.com".into()],
-            max_validity: Duration::from_secs(86400),
-        });
-        let policy = crate::policy::Policy::decode(&mut old.as_slice()).unwrap();
-        assert!(policy.id_map_groups.is_empty());
-        assert!(policy.server_enroll_scopes.is_empty());
-        assert!(policy.server_enroll_roles.is_empty());
-        assert!(policy.perms_edit_scopes.is_empty());
-        assert!(!policy.may_manage_admins);
-        assert!(policy.service_control_scopes.is_empty());
-
-        let old = encode(&EnrollmentBeforeReplacement {
-            listen: "127.0.0.1:4565".parse().unwrap(),
-            roles: Role::Resolver.into(),
-            resolver_member: None,
-            resolver_members: Vec::new(),
-            cluster: ResolverClusterPlacement::Create { base: "/".into() },
-        });
-        let enrollment = EnrollmentRequest::decode(&mut old.as_slice()).unwrap();
-        assert_eq!(enrollment.replaces, None);
-
-        let old = encode(&EnrollBeforeReplacement {
-            credential: AdminCredential::password("admin", "pw"),
-            csr_pem: "CSR".into(),
-            listen: "127.0.0.1:4565".parse().unwrap(),
-            roles: Role::Resolver.into(),
-            resolver_member: None,
-            resolver_members: Vec::new(),
-            cluster: ResolverClusterPlacement::Create { base: "/".into() },
-            renew_identity: None,
-        });
-        let enroll = EnrollRequest::decode(&mut old.as_slice()).unwrap();
-        assert_eq!(enroll.replaces, None);
-
-        // The resolver config a host hands the CA at enrollment. Appended, so
-        // an enrollment that predates it still decodes — and the CA renders
-        // nothing for that server rather than mistaking a later field for one.
-        let old = encode(&EnrollmentBeforeResolverConfig {
-            listen: "127.0.0.1:4565".parse().unwrap(),
-            roles: Role::Resolver.into(),
-            resolver_member: None,
-            resolver_members: Vec::new(),
-            cluster: ResolverClusterPlacement::Create { base: "/".into() },
-            replaces: None,
-        });
-        let enrollment = EnrollmentRequest::decode(&mut old.as_slice()).unwrap();
-        assert!(enrollment.resolver_config.is_none());
-
-        let old = encode(&EnrollBeforeResolverConfig {
-            credential: AdminCredential::password("admin", "pw"),
-            csr_pem: "CSR".into(),
-            listen: "127.0.0.1:4565".parse().unwrap(),
-            roles: Role::Resolver.into(),
-            resolver_member: None,
-            resolver_members: Vec::new(),
-            cluster: ResolverClusterPlacement::Create { base: "/".into() },
-            renew_identity: None,
-            replaces: None,
-        });
-        let enroll = EnrollRequest::decode(&mut old.as_slice()).unwrap();
-        assert!(enroll.resolver_config.is_none());
-
-        // A pre-`must_change` add-role means what it always meant: an admin
-        // holding a password its manager chose, working immediately. The
-        // default has to be `false` or replaying an old request would lock the
-        // new admin out of the account it just created.
-        let old = encode(&AddRoleAdminBeforeMustChange {
-            credential: AdminCredential::password("admin", "pw"),
-            name: "ops1".into(),
-            new_password: Secret("pw".into()),
-            policy: crate::policy::superuser_policy(),
-        });
-        let add = AddRoleAdminRequest::decode(&mut old.as_slice()).unwrap();
-        assert!(!add.must_change);
-
-        let old = encode(&AdminInfoBeforeMustChange {
-            slot_id: uuid::Uuid::nil(),
-            admin: "ops1".into(),
-            kind: crate::policy::SlotKind::Role,
-            policy: crate::policy::superuser_policy(),
-        });
-        let info = crate::policy::AdminInfo::decode(&mut old.as_slice()).unwrap();
-        assert!(!info.must_change);
-    }
-
-    /// [`LoginResponse`] stopped being a `RpcResult<LoginOk>` alias when it
-    /// grew `PasswordChangeRequired`. Its first two tags are the whole
-    /// compatibility claim: an encoding produced by the alias must still
-    /// decode, and to the same thing.
-    #[test]
-    fn login_response_kept_the_rpc_result_tags_it_replaced() {
-        let ok = encode(&LoginResponseBeforePasswordChange::Ok(LoginOk {
-            admin: "ops1".into(),
-            token: Secret("tok".into()),
-            issued_unix: 1,
-            absolute_deadline_unix: 2,
-            idle_timeout_secs: 3,
-        }));
-        match LoginResponse::decode(&mut ok.as_slice()).unwrap() {
-            LoginResponse::Ok(ok) => {
-                assert_eq!(ok.admin, "ops1");
-                assert_eq!(ok.token.0, "tok");
-                assert_eq!(ok.absolute_deadline_unix, 2);
-            }
-            other => panic!("old Ok decoded as {other:?}"),
-        }
-
-        let err = encode(&LoginResponseBeforePasswordChange::Err {
-            reason: "authentication failed".into(),
-        });
-        match LoginResponse::decode(&mut err.as_slice()).unwrap() {
-            LoginResponse::Err { reason } => assert_eq!(reason, "authentication failed"),
-            other => panic!("old Err decoded as {other:?}"),
-        }
-
-        // Tags frozen at their `RpcResult` values, with the new case appended
-        // past them (variant tag is the second byte, as in
-        // `protocol_epoch_and_request_tags_have_frozen_pack_bytes`).
-        let new = encode(&LoginResponse::PasswordChangeRequired { admin: "ops1".into() });
-        assert_eq!((ok[1], err[1], new[1]), (0, 1, 2));
     }
 
     #[test]

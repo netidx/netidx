@@ -50,13 +50,10 @@ pub struct Policy {
     /// may name. Empty ⇒ this admin's signs never register identities and it
     /// may not edit an id-map.
     #[serde(default)]
-    #[pack(default)]
     pub id_map_groups: Vec<String>,
     #[serde(default)]
-    #[pack(default)]
     pub server_enroll_scopes: Vec<String>,
     #[serde(default)]
-    #[pack(default)]
     pub server_enroll_roles: BitFlags<Role>,
     /// Netidx hierarchy paths under which this admin may edit permissions
     /// (the remote perms edit). A target path is in scope when it equals
@@ -64,7 +61,6 @@ pub struct Policy {
     /// perms-edit authority. Unlike issuance, this needs no CA key, so a
     /// `Role` keyslot can carry it.
     #[serde(default)]
-    #[pack(default)]
     pub perms_edit_scopes: Vec<String>,
     /// Whether this admin may mint / rescope / revoke **role** admins (the
     /// `ca admin` ops, local or over the admin plane). It never confers MK
@@ -73,7 +69,6 @@ pub struct Policy {
     /// capabilities ⊆ its own (no escalation; enforced server-side).
     /// Granted explicitly.
     #[serde(default)]
-    #[pack(default)]
     pub may_manage_admins: bool,
     /// Netidx hierarchy paths under which this admin may control services
     /// (restart / start / stop / status the activation units on the admin
@@ -82,7 +77,6 @@ pub struct Policy {
     /// editing perms and restarting services are distinct authorities.
     /// Needs no CA key, so a `Role` keyslot can carry it.
     #[serde(default)]
-    #[pack(default)]
     pub service_control_scopes: Vec<String>,
 }
 
@@ -116,7 +110,6 @@ pub struct AdminInfo {
     /// chosen a password yet. Reported so the roster shows who is still
     /// holding a one-time key.
     #[serde(default)]
-    #[pack(default)]
     pub must_change: bool,
 }
 

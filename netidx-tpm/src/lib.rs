@@ -1,4 +1,4 @@
-//! Seal a small secret to this host's TPM 2.0.
+//! Seal a secret to this host's TPM 2.0.
 //!
 //! netidx uses this to bind credentials to a machine: TLS private-key
 //! passwords (`<key>.tpm` sidecars read by `netidx::tls`) and the CA
@@ -9,14 +9,22 @@
 //! they could have read a plaintext secret) — that boundary is
 //! unchanged.
 //!
-//! Mechanism: the secret is wrapped in a TPM `KeyedHash` sealed-data
-//! object under the standard ECC P-256 storage root key (SRK) template
-//! on the owner hierarchy. The SRK is re-derived by `CreatePrimary` on
-//! every operation — same seed + same template ⇒ same key — so nothing
-//! is persisted in the TPM and no NV/owner-auth bookkeeping exists to
-//! rot. The sealed object carries an empty auth value: the protection
-//! is the TPM binding, not a second password (which would just move
-//! the problem to "where do we store that").
+//! Mechanism: the secret is encrypted under a fresh AES-256-GCM key,
+//! and that key — 32 bytes, comfortably inside the 128 a TPM 2.0
+//! guarantees per sealed object — is wrapped in a TPM `KeyedHash`
+//! sealed-data object under the standard ECC P-256 storage root key
+//! (SRK) template on the owner hierarchy. The ciphertext rides in the
+//! same blob. Sealing the key rather than the secret is what lets
+//! [`seal`] take a secret of any size: a TLS key password is 64 bytes,
+//! a cached administrator session is ~300, and only one of those would
+//! fit in a sealed object.
+//!
+//! The SRK is re-derived by `CreatePrimary` on every operation — same
+//! seed + same template ⇒ same key — so nothing is persisted in the TPM
+//! and no NV/owner-auth bookkeeping exists to rot. The sealed object
+//! carries an empty auth value: the protection is the TPM binding, not
+//! a second password (which would just move the problem to "where do we
+//! store that").
 //!
 //! Deliberately **no PCR binding**: a PCR-bound blob silently stops
 //! unsealing after a firmware update, and a daemon that silently stops
@@ -31,11 +39,12 @@
 //! (`Tbsip_Submit_Command` takes the same raw frames).
 //!
 //! macOS has no TPM; there the same [`seal`]/[`unseal`] contract is
-//! kept by the **Secure Enclave** instead, with the same blob shape
-//! as the TPM path: each seal generates a fresh transient SE P-256
-//! key, ECIES-encrypts the secret under it, and stores the key's
-//! SEP-wrapped private material *inside the blob* (the CTK token
-//! object id — what CryptoKit calls `dataRepresentation`). Nothing
+//! kept by the **Secure Enclave** instead, and in the same shape —
+//! hardware holds a key, the key holds the secret. Each seal generates
+//! a fresh transient SE P-256 key, ECIES-encrypts the secret under it,
+//! and stores the key's SEP-wrapped private material *inside the blob*
+//! (the CTK token object id — what CryptoKit calls
+//! `dataRepresentation`). Nothing
 //! touches the keychain, so no code-signing entitlement is needed,
 //! and there is no system state to lose: the blob is self-contained
 //! and only this machine's enclave can unwrap it. No user-presence
@@ -52,28 +61,15 @@ use anyhow::Result;
 /// never collide with a plaintext secret (which is printable text).
 pub const MAGIC: &[u8] = b"#netidx-tpm-sealed-v1\0";
 
-/// Marker prefixed to TPM-sealed files whose payload rides in an
-/// envelope because it exceeds [`MAX_SEAL_BYTES`] — see [`seal`].
-///
-/// A distinct magic rather than a field inside the v1 layout, so that
-/// [`MAGIC`] keeps meaning exactly what it meant. Sealed key-password
-/// sidecars are read by whatever netidx is installed on that host,
-/// which can be older than the tool that wrote them; an older reader
-/// must fail on a blob it cannot understand, not misparse one it
-/// thinks it can.
-pub const MAGIC_ENVELOPED: &[u8] = b"#netidx-tpm-sealed-v2\0";
-
 /// Marker prefixed to Secure-Enclave-sealed files (macOS). Same NUL
 /// trick. A distinct magic means a blob carried to the wrong platform
 /// fails with "sealed elsewhere — re-issue", not a parse error.
 pub const SE_MAGIC: &[u8] = b"#netidx-se-sealed-v1\0";
 
 /// Does `data` carry a sealed payload (vs a plaintext secret),
-/// whichever platform sealed it, in either layout?
+/// whichever platform sealed it?
 pub fn is_sealed(data: &[u8]) -> bool {
-    data.starts_with(MAGIC)
-        || data.starts_with(MAGIC_ENVELOPED)
-        || data.starts_with(SE_MAGIC)
+    data.starts_with(MAGIC) || data.starts_with(SE_MAGIC)
 }
 
 /// What does the sealing on this platform — for user-facing messages
@@ -82,15 +78,6 @@ pub fn is_sealed(data: &[u8]) -> bool {
 pub const MECHANISM: &str = "Secure Enclave";
 #[cfg(not(target_os = "macos"))]
 pub const MECHANISM: &str = "TPM";
-
-/// Largest secret a TPM 2.0 is guaranteed to hold in one sealed
-/// object (MAX_SYM_DATA).
-///
-/// **Not** a limit on [`seal`], which takes a secret of any size:
-/// anything past this rides in an envelope. It is exported because
-/// it is the threshold at which the blob layout changes, which a
-/// caller reasoning about on-disk compatibility may want to know.
-pub const MAX_SEAL_BYTES: usize = 128;
 
 /// A long random secret (256 bits, lowercase hex — printable, so it
 /// composes with anything that expects a password string). Used as the
@@ -140,8 +127,6 @@ mod ops {
         },
     };
     use zeroize::{Zeroize, Zeroizing};
-
-    use super::MAX_SEAL_BYTES;
 
     /// The empty-password authorization session (TPM_RS_PW). We assume
     /// an empty owner-hierarchy auth: how every mainstream linux
@@ -367,29 +352,20 @@ mod ops {
         let _ = transmit(dev, &cmd, &[]);
     }
 
-    /// A TPM holds only [`MAX_SEAL_BYTES`] in one sealed object, which
-    /// is plenty for a password and nowhere near enough for, say, a
-    /// cached administrator session. A larger secret is therefore
-    /// encrypted under a fresh AES-256-GCM key and it is the *key* the
-    /// TPM seals — the machine binding is unchanged, since the key is
-    /// inert without an unseal on this host, and the ciphertext sits
-    /// beside it in the same blob.
-    ///
-    /// Only what doesn't fit is enveloped. A secret that fits keeps the
-    /// v1 layout byte for byte, because sealed key passwords are read
-    /// by whatever netidx is installed on that host — re-formatting
-    /// them would strand a resolver whose binary predates this.
+    /// A TPM sealed object holds a guaranteed 128 bytes (MAX_SYM_DATA)
+    /// — plenty for a password, nowhere near a cached administrator
+    /// session. So the secret is never what the TPM holds: it is
+    /// encrypted under a fresh AES-256-GCM key and the *key* is sealed,
+    /// with the ciphertext beside it in the same blob. The machine
+    /// binding is exactly what it was, since the key is inert without an
+    /// unseal on this host, and size stops being anyone's problem.
     const ENVELOPE_KEY_BYTES: usize = 32;
     const ENVELOPE_NONCE_BYTES: usize = 12;
 
+    /// `MAGIC || out_private || out_public || nonce || ciphertext`. The
+    /// two TPM areas are TPM2Bs and so self-delimiting, which is what
+    /// lets the envelope sit after them and still be parsed.
     pub fn seal(dev: &mut dyn Transport, secret: &[u8]) -> Result<Vec<u8>> {
-        if secret.len() > MAX_SEAL_BYTES {
-            return seal_enveloped(dev, secret);
-        }
-        seal_object(dev, super::MAGIC, secret)
-    }
-
-    fn seal_enveloped(dev: &mut dyn Transport, secret: &[u8]) -> Result<Vec<u8>> {
         use aes_gcm::{Aes256Gcm, Key, KeyInit, Nonce, aead::Aead};
         use rand::Rng;
         let mut key = Zeroizing::new([0u8; ENVELOPE_KEY_BYTES]);
@@ -401,20 +377,13 @@ mod ops {
         let ciphertext = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&key[..]))
             .encrypt(Nonce::from_slice(&nonce), secret)
             .map_err(|_| anyhow!("encrypting the enveloped secret failed"))?;
-        let mut blob = seal_object(dev, super::MAGIC_ENVELOPED, &key[..])?;
+        let mut blob = seal_key(dev, &key[..])?;
         blob.extend_from_slice(&nonce);
         blob.extend_from_slice(&ciphertext);
         Ok(blob)
     }
 
-    /// `magic || out_private || out_public`, each area a TPM2B and so
-    /// self-delimiting — which is what lets the envelope append its
-    /// ciphertext after them and still be parsed.
-    fn seal_object(
-        dev: &mut dyn Transport,
-        magic: &[u8],
-        secret: &[u8],
-    ) -> Result<Vec<u8>> {
+    fn seal_key(dev: &mut dyn Transport, secret: &[u8]) -> Result<Vec<u8>> {
         let primary = create_primary(dev)?;
         let result = (|| {
             let cmd = TpmCreateCommand {
@@ -435,8 +404,9 @@ mod ops {
             let (private, rest) =
                 take_tpm2b(params).context("TPM2_Create out_private")?;
             let (public, _) = take_tpm2b(rest).context("TPM2_Create out_public")?;
-            let mut blob = Vec::with_capacity(magic.len() + private.len() + public.len());
-            blob.extend_from_slice(magic);
+            let mut blob =
+                Vec::with_capacity(super::MAGIC.len() + private.len() + public.len());
+            blob.extend_from_slice(super::MAGIC);
             blob.extend_from_slice(private);
             blob.extend_from_slice(public);
             Ok(blob)
@@ -446,9 +416,7 @@ mod ops {
     }
 
     pub fn unseal(dev: &mut dyn Transport, blob: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
-        if let Some(body) = blob.strip_prefix(super::MAGIC_ENVELOPED) {
-            return unseal_enveloped(dev, body);
-        }
+        use aes_gcm::{Aes256Gcm, Key, KeyInit, Nonce, aead::Aead};
         let Some(body) = blob.strip_prefix(super::MAGIC) else {
             if blob.starts_with(super::SE_MAGIC) {
                 bail!(
@@ -458,19 +426,7 @@ mod ops {
             }
             bail!("not a netidx TPM-sealed blob (bad magic)");
         };
-        let (secret, rest) = unseal_object(dev, body)?;
-        if !rest.is_empty() {
-            bail!("trailing garbage after the sealed blob");
-        }
-        Ok(secret)
-    }
-
-    fn unseal_enveloped(
-        dev: &mut dyn Transport,
-        body: &[u8],
-    ) -> Result<Zeroizing<Vec<u8>>> {
-        use aes_gcm::{Aes256Gcm, Key, KeyInit, Nonce, aead::Aead};
-        let (key, rest) = unseal_object(dev, body)?;
+        let (key, rest) = unseal_key(dev, body)?;
         // `Key::from_slice` panics on a wrong length, and what the TPM
         // hands back is only as long as whatever was sealed.
         if key.len() != ENVELOPE_KEY_BYTES {
@@ -494,9 +450,9 @@ mod ops {
     }
 
     /// Load and unseal the sealed object at the head of `body`,
-    /// returning it with whatever follows it (nothing in the v1
-    /// layout; the envelope's nonce + ciphertext in the v2 one).
-    fn unseal_object<'a>(
+    /// returning the envelope key with the nonce + ciphertext that
+    /// follow it.
+    fn unseal_key<'a>(
         dev: &mut dyn Transport,
         body: &'a [u8],
     ) -> Result<(Zeroizing<Vec<u8>>, &'a [u8])> {
@@ -941,15 +897,6 @@ mod tests {
         assert!(!is_sealed(b""));
         // A prefix of the magic is not the magic.
         assert!(!is_sealed(&MAGIC[..MAGIC.len() - 1]));
-        // An enveloped blob is sealed too — a caller deciding "is this
-        // file a secret or a sealed blob" must not read one as plaintext.
-        let mut enveloped = MAGIC_ENVELOPED.to_vec();
-        enveloped.extend_from_slice(b"\x00\x10whatever");
-        assert!(is_sealed(&enveloped));
-        // The two layouts are distinguishable, which is what lets an
-        // older reader refuse a blob it cannot parse.
-        assert!(!enveloped.starts_with(MAGIC));
-        assert!(!sealed.starts_with(MAGIC_ENVELOPED));
     }
 
     #[test]
@@ -985,21 +932,20 @@ mod tests {
         assert!(unseal(&bad).is_err());
     }
 
-    /// A secret past what one TPM sealed object holds. This is the
-    /// case that matters: a cached administrator session is ~300 bytes,
-    /// and sealing it used to fail outright, which made
-    /// `netidx admin login` impossible on any machine with a TPM.
+    /// A secret far past what one TPM sealed object holds — the case
+    /// the envelope exists for. A cached administrator session is ~300
+    /// bytes against a 128-byte sealed object, so before it,
+    /// `netidx admin login` could not persist anything on any machine
+    /// with a TPM.
     #[test]
-    fn seal_unseal_round_trips_a_secret_too_large_to_seal_directly() {
+    fn seal_unseal_round_trips_a_secret_larger_than_a_sealed_object() {
         if !available() {
             eprintln!("skipping: no usable TPM on this host");
             return;
         }
         let secret: Vec<u8> = (0..4096u32).map(|i| (i % 251) as u8).collect();
-        assert!(secret.len() > MAX_SEAL_BYTES);
         let blob = seal(&secret).expect("seal");
         assert!(is_sealed(&blob));
-        assert!(blob.starts_with(MAGIC_ENVELOPED), "a large secret must be enveloped");
         assert_eq!(&*unseal(&blob).expect("unseal"), &secret[..]);
 
         // The plaintext must not be sitting in the blob next to the key.
@@ -1016,10 +962,5 @@ mod tests {
             bad[at] ^= 0xff;
             assert!(unseal(&bad).is_err(), "corruption at {at} was not caught");
         }
-
-        // A secret that still fits keeps the v1 layout, so a reader
-        // older than the envelope can go on reading key passwords.
-        let small = seal(&[7u8; MAX_SEAL_BYTES]).expect("seal");
-        assert!(small.starts_with(MAGIC), "a small secret must not change layout");
     }
 }

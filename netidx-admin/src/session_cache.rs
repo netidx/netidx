@@ -259,11 +259,11 @@ mod tests {
     }
 
     /// The whole persistent path on real hardware, which is where this
-    /// broke: a session is ~300 bytes and a TPM seals 128 in one object,
-    /// so `store` failed outright and `netidx admin login` could not
-    /// persist anything on any machine with a TPM. Nothing above this
-    /// layer noticed, because the only frontend that keeps a session
-    /// without one — the TUI — falls back to process memory.
+    /// broke: a session is ~300 bytes against a 128-byte TPM sealed
+    /// object, so `store` failed outright and `netidx admin login` could
+    /// not persist anything on any machine with a TPM. Nothing above
+    /// this layer noticed, because the only frontend that keeps a
+    /// session without one — the TUI — falls back to process memory.
     ///
     /// Runs only where a TPM is reachable; the fingerprint is random, so
     /// it can never collide with a real cached session, and it is
@@ -277,15 +277,6 @@ mod tests {
         let session = cached(now().saturating_add(3600));
         let fp = session.ca_fingerprint.clone();
         let outcome = (|| -> Result<()> {
-            assert!(
-                serde_json::to_vec(&Payload {
-                    version: VERSION,
-                    session: session.clone()
-                })?
-                .len()
-                    > netidx_tpm::MAX_SEAL_BYTES,
-                "this test is pointless if a session fits in one sealed object"
-            );
             store(session.clone())?;
             let back = load(&fp, Some(&session.admin))?.context("nothing was cached")?;
             assert_eq!(back.token.as_str(), session.token.as_str());
