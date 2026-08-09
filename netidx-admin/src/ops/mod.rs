@@ -299,6 +299,10 @@ pub async fn refusal_reason(
 /// The one shared remote preamble: resolve the admin server + confirm its
 /// identity, then collect the admin name (defaulting to the current OS user)
 /// and password. Every authenticated remote query and action starts here.
+///
+/// A cached session is reused only when the caller named nobody or named the
+/// admin it was minted for — `--admin bob` must never be served as alice
+/// because alice is who happens to be logged in.
 pub async fn open_admin_session(
     ans: &mut dyn Answerer,
     server: Option<SocketAddr>,
@@ -309,7 +313,8 @@ pub async fn open_admin_session(
     let (server, ca_identity) = resolve_ca(ans, server, ca_dir.as_deref()).await?;
     if password.is_none()
         && !ans.has_explicit_secret(Field::AdminPassword)
-        && let Some(cached) = crate::session_cache::load(&ca_identity.fingerprint.text())?
+        && let Some(cached) =
+            crate::session_cache::load(&ca_identity.fingerprint.text(), admin.as_deref())?
     {
         return Ok(AdminSession {
             server,

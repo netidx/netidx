@@ -102,13 +102,25 @@ pub fn store(mut session: CachedSession) -> Result<()> {
     Ok(())
 }
 
-pub fn load(ca_fingerprint: &str) -> Result<Option<CachedSession>> {
+/// A cached session speaks for exactly one admin: the one it was minted for.
+/// The cache is keyed by admin domain, so asking it for a *different* admin is a
+/// question it cannot answer — and answering with whoever is cached would
+/// silently run the command as them. It declines instead, and leaves the
+/// session it holds alone: naming someone else is no reason to end a login.
+fn answers_for(session: &CachedSession, admin: Option<&str>) -> bool {
+    admin.is_none_or(|admin| admin == session.admin)
+}
+
+/// The session cached for `ca_fingerprint`, or `None` if there is none, it has
+/// expired, or it belongs to an admin other than `admin`. `admin` is `None`
+/// when the caller named nobody and means "whoever I am logged in as".
+pub fn load(ca_fingerprint: &str, admin: Option<&str>) -> Result<Option<CachedSession>> {
     let (fp, normalized) = normalized(ca_fingerprint)?;
     {
         let mut memory = memory().lock().expect("session memory poisoned");
         if let Some(session) = memory.get(&normalized) {
             if now() < session.absolute_deadline_unix {
-                return Ok(Some(session.clone()));
+                return Ok(answers_for(session, admin).then(|| session.clone()));
             }
             memory.remove(&normalized);
         }
@@ -132,7 +144,8 @@ pub fn load(ca_fingerprint: &str) -> Result<Option<CachedSession>> {
         let _ = std::fs::remove_file(&path);
         return Ok(None);
     }
-    Ok(Some(payload.session))
+    let answers = answers_for(&payload.session, admin);
+    Ok(answers.then_some(payload.session))
 }
 
 pub fn delete(ca_fingerprint: &str) -> Result<()> {
@@ -216,14 +229,33 @@ mod tests {
         let valid = cached(now().saturating_add(60));
         remember(valid.clone()).unwrap();
         assert_eq!(
-            load(&valid.ca_fingerprint).unwrap().unwrap().token.as_str(),
+            load(&valid.ca_fingerprint, None).unwrap().unwrap().token.as_str(),
             valid.token.as_str()
         );
         delete(&valid.ca_fingerprint).unwrap();
 
         let expired = cached(now());
         remember(expired.clone()).unwrap();
-        assert!(load(&expired.ca_fingerprint).unwrap().is_none());
+        assert!(load(&expired.ca_fingerprint, None).unwrap().is_none());
+    }
+
+    /// The cache is keyed by admin domain, not by admin, so one login's token is
+    /// what every later command for that CA finds. Asking for someone else
+    /// must not be answered with it: the command would run as the cached
+    /// admin under the other one's name — and for `change-password` that
+    /// meant rekeying a slot nobody asked about.
+    #[test]
+    fn a_cached_session_does_not_answer_for_another_admin() {
+        let session = cached(now().saturating_add(60));
+        remember(session.clone()).unwrap();
+        assert_eq!(session.admin, "alice");
+
+        assert!(load(&session.ca_fingerprint, Some("bob")).unwrap().is_none());
+        // Declining is not forgetting: alice is still logged in, both for the
+        // command that names her and for the one that names nobody.
+        assert!(load(&session.ca_fingerprint, Some("alice")).unwrap().is_some());
+        assert!(load(&session.ca_fingerprint, None).unwrap().is_some());
+        delete(&session.ca_fingerprint).unwrap();
     }
 
     #[test]
