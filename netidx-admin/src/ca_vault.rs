@@ -33,8 +33,12 @@ use std::path::{Path, PathBuf};
 use zeroize::Zeroizing;
 
 #[cfg(test)]
-use netidx_admin_proto::policy::RECOVERY_ADMIN;
+use netidx_admin_proto::policy::{AUTORENEW_ADMIN, RECOVERY_ADMIN};
 use netidx_admin_proto::policy::{AdminInfo, Policy, SlotKind, is_reserved_admin};
+
+/// 256 bits, sized like the key it protects rather than like something a
+/// human types — any signing-slot password recovers MK, and so the CA key.
+const SIGNING_PASSWORD_BYTES: usize = 32;
 
 /// A long random password for a **signing** slot (the box-held `autorenew`
 /// credential), kept in a `Zeroizing` buffer that wipes on drop. Unlike a
@@ -42,8 +46,22 @@ use netidx_admin_proto::policy::{AdminInfo, Policy, SlotKind, is_reserved_admin}
 /// sealed keytab and in process memory — so it is plain hex with no
 /// confusable-character handling. Any signing-slot password unlocks MK, so
 /// treat it like the CA key.
+///
+/// Every buffer the secret passes through is wiped, which is why this does
+/// not reach for a hex helper: the obvious ones return a plain `String`, and
+/// a credential that claims to live only in a sealed keytab must not leave
+/// copies of itself in freed heap for a core dump to find. The output string
+/// is preallocated to its exact length for the same reason — a realloc
+/// midway would strand half the password in the old buffer.
 pub fn random_signing_password() -> Zeroizing<String> {
-    Zeroizing::new(format!("{}{}", crate::ca_store::new_id(), crate::ca_store::new_id()))
+    use std::fmt::Write;
+    let mut bytes = Zeroizing::new([0u8; SIGNING_PASSWORD_BYTES]);
+    rand::rng().fill_bytes(&mut bytes[..]);
+    let mut out = Zeroizing::new(String::with_capacity(2 * SIGNING_PASSWORD_BYTES));
+    for b in bytes.iter() {
+        let _ = write!(&mut *out, "{b:02x}");
+    }
+    out
 }
 
 /// File name of the vault within a CA directory. Its presence (rather
@@ -1070,7 +1088,7 @@ mod tests {
     fn role_pol(scope: &str) -> Policy {
         Policy {
             allowed_san: vec![],
-            max_validity: std::time::Duration::from_secs(0 * 86400),
+            max_validity: std::time::Duration::ZERO,
             id_map_groups: vec![],
             server_enroll_scopes: vec![],
             server_enroll_roles: Default::default(),
@@ -1374,6 +1392,48 @@ mod tests {
         assert!(v.add_role_slot("AutoRenew", "x", role_pol("/"), false).await.is_err());
         assert!(is_reserved_admin("recovery") && is_reserved_admin("AUTORENEW"));
         assert!(!is_reserved_admin("eve"));
+    }
+
+    /// The autorenew credential recovers MK and so the CA key — it is the
+    /// one password sized like a key rather than like something a person
+    /// types, and the constant is that claim.
+    ///
+    /// The length assertion is also what keeps the preallocation exact: a
+    /// `String` grows by reallocating, and a grown buffer strands the first
+    /// half of the password in freed heap, where `Zeroizing` never reaches
+    /// it. Shortening the password or lengthening the rendering breaks this.
+    #[test]
+    fn a_signing_password_is_256_bits_of_lowercase_hex() {
+        assert_eq!(SIGNING_PASSWORD_BYTES * 8, 256);
+        let pw = random_signing_password();
+        assert_eq!(pw.len(), 2 * SIGNING_PASSWORD_BYTES);
+        assert!(
+            pw.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+            "{}",
+            &*pw
+        );
+        assert_ne!(*random_signing_password(), *pw);
+    }
+
+    /// …and it is a working credential, not merely a well-shaped string.
+    /// Nothing else covers this: the generator is called only at CA init
+    /// and at rotation, so a change that rendered it differently would
+    /// have surfaced on a real install rather than here. This is the
+    /// production shape — recovery mints the vault, autorenew is added
+    /// under it — with the box credential the generator actually produces.
+    #[tokio::test]
+    async fn a_generated_signing_password_unlocks_the_key_it_protects() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut v = CAVault::new(dir.path().to_path_buf());
+        let autorenew = random_signing_password();
+        v.create(KEY, RECOVERY_ADMIN, "rpw", pol("*.a")).await.unwrap();
+        v.add_signing_slot("rpw", AUTORENEW_ADMIN, &autorenew, pol("*.a")).await.unwrap();
+
+        let by_box = v.unlock(&autorenew).unwrap();
+        assert_eq!(by_box.admin, AUTORENEW_ADMIN);
+        // The same master key the off-box credential reaches — this slot is
+        // the CA key by another name, which is why it is sized like one.
+        assert_eq!(&by_box.ca_key_pem[..], &v.unlock("rpw").unwrap().ca_key_pem[..]);
     }
 
     #[tokio::test]
