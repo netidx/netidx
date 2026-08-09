@@ -26,8 +26,9 @@
 //! These types are also what the admin plane moves between hosts, so they
 //! implement `Pack` as well as serde. JSON is the on-disk form because an
 //! operator reads and hand-edits the file; Pack is the wire form because
-//! nothing on the wire is a document. Adding a field means appending it and
-//! marking it `#[pack(default)]`, the same rule the admin protocol follows.
+//! nothing on the wire is a document. Adding a field means adding it: the
+//! admin protocol has never shipped and keeps no wire compatibility, so
+//! peers are version-locked and there is no older encoding to decode.
 
 use anyhow::{Context, Result};
 use arcstr::ArcStr;
