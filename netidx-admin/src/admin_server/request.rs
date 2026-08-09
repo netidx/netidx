@@ -10,8 +10,9 @@ use super::{
         handle_set_admin_policy,
     },
     auth::{
-        PreparedAdminAuthentication, PreparedServerUnlock, prepare_admin_authentication,
-        prepare_role_rekey, prepare_role_slot, prepare_server_unlock,
+        AdminAuth, PreparedAdminAuthentication, PreparedServerUnlock,
+        prepare_admin_authentication, prepare_role_rekey, prepare_role_slot,
+        prepare_server_unlock,
     },
     ca_dir,
     ca_ops::{
@@ -137,28 +138,21 @@ where
     // sleeping outside the global Argon2 semaphore when recent failures impose
     // a delay. Local-control requests are kernel-credential authorized and do
     // not participate in admin domain throttling.
-    let credential = requirements.admin_credential();
-    let password_attempt = if !local
-        && state.has_ca().await
-        && matches!(credential, Some(admin_proto::AdminCredential::Password { .. }))
-    {
-        let (attempt, delay) = state.begin_password_attempt(peer.ip()).await;
-        if !delay.is_zero() {
-            tokio::time::sleep(delay).await;
-        }
-        Some(attempt)
-    } else {
-        None
-    };
-    let authentication = match credential {
-        Some(credential) => Some(
-            prepare_admin_authentication(
-                state,
-                &signs,
-                credential,
-                password_attempt.clone(),
-            )
-            .await,
+    let auth = requirements.admin_auth();
+    let password_attempt =
+        if !local && state.has_ca().await && auth.is_some_and(AdminAuth::is_password) {
+            let (attempt, delay) = state.begin_password_attempt(peer.ip()).await;
+            if !delay.is_zero() {
+                tokio::time::sleep(delay).await;
+            }
+            Some(attempt)
+        } else {
+            None
+        };
+    let authentication = match auth {
+        Some(auth) => Some(
+            prepare_admin_authentication(state, &signs, auth, password_attempt.clone())
+                .await,
         ),
         None => None,
     };
@@ -565,9 +559,9 @@ where
         }
         Request::ChangePassword(req) => {
             let authentication = request_authentication();
-            // The slot to rekey is whichever one the credential belongs to,
+            // The slot to rekey is the one the old password authenticated,
             // which the prepared authentication already resolved — so the
-            // rekey is derived for that admin by name from the credential,
+            // rekey is derived for that admin by the vault's name for it,
             // never from anything the request chose.
             let prepared = match prepare_blocked_by_credential(local, authentication) {
                 Some(reason) => Err(reason),
@@ -599,8 +593,7 @@ where
                 },
             };
             let resp =
-                handle_change_password(state, &req, authentication, local, prepared)
-                    .await;
+                handle_change_password(state, authentication, local, prepared).await;
             admin_proto::write_msg(&mut tls, &resp)
                 .await
                 .context("writing AdminMgmtResponse")
@@ -732,22 +725,17 @@ enum ServerKeyRequirement {
 #[derive(Debug, Clone, Copy)]
 enum RequestRequirements<'a> {
     Public,
-    Admin {
-        credential: &'a admin_proto::AdminCredential,
-        server_key: ServerKeyRequirement,
-    },
+    Admin { auth: AdminAuth<'a>, server_key: ServerKeyRequirement },
     Logout,
     CaOnly,
     NodeSelf,
-    LocalOnly {
-        server_key: ServerKeyRequirement,
-    },
+    LocalOnly { server_key: ServerKeyRequirement },
 }
 
 impl<'a> RequestRequirements<'a> {
-    fn admin_credential(self) -> Option<&'a admin_proto::AdminCredential> {
+    fn admin_auth(self) -> Option<AdminAuth<'a>> {
         match self {
-            Self::Admin { credential, .. } => Some(credential),
+            Self::Admin { auth, .. } => Some(auth),
             Self::Public
             | Self::Logout
             | Self::CaOnly
@@ -790,105 +778,110 @@ fn request_requirements(req: &Request) -> RequestRequirements<'_> {
         }
         Logout(_) => RequestRequirements::Logout,
         Login(req) => RequestRequirements::Admin {
-            credential: &req.credential,
+            auth: AdminAuth::Credential(&req.credential),
             server_key: NotNeeded,
         },
         Sign(req) => RequestRequirements::Admin {
-            credential: &req.credential,
+            auth: AdminAuth::Credential(&req.credential),
             server_key: Required,
         },
         Enroll(req) => RequestRequirements::Admin {
-            credential: &req.credential,
+            auth: AdminAuth::Credential(&req.credential),
             server_key: Required,
         },
         ListQueue(req) => RequestRequirements::Admin {
-            credential: &req.credential,
+            auth: AdminAuth::Credential(&req.credential),
             server_key: NotNeeded,
         },
         Approve(req) => RequestRequirements::Admin {
-            credential: &req.credential,
+            auth: AdminAuth::Credential(&req.credential),
             server_key: Required,
         },
         Deny(req) => RequestRequirements::Admin {
-            credential: &req.credential,
+            auth: AdminAuth::Credential(&req.credential),
             server_key: NotNeeded,
         },
         Revoke(req) => RequestRequirements::Admin {
-            credential: &req.credential,
+            auth: AdminAuth::Credential(&req.credential),
             server_key: Required,
         },
         ListIssued(req) => RequestRequirements::Admin {
-            credential: &req.credential,
+            auth: AdminAuth::Credential(&req.credential),
             server_key: NotNeeded,
         },
         ListDelegations(req) => RequestRequirements::Admin {
-            credential: &req.credential,
+            auth: AdminAuth::Credential(&req.credential),
             server_key: NotNeeded,
         },
         ApproveDelegation(req) => RequestRequirements::Admin {
-            credential: &req.credential,
+            auth: AdminAuth::Credential(&req.credential),
             server_key: NotNeeded,
         },
         DenyDelegation(req) => RequestRequirements::Admin {
-            credential: &req.credential,
+            auth: AdminAuth::Credential(&req.credential),
             server_key: NotNeeded,
         },
         RemoveServer(req) => RequestRequirements::Admin {
-            credential: &req.credential,
+            auth: AdminAuth::Credential(&req.credential),
             server_key: Required,
         },
         ReadPerms(req) => RequestRequirements::Admin {
-            credential: &req.credential,
+            auth: AdminAuth::Credential(&req.credential),
             server_key: NotNeeded,
         },
         EditPerms(req) => RequestRequirements::Admin {
-            credential: &req.credential,
+            auth: AdminAuth::Credential(&req.credential),
             server_key: NotNeeded,
         },
         GetIdMap(req) => RequestRequirements::Admin {
-            credential: &req.credential,
+            auth: AdminAuth::Credential(&req.credential),
             server_key: NotNeeded,
         },
         EditIdMap(req) => RequestRequirements::Admin {
-            credential: &req.credential,
+            auth: AdminAuth::Credential(&req.credential),
             server_key: NotNeeded,
         },
         AddRoleAdmin(req) => RequestRequirements::Admin {
-            credential: &req.credential,
+            auth: AdminAuth::Credential(&req.credential),
             server_key: NotNeeded,
         },
         SetAdminPolicy(req) => RequestRequirements::Admin {
-            credential: &req.credential,
+            auth: AdminAuth::Credential(&req.credential),
             server_key: NotNeeded,
         },
         RemoveAdmin(req) => RequestRequirements::Admin {
-            credential: &req.credential,
+            auth: AdminAuth::Credential(&req.credential),
             server_key: NotNeeded,
         },
         ListAdmins(req) => RequestRequirements::Admin {
-            credential: &req.credential,
+            auth: AdminAuth::Credential(&req.credential),
             server_key: NotNeeded,
         },
         // Both rekey a role slot, whose wrap holds a throwaway verifier
         // rather than the master key — so neither needs the CA's own key.
+        //
+        // Change-password is the one admin request with no `AdminCredential`:
+        // replacing a password requires proving the current one, so what it
+        // authenticates with is a password and there is nowhere for a session
+        // token to be offered.
         ChangePassword(req) => RequestRequirements::Admin {
-            credential: &req.credential,
+            auth: AdminAuth::Password { admin: &req.admin, password: &req.old_password },
             server_key: NotNeeded,
         },
         ResetPassword(req) => RequestRequirements::Admin {
-            credential: &req.credential,
+            auth: AdminAuth::Credential(&req.credential),
             server_key: NotNeeded,
         },
         ControlService(req) => RequestRequirements::Admin {
-            credential: &req.credential,
+            auth: AdminAuth::Credential(&req.credential),
             server_key: NotNeeded,
         },
         SetReadGate(req) => RequestRequirements::Admin {
-            credential: &req.credential,
+            auth: AdminAuth::Credential(&req.credential),
             server_key: NotNeeded,
         },
         ReconcileCa(req) => RequestRequirements::Admin {
-            credential: &req.credential,
+            auth: AdminAuth::Credential(&req.credential),
             server_key: Required,
         },
     }

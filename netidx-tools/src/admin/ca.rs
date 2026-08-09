@@ -1673,9 +1673,11 @@ fn admin_add_role(a: AdminAddRoleArgs) -> Result<()> {
     Ok(())
 }
 
-/// `ca admin change-password` — replace your own password. The credential you
+/// `ca admin change-password` — replace your own password. The password you
 /// authenticate with is the one being replaced, which is why this works while
-/// a one-time password has everything else refused.
+/// a one-time password has everything else refused — and why a cached session
+/// is not enough: `--password-file` (or the prompt) is required even when one
+/// is held.
 fn admin_change_password(a: AdminChangePasswordArgs) -> Result<()> {
     let new_password = super::answer_cli::read_new_password_secret(
         a.new_password_file.as_deref(),

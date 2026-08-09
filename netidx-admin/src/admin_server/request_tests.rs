@@ -161,8 +161,39 @@ fn centralized_requirements_protect_all_mutations() {
     let logout = Request::Logout(LogoutRequest { credential: password });
     let requirements = request_requirements(&logout);
     assert!(matches!(requirements, RequestRequirements::Logout));
-    assert!(requirements.admin_credential().is_none());
+    assert!(requirements.admin_auth().is_none());
     assert!(!requirements.needs_server_unlock());
+}
+
+/// Every other admin request offers an `AdminCredential`, which a session
+/// satisfies. Change-password offers a password, so "you cannot change a
+/// password with a token you found" is decided by the shape of the message
+/// rather than by a check in the handler. Sessions also cost no KDF, so this
+/// pins the throttle onto it too — it is the one admin request that always
+/// spends an Argon2.
+#[test]
+fn change_password_authenticates_with_a_password_and_never_a_session() {
+    let req = Request::ChangePassword(admin_proto::ChangePasswordRequest {
+        admin: "alice".into(),
+        old_password: admin_proto::Secret("current".into()),
+        new_password: admin_proto::Secret("replacement".into()),
+    });
+    match request_requirements(&req) {
+        RequestRequirements::Admin { auth, server_key } => {
+            assert_eq!(server_key, ServerKeyRequirement::NotNeeded);
+            assert!(auth.is_password());
+            match auth {
+                AdminAuth::Password { admin, password } => {
+                    assert_eq!(admin, "alice");
+                    assert_eq!(password.0, "current");
+                }
+                AdminAuth::Credential(_) => {
+                    panic!("change-password offered a credential a session could fill")
+                }
+            }
+        }
+        actual => panic!("expected admin requirements, got {actual:?}"),
+    }
 }
 
 #[test]

@@ -1006,28 +1006,32 @@ pub async fn add_role_admin(
 }
 
 /// Admin → CA (pinned): replace the caller's own password. The request names
-/// no target — the slot changed is the one `credential` authenticates.
+/// no target — the slot changed is the one `old_password` authenticates — and
+/// it takes that password rather than a session, so holding a token is never
+/// enough to replace the credential behind it.
 pub async fn change_password(
     addr: SocketAddr,
     kind: NodeKind,
     expected: &CaIdentity,
-    credential: admin_proto::AdminCredential,
+    admin: &str,
+    old_password: &str,
     new_password: &str,
 ) -> Result<()> {
     let mut tls = connect_ca_pinned(addr, kind, expected).await?;
     admin_proto::write_msg(
         &mut tls,
         &Request::ChangePassword(admin_proto::ChangePasswordRequest {
-            credential: credential.clone(),
+            admin: admin.to_string(),
+            old_password: admin_proto::Secret(old_password.to_string()),
             new_password: admin_proto::Secret(new_password.to_string()),
         }),
     )
     .await?;
     match admin_proto::read_msg::<_, AdminMgmtResponse>(&mut tls).await? {
         AdminMgmtResponse::Ok(()) => Ok(()),
-        AdminMgmtResponse::Err { reason } => {
-            Err(admin_refusal(expected, &credential, "the CA refused", reason))
-        }
+        // No `admin_refusal`: that exists to drop a sealed session the CA has
+        // stopped honoring, and no session was offered here.
+        AdminMgmtResponse::Err { reason } => bail!("the CA refused: {reason}"),
     }
 }
 

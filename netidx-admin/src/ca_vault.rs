@@ -772,9 +772,10 @@ fn prepare_role_slot(
 /// A role slot's `wrap` holds a throwaway verifier, so replacing it needs
 /// neither MK nor the old password: a fresh random verifier under the new
 /// KDF is as good as the one it replaces. **All** authority to call this
-/// therefore lives in the caller — self-service change-password proves the
-/// old password by authenticating first, and reset-password proves
-/// `may_manage_admins` plus the target being within the caller's own scope.
+/// therefore lives in the caller — self-service change-password authenticates
+/// the old password in the same request that replaces it, and reset-password
+/// proves `may_manage_admins` plus the target being within the caller's own
+/// scope.
 fn prepare_role_rekey(
     vault: &VaultFile,
     target_admin: &str,

@@ -270,8 +270,8 @@ mod state_tests {
     /// The one-time-password refusal lives in `authenticate`, the funnel every
     /// admin handler resolves its caller through — so it covers ops that did
     /// not exist when it was written, rather than a list someone maintains.
-    /// The single exemption is `authenticate_for_password_change`, whose only
-    /// caller is the op that clears the flag.
+    /// The single exemption is `authenticate_for_password_change`, which
+    /// serves the op that clears the flag and the login that reports it.
     ///
     /// This asserts the funnel itself, not a set of handlers: if the gate were
     /// moved into individual ops, or a new op resolved its caller some other
@@ -316,11 +316,22 @@ mod state_tests {
             Err(refused) => assert!(refused.contains("change-password"), "{refused}"),
         }
 
-        // The exemption: same credential, same prepared authentication.
-        let allowed =
-            authenticate_for_password_change(&mut ca, &credential, &prepared).unwrap();
+        // The exemption: same prepared authentication.
+        let allowed = authenticate_for_password_change(&mut ca, &prepared).unwrap();
         assert_eq!(allowed.admin, "alice");
         assert!(allowed.must_change);
+
+        // The exemption is for a *password*. A session proves only that one
+        // was typed hours ago, and a rekey outlives every session and ends
+        // them all — so a token can never be what replaces the credential
+        // behind it. `ChangePasswordRequest` carries no session field, which
+        // is what makes this unreachable; this is the second refusal.
+        let session_authenticated = ca.vault.authenticate("alice", &key).unwrap();
+        let session = PreparedAdminAuthentication::Session(Ok(session_authenticated));
+        match authenticate_for_password_change(&mut ca, &session) {
+            Ok(a) => panic!("{} changed its password with a session", a.admin),
+            Err(refused) => assert_eq!(refused, "authentication failed"),
+        }
 
         // And once a password is chosen, the gate lifts for everything.
         let rekey = ca
@@ -470,6 +481,126 @@ mod state_tests {
         .unwrap();
         assert!(matches!(resp, SignResponse::Err { .. }), "{resp:?}");
         served.await.unwrap().unwrap();
+    }
+
+    /// Change-password end to end: the request carries the current password
+    /// and the replacement, so a wrong current one must change nothing, and
+    /// what lands must be the *new* one.
+    ///
+    /// Driven through `serve_request` rather than the handler because that is
+    /// where the claim lives: the requirements table decides what authenticates
+    /// the request, the preamble spends the KDF on it, and the handler commits
+    /// a rekey prepared somewhere else entirely. All three have to agree about
+    /// which of the two passwords is which, and only the whole path shows it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn change_password_proves_the_current_one_and_installs_the_new_one() {
+        use admin_proto::AdminMgmtResponse;
+        let dir = tempfile::tempdir().unwrap();
+        let lock = ConfigDirLock::acquire_for_ca_dir(dir.path()).await.unwrap();
+        let mut ca = ca_store::CaDir::open(lock, dir.path()).await.unwrap();
+        ca.vault
+            .create(
+                b"mock-ca-key",
+                "recovery",
+                "rpw",
+                netidx_admin_proto::policy::recovery_policy(),
+            )
+            .await
+            .unwrap();
+        ca.vault
+            .add_role_slot(
+                "alice",
+                "alice-current-pw",
+                netidx_admin_proto::policy::superuser_policy(),
+                false,
+            )
+            .await
+            .unwrap();
+        let state = test_server(Some(ca));
+        let holds = async |state: &Arc<Server>, password: &'static str| {
+            let password = password.to_string();
+            state
+                .read(move |state| {
+                    state
+                        .ca
+                        .as_ref()
+                        .expect("CA role held")
+                        .vault
+                        .authenticate("alice", &password)
+                        .is_ok()
+                })
+                .await
+        };
+
+        // Wrong current password: refused with the same words a bad login
+        // gets, and the slot it named is untouched.
+        match change_password_over_the_wire(&state, "not-alices-password", "chosen-pw")
+            .await
+        {
+            AdminMgmtResponse::Ok(()) => panic!("a wrong current password rekeyed alice"),
+            AdminMgmtResponse::Err { reason } => {
+                assert_eq!(reason, "authentication failed")
+            }
+        }
+        assert!(holds(&state, "alice-current-pw").await);
+        assert!(!holds(&state, "chosen-pw").await);
+
+        // The right one: the replacement lands, and the password that
+        // authorized the change stops working with it.
+        match change_password_over_the_wire(&state, "alice-current-pw", "chosen-pw").await
+        {
+            AdminMgmtResponse::Ok(()) => (),
+            AdminMgmtResponse::Err { reason } => panic!("{reason}"),
+        }
+        assert!(holds(&state, "chosen-pw").await);
+        assert!(!holds(&state, "alice-current-pw").await);
+    }
+
+    /// One connection, one change-password request, hello exchange and all.
+    async fn change_password_over_the_wire(
+        state: &Arc<Server>,
+        old_password: &str,
+        new_password: &str,
+    ) -> admin_proto::AdminMgmtResponse {
+        use super::request::serve_request;
+        use admin_proto::{
+            ClientHello, NodeKind, PROTOCOL_VERSION, Request, Secret, ServerHello,
+        };
+        let (mut client, server) = tokio::io::duplex(64 * 1024);
+        let served = tokio::spawn({
+            let state = state.clone();
+            async move {
+                serve_request(
+                    server,
+                    "203.0.113.7:1234".parse().unwrap(),
+                    None,
+                    false,
+                    &state,
+                    Arc::new(tokio::sync::Semaphore::new(4)),
+                )
+                .await
+            }
+        });
+        admin_proto::write_msg(
+            &mut client,
+            &ClientHello { protocol_version: PROTOCOL_VERSION, kind: NodeKind::Client },
+        )
+        .await
+        .unwrap();
+        let _: ServerHello = admin_proto::read_msg(&mut client).await.unwrap();
+        admin_proto::write_msg(
+            &mut client,
+            &Request::ChangePassword(admin_proto::ChangePasswordRequest {
+                admin: "alice".to_string(),
+                old_password: Secret(old_password.to_string()),
+                new_password: Secret(new_password.to_string()),
+            }),
+        )
+        .await
+        .unwrap();
+        let resp = admin_proto::read_msg(&mut client).await.unwrap();
+        served.await.unwrap().unwrap();
+        resp
     }
 }
 

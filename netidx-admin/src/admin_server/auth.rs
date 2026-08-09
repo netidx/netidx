@@ -46,10 +46,9 @@ pub(super) const MUST_CHANGE_PASSWORD: &str = concat!(
 ///
 /// The `must_change` check lives here, at the single funnel every handler
 /// reaches authentication through, rather than in each op: a handler added
-/// later inherits the refusal without anyone having to remember it. The one
-/// op that must work anyway goes through
-/// [`authenticate_for_password_change`] — an explicit exemption at one call
-/// site, not a gap in the default.
+/// later inherits the refusal without anyone having to remember it. What must
+/// work anyway asks for [`authenticate_for_password_change`] by name — an
+/// exemption spelled out at the sites that need it, not a gap in the default.
 ///
 /// Both credential kinds are validated during the prepare phase (see
 /// [`prepare_admin_authentication`]); this revalidates the prepared result
@@ -59,45 +58,15 @@ pub(super) fn authenticate(
     credential: &admin_proto::AdminCredential,
     prepared: &PreparedAdminAuthentication,
 ) -> std::result::Result<ca_vault::Authenticated, String> {
-    let authd = authenticate_for_password_change(ca, credential, prepared)?;
-    if authd.must_change {
-        return Err(MUST_CHANGE_PASSWORD.to_string());
-    }
-    Ok(authd)
-}
-
-/// [`authenticate`] without the one-time-password refusal — the caller has
-/// established that the request being served *is* the password change. Never
-/// call it for anything else: it is the exemption, and its only legitimate
-/// use is the op that clears the flag.
-pub(super) fn authenticate_for_password_change(
-    ca: &mut ca_store::CaDir,
-    credential: &admin_proto::AdminCredential,
-    prepared: &PreparedAdminAuthentication,
-) -> std::result::Result<ca_vault::Authenticated, String> {
-    match (credential, prepared) {
+    let authd = match (credential, prepared) {
         (
             admin_proto::AdminCredential::Password { .. },
             PreparedAdminAuthentication::Password(result),
-        ) => result.as_ref().map_err(Clone::clone).and_then(|authenticated| {
-            ca.vault
-                .resolve_session_slot(
-                    authenticated.slot_id,
-                    authenticated.credential_revision,
-                )
-                .map_err(|_| "authentication failed".to_string())
-        }),
+        ) => revalidate(ca, result, "authentication failed"),
         (
             admin_proto::AdminCredential::Session { .. },
             PreparedAdminAuthentication::Session(result),
-        ) => result.as_ref().map_err(Clone::clone).and_then(|authenticated| {
-            ca.vault
-                .resolve_session_slot(
-                    authenticated.slot_id,
-                    authenticated.credential_revision,
-                )
-                .map_err(|_| "login required: session is no longer valid".to_string())
-        }),
+        ) => revalidate(ca, result, "login required: session is no longer valid"),
         (
             admin_proto::AdminCredential::Password { .. },
             PreparedAdminAuthentication::Session(_),
@@ -106,7 +75,47 @@ pub(super) fn authenticate_for_password_change(
             admin_proto::AdminCredential::Session { .. },
             PreparedAdminAuthentication::Password(_),
         ) => Err("authentication failed".to_string()),
+    }?;
+    if authd.must_change {
+        return Err(MUST_CHANGE_PASSWORD.to_string());
     }
+    Ok(authd)
+}
+
+/// [`authenticate`] for a **password only**, and without the one-time-password
+/// refusal. Its two callers are the two points a one-time password has to get
+/// through: the login that answers "change it first", and the change itself.
+/// Never call it for anything else — it is the exemption, not a shortcut.
+///
+/// A session is refused rather than resolved, and by then it is the second
+/// refusal: [`admin_proto::ChangePasswordRequest`] has no field a token could
+/// arrive in, so a prepared session here means a caller reached this function
+/// from somewhere it does not belong.
+pub(super) fn authenticate_for_password_change(
+    ca: &mut ca_store::CaDir,
+    prepared: &PreparedAdminAuthentication,
+) -> std::result::Result<ca_vault::Authenticated, String> {
+    match prepared {
+        PreparedAdminAuthentication::Password(result) => {
+            revalidate(ca, result, "authentication failed")
+        }
+        PreparedAdminAuthentication::Session(_) => {
+            Err("authentication failed".to_string())
+        }
+    }
+}
+
+/// Re-resolve a prepared authentication against the live vault, so a slot
+/// removed or rekeyed while the (deliberately slow) KDF ran is refused.
+fn revalidate(
+    ca: &ca_store::CaDir,
+    prepared: &std::result::Result<ca_vault::Authenticated, String>,
+    stale: &str,
+) -> std::result::Result<ca_vault::Authenticated, String> {
+    let authenticated = prepared.as_ref().map_err(Clone::clone)?;
+    ca.vault
+        .resolve_session_slot(authenticated.slot_id, authenticated.credential_revision)
+        .map_err(|_| stale.to_string())
 }
 
 pub(super) fn safe_auth_failure(
@@ -171,6 +180,28 @@ where
     .context("CA signing task panicked")
 }
 
+/// What a request offers as proof of who is sending it. Most carry an
+/// [`admin_proto::AdminCredential`] and so accept either kind; change-password
+/// carries a bare password, which is how "a session cannot authorize it"
+/// becomes a property of the message rather than a check someone must
+/// remember to write.
+#[derive(Debug, Clone, Copy)]
+pub(super) enum AdminAuth<'a> {
+    Credential(&'a admin_proto::AdminCredential),
+    Password { admin: &'a str, password: &'a admin_proto::Secret },
+}
+
+impl AdminAuth<'_> {
+    /// Whether resolving this costs a KDF, and so must be rate limited.
+    pub(super) fn is_password(self) -> bool {
+        match self {
+            Self::Password { .. }
+            | Self::Credential(admin_proto::AdminCredential::Password { .. }) => true,
+            Self::Credential(admin_proto::AdminCredential::Session { .. }) => false,
+        }
+    }
+}
+
 pub(super) enum PreparedAdminAuthentication {
     Password(std::result::Result<ca_vault::Authenticated, String>),
     Session(std::result::Result<ca_vault::Authenticated, String>),
@@ -227,17 +258,19 @@ impl PreparedServerUnlock {
 pub(super) async fn prepare_admin_authentication(
     state: &Arc<Server>,
     signs: &Arc<Semaphore>,
-    credential: &admin_proto::AdminCredential,
+    auth: AdminAuth<'_>,
     attempt: Option<PasswordAttempt>,
 ) -> PreparedAdminAuthentication {
-    let (admin, password) = match credential {
-        admin_proto::AdminCredential::Password { admin, password } => {
-            (admin.clone(), password.clone())
-        }
+    let (admin, password) = match auth {
+        AdminAuth::Password { admin, password } => (admin.to_string(), password.clone()),
+        AdminAuth::Credential(admin_proto::AdminCredential::Password {
+            admin,
+            password,
+        }) => (admin.clone(), password.clone()),
         // Validating a session token is a hashmap lookup plus a slot-revision
         // check — cheap, and it must happen here so a bogus token never
         // reaches the KDF-bearing preparation steps below.
-        admin_proto::AdminCredential::Session { token } => {
+        AdminAuth::Credential(admin_proto::AdminCredential::Session { token }) => {
             let token = token.clone();
             return PreparedAdminAuthentication::Session(
                 state

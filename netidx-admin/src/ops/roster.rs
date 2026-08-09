@@ -26,7 +26,7 @@ use super::AdminTarget;
 #[cfg(unix)]
 use crate::local;
 use crate::{
-    admin_proto::{NodeKind, Secret},
+    admin_proto::{AdminCredential, NodeKind, Secret},
     answer::{Answerer, Field},
     transport,
 };
@@ -153,7 +153,8 @@ pub async fn reset_password(
 }
 
 /// The `ca admin change-password` action: replace the **caller's own**
-/// password, prompting for the new one (twice, until they match).
+/// password, proving the current one and prompting for the new one (twice,
+/// until they match).
 ///
 /// Remote-only. The local control socket authenticates by unix credentials,
 /// so there is no keyslot behind it to rekey; a caller that reaches here with
@@ -172,12 +173,20 @@ pub async fn change_password(
              password use `netidx admin ca admin reset-password <name>`."
         ),
     };
+    let old_password = match &session.credential {
+        AdminCredential::Password { password, .. } => password.clone(),
+        // A token says a password was typed when it was minted, hours ago —
+        // not that whoever holds it now knows one. This op mints a credential
+        // that outlives every session and ends them all, so it is proved now.
+        AdminCredential::Session { .. } => ans.secret(Field::AdminPassword, None).await?,
+    };
     let new_password = confirm_new_password(ans, new_password).await?;
     transport::change_password(
         session.server,
         NodeKind::Client,
         &session.identity,
-        session.credential.clone(),
+        &session.admin,
+        old_password.as_str(),
         new_password.as_str(),
     )
     .await

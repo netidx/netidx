@@ -2,7 +2,7 @@ use super::{
     MutableState, Server, audit,
     auth::{
         PreparedAdminAuthentication, authenticate, authenticate_for_password_change,
-        broad_admin, local_superuser, safe_auth_failure, scope_covers, signing_slot,
+        broad_admin, local_superuser, scope_covers, signing_slot,
     },
 };
 use crate::{
@@ -35,8 +35,7 @@ pub(super) async fn handle_login(
                     // changed. Answering that before the password verifies
                     // would name which accounts are mid-reset to anyone who
                     // can guess a login. No session is minted either way.
-                    match authenticate_for_password_change(ca, &req.credential, prepared)
-                    {
+                    match authenticate_for_password_change(ca, prepared) {
                         Ok(authenticated) if authenticated.must_change => {
                             admin_proto::LoginResponse::PasswordChangeRequired {
                                 admin: authenticated.admin,
@@ -470,23 +469,25 @@ async fn handle_remove_admin_inner(
 
 /// `ChangePassword`: replace the **caller's own** password (CA-only).
 ///
-/// The one op a one-time credential may drive, so it authenticates through
-/// [`authenticate_for_password_change`] rather than the gated funnel. Two
-/// things keep that exemption narrow: the slot rekeyed is `authd.slot_id` —
-/// the request carries no target, so no name can redirect it — and a signing
-/// slot is refused outright.
+/// The one op a one-time password may drive, so it authenticates through
+/// [`authenticate_for_password_change`] rather than the gated funnel. Three
+/// things keep that exemption narrow: what it authenticates is the current
+/// password, never a session; the slot rekeyed is `authd.slot_id` — the
+/// request carries no target, so no name can redirect it — and a signing slot
+/// is refused outright.
+///
+/// Nothing here reads the request: the password it carries was spent
+/// authenticating, and the replacement was derived from it before the write
+/// lock. What survives is `authentication` and `prepared`.
 pub(super) async fn handle_change_password(
     state: &Server,
-    req: &admin_proto::ChangePasswordRequest,
     authentication: &PreparedAdminAuthentication,
     local: bool,
     prepared: PreparedRekey,
 ) -> AdminMgmtResponse {
-    let req = req.clone();
     state
         .write_async(async move |state| {
-            handle_change_password_inner(state, &req, authentication, local, prepared)
-                .await
+            handle_change_password_inner(state, authentication, local, prepared).await
         })
         .await
 }
@@ -497,7 +498,6 @@ pub(super) type PreparedRekey = std::result::Result<ca_vault::PreparedRoleRekey,
 
 async fn handle_change_password_inner(
     state: &mut MutableState,
-    req: &admin_proto::ChangePasswordRequest,
     authentication: &PreparedAdminAuthentication,
     local: bool,
     prepared: PreparedRekey,
@@ -514,11 +514,10 @@ async fn handle_change_password_inner(
              use `netidx admin ca admin reset-password <name>`."
             .to_string());
     }
-    let authd =
-        match authenticate_for_password_change(ca, &req.credential, authentication) {
-            Ok(a) => a,
-            Err(reason) => return err(safe_auth_failure(&req.credential, reason)),
-        };
+    let authd = match authenticate_for_password_change(ca, authentication) {
+        Ok(a) => a,
+        Err(reason) => return err(reason),
+    };
     if signing_slot(&authd) {
         return err(format!(
             "{:?} is a system-managed signing slot; rotate it with `netidx admin ca \

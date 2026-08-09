@@ -50,7 +50,7 @@ pub mod identity;
 pub mod policy;
 pub mod server_config;
 
-pub const PROTOCOL_VERSION: u32 = 12;
+pub const PROTOCOL_VERSION: u32 = 13;
 
 /// Conventional admin-server port (resolver is 4564).
 pub const DEFAULT_PORT: u16 = 4565;
@@ -522,11 +522,13 @@ pub enum Request {
     /// [`EditIdMapResponse`].
     #[pack(tag(47))]
     EditIdMap(EditIdMapRequest),
-    /// Admin-authenticated, sent to the **CA**: replace the caller's OWN
-    /// password. The only request a `must_change` credential may send, so it
-    /// authenticates through a path that deliberately skips that gate — an
-    /// admin locked out of everything else must still be able to get out.
-    /// Answered with [`AdminMgmtResponse`].
+    /// Sent to the **CA**: replace the caller's OWN password, proving the
+    /// current one in the same request — the one admin request that carries no
+    /// [`AdminCredential`], and so cannot be authorized by a session. The only
+    /// request a `must_change` password may send, so it authenticates through
+    /// a path that deliberately skips that gate — an admin locked out of
+    /// everything else must still be able to get out. Answered with
+    /// [`AdminMgmtResponse`].
     #[pack(tag(49))]
     ChangePassword(ChangePasswordRequest),
     /// Admin-authenticated, sent to the **CA**: replace a role admin's
@@ -1784,13 +1786,21 @@ pub struct AddRoleAdminRequest {
     pub must_change: bool,
 }
 
-/// Admin → CA: replace the **caller's own** password. There is no target
-/// field by construction: the slot rekeyed is the one the credential
-/// authenticated, so this request can never reach another admin's slot. The
-/// one request a `must_change` credential may send.
+/// Admin → CA: replace the **caller's own** password, proving the current one.
+/// There is no target field by construction: the slot rekeyed is the one
+/// `old_password` authenticates, so this request can never reach another
+/// admin's slot. The one request a `must_change` password may send.
+///
+/// It carries a password rather than an [`AdminCredential`] deliberately, so
+/// that no session can authorize it. A token proves only that someone held a
+/// terminal when it was minted, hours earlier; a rekey mints a credential that
+/// outlives every session and evicts them all, including the real holder's. An
+/// inherited session would therefore be a complete, one-way account takeover,
+/// which is exactly what a password prompt at the moment of change prevents.
 #[derive(Debug, Clone, Serialize, Deserialize, Pack)]
 pub struct ChangePasswordRequest {
-    pub credential: AdminCredential,
+    pub admin: String,
+    pub old_password: Secret,
     pub new_password: Secret,
 }
 
@@ -2271,7 +2281,7 @@ mod tests {
                 protocol_version: PROTOCOL_VERSION,
                 kind: NodeKind::Client,
             }),
-            vec![7, 0, 0, 0, 12, 2, 2]
+            vec![7, 0, 0, 0, 13, 2, 2]
         );
         assert_eq!(encode(&Request::GetMap), vec![2, 23]);
         assert_eq!(encode(&Request::Deregister), vec![2, 21]);
