@@ -44,12 +44,11 @@
 //! a fresh transient SE P-256 key, ECIES-encrypts the secret under it,
 //! and stores the key's SEP-wrapped private material *inside the blob*
 //! (the CTK token object id — what CryptoKit calls
-//! `dataRepresentation`). Nothing
-//! touches the keychain, so no code-signing entitlement is needed,
-//! and there is no system state to lose: the blob is self-contained
-//! and only this machine's enclave can unwrap it. No user-presence
-//! gate, accessible after first unlock — a daemon that can't start
-//! unattended is an outage on a delay timer.
+//! `dataRepresentation`). Nothing touches the keychain, so no
+//! code-signing entitlement is needed, and there is no system state to
+//! lose: the blob is self-contained and only this machine's enclave can
+//! unwrap it. No user-presence gate, accessible after first unlock — a
+//! daemon that can't start unattended is an outage on a delay timer.
 //!
 //! On platforms with neither, [`available`] is `false` and
 //! [`seal`]/[`unseal`] return honest errors; callers fall back to
@@ -79,19 +78,30 @@ pub const MECHANISM: &str = "Secure Enclave";
 #[cfg(not(target_os = "macos"))]
 pub const MECHANISM: &str = "TPM";
 
+/// Bytes of entropy in a [`random_secret`] — 256 bits, sized like the
+/// private key whose password it becomes.
+const RANDOM_SECRET_BYTES: usize = 32;
+
 /// A long random secret (256 bits, lowercase hex — printable, so it
 /// composes with anything that expects a password string). Used as the
 /// generated password when a key is sealed rather than typed.
+///
+/// Every buffer it passes through is wiped, and the output string is
+/// preallocated to its exact length: a realloc midway would strand half
+/// the secret in an old allocation, where `Zeroizing` never reaches it.
+/// The password protects a TLS private key and is meant to exist only
+/// inside a sealed blob, so a copy left in freed heap for a core dump to
+/// find is the whole of what it was supposed to prevent.
 pub fn random_secret() -> zeroize::Zeroizing<String> {
     use rand::Rng;
     use std::fmt::Write;
-    let mut bytes = [0u8; 32];
-    rand::rng().fill_bytes(&mut bytes);
-    let mut s = String::with_capacity(64);
-    for b in bytes {
-        let _ = write!(s, "{b:02x}");
+    let mut bytes = zeroize::Zeroizing::new([0u8; RANDOM_SECRET_BYTES]);
+    rand::rng().fill_bytes(&mut bytes[..]);
+    let mut out = zeroize::Zeroizing::new(String::with_capacity(2 * RANDOM_SECRET_BYTES));
+    for b in bytes.iter() {
+        let _ = write!(&mut *out, "{b:02x}");
     }
-    zeroize::Zeroizing::new(s)
+    out
 }
 
 /// One marshalled TPM command in, one complete raw response frame out.
@@ -901,11 +911,15 @@ mod tests {
 
     #[test]
     fn random_secrets_are_long_and_distinct() {
+        // The size is the security claim; the length is also what keeps the
+        // output string's preallocation exact, so that no realloc can leave
+        // half the secret behind in a freed buffer.
+        assert_eq!(RANDOM_SECRET_BYTES * 8, 256);
         let a = random_secret();
         let b = random_secret();
-        assert_eq!(a.len(), 64);
+        assert_eq!(a.len(), 2 * RANDOM_SECRET_BYTES);
         assert_ne!(*a, *b);
-        assert!(a.bytes().all(|c| c.is_ascii_hexdigit()));
+        assert!(a.bytes().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
     }
 
     /// Real hardware round-trip. Runs only where a TPM is reachable
