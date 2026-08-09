@@ -258,6 +258,53 @@ mod tests {
         delete(&session.ca_fingerprint).unwrap();
     }
 
+    /// The whole persistent path on real hardware, which is where this
+    /// broke: a session is ~300 bytes and a TPM seals 128 in one object,
+    /// so `store` failed outright and `netidx admin login` could not
+    /// persist anything on any machine with a TPM. Nothing above this
+    /// layer noticed, because the only frontend that keeps a session
+    /// without one — the TUI — falls back to process memory.
+    ///
+    /// Runs only where a TPM is reachable; the fingerprint is random, so
+    /// it can never collide with a real cached session, and it is
+    /// deleted either way.
+    #[test]
+    fn a_real_session_survives_sealing_to_this_machine() {
+        if !netidx_tpm::available() {
+            eprintln!("skipping: no usable sealing mechanism on this host");
+            return;
+        }
+        let session = cached(now().saturating_add(3600));
+        let fp = session.ca_fingerprint.clone();
+        let outcome = (|| -> Result<()> {
+            assert!(
+                serde_json::to_vec(&Payload {
+                    version: VERSION,
+                    session: session.clone()
+                })?
+                .len()
+                    > netidx_tpm::MAX_SEAL_BYTES,
+                "this test is pointless if a session fits in one sealed object"
+            );
+            store(session.clone())?;
+            let back = load(&fp, Some(&session.admin))?.context("nothing was cached")?;
+            assert_eq!(back.token.as_str(), session.token.as_str());
+            assert_eq!(back.admin, session.admin);
+            assert_eq!(back.bootstrap, session.bootstrap);
+            assert_eq!(back.absolute_deadline_unix, session.absolute_deadline_unix);
+            // On disk it is sealed, not merely encoded.
+            let raw = std::fs::read(path_for(&normalized(&fp)?.0)?)?;
+            assert!(netidx_tpm::is_sealed(&raw));
+            assert!(
+                !raw.windows(session.token.0.len())
+                    .any(|w| w == session.token.0.as_bytes())
+            );
+            Ok(())
+        })();
+        let _ = delete(&fp);
+        outcome.unwrap();
+    }
+
     #[test]
     fn persistent_cache_refuses_unsealed_storage() {
         if netidx_tpm::available() {

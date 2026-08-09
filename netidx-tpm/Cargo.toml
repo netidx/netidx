@@ -22,6 +22,9 @@ zeroize = { workspace = true }
 # through the Secure Enclave instead (below).
 [target.'cfg(not(target_os = "macos"))'.dependencies]
 tpm2-protocol = { workspace = true }
+# Encrypts a secret too large for one TPM sealed object under a key the
+# TPM does hold — see `MAGIC_ENVELOPED`.
+aes-gcm = { workspace = true }
 
 # TPM Base Services (tbs.dll) — the Windows TPM resource manager.
 # raw-dylib linkage: no import libraries, cross-compiles from linux.
