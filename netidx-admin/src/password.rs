@@ -39,7 +39,7 @@ const RECOVERY_ENTROPY_BYTES: usize = 20;
 pub fn gen_crockford_password() -> Zeroizing<String> {
     let mut bytes = Zeroizing::new([0u8; RECOVERY_ENTROPY_BYTES]);
     rand::rng().fill_bytes(&mut bytes[..]);
-    let mut out = String::with_capacity(32);
+    let mut out = Zeroizing::new(String::with_capacity(32));
     let (mut acc, mut bits) = (0u16, 0u32);
     for &b in bytes.iter() {
         acc = (acc << 8) | b as u16;
@@ -50,7 +50,7 @@ pub fn gen_crockford_password() -> Zeroizing<String> {
         }
     }
     // 160 bits / 5 == 32 chars exactly; no leftover bits to pad.
-    Zeroizing::new(out)
+    out
 }
 
 /// Render a generated password in 4-character quads separated by spaces
@@ -59,14 +59,14 @@ pub fn gen_crockford_password() -> Zeroizing<String> {
 /// The result is `Zeroizing` (it holds the full secret) — the same care
 /// [`gen_crockford_password`] takes, kept across this hop.
 pub fn group_crockford_password(pw: &str) -> Zeroizing<String> {
-    let mut out = String::with_capacity(pw.len() + pw.len() / 4);
+    let mut out = Zeroizing::new(String::with_capacity(pw.len() + pw.len() / 4));
     for (i, c) in pw.chars().enumerate() {
         if i > 0 && i % 4 == 0 {
             out.push(' ');
         }
         out.push(c);
     }
-    Zeroizing::new(out)
+    out
 }
 
 /// Fold an operator-typed generated password back to the canonical form
