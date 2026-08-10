@@ -10,24 +10,6 @@
 //! request per connection keeps human think-time (fingerprint
 //! confirmation, password entry) from ever holding a connection — and
 //! the server's connection timeout — open.
-//!
-//! # Protocol evolution
-//!
-//! This protocol has never shipped, so **no compatibility is maintained**.
-//! There is no older peer to accommodate: change a message into whatever
-//! shape is right and bump [`PROTOCOL_VERSION`], which peers compare for
-//! exact equality before a request — and therefore before a credential — is
-//! sent. A mismatch is refused at the hello with both versions named.
-//!
-//! That means no defaulted fields standing in for an encoding nobody ever
-//! produced, no deprecated fields held in place, and no fixtures asserting
-//! that last month's layout still decodes. Every field in a message is a
-//! field the sender wrote, and a message that does not decode in full is an
-//! error rather than a shape half-filled with defaults.
-//!
-//! Reconsider all of this at the first release: from then on there are peers
-//! in the field, an epoch bump is an outage, and appending with defaults
-//! becomes the cheap way to evolve rather than a lie about history.
 
 use anyhow::{Context, Result, bail};
 use enumflags2::{BitFlags, bitflags};
