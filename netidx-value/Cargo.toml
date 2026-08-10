@@ -34,5 +34,6 @@ seq-macro = { workspace = true }
 serde = { workspace = true }
 serde_derive = { workspace = true }
 smallvec = { workspace = true }
+stacker = { workspace = true }
 triomphe = { workspace = true }
 uuid = { workspace = true }

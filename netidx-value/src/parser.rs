@@ -15,13 +15,127 @@ use combine::{
     stream::{Range, position},
     token, unexpected_any,
 };
+use combine::{
+    ErrorOffset,
+    error::{ParseResult, StreamError, Tracked},
+    parser::ParseMode,
+    stream::{Stream, StreamOnce},
+};
 use compact_str::CompactString;
 use escaping::Escape;
 use netidx_core::pack::Pack;
 use poolshark::local::LPooled;
 use rust_decimal::Decimal;
-use std::{borrow::Cow, str::FromStr, sync::LazyLock, time::Duration};
+use std::{
+    borrow::Cow,
+    cell::Cell,
+    str::FromStr,
+    sync::{
+        LazyLock,
+        atomic::{AtomicUsize, Ordering},
+    },
+    time::Duration,
+};
 use triomphe::Arc;
+
+/// Default [`max_nesting`].
+///
+/// A `Value` nests through arrays, maps and abstracts. Anything past
+/// this is an attempt to exhaust the parser rather than to express a
+/// value — real ones are a handful of levels deep.
+pub const DEFAULT_MAX_NESTING: usize = 1000;
+
+static MAX_NESTING: AtomicUsize = AtomicUsize::new(DEFAULT_MAX_NESTING);
+
+/// How deeply a value literal may nest before [`value`] rejects it.
+pub fn max_nesting() -> usize {
+    MAX_NESTING.load(Ordering::Relaxed)
+}
+
+/// Raise or lower [`max_nesting`].
+pub fn set_max_nesting(depth: usize) {
+    MAX_NESTING.store(depth, Ordering::Relaxed)
+}
+
+/// Stack headroom [`grow`] guarantees each nesting level. It must
+/// exceed what one level of `value` costs between checks, which in an
+/// unoptimized build is a large combine `choice` frame.
+const RED_ZONE: usize = 1024 * 1024;
+
+/// Size of each fresh segment, mmap'd on entry and released on exit.
+const SEGMENT: usize = 32 * 1024 * 1024;
+
+thread_local! {
+    static DEPTH: Cell<usize> = const { Cell::new(0) };
+}
+
+/// Wrap the recursion knot of a parser so a deeply nested input costs
+/// heap segments rather than the parsing thread's stack, and is refused
+/// past [`max_nesting`] rather than aborting the process. `Value`
+/// literals arrive from config files, the CLI, and embedders parsing
+/// text they did not write, so the depth is not ours to trust.
+fn grow<P>(p: P) -> GrowStack<P> {
+    GrowStack(p)
+}
+
+struct GrowStack<P>(P);
+
+impl<Input, P> Parser<Input> for GrowStack<P>
+where
+    Input: Stream,
+    P: Parser<Input>,
+{
+    type Output = P::Output;
+    type PartialState = P::PartialState;
+
+    combine::parse_mode!(Input);
+
+    #[inline]
+    fn parse_mode_impl<M>(
+        &mut self,
+        mode: M,
+        input: &mut Input,
+        state: &mut Self::PartialState,
+    ) -> ParseResult<Self::Output, <Input as StreamOnce>::Error>
+    where
+        M: ParseMode,
+    {
+        let depth = DEPTH.with(|d| {
+            let n = d.get() + 1;
+            d.set(n);
+            n
+        });
+        let r = if depth > max_nesting() {
+            ParseResult::CommitErr(<Input as StreamOnce>::Error::from_error(
+                input.position(),
+                StreamError::message_static_message("value nesting too deep"),
+            ))
+        } else {
+            let Self(p) = self;
+            stacker::maybe_grow(RED_ZONE, SEGMENT, || p.parse_mode(mode, input, state))
+        };
+        DEPTH.with(|d| d.set(d.get() - 1));
+        r
+    }
+
+    #[inline]
+    fn add_error(&mut self, error: &mut Tracked<<Input as StreamOnce>::Error>) {
+        self.0.add_error(error)
+    }
+
+    #[inline]
+    fn add_committed_expected_error(
+        &mut self,
+        error: &mut Tracked<<Input as StreamOnce>::Error>,
+    ) {
+        self.0.add_committed_expected_error(error)
+    }
+
+    #[inline]
+    fn parser_count(&self) -> ErrorOffset {
+        self.0.parser_count()
+    }
+}
 
 // sep_by1, but a separator terminator is allowed, and ignored
 pub fn sep_by1_tok<I, O, OC, EP, SP, TP>(
@@ -373,9 +487,7 @@ where
                 Err(_) => unexpected_any("failed to unpack abstract").left(),
             }
         }),
-        constant("error")
-            .with(value(must_escape, esc))
-            .map(|v| Value::Error(v.into())),
+        constant("error").with(value(must_escape, esc)).map(|v| Value::Error(v.into())),
         attempt(constant("decimal"))
             .with(flt::<_, Decimal>())
             .map(|d| Value::Decimal(Arc::new(d))),
@@ -409,7 +521,7 @@ parser! {
     )(I) -> Value
     where [I: RangeStream<Token = char>, I::Range: Range]
     {
-        value_(must_escape, esc)
+        grow(value_(must_escape, esc))
     }
 }
 

@@ -6,9 +6,7 @@ debug = false
 
 
 [profile.dev]
-opt-level = "s"
-lto = "thin"
-debug = true
+debug = false
 
 [workspace.dependencies]
 aes-gcm = "0.10"
@@ -99,6 +97,7 @@ sha2 = "0.10"
 sha3 = "0.11"
 sled = { version = "0.34" }
 smallvec = { version = "1", features = ["const_generics", "union"] }
+stacker = "0.1"
 syn = "2"
 tempdir = "0.3.7"
 tempfile = "3"
