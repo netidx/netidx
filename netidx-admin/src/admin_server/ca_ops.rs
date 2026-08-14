@@ -60,77 +60,64 @@ pub(super) async fn handle_backup(
     req: &admin_proto::BackupRequest,
     prepared_server_unlock: &PreparedServerUnlock,
 ) -> BackupResponse {
-    if !state.has_ca().await {
-        return BackupResponse::Err {
-            reason: "backup must be run on the CA".to_string(),
-        };
-    }
     let Some(cfg_path) = state.cfg_path.clone() else {
         return BackupResponse::Err {
             reason: "the running CA has no persistent config path".to_string(),
         };
     };
-    let ca_dir = state.ca_dir().await.expect("CA role held");
     let target = PathBuf::from(&req.target);
-    let unlocked = match state
-        .write_async(async move |state| {
-            server_unlock(
-                state.ca.as_mut().expect("CA role held"),
-                prepared_server_unlock,
-            )
-            .await
-        })
-        .await
-    {
-        Ok(unlocked) => unlocked,
-        Err(reason) => return BackupResponse::Err { reason },
-    };
-    let capture_ca_dir = ca_dir.clone();
+    // The write lock is the barrier `capture` documents: issue/revoke
+    // serialize here, so issued/ cannot change mid-walk. publish is
+    // only the already-copied bytes.
     let captured = state
-        .read_async(async move |state| {
-            Ok::<_, anyhow::Error>((
-                state.cfg.clone(),
-                state.map.version,
-                state
-                    .ca
-                    .as_ref()
-                    .expect("CA role held")
-                    .store
-                    .max_serial()
-                    .await?
-                    .unwrap_or(0),
-            ))
+        .write_async(async move |state| {
+            let Some(ca) = state.ca.as_mut() else {
+                return Err(BackupResponse::Err {
+                    reason: "backup must be run on the CA".to_string(),
+                });
+            };
+            let unlocked = match server_unlock(ca, prepared_server_unlock).await {
+                Ok(unlocked) => unlocked,
+                Err(reason) => return Err(BackupResponse::Err { reason }),
+            };
+            let ca_dir = ca.dir().to_path_buf();
+            let highest_serial = match ca.store.max_serial().await {
+                Ok(serial) => serial.unwrap_or(0),
+                Err(e) => {
+                    return Err(BackupResponse::Err {
+                        reason: format!("capturing backup state: {e:#}"),
+                    });
+                }
+            };
+            let cfg = state.cfg.clone();
+            let map_version = state.map.version;
+            let ca_key_pem = unlocked.ca_key_pem.clone();
+            let walk = ca_dir.clone();
+            match tokio::task::spawn_blocking(move || {
+                crate::backup::capture(
+                    &cfg,
+                    &cfg_path,
+                    &walk,
+                    map_version,
+                    highest_serial,
+                    &ca_key_pem,
+                )
+            })
+            .await
+            {
+                Ok(Ok(snapshot)) => Ok((snapshot, ca_dir)),
+                Ok(Err(e)) => Err(BackupResponse::Err {
+                    reason: format!("capturing backup: {e:#}"),
+                }),
+                Err(e) => Err(BackupResponse::Err {
+                    reason: format!("backup capture task panicked: {e}"),
+                }),
+            }
         })
         .await;
-    let (cfg, map_version, highest_serial) = match captured {
+    let (snapshot, ca_dir) = match captured {
         Ok(captured) => captured,
-        Err(e) => {
-            return BackupResponse::Err {
-                reason: format!("capturing backup state: {e:#}"),
-            };
-        }
-    };
-    let snapshot = match tokio::task::spawn_blocking(move || {
-        crate::backup::capture(
-            &cfg,
-            &cfg_path,
-            &capture_ca_dir,
-            map_version,
-            highest_serial,
-            &unlocked.ca_key_pem,
-        )
-    })
-    .await
-    {
-        Ok(Ok(snapshot)) => snapshot,
-        Ok(Err(e)) => {
-            return BackupResponse::Err { reason: format!("capturing backup: {e:#}") };
-        }
-        Err(e) => {
-            return BackupResponse::Err {
-                reason: format!("backup capture task panicked: {e}"),
-            };
-        }
+        Err(resp) => return resp,
     };
     let ca_dir_for_publish = ca_dir.clone();
     let outcome = match tokio::task::spawn_blocking(move || {
