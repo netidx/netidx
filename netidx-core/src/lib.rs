@@ -1,8 +1,6 @@
 #[macro_use]
 extern crate serde_derive;
 #[macro_use]
-extern crate anyhow;
-#[macro_use]
 extern crate pin_utils;
 
 pub mod pack;

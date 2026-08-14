@@ -2230,10 +2230,22 @@ mod errors {
             e.next(TO).await,
             Some((d.id(), errs(&[SubscribeError::ConnectionLost])))
         );
-        let gone = errs(&[SubscribeError::ConnectionLost, SubscribeError::NotFound]);
-        assert_eq!(e.next(TO).await, Some((d.id(), gone)));
+        // the union grows as the retries discover more, and every new reason
+        // is reported exactly once — the set never repeats itself
+        let mut last = errs(&[SubscribeError::ConnectionLost]);
+        while !last.contains(SubscribeError::NotFound) {
+            match e.next(TO).await {
+                None => panic!("the publisher is gone and it never said so: {last}"),
+                Some((id, errors)) => {
+                    assert_eq!(id, d.id());
+                    assert!(errors.0.contains(last.0), "{last} is not kept by {errors}");
+                    assert_ne!(errors, last);
+                    last = errors;
+                }
+            }
+        }
         e.expect_quiet().await;
-        assert_eq!(d.last_error(), Some(gone));
+        assert_eq!(d.last_error(), Some(last));
         drop(server);
         Ok(())
     }
@@ -2432,6 +2444,39 @@ mod errors {
         Ok(())
     }
 
+    /// A resolver that refuses a publisher's address used to drop the socket
+    /// and say nothing, leaving the publisher to retry on a silent loop.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_refused_publisher_is_told_why() -> Result<()> {
+        let _ = env_logger::try_init();
+        let port = free_port();
+        // binds loopback, but tells the world it is somewhere else, so a
+        // publisher on loopback is not reachable through the address it would
+        // be published under
+        let member = sfile::MemberServerBuilder::default()
+            .addr(SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)), port))
+            .bind_addr(IpAddr::V4(Ipv4Addr::LOCALHOST))
+            .auth(sfile::Auth::Anonymous)
+            .writer_ttl(4)
+            .build()
+            .unwrap();
+        let server = start(
+            sfile::ConfigBuilder::default().member_servers(vec![member]).build().unwrap(),
+            0,
+        )
+        .await;
+        let cfg = anon_client(&[port])?;
+        let pb = publisher(&cfg, DesiredAuth::Anonymous).await?;
+        let mut e = pub_errors(&pb);
+        let v = pb.publish(Path::from("/app/v0"), 42i64)?;
+        pb.flushed().await;
+        let want = perrs(&[PublishError::NotPublished, PublishError::LoopbackAddr]);
+        assert_eq!(e.next(TO).await, Some((None, want)));
+        assert_eq!(pb.publish_errors(v.id()), want);
+        drop(server);
+        Ok(())
+    }
+
     /// The failure everyone actually hits: a resolver or a publisher goes
     /// away and takes every subscription with it.
     #[tokio::test(flavor = "multi_thread")]
@@ -2460,8 +2505,13 @@ mod errors {
             match e.next(TO).await {
                 None => panic!("only {} of {N} subscriptions reported", lost.len()),
                 Some((id, errors)) => {
-                    assert_eq!(errors, errs(&[SubscribeError::ConnectionLost]));
-                    assert!(lost.insert(id), "{id:?} reported the same set twice");
+                    // the death itself is what every one of them reports
+                    // first; a retry may have found more by now
+                    if lost.insert(id) {
+                        assert_eq!(errors, errs(&[SubscribeError::ConnectionLost]))
+                    } else {
+                        assert!(errors.contains(SubscribeError::ConnectionLost))
+                    }
                 }
             }
         }

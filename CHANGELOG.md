@@ -1,5 +1,15 @@
 # Unreleased
 
+- A resolver that refuses a publisher's write address now says why instead
+  of dropping the socket. `ServerHelloWrite` gains a trailing
+  `#[pack(default)] refused: Option<WriteRefusal>`, so this is not a
+  protocol version bump: a 0.32 publisher decodes the message, skips the
+  field, and sees the connection close, exactly as it does today. The
+  publisher reports the reason through `Publisher::errors` — e.g.
+  `NotPublished | LoopbackAddr` — where before this was a `warn!` on a
+  silent retry loop. `netidx_core::utils::check_addr` returns a typed
+  `AddrError` rather than one of six strings.
+
 - Publishers can find out whether their paths are actually published.
   `Publisher::errors` takes a channel that reports `(Option<Id>,
   PublishErrors)` whenever the condition of a published value changes, and

@@ -70,12 +70,49 @@ pub enum ClientHello {
     WriteOnly(ClientHelloWrite),
 }
 
+/// Why the resolver will not accept this publisher, sent instead of dropping
+/// the socket and leaving it to guess.
+///
+/// One value, not a set: a single server refuses for a single reason. A
+/// client that doesn't recognise one just knows it was refused.
+#[derive(Clone, Debug, Copy, PartialEq, Eq, Pack)]
+#[repr(u8)]
+pub enum WriteRefusal {
+    LinkLocalAddr,
+    BroadcastAddr,
+    PrivateAddr,
+    UnspecifiedAddr,
+    MulticastAddr,
+    LoopbackAddr,
+}
+
+impl From<netidx_core::utils::AddrError> for WriteRefusal {
+    fn from(e: netidx_core::utils::AddrError) -> Self {
+        use netidx_core::utils::AddrError as A;
+        match e {
+            A::LinkLocal => Self::LinkLocalAddr,
+            A::Broadcast => Self::BroadcastAddr,
+            A::Private => Self::PrivateAddr,
+            A::Unspecified => Self::UnspecifiedAddr,
+            A::Multicast => Self::MulticastAddr,
+            A::Loopback => Self::LoopbackAddr,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Pack)]
 pub struct ServerHelloWrite {
     pub ttl: u64,
     pub ttl_expired: bool,
     pub auth: AuthWrite,
     pub resolver_id: SocketAddr,
+    /// If set, everything above is moot: the connection is about to close.
+    ///
+    /// A trailing `#[pack(default)]` field, so a 0.32 publisher decodes the
+    /// message, skips it, and then sees the connection close — which is what
+    /// it sees today. No protocol version bump.
+    #[pack(default)]
+    pub refused: Option<WriteRefusal>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Pack)]

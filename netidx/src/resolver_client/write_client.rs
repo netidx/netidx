@@ -14,7 +14,7 @@ use crate::{
     tls, utils,
 };
 use ahash::{AHashMap, AHasher};
-use anyhow::{Result, anyhow};
+use anyhow::{Error, Result, anyhow};
 use arcstr::ArcStr;
 use cross_krb5::{ClientCtx, K5Ctx};
 use futures::{
@@ -505,6 +505,11 @@ impl Connection {
                 }
             };
         debug!("write_con resolver hello {:?}", r);
+        if let Some(refused) = r.refused {
+            let e = PublishError::from(refused);
+            warn!("resolver {:?} refused this publisher: {e}", self.resolver_addr);
+            return Err(Error::from(e));
+        }
         if ownership_check {
             let secret: Secret = wt!("recv secret", con.receive())??;
             {
@@ -535,9 +540,13 @@ impl Connection {
         self.security_context = None;
         self.secrets.write().remove(&self.resolver_addr);
         warn!("write connection {:?} failed {}", self.resolver_addr, e);
-        // the log has the diagnosis; there is nothing more specific we could
-        // call this until the resolver can tell us why it refused us
-        self.report_down(PublishError::ResolverUnreachable);
+        // a resolver that told us why said so in the hello; everything else
+        // is a connection we could not make, and the log has the detail
+        let reason = e
+            .downcast_ref::<PublishError>()
+            .copied()
+            .unwrap_or(PublishError::ResolverUnreachable);
+        self.report_down(reason);
     }
 
     async fn send_heartbeat(&mut self) {

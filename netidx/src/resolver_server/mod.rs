@@ -8,13 +8,13 @@ use crate::{
         resolver::{
             AuthChallenge, AuthRead, AuthWrite, ClientHello, ClientHelloWrite, FromWrite,
             HashMethod, Publisher, PublisherId, ReadyForOwnershipCheck, Secret,
-            ServerHelloWrite, ToRead, ToWrite,
+            ServerHelloWrite, ToRead, ToWrite, WriteRefusal,
         },
     },
     tls, utils,
 };
 use ahash::AHashMap;
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 use arcstr::{ArcStr, literal};
 use auth::{ANONYMOUS, UserInfo};
 use config::{Config, MemberServer, ReadGate};
@@ -500,11 +500,55 @@ async fn ownership_check(
 
 type AuthResult = Result<(Channel, Arc<UserInfo>, Arc<Publisher>, oneshot::Receiver<()>)>;
 
+/// A hello that says nothing except why we will not take this publisher.
+fn refusal_hello(ctx: &Ctx, auth: AuthWrite, refused: WriteRefusal) -> ServerHelloWrite {
+    info!("hello_write refusing the publisher: {refused:?}");
+    ServerHelloWrite {
+        ttl: ctx.cfg.writer_ttl.as_secs(),
+        ttl_expired: true,
+        resolver_id: ctx.id,
+        auth,
+        refused: Some(refused),
+    }
+}
+
+/// Say why, rather than dropping the socket and leaving the publisher to
+/// guess. It has nothing else to go on: it will retry forever either way.
+///
+/// Sent where the publisher is already waiting to read a `ServerHelloWrite`,
+/// and before anything is registered, so refusing costs it one round trip and
+/// us nothing.
+async fn refuse_write_raw(
+    ctx: &Ctx,
+    con: &mut TcpStream,
+    auth: AuthWrite,
+    refused: WriteRefusal,
+) -> anyhow::Error {
+    let h = refusal_hello(ctx, auth, refused);
+    let _ = send(ctx.cfg.hello_timeout, con, &h).await;
+    anyhow!("refused the publisher: {refused:?}")
+}
+
+async fn refuse_write(
+    ctx: &Ctx,
+    con: &mut Channel,
+    auth: AuthWrite,
+    refused: WriteRefusal,
+) -> anyhow::Error {
+    let h = refusal_hello(ctx, auth, refused);
+    let _ = time::timeout(ctx.cfg.hello_timeout, con.send_one(&h)).await;
+    anyhow!("refused the publisher: {refused:?}")
+}
+
 async fn write_client_anonymous_auth(
     ctx: &Arc<Ctx>,
     mut con: TcpStream,
     hello: &ClientHelloWrite,
+    refused: Option<WriteRefusal>,
 ) -> AuthResult {
+    if let Some(r) = refused {
+        return Err(refuse_write_raw(ctx, &mut con, AuthWrite::Anonymous, r).await);
+    }
     let uifo = &*ANONYMOUS;
     let (publisher, ttl_expired, rx_stop) =
         ctx.clinfos.lock().await.insert(&ctx, uifo, &hello).await?;
@@ -513,6 +557,7 @@ async fn write_client_anonymous_auth(
         ttl_expired,
         resolver_id: ctx.id,
         auth: AuthWrite::Anonymous,
+        refused: None,
     };
     info!("hello_write accepting Anonymous authentication");
     debug!("hello_write sending hello {:?}", h);
@@ -533,8 +578,12 @@ async fn write_client_local_auth(
     mut con: TcpStream,
     a: &Arc<(secctx::LocalAuth, RwLock<secctx::SecCtxData<secctx::LocalSecData>>)>,
     hello: &ClientHelloWrite,
+    refused: Option<WriteRefusal>,
 ) -> AuthResult {
     let tok: BoundedBytes<TOKEN_MAX> = recv(ctx.cfg.hello_timeout, &mut con).await?;
+    if let Some(r) = refused {
+        return Err(refuse_write_raw(ctx, &mut con, AuthWrite::Local, r).await);
+    }
     let cred = a.0.authenticate(&*tok)?;
     let uifo = a.1.write().await.users.ifo(ctx.id, Some(&cred.user)).await?;
     info!("hello_write local auth succeeded");
@@ -543,6 +592,7 @@ async fn write_client_local_auth(
         ttl_expired: true, // re auth always clears
         resolver_id: ctx.id,
         auth: AuthWrite::Local,
+        refused: None,
     };
     debug!("hello_write sending {:?}", h);
     send(ctx.cfg.hello_timeout, &mut con, &h).await?;
@@ -560,6 +610,7 @@ async fn write_client_reuse_local(
     con: TcpStream,
     a: &Arc<(secctx::LocalAuth, RwLock<secctx::SecCtxData<secctx::LocalSecData>>)>,
     hello: &ClientHelloWrite,
+    refused: Option<WriteRefusal>,
 ) -> AuthResult {
     let wa = &hello.write_addr;
     let id = ctx.clinfos.lock().await.id(wa).ok_or_else(|| anyhow!("missing"))?;
@@ -567,6 +618,9 @@ async fn write_client_reuse_local(
     let uifo = a.1.write().await.users.ifo(ctx.id, Some(&*d.user)).await?;
     let mut con = Channel::new::<ServerCtx, TcpStream>(None, con);
     challenge_auth(&ctx.cfg, &mut con, d.secret).await?;
+    if let Some(r) = refused {
+        return Err(refuse_write(ctx, &mut con, AuthWrite::Reuse, r).await);
+    }
     let (publisher, ttl_expired, rx_stop) =
         ctx.clinfos.lock().await.insert(&ctx, &uifo, &hello).await?;
     let h = ServerHelloWrite {
@@ -574,6 +628,7 @@ async fn write_client_reuse_local(
         ttl_expired,
         resolver_id: ctx.id,
         auth: AuthWrite::Reuse,
+        refused: None,
     };
     match time::timeout(ctx.cfg.hello_timeout, con.send_one(&h)).await {
         Ok(Ok(())) => (),
@@ -594,17 +649,28 @@ async fn write_client_krb5_auth(
     mut con: TcpStream,
     a: &Arc<(ArcStr, RwLock<secctx::SecCtxData<secctx::K5SecData>>)>,
     hello: &ClientHelloWrite,
+    refused: Option<WriteRefusal>,
 ) -> AuthResult {
     info!("hello_write initiating new krb5 context for {:?}", hello.write_addr);
     let k5ctx = krb5_authentication(ctx.cfg.hello_timeout, Some(&*a.0), &mut con).await?;
     let k5ctx = K5CtxWrap::new(k5ctx);
     let mut con = Channel::new(Some(k5ctx.clone()), con);
     info!("hello_write all traffic now encrypted");
+    if let Some(r) = refused {
+        return Err(refuse_write(
+            ctx,
+            &mut con,
+            AuthWrite::Krb5 { spn: literal!("") },
+            r,
+        )
+        .await);
+    }
     let h = ServerHelloWrite {
         ttl: ctx.cfg.writer_ttl.as_secs(),
         ttl_expired: true, // re auth always clears
         resolver_id: ctx.id,
         auth: AuthWrite::Krb5 { spn: literal!("") },
+        refused: None,
     };
     debug!("hello_write sending {:?}", h);
     time::timeout(ctx.cfg.hello_timeout, con.send_one(&h)).await??;
@@ -624,6 +690,7 @@ async fn write_client_reuse_krb5(
     con: TcpStream,
     a: &Arc<(ArcStr, RwLock<secctx::SecCtxData<secctx::K5SecData>>)>,
     hello: &ClientHelloWrite,
+    refused: Option<WriteRefusal>,
 ) -> AuthResult {
     let wa = &hello.write_addr;
     let id = ctx.clinfos.lock().await.id(wa).ok_or_else(|| anyhow!("missing"))?;
@@ -633,6 +700,9 @@ async fn write_client_reuse_krb5(
     let mut con = Channel::new(Some(d.ctx), con);
     info!("hello_write all traffic now encrypted");
     challenge_auth(&ctx.cfg, &mut con, d.secret).await?;
+    if let Some(r) = refused {
+        return Err(refuse_write(ctx, &mut con, AuthWrite::Reuse, r).await);
+    }
     let (publisher, ttl_expired, rx_stop) =
         ctx.clinfos.lock().await.insert(&ctx, &uifo, &hello).await?;
     let h = ServerHelloWrite {
@@ -640,6 +710,7 @@ async fn write_client_reuse_krb5(
         ttl_expired,
         resolver_id: ctx.id,
         auth: AuthWrite::Reuse,
+        refused: None,
     };
     info!("hello_write reusing krb5 context");
     debug!("hello_write sending {:?}", h);
@@ -683,17 +754,28 @@ async fn write_client_tls_auth(
     con: TcpStream,
     a: &Arc<(tls::CrlWatchingAcceptor, RwLock<secctx::SecCtxData<secctx::TlsSecData>>)>,
     hello: &ClientHelloWrite,
+    refused: Option<WriteRefusal>,
 ) -> AuthResult {
     let tls = a.0.acceptor().accept(con).await?;
     let uifo = get_tls_uifo(ctx.id, &tls, a).await?;
     let mut con =
         Channel::new::<ServerCtx, tokio_rustls::server::TlsStream<TcpStream>>(None, tls);
     info!("hello_write all traffic now encrypted");
+    if let Some(r) = refused {
+        return Err(refuse_write(
+            ctx,
+            &mut con,
+            AuthWrite::Tls { name: literal!("") },
+            r,
+        )
+        .await);
+    }
     let h = ServerHelloWrite {
         ttl: ctx.cfg.writer_ttl.as_secs(),
         ttl_expired: true,
         resolver_id: ctx.id,
         auth: AuthWrite::Tls { name: literal!("") },
+        refused: None,
     };
     debug!("hello_write sending {:?}", h);
     time::timeout(ctx.cfg.hello_timeout, con.send_one(&h)).await??;
@@ -711,6 +793,7 @@ async fn write_client_reuse_tls(
     con: TcpStream,
     a: &Arc<(tls::CrlWatchingAcceptor, RwLock<secctx::SecCtxData<secctx::TlsSecData>>)>,
     hello: &ClientHelloWrite,
+    refused: Option<WriteRefusal>,
 ) -> AuthResult {
     let tls = a.0.acceptor().accept(con).await?;
     let wa = &hello.write_addr;
@@ -721,6 +804,9 @@ async fn write_client_reuse_tls(
         Channel::new::<ServerCtx, tokio_rustls::server::TlsStream<TcpStream>>(None, tls);
     info!("hello_write all traffic now encrypted");
     challenge_auth(&ctx.cfg, &mut con, d.0).await?;
+    if let Some(r) = refused {
+        return Err(refuse_write(ctx, &mut con, AuthWrite::Reuse, r).await);
+    }
     let (publisher, ttl_expired, rx_stop) =
         ctx.clinfos.lock().await.insert(&ctx, &uifo, &hello).await?;
     let h = ServerHelloWrite {
@@ -728,6 +814,7 @@ async fn write_client_reuse_tls(
         ttl_expired,
         resolver_id: ctx.id,
         auth: AuthWrite::Reuse,
+        refused: None,
     };
     info!("hello_write reusing tls context");
     debug!("hello_write sending {:?}", h);
@@ -755,25 +842,45 @@ async fn hello_client_write(
     static NO: &str = "authentication mechanism not supported";
     info!("hello_write starting negotiation");
     debug!("hello_write client_hello: {:?}", hello);
-    utils::check_addr(hello.write_addr.ip(), &[(ctx.id, ())])?;
+    // not `?`: the publisher can only be told this over a connection we
+    // finish negotiating, and it is the answer it has never been able to get
+    let refused =
+        utils::check_addr(hello.write_addr.ip(), &[(ctx.id, ())]).err().map(|e| {
+            warn!("refusing publisher {}: {e}", hello.write_addr);
+            WriteRefusal::from(e)
+        });
     let (con, uifo, publisher, rx_stop) = match hello.auth {
-        AuthWrite::Anonymous => write_client_anonymous_auth(&ctx, con, &hello).await?,
+        AuthWrite::Anonymous => {
+            write_client_anonymous_auth(&ctx, con, &hello, refused).await?
+        }
         AuthWrite::Local => match &ctx.secctx {
-            SecCtx::Local(a) => write_client_local_auth(&ctx, con, a, &hello).await?,
+            SecCtx::Local(a) => {
+                write_client_local_auth(&ctx, con, a, &hello, refused).await?
+            }
             SecCtx::Anonymous | SecCtx::Krb5(_) | SecCtx::Tls(_) => bail!(NO),
         },
         AuthWrite::Krb5 { .. } => match &ctx.secctx {
-            SecCtx::Krb5(a) => write_client_krb5_auth(&ctx, con, a, &hello).await?,
+            SecCtx::Krb5(a) => {
+                write_client_krb5_auth(&ctx, con, a, &hello, refused).await?
+            }
             SecCtx::Anonymous | SecCtx::Local(_) | SecCtx::Tls(_) => bail!(NO),
         },
         AuthWrite::Tls { .. } => match &ctx.secctx {
-            SecCtx::Tls(a) => write_client_tls_auth(&ctx, con, a, &hello).await?,
+            SecCtx::Tls(a) => {
+                write_client_tls_auth(&ctx, con, a, &hello, refused).await?
+            }
             SecCtx::Anonymous | SecCtx::Local(_) | SecCtx::Krb5(_) => bail!(NO),
         },
         AuthWrite::Reuse => match &ctx.secctx {
-            SecCtx::Local(a) => write_client_reuse_local(&ctx, con, a, &hello).await?,
-            SecCtx::Krb5(a) => write_client_reuse_krb5(&ctx, con, a, &hello).await?,
-            SecCtx::Tls(a) => write_client_reuse_tls(&ctx, con, a, &hello).await?,
+            SecCtx::Local(a) => {
+                write_client_reuse_local(&ctx, con, a, &hello, refused).await?
+            }
+            SecCtx::Krb5(a) => {
+                write_client_reuse_krb5(&ctx, con, a, &hello, refused).await?
+            }
+            SecCtx::Tls(a) => {
+                write_client_reuse_tls(&ctx, con, a, &hello, refused).await?
+            }
             SecCtx::Anonymous => bail!(NO),
         },
     };

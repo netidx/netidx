@@ -62,7 +62,7 @@ mod resolver {
             FromRead, FromWrite, GetChangeNr, HashMethod, ListMatching, Publisher,
             PublisherId, PublisherPriority, PublisherRef, ReadyForOwnershipCheck,
             Referral, Resolved, Secret, ServerHelloWrite, Table, TargetAuth, ToRead,
-            ToWrite,
+            ToWrite, WriteRefusal,
         },
     };
     use netidx_core::pack::PackError;
@@ -146,15 +146,68 @@ mod resolver {
         ]
     }
 
+    /// `ServerHelloWrite` as 0.32 encodes it, so that appending `refused` can
+    /// be shown not to break either direction. Do not "fix" this to match the
+    /// current type: it is a fixture of what is already on the wire.
+    #[derive(Clone, Debug, PartialEq, Eq, netidx_derive::Pack)]
+    struct ServerHelloWriteBefore {
+        ttl: u64,
+        ttl_expired: bool,
+        auth: AuthWrite,
+        resolver_id: SocketAddr,
+    }
+
+    #[test]
+    fn a_refusal_breaks_neither_direction() {
+        let addr: SocketAddr = "127.0.0.1:1234".parse().unwrap();
+        let before = ServerHelloWriteBefore {
+            ttl: 120,
+            ttl_expired: false,
+            auth: AuthWrite::Anonymous,
+            resolver_id: addr,
+        };
+        // a 0.33 publisher reading a 0.32 resolver
+        let mut buf = pack(&before).unwrap();
+        let after = <ServerHelloWrite as Pack>::decode(&mut buf).unwrap();
+        assert_eq!(after.refused, None);
+        assert_eq!(after.ttl, before.ttl);
+        assert_eq!(after.resolver_id, before.resolver_id);
+        // a 0.32 publisher reading a 0.33 resolver that is refusing it: it
+        // skips the field it doesn't know and then sees the connection close,
+        // which is what it sees today
+        let refusing = ServerHelloWrite {
+            ttl: 120,
+            ttl_expired: false,
+            auth: AuthWrite::Anonymous,
+            resolver_id: addr,
+            refused: Some(WriteRefusal::LoopbackAddr),
+        };
+        let mut buf = pack(&refusing).unwrap();
+        assert_eq!(<ServerHelloWriteBefore as Pack>::decode(&mut buf).unwrap(), before);
+    }
+
+    fn write_refusal() -> impl Strategy<Value = WriteRefusal> {
+        prop_oneof![
+            Just(WriteRefusal::LinkLocalAddr),
+            Just(WriteRefusal::BroadcastAddr),
+            Just(WriteRefusal::PrivateAddr),
+            Just(WriteRefusal::UnspecifiedAddr),
+            Just(WriteRefusal::MulticastAddr),
+            Just(WriteRefusal::LoopbackAddr),
+        ]
+    }
+
     fn server_hello_write() -> impl Strategy<Value = ServerHelloWrite> {
-        (any::<u64>(), any::<bool>(), any::<SocketAddr>(), auth_write()).prop_map(
-            |(ttl, ttl_expired, resolver_id, auth)| ServerHelloWrite {
-                ttl,
-                ttl_expired,
-                auth,
-                resolver_id,
-            },
+        (
+            any::<u64>(),
+            any::<bool>(),
+            any::<SocketAddr>(),
+            auth_write(),
+            option(write_refusal()),
         )
+            .prop_map(|(ttl, ttl_expired, resolver_id, auth, refused)| {
+                ServerHelloWrite { ttl, ttl_expired, auth, resolver_id, refused }
+            })
     }
 
     fn glob() -> impl Strategy<Value = Glob> {

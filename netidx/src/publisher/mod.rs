@@ -8,7 +8,10 @@ pub use crate::resolver_client::DesiredAuth;
 use crate::{
     config::Config,
     path::Path,
-    protocol::{publisher, resolver::UserInfo},
+    protocol::{
+        publisher,
+        resolver::{UserInfo, WriteRefusal},
+    },
     resolver_client::{ResolverWrite, WriteEvent},
     resolver_server::auth::Permissions,
     tls,
@@ -335,7 +338,36 @@ pub enum PublishError {
     ResolverError,
     /// The resolver could not be reached.
     ResolverUnreachable,
+    // the resolver refused the publisher's address at hello time
+    LinkLocalAddr,
+    BroadcastAddr,
+    PrivateAddr,
+    UnspecifiedAddr,
+    MulticastAddr,
+    LoopbackAddr,
 }
+
+// `From` in this module is the publisher's wire message
+impl std::convert::From<WriteRefusal> for PublishError {
+    fn from(r: WriteRefusal) -> Self {
+        match r {
+            WriteRefusal::LinkLocalAddr => Self::LinkLocalAddr,
+            WriteRefusal::BroadcastAddr => Self::BroadcastAddr,
+            WriteRefusal::PrivateAddr => Self::PrivateAddr,
+            WriteRefusal::UnspecifiedAddr => Self::UnspecifiedAddr,
+            WriteRefusal::MulticastAddr => Self::MulticastAddr,
+            WriteRefusal::LoopbackAddr => Self::LoopbackAddr,
+        }
+    }
+}
+
+impl fmt::Display for PublishError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.name())
+    }
+}
+
+impl std::error::Error for PublishError {}
 
 impl PublishError {
     fn name(&self) -> &'static str {
@@ -345,6 +377,16 @@ impl PublishError {
             Self::InvalidPath => "invalid path",
             Self::ResolverError => "resolver error",
             Self::ResolverUnreachable => "resolver unreachable",
+            Self::LinkLocalAddr => "the publisher address is link local",
+            Self::BroadcastAddr => "the publisher address is a broadcast address",
+            Self::PrivateAddr => {
+                "the publisher address is private and the resolver is not"
+            }
+            Self::UnspecifiedAddr => "the publisher address is unspecified",
+            Self::MulticastAddr => "the publisher address is multicast",
+            Self::LoopbackAddr => {
+                "the publisher address is loopback and the resolver is not"
+            }
         }
     }
 }
