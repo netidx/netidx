@@ -94,6 +94,7 @@ mod resolver {
         w.publish_with_flags(paths.iter().map(|p| (p.clone(), flags))).await.unwrap();
         let (publishers, mut resolved) = r.resolve(paths.clone()).await.unwrap();
         for r in resolved.drain(..) {
+            let r = r.unwrap();
             assert_eq!(r.publishers.len(), 1);
             let key = PublisherKey::new(r.resolver, r.publishers[0].id);
             let pb = publishers.get(&key).unwrap();
@@ -146,6 +147,7 @@ mod resolver {
         let paths = vec![p("/default/foo/bar"), p("/default/foo/baz")];
         let (publishers, mut resolved) = r.resolve(paths.clone()).await.unwrap();
         for r in resolved.drain(..) {
+            let r = r.unwrap();
             assert_eq!(r.publishers.len(), 1);
             let key = PublisherKey::new(r.resolver, r.publishers[0].id);
             let pb = publishers.get(&key).unwrap();
@@ -156,7 +158,7 @@ mod resolver {
         w.clear().await.unwrap();
         let (_, mut resolved) = r.resolve(paths.clone()).await.unwrap();
         for r in resolved.drain(..) {
-            assert_eq!(r.publishers.len(), 0);
+            assert_eq!(r.unwrap().publishers.len(), 0);
         }
         let l = r.list(p("/")).await.unwrap();
         assert_eq!(&**l, &[]);
@@ -316,6 +318,7 @@ mod resolver {
         let (publishers, mut answer) = r.resolve(paths.iter().cloned()).await.unwrap();
         let mut i = 0;
         for (p, r) in paths.iter().zip(answer.drain(..)) {
+            let r = r.unwrap();
             let mut r_addrs = r
                 .publishers
                 .iter()
@@ -622,7 +625,9 @@ mod republish {
                 .iter()
                 .cloned()
                 .zip(res.drain(..))
-                .filter(|(_, r)| r.publishers.len() > 0)
+                .filter(|(_, r)| {
+                    r.as_ref().map(|r| r.publishers.len() > 0).unwrap_or(false)
+                })
                 .map(|(p, _)| p)
                 .collect(),
         }
@@ -1845,7 +1850,7 @@ mod publisher {
         debug!("published {pubs:?}, resolved: {res:?}");
         assert_eq!(pubs.len(), 3);
         assert_eq!(res.len(), 1);
-        assert_eq!(res[0].publishers.len(), 3);
+        assert_eq!(res[0].as_ref().unwrap().publishers.len(), 3);
         let mut saw_high = false;
         let mut saw_normal = false;
         let mut saw_low = false;
@@ -1922,6 +1927,276 @@ mod publisher {
             debug!("loop finished, dropping subscriber");
             drop(s)
         }
+        Ok(())
+    }
+}
+
+/// Surfacing why a durable subscription isn't subscribed.
+mod errors {
+    use crate::{
+        config::Config as ClientConfig,
+        publisher::{BindCfg, DesiredAuth, Publisher, PublisherBuilder},
+        resolver_client::ResolverError,
+        resolver_server::{Server, config::Config as ServerConfig},
+        subscriber::{
+            SubId, SubscribeError, SubscribeErrors, Subscriber, SubscriberBuilder,
+        },
+    };
+    use anyhow::Result;
+    use futures::{channel::mpsc, prelude::*};
+    use netidx_core::path::Path;
+    use poolshark::global::GPooled;
+    use std::collections::{HashSet, VecDeque};
+    use std::time::Duration;
+    use tokio::time;
+
+    const TO: Duration = Duration::from_secs(30);
+    /// long enough for many retries of a subscription that keeps failing
+    const QUIET: Duration = Duration::from_secs(2);
+
+    fn errs(es: &[SubscribeError]) -> SubscribeErrors {
+        let mut r = SubscribeErrors::default();
+        for e in es {
+            r.insert(*e)
+        }
+        r
+    }
+
+    fn bind() -> BindCfg {
+        "127.0.0.1/32".parse().unwrap()
+    }
+
+    async fn anon_server() -> Result<(Server, ClientConfig)> {
+        let server_cfg = ServerConfig::load("../cfg/simple-server.json")?;
+        let mut cfg = ClientConfig::load("../cfg/simple-client.json")?;
+        let server = Server::new(server_cfg, false, 0).await?;
+        cfg.addrs[0].0 = *server.local_addr();
+        cfg.detach();
+        Ok((server, cfg))
+    }
+
+    async fn tls_server() -> Result<(Server, ClientConfig)> {
+        #[cfg(unix)]
+        let server_cfg = ServerConfig::load("../cfg/tls/resolver/resolver.json")?;
+        #[cfg(windows)]
+        let server_cfg = ServerConfig::load("../cfg/tls/resolver/resolver-win.json")?;
+        let mut cfg = ClientConfig::load("../cfg/tls/publisher/client.json")?;
+        let server = Server::new(server_cfg, false, 0).await?;
+        cfg.addrs[0].0 = *server.local_addr();
+        cfg.detach();
+        Ok((server, cfg))
+    }
+
+    async fn publisher(cfg: &ClientConfig, auth: DesiredAuth) -> Result<Publisher> {
+        PublisherBuilder::new(cfg.clone())
+            .desired_auth(auth)
+            .bind_cfg(Some(bind()))
+            .build()
+            .await
+    }
+
+    fn subscriber(cfg: &ClientConfig, auth: DesiredAuth) -> Result<Subscriber> {
+        SubscriberBuilder::new(cfg.clone()).desired_auth(auth).build()
+    }
+
+    /// The errors channel, flattened back into single items so a test can say
+    /// what it expects to happen next.
+    struct Errors {
+        rx: mpsc::Receiver<GPooled<Vec<(SubId, SubscribeErrors)>>>,
+        buf: VecDeque<(SubId, SubscribeErrors)>,
+    }
+
+    impl Errors {
+        fn attach(subscriber: &Subscriber) -> Self {
+            let (tx, rx) = mpsc::channel(10);
+            subscriber.errors(tx);
+            Self { rx, buf: VecDeque::new() }
+        }
+
+        async fn next(&mut self, wait: Duration) -> Option<(SubId, SubscribeErrors)> {
+            loop {
+                if let Some(i) = self.buf.pop_front() {
+                    break Some(i);
+                }
+                match time::timeout(wait, self.rx.next()).await {
+                    Err(_) | Ok(None) => break None,
+                    Ok(Some(mut b)) => self.buf.extend(b.drain(..)),
+                }
+            }
+        }
+
+        /// Assert nothing more is said. A subscription that keeps failing for
+        /// the same reason it already reported must go quiet.
+        async fn expect_quiet(&mut self) {
+            if let Some(i) = self.next(QUIET).await {
+                panic!("expected silence, got {i:?}")
+            }
+        }
+    }
+
+    /// One denied path used to fail every path in the batch with it, and
+    /// `do_resub` batches up to 100,000 of them.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn one_denied_path_does_not_fail_the_batch() -> Result<()> {
+        let _ = env_logger::try_init();
+        let (server, cfg) = tls_server().await?;
+        let auth = DesiredAuth::Tls { identity: None };
+        let pb = publisher(&cfg, auth.clone()).await?;
+        let _v0 = pb.publish(Path::from("/app/v0"), 42i64)?;
+        let _v1 = pb.publish(Path::from("/denied/x"), 42i64)?;
+        pb.flushed().await;
+        let subscriber = subscriber(&cfg, auth)?;
+        let paths = vec![Path::from("/app/v0"), Path::from("/denied/x")];
+        let (publishers, res) =
+            time::timeout(TO, subscriber.resolver().resolve(paths)).await??;
+        assert_eq!(res.len(), 2);
+        assert_eq!(res[0].as_ref().unwrap().publishers.len(), 1);
+        assert!(!publishers.is_empty());
+        let e = res[1].as_ref().unwrap_err();
+        assert_eq!(e.downcast_ref::<ResolverError>(), Some(&ResolverError::Denied));
+        drop(server);
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_denied_subscription_reports_resolver_denied() -> Result<()> {
+        let _ = env_logger::try_init();
+        let (server, cfg) = tls_server().await?;
+        let auth = DesiredAuth::Tls { identity: None };
+        let pb = publisher(&cfg, auth.clone()).await?;
+        let _v0 = pb.publish(Path::from("/app/v0"), 42i64)?;
+        let _v1 = pb.publish(Path::from("/denied/x"), 42i64)?;
+        pb.flushed().await;
+        let subscriber = subscriber(&cfg, auth)?;
+        let mut e = Errors::attach(&subscriber);
+        let denied = subscriber.subscribe(Path::from("/denied/x"));
+        let allowed = subscriber.subscribe(Path::from("/app/v0"));
+        time::timeout(TO, allowed.wait_subscribed()).await??;
+        loop {
+            match e.next(TO).await {
+                None => panic!("the denied subscription never reported"),
+                Some((id, errors)) if id == denied.id() => {
+                    assert_eq!(errors, errs(&[SubscribeError::ResolverDenied]));
+                    break;
+                }
+                Some((id, errors)) => {
+                    assert_eq!(id, allowed.id());
+                    assert!(!errors.is_empty(), "a healthy sub said nothing was wrong")
+                }
+            }
+        }
+        // the path it could see is subscribed and has nothing to report
+        assert_eq!(allowed.last_error(), None);
+        assert_eq!(denied.last_error(), Some(errs(&[SubscribeError::ResolverDenied])));
+        drop(server);
+        Ok(())
+    }
+
+    /// Every new reason is reported once, and a subscription that has run out
+    /// of new things to say goes quiet rather than restating itself on every
+    /// retry.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_dead_publisher_reports_each_reason_once() -> Result<()> {
+        let _ = env_logger::try_init();
+        let (server, cfg) = anon_server().await?;
+        let pb = publisher(&cfg, DesiredAuth::Anonymous).await?;
+        let v = pb.publish(Path::from("/app/v0"), 42i64)?;
+        pb.flushed().await;
+        let subscriber = subscriber(&cfg, DesiredAuth::Anonymous)?;
+        let d = subscriber.subscribe(Path::from("/app/v0"));
+        time::timeout(TO, d.wait_subscribed()).await??;
+        assert_eq!(d.last_error(), None);
+        let mut e = Errors::attach(&subscriber);
+        drop(v);
+        pb.shutdown().await;
+        assert_eq!(
+            e.next(TO).await,
+            Some((d.id(), errs(&[SubscribeError::ConnectionLost])))
+        );
+        let gone = errs(&[SubscribeError::ConnectionLost, SubscribeError::NotFound]);
+        assert_eq!(e.next(TO).await, Some((d.id(), gone)));
+        e.expect_quiet().await;
+        assert_eq!(d.last_error(), Some(gone));
+        drop(server);
+        Ok(())
+    }
+
+    /// Recovery is on the same channel, so a consumer watching only errors
+    /// isn't left thinking a subscription is still dead.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_recovered_subscription_reports_the_empty_set() -> Result<()> {
+        let _ = env_logger::try_init();
+        let (server, cfg) = anon_server().await?;
+        let pb = publisher(&cfg, DesiredAuth::Anonymous).await?;
+        let v = pb.publish(Path::from("/app/v0"), 42i64)?;
+        pb.flushed().await;
+        let subscriber = subscriber(&cfg, DesiredAuth::Anonymous)?;
+        let d = subscriber.subscribe(Path::from("/app/v0"));
+        time::timeout(TO, d.wait_subscribed()).await??;
+        let mut e = Errors::attach(&subscriber);
+        drop(v);
+        pb.shutdown().await;
+        assert_eq!(
+            e.next(TO).await,
+            Some((d.id(), errs(&[SubscribeError::ConnectionLost])))
+        );
+        let pb = publisher(&cfg, DesiredAuth::Anonymous).await?;
+        let _v = pb.publish(Path::from("/app/v0"), 42i64)?;
+        pb.flushed().await;
+        time::timeout(TO, d.wait_subscribed()).await??;
+        loop {
+            match e.next(TO).await {
+                None => panic!("recovery was never reported"),
+                Some((id, errors)) => {
+                    assert_eq!(id, d.id());
+                    if errors.is_empty() {
+                        break;
+                    }
+                }
+            }
+        }
+        assert_eq!(d.last_error(), None);
+        // and it says it once, not once per resubscription
+        e.expect_quiet().await;
+        drop(server);
+        Ok(())
+    }
+
+    /// The failure everyone actually hits: a resolver or a publisher goes
+    /// away and takes every subscription with it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn mass_failure_reports_each_subscription_once() -> Result<()> {
+        const N: usize = 50;
+        let _ = env_logger::try_init();
+        let (server, cfg) = anon_server().await?;
+        let pb = publisher(&cfg, DesiredAuth::Anonymous).await?;
+        let mut vals = Vec::new();
+        for i in 0..N {
+            vals.push(pb.publish(Path::from(format!("/app/v{i}")), 42i64)?);
+        }
+        pb.flushed().await;
+        let subscriber = subscriber(&cfg, DesiredAuth::Anonymous)?;
+        let dvals = (0..N)
+            .map(|i| subscriber.subscribe(Path::from(format!("/app/v{i}"))))
+            .collect::<Vec<_>>();
+        for d in dvals.iter() {
+            time::timeout(TO, d.wait_subscribed()).await??;
+        }
+        let mut e = Errors::attach(&subscriber);
+        vals.clear();
+        pb.shutdown().await;
+        let mut lost: HashSet<SubId> = HashSet::new();
+        while lost.len() < N {
+            match e.next(TO).await {
+                None => panic!("only {} of {N} subscriptions reported", lost.len()),
+                Some((id, errors)) => {
+                    assert_eq!(errors, errs(&[SubscribeError::ConnectionLost]));
+                    assert!(lost.insert(id), "{id:?} reported the same set twice");
+                }
+            }
+        }
+        assert_eq!(lost, dvals.iter().map(|d| d.id()).collect::<HashSet<_>>());
+        drop(server);
         Ok(())
     }
 }

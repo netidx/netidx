@@ -1,5 +1,24 @@
 # Unreleased
 
+- Subscribers can find out why a durable subscription isn't subscribed.
+  `Subscriber::errors` takes a channel that reports `(SubId,
+  SubscribeErrors)` whenever a `Dval`'s error set changes — the union of
+  everything that has gone wrong since it last succeeded, or the empty set
+  when it resubscribes — and `Dval::last_error` asks about one
+  subscription. `SubscribeErrors` is a classification (`Denied`,
+  `NoSuchValue`, `ConnectionLost`, `ResolverDenied`, `NotFound`, ...); the
+  log still carries the diagnosis. Nothing else changes: `subscriber::Event`
+  and therefore the archive record format are untouched.
+
+- **Breaking `netidx` API:** `ResolverRead::resolve` returns a `Result` per
+  path instead of failing the whole batch on the first refusal. Previously a
+  single `Denied` failed every path in the batch, and a resubscription batch
+  can hold 100,000 paths. Failures carry a `ResolverError`, recoverable with
+  `downcast_ref`.
+
+- **Breaking `netidx` API:** the `PermissionDenied` and `NoSuchValue` marker
+  error types are replaced by `SubscribeErrors`.
+
 - **Breaking `netidx` API:** publisher tables returned by
   `ResolverRead::send` and `ResolverRead::resolve` are now keyed by both the
   resolver address and resolver-local publisher ID. This prevents publisher

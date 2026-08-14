@@ -12,16 +12,18 @@ use crate::{
         resolver::{Publisher, Resolved, TargetAuth},
     },
     publisher::PublishFlags,
-    resolver_client::{PublisherKey, PublisherTable, ResolverRead},
+    resolver_client::{PublisherKey, PublisherTable, ResolverError, ResolverRead},
     tls,
     utils::{BatchItem, Batched, ChanWrap},
 };
 use ahash::AHashMap;
 use anyhow::{Error, Result, anyhow};
 use bytes::{Buf, BufMut, Bytes};
+use compact_str::format_compact;
+use enumflags2::{BitFlags, bitflags};
 use futures::{
     channel::{
-        mpsc::{self, Sender, UnboundedReceiver, UnboundedSender},
+        mpsc::{self, Receiver, Sender, UnboundedReceiver, UnboundedSender},
         oneshot,
     },
     prelude::*,
@@ -59,30 +61,182 @@ use triomphe::Arc as TArc;
 static BATCHES: LazyLock<Pool<Vec<(SubId, Event)>>> =
     LazyLock::new(|| Pool::new(64, 16384));
 static DECODE_BATCHES: LazyLock<Pool<Vec<From>>> = LazyLock::new(|| Pool::new(64, 16384));
+static ERRORS: LazyLock<Pool<Vec<(SubId, SubscribeErrors)>>> =
+    LazyLock::new(|| Pool::new(64, 16384));
 
-/// Subscription was denied due to insufficient permissions.
-#[derive(Debug)]
-pub struct PermissionDenied;
+/// Why a subscription failed.
+///
+/// A classification, not a diagnosis. Which publisher refused, which resolver
+/// was unreachable, and what exactly either of them said is in the log; this
+/// tells you what kind of thing went wrong so you know whether to go read it.
+#[bitflags]
+#[repr(u64)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SubscribeError {
+    /// The subscription attempt was abandoned before it finished, e.g. the
+    /// subscriber was shut down.
+    Dropped,
+    /// The publisher unsubscribed us while we were subscribed.
+    Unpublished,
+    /// The connection to the publisher died.
+    ConnectionLost,
+    /// We could not connect to the publisher.
+    ConnectFailed,
+    /// Authentication with the publisher failed.
+    AuthFailed,
+    /// The publisher speaks a different protocol version.
+    ProtocolMismatch,
+    /// The publisher refused the subscription.
+    Denied,
+    /// The publisher does not publish the path.
+    NoSuchValue,
+    /// The publisher never answered the subscription request.
+    SubscribeTimeout,
+    /// The resolver refused to resolve the path.
+    ResolverDenied,
+    /// The path resolved, but nobody publishes it.
+    NotFound,
+    /// No resolver server could be reached.
+    ResolverUnreachable,
+    /// The resolver answered with an error.
+    ResolverError,
+    /// The resolver did not answer in time.
+    ResolveTimeout,
+    /// It failed, but we could not classify why. Always logged in full.
+    Unspecified,
+}
 
-impl fmt::Display for PermissionDenied {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "permission denied")
+impl SubscribeError {
+    fn name(&self) -> &'static str {
+        match self {
+            Self::Dropped => "dropped",
+            Self::Unpublished => "unpublished",
+            Self::ConnectionLost => "connection lost",
+            Self::ConnectFailed => "connect failed",
+            Self::AuthFailed => "authentication failed",
+            Self::ProtocolMismatch => "protocol mismatch",
+            Self::Denied => "permission denied",
+            Self::NoSuchValue => "no such value",
+            Self::SubscribeTimeout => "subscribe timed out",
+            Self::ResolverDenied => "resolver denied",
+            Self::NotFound => "not found",
+            Self::ResolverUnreachable => "resolver unreachable",
+            Self::ResolverError => "resolver error",
+            Self::ResolveTimeout => "resolve timed out",
+            Self::Unspecified => "unspecified",
+        }
+    }
+
+    /// An `anyhow::Error` carrying this classification, which
+    /// `SubscribeErrors::classify` can recover.
+    pub(crate) fn err(self) -> Error {
+        Error::from(SubscribeErrors::from(self))
     }
 }
 
-impl error::Error for PermissionDenied {}
+/// The set of reasons a subscription is not subscribed.
+///
+/// A set rather than one reason because several genuinely apply at once: a
+/// retrying `Dval` accumulates distinct failures across rounds. Empty means
+/// there is nothing wrong.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SubscribeErrors(pub BitFlags<SubscribeError>);
 
-/// The requested path does not exist.
-#[derive(Debug)]
-pub struct NoSuchValue;
+impl SubscribeErrors {
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
 
-impl fmt::Display for NoSuchValue {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "no such value")
+    pub fn contains(&self, e: SubscribeError) -> bool {
+        self.0.contains(e)
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = SubscribeError> {
+        self.0.iter()
+    }
+
+    pub fn insert(&mut self, e: impl Into<BitFlags<SubscribeError>>) {
+        self.0 |= e.into();
+    }
+
+    /// Recover the classification of a failed subscription.
+    ///
+    /// Every error the subscriber produces carries one. An error that does not
+    /// is a gap in the classification rather than an `Unspecified` subscription,
+    /// so it is logged in full before being called `Unspecified`.
+    fn classify(e: &Error, path: &Path) -> Self {
+        match e.downcast_ref::<Self>() {
+            Some(errs) => *errs,
+            None => {
+                warn!("unclassified subscribe error for {path}: {e:?}");
+                Self::from(SubscribeError::Unspecified)
+            }
+        }
     }
 }
 
-impl error::Error for NoSuchValue {}
+// `From` in this module is the publisher's wire message
+impl std::convert::From<SubscribeError> for SubscribeErrors {
+    fn from(e: SubscribeError) -> Self {
+        Self(e.into())
+    }
+}
+
+impl fmt::Display for SubscribeErrors {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.0.is_empty() {
+            return write!(f, "no errors");
+        }
+        for (i, e) in self.0.iter().enumerate() {
+            if i > 0 {
+                write!(f, ", ")?
+            }
+            write!(f, "{}", e.name())?
+        }
+        Ok(())
+    }
+}
+
+impl error::Error for SubscribeErrors {}
+
+#[cfg(test)]
+mod classification {
+    use super::*;
+
+    #[test]
+    fn a_classified_error_survives_context_layers() {
+        let e = SubscribeError::Denied.err().context("subscribing to /foo");
+        assert_eq!(
+            SubscribeErrors::classify(&e, &Path::from("/foo")),
+            SubscribeErrors::from(SubscribeError::Denied)
+        );
+    }
+
+    /// The rule the whole design rests on: an error nobody classified is a gap
+    /// in the classification, not a subscription that failed for no reason.
+    /// It is `Unspecified` *and* logged, never silently absorbed.
+    #[test]
+    fn an_unclassified_error_is_unspecified() {
+        let e = anyhow!("something nobody thought about");
+        assert_eq!(
+            SubscribeErrors::classify(&e, &Path::from("/foo")),
+            SubscribeErrors::from(SubscribeError::Unspecified)
+        );
+    }
+
+    #[test]
+    fn the_set_accumulates_and_displays_every_reason() {
+        let mut e = SubscribeErrors::from(SubscribeError::ConnectionLost);
+        assert!(!e.is_empty());
+        e.insert(SubscribeError::NotFound);
+        e.insert(SubscribeError::ConnectionLost);
+        assert!(e.contains(SubscribeError::ConnectionLost));
+        assert!(e.contains(SubscribeError::NotFound));
+        assert_eq!(e.iter().count(), 2);
+        assert_eq!(&format!("{e}"), "connection lost, not found");
+        assert_eq!(&format!("{}", SubscribeErrors::default()), "no errors");
+    }
+}
 
 atomic_id!(SubId);
 atomic_id!(SubscriberId);
@@ -282,6 +436,8 @@ struct DvDead {
     waiting: Vec<oneshot::Sender<()>>,
     tries: usize,
     next_try: Instant,
+    /// everything that has gone wrong since this subscription last succeeded
+    errors: SubscribeErrors,
 }
 
 #[derive(Debug)]
@@ -480,6 +636,18 @@ impl Dval {
     pub fn id(&self) -> SubId {
         self.0.lock().sub_id
     }
+
+    /// The errors seen since this subscription last succeeded, or `None` if it
+    /// is currently subscribed.
+    ///
+    /// This is the same state [`Subscriber::errors`] reports; ask here if you
+    /// only care about this one subscription.
+    pub fn last_error(&self) -> Option<SubscribeErrors> {
+        match &self.0.lock().sub {
+            DvState::Subscribed(_) => None,
+            DvState::Dead(d) => Some(d.errors),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -493,6 +661,40 @@ const REMEBER_FAILED: Duration = Duration::from_secs(60);
 fn pick(n: usize) -> usize {
     let mut rng = rand::rng();
     rng.random_range(0..n)
+}
+
+/// Restate a resolver failure as a subscribe failure.
+fn resolve_failed(e: &Error, path: &Path) -> Error {
+    let cause = match e.downcast_ref::<ResolverError>() {
+        Some(ResolverError::Denied) => SubscribeError::ResolverDenied,
+        Some(ResolverError::Unreachable) => SubscribeError::ResolverUnreachable,
+        Some(
+            ResolverError::Error
+            | ResolverError::ReferralLimit
+            | ResolverError::Unexpected,
+        ) => SubscribeError::ResolverError,
+        None => {
+            warn!("unclassified resolver error for {path}: {e:?}");
+            SubscribeError::Unspecified
+        }
+    };
+    cause.err().context(format_compact!("resolving {path} failed: {e}"))
+}
+
+/// Give every waiter on the same path the same failure.
+///
+/// They can't share one `anyhow::Error` because it isn't `Clone`, but the
+/// classification is `Copy` and the message is a string, so rebuilding it per
+/// waiter loses nothing — which is why this no longer flattens it to text.
+fn fanout(e: &Error, path: &Path, waiters: SmallVec<[oneshot::Sender<Result<Val>>; 1]>) {
+    if waiters.is_empty() {
+        return;
+    }
+    let errors = SubscribeErrors::classify(e, path);
+    let msg = format_compact!("{e}");
+    for w in waiters {
+        let _ = w.send(Err(Error::from(errors).context(msg.clone())));
+    }
 }
 
 #[derive(Debug)]
@@ -554,9 +756,26 @@ struct SubscriberInner {
     desired_auth: DesiredAuth,
     tls_ctx: Option<tls::CachedConnector>,
     interfaces: Vec<NetworkInterface>,
+    error_chans: Vec<Sender<GPooled<Vec<(SubId, SubscribeErrors)>>>>,
+    /// staged by whoever changed a durable subscription's error state, drained
+    /// by the error task, which is the only place that can wait on a slow
+    /// consumer without holding this lock or stalling a resubscription
+    pending_errors: GPooled<Vec<(SubId, SubscribeErrors)>>,
+    error_notify: Sender<()>,
 }
 
 impl SubscriberInner {
+    /// Record that `id`'s error set is now `errors`. Only call this when the
+    /// set has actually changed; a durable subscription restates its condition
+    /// on every retry and level triggering would emit forever.
+    fn record_error(&mut self, id: SubId, errors: SubscribeErrors) {
+        if !self.error_chans.is_empty() {
+            self.pending_errors.push((id, errors));
+            // a queued notification already says "there is work"
+            let _ = self.error_notify.try_send(());
+        }
+    }
+
     fn durable_id(&self, path: &Path) -> Option<SubId> {
         self.durable_dead
             .get(path)
@@ -838,6 +1057,7 @@ impl Subscriber {
     /// Create a new subscriber with the specified config and desired auth.
     pub fn new(resolver: Config, desired_auth: DesiredAuth) -> Result<Subscriber> {
         let (tx, rx) = mpsc::unbounded();
+        let (error_notify, error_rx) = mpsc::channel(0);
         let tls_ctx = resolver.tls.clone().map(tls::CachedConnector::new);
         let resolver = ResolverRead::new(resolver, desired_auth.clone());
         let t = Subscriber(Arc::new(Mutex::new(SubscriberInner {
@@ -853,8 +1073,12 @@ impl Subscriber {
             trigger_resub: tx,
             tls_ctx,
             interfaces: get_if_addrs()?,
+            error_chans: Vec::new(),
+            pending_errors: ERRORS.take(),
+            error_notify,
         })));
         t.start_resub_task(rx);
+        t.start_error_task(error_rx);
         Ok(t)
     }
 
@@ -886,6 +1110,22 @@ impl Subscriber {
 
     pub fn resolver(&self) -> ResolverRead {
         self.0.lock().resolver.clone()
+    }
+
+    /// Register a channel to receive errors about durable subscriptions.
+    ///
+    /// An item is sent whenever a `Dval`'s error set changes: the union of
+    /// everything that has gone wrong since it last succeeded, or the empty
+    /// set when it resubscribes. So a consumer watching only this channel sees
+    /// both failure and recovery, and a permanently dead subscription goes
+    /// quiet once it has said everything it has to say.
+    ///
+    /// The set is a classification. What exactly failed is in the log.
+    ///
+    /// Non durable subscriptions report through their `Result` instead, and
+    /// never appear here. Drop the channel to stop receiving.
+    pub fn errors(&self, tx: Sender<GPooled<Vec<(SubId, SubscribeErrors)>>>) {
+        self.0.lock().error_chans.push(tx)
     }
 
     fn downgrade(&self) -> SubscriberWeak {
@@ -998,8 +1238,10 @@ impl Subscriber {
                         trace!("processing pending subscrition to {p}");
                         let dsw = ds.downgrade();
                         let mut dv = ds.0.lock();
+                        let sub_id = dv.sub_id;
                         macro_rules! failed {
-                            ($e:expr) => {
+                            ($e:expr) => {{
+                                let e: Error = $e;
                                 match &mut dv.sub {
                                     DvState::Subscribed(_) => unreachable!(),
                                     DvState::Dead(d) => {
@@ -1011,17 +1253,24 @@ impl Subscriber {
                                         let s = wait.as_secs_f32();
                                         warn!(
                                             "resubscription error {}: {}, next try: {}s",
-                                            p, $e, s
+                                            p, e, s
                                         );
+                                        let before = d.errors;
+                                        d.errors
+                                            .insert(SubscribeErrors::classify(&e, &p).0);
+                                        if d.errors != before {
+                                            let errors = d.errors;
+                                            subscriber.record_error(sub_id, errors);
+                                        }
                                         subscriber.durable_dead.insert(p.clone(), dsw);
                                     }
                                 }
-                            };
+                            }};
                         }
                         match r {
                             Err(e) => failed!(e),
                             Ok(sub) if *sub.0.last.lock() == Event::Unsubscribed => {
-                                failed!(anyhow!("unsubscribed"))
+                                failed!(SubscribeError::Unpublished.err())
                             }
                             Ok(sub) => {
                                 info!("resubscription success {}", p);
@@ -1042,6 +1291,12 @@ impl Subscriber {
                                             WriteId::new(),
                                             resp,
                                         ));
+                                    }
+                                    if !d.errors.is_empty() {
+                                        subscriber.record_error(
+                                            sub_id,
+                                            SubscribeErrors::default(),
+                                        );
                                     }
                                 }
                                 dv.sub = DvState::Subscribed(sub);
@@ -1134,6 +1389,49 @@ impl Subscriber {
                 }
             }
             trace!("resub loop ended");
+        });
+    }
+
+    /// Deliver staged error state changes to the registered channels.
+    ///
+    /// Its own task because it is the one place that waits: a consumer that
+    /// stops reading must not stall resubscription or a connection, so the
+    /// producers only stage under the subscriber lock and this task does the
+    /// sending.
+    fn start_error_task(&self, mut notify: Receiver<()>) {
+        let subscriber = self.downgrade();
+        task::spawn(async move {
+            while let Some(()) = notify.next().await {
+                // whatever is staged while we are blocked goes out too
+                loop {
+                    let (batch, mut chans) = match subscriber.upgrade() {
+                        None => return,
+                        Some(s) => {
+                            let mut t = s.0.lock();
+                            if t.pending_errors.is_empty() {
+                                break;
+                            }
+                            let batch =
+                                mem::replace(&mut t.pending_errors, ERRORS.take());
+                            if t.error_chans.is_empty() {
+                                continue;
+                            }
+                            let chans: LPooled<Vec<_>> =
+                                t.error_chans.iter().cloned().collect();
+                            (batch, chans)
+                        }
+                    };
+                    for c in chans.iter_mut() {
+                        let mut b = ERRORS.take();
+                        b.extend_from_slice(&batch);
+                        let _ = c.send(b).await;
+                    }
+                    if let Some(s) = subscriber.upgrade() {
+                        s.0.lock().error_chans.retain(|c| !c.is_closed());
+                    }
+                }
+            }
+            trace!("error loop ended");
         });
     }
 
@@ -1310,13 +1608,15 @@ impl Subscriber {
             match r {
                 Err(_) => {
                     for p in to_resolve {
-                        let e = anyhow!("resolving {} timed out", p);
+                        let e = SubscribeError::ResolveTimeout
+                            .err()
+                            .context(format_compact!("resolving {p} timed out"));
                         pending.insert(p, St::Error(e));
                     }
                 }
                 Ok(Err(e)) => {
                     for p in to_resolve {
-                        let s = St::Error(anyhow!("resolving {} failed {}", p, e));
+                        let s = St::Error(resolve_failed(&e, &p));
                         pending.insert(p, s);
                     }
                 }
@@ -1325,8 +1625,16 @@ impl Subscriber {
                     let deadline = timeout.map(|t| now + t);
                     let desired_auth = t.desired_auth.clone();
                     for (p, resolved) in to_resolve.into_iter().zip(res.drain(..)) {
+                        let resolved = match resolved {
+                            Ok(r) => r,
+                            Err(e) => {
+                                pending
+                                    .insert(p.clone(), St::Error(resolve_failed(&e, &p)));
+                                continue;
+                            }
+                        };
                         if resolved.publishers.len() == 0 {
-                            pending.insert(p, St::Error(anyhow!("path not found")));
+                            pending.insert(p, St::Error(SubscribeError::NotFound.err()));
                         } else if let Some(ch) = t.choose_addr(&publishers, &resolved) {
                             let tls_ctx = t.tls_ctx.clone();
                             let sub_id = t.durable_id(&p).unwrap_or_else(SubId::new);
@@ -1380,13 +1688,15 @@ impl Subscriber {
                             if r {
                                 pending.insert(p, St::Subscribing(rx));
                             } else {
-                                pending.insert(
-                                    p,
-                                    St::Error(Error::from(anyhow!("connection closed"))),
-                                );
+                                let e = SubscribeError::ConnectionLost
+                                    .err()
+                                    .context("connection closed");
+                                pending.insert(p, St::Error(e));
                             }
                         } else {
-                            let e = anyhow!("missing publisher record");
+                            let e = SubscribeError::ResolverError
+                                .err()
+                                .context("missing publisher record");
                             pending.insert(p, St::Error(e));
                         }
                     }
@@ -1413,18 +1723,13 @@ impl Subscriber {
                     if let Some(sub) = t.subscribed.remove(path.as_ref()) {
                         match sub {
                             SubStatus::Subscribed(_) => unreachable!(),
-                            SubStatus::Pending(waiters) => {
-                                for w in waiters.into_iter() {
-                                    let err = Err(anyhow!("{}", e));
-                                    let _ = w.send(err);
-                                }
-                            }
+                            SubStatus::Pending(waiters) => fanout(&e, &path, *waiters),
                         }
                     }
                     (path, Err(e))
                 }
                 St::WaitingOther(w, streams) => match w.await {
-                    Err(e) => (path, Err(anyhow!("other side died {}", e))),
+                    Err(_) => (path, Err(SubscribeError::Dropped.err())),
                     Ok(Err(e)) => (path, Err(e)),
                     Ok(Ok(raw)) => {
                         for (f, tx) in streams {
@@ -1436,7 +1741,9 @@ impl Subscriber {
                 },
                 St::Subscribing(w) => {
                     let res = match w.await {
-                        Err(e) => Err(anyhow!("connection died {}", e)),
+                        Err(_) => Err(SubscribeError::ConnectionLost
+                            .err()
+                            .context("connection died")),
                         Ok(Err(e)) => Err(e),
                         Ok(Ok(raw)) => Ok(raw),
                     };
@@ -1447,10 +1754,7 @@ impl Subscriber {
                             Err(err) => match e.remove() {
                                 SubStatus::Subscribed(_) => unreachable!(),
                                 SubStatus::Pending(waiters) => {
-                                    for w in waiters.into_iter() {
-                                        let err = Err(anyhow!("{}", err));
-                                        let _ = w.send(err);
-                                    }
+                                    fanout(&err, &path, *waiters);
                                     (path, Err(err))
                                 }
                             },
@@ -1537,6 +1841,7 @@ impl Subscriber {
                 waiting: Vec::new(),
                 tries: 0,
                 next_try: Instant::now(),
+                errors: SubscribeErrors::default(),
             })),
             streams: SmallVec::from_iter(
                 updates.into_iter().map(|(f, c)| (f, ChanWrap(c))),

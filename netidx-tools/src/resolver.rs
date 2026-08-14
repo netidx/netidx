@@ -47,20 +47,23 @@ pub(super) async fn run(
         ResolverCmd::Resolve { path } => {
             let resolver = ResolverRead::new(config, auth);
             let (publishers, resolved) =
-                resolver.resolve(path).await.context("resolve")?;
-            if publishers.len() > 0 {
-                for pb in publishers.values() {
-                    println!("publisher: {:?}", pb);
-                }
-                for res in resolved.iter() {
-                    for i in 0..res.publishers.len() {
-                        if i < res.publishers.len() - 1 {
-                            print!("{:?}, ", res.publishers[i].id);
-                        } else {
-                            print!("{:?}", res.publishers[i].id);
+                resolver.resolve(path.clone()).await.context("resolve")?;
+            for pb in publishers.values() {
+                println!("publisher: {:?}", pb);
+            }
+            for (p, res) in path.iter().zip(resolved.iter()) {
+                match res {
+                    Err(e) => println!("{p}: {e}"),
+                    Ok(res) => {
+                        for i in 0..res.publishers.len() {
+                            if i < res.publishers.len() - 1 {
+                                print!("{:?}, ", res.publishers[i].id);
+                            } else {
+                                print!("{:?}", res.publishers[i].id);
+                            }
                         }
+                        println!("");
                     }
-                    println!("");
                 }
             }
         }

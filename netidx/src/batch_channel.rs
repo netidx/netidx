@@ -69,6 +69,17 @@ impl<T: Send + Sync + 'static> BatchReceiver<T> {
         self.0.lock().queue.len()
     }
 
+    /// Take whatever is queued right now, if anything.
+    pub(crate) fn try_recv(&self) -> Option<GPooled<Vec<T>>> {
+        let mut inner = self.0.lock();
+        if inner.queue.is_empty() {
+            None
+        } else {
+            let v = inner.pool.take();
+            Some(mem::replace(&mut inner.queue, v))
+        }
+    }
+
     pub(crate) async fn recv(&self) -> Option<GPooled<Vec<T>>> {
         loop {
             let receiver = {

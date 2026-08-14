@@ -33,7 +33,7 @@ pub(super) static TOWRITEPOOL: LazyLock<Pool<Vec<(usize, ToWrite)>>> =
     LazyLock::new(|| Pool::new(100, 10_000));
 pub(super) static FROMWRITEPOOL: LazyLock<Pool<Vec<(usize, FromWrite)>>> =
     LazyLock::new(|| Pool::new(100, 10_000));
-pub(super) static RESOLVEDPOOL: LazyLock<Pool<Vec<Resolved>>> =
+pub(super) static RESOLVEDPOOL: LazyLock<Pool<Vec<Result<Resolved>>>> =
     LazyLock::new(|| Pool::new(100, 10_000));
 pub(super) static LISTPOOL: LazyLock<Pool<Vec<GPooled<Vec<Path>>>>> =
     LazyLock::new(|| Pool::new(100, 10_000));

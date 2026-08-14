@@ -1,6 +1,6 @@
 use super::{
-    BATCHES, ConId, DECODE_BATCHES, DvDead, DvState, Event, NoSuchValue,
-    PermissionDenied, SubId, SubStatus, SubscribeValRequest, Subscriber, SubscriberInner,
+    BATCHES, ConId, DECODE_BATCHES, DvDead, DvState, Event, SubId, SubStatus,
+    SubscribeError, SubscribeErrors, SubscribeValRequest, Subscriber, SubscriberInner,
     SubscriberWeak, ToCon, UpdatesFlags, Val, ValInner, ValWeak, WUpdateChan,
 };
 pub use crate::protocol::value::{FromValue, Value};
@@ -20,6 +20,8 @@ use crate::{
 };
 use ahash::AHashMap;
 use anyhow::{Error, Result, anyhow};
+use arcstr::ArcStr;
+use compact_str::format_compact;
 use cross_krb5::ClientCtx;
 use futures::{
     channel::{
@@ -37,7 +39,7 @@ use poolshark::global::GPooled;
 use protocol::resolver::UserInfo;
 use smallvec::SmallVec;
 use std::{
-    collections::hash_map::Entry, mem, net::SocketAddr, pin::Pin, sync::Arc,
+    collections::hash_map::Entry, fmt, mem, net::SocketAddr, pin::Pin, sync::Arc,
     time::Duration,
 };
 use tokio::{
@@ -67,6 +69,7 @@ fn unsubscribe(
     sub: Sub,
     id: Id,
     conid: ConId,
+    reason: SubscribeError,
 ) {
     for (chan_id, c) in sub.streams.iter() {
         by_chan
@@ -86,12 +89,21 @@ fn unsubscribe(
         trace!("unsubscribing {}", sub.path);
         if let Some(ds) = dsw.upgrade() {
             let mut inner = ds.0.lock();
+            // it can already be dead if a resubscription is in flight, and
+            // then it keeps what it has accumulated since it last succeeded
+            let mut errors = match &inner.sub {
+                DvState::Dead(d) => d.errors,
+                DvState::Subscribed(_) => SubscribeErrors::default(),
+            };
+            errors.insert(reason);
             inner.sub = DvState::Dead(Box::new(DvDead {
                 queued_writes: Vec::new(),
                 waiting: Vec::new(),
                 tries: 0,
                 next_try: Instant::now(),
+                errors,
             }));
+            subscriber.record_error(inner.sub_id, errors);
             subscriber.durable_dead.insert(sub.path.clone(), dsw);
             let _ = subscriber.trigger_resub.unbounded_send(());
         }
@@ -114,6 +126,21 @@ fn unsubscribe(
     }
 }
 
+/// Refuse the connection for a classified reason.
+///
+/// Everything else that can go wrong in here is transport, which the caller
+/// classifies as `ConnectFailed`.
+macro_rules! refuse {
+    ($e:ident, $msg:literal) => {
+        return Err(SubscribeError::$e.err().context($msg))
+    };
+}
+
+/// The exchange itself failed, rather than us refusing to attempt it.
+fn auth_failed(e: impl fmt::Display) -> Error {
+    SubscribeError::AuthFailed.err().context(format_compact!("{e}").as_str().to_owned())
+}
+
 async fn hello_publisher(
     mut con: TcpStream,
     tls_ctx: Option<tls::CachedConnector>,
@@ -124,14 +151,14 @@ async fn hello_publisher(
     use protocol::publisher::Hello;
     channel::write_raw(&mut con, &3u64).await?;
     if channel::read_raw::<u64, _, 1024>(&mut con).await? != 3 {
-        bail!("incompatible protocol version")
+        refuse!(ProtocolMismatch, "incompatible protocol version")
     }
     match (desired_auth, target_auth) {
         (DesiredAuth::Anonymous, TargetAuth::Anonymous) => {
             channel::write_raw(&mut con, &Hello::Anonymous).await?;
             match channel::read_raw::<_, _, 8124>(&mut con).await? {
                 Hello::Anonymous => (),
-                _ => bail!("unexpected response from publisher"),
+                _ => refuse!(ProtocolMismatch, "unexpected response from publisher"),
             }
             Ok(Channel::new::<ClientCtx, TcpStream>(None, con))
         }
@@ -139,13 +166,13 @@ async fn hello_publisher(
             DesiredAuth::Anonymous,
             TargetAuth::Local { .. } | TargetAuth::Krb5 { .. } | TargetAuth::Tls { .. },
         ) => {
-            bail!("anonymous access not allowed")
+            refuse!(AuthFailed, "anonymous access not allowed")
         }
         (
             DesiredAuth::Local | DesiredAuth::Krb5 { .. } | DesiredAuth::Tls { .. },
             TargetAuth::Anonymous,
         ) => {
-            bail!("authentication not supported")
+            refuse!(AuthFailed, "authentication not supported")
         }
         (
             DesiredAuth::Local | DesiredAuth::Krb5 { .. } | DesiredAuth::Tls { .. },
@@ -154,49 +181,53 @@ async fn hello_publisher(
             channel::write_raw(&mut con, &Hello::Local(uifo)).await?;
             match channel::read_raw::<_, _, 8124>(&mut con).await? {
                 Hello::Local(_) => (),
-                _ => bail!("unexpected response from publisher"),
+                _ => refuse!(ProtocolMismatch, "unexpected response from publisher"),
             }
             Ok(Channel::new::<ClientCtx, TcpStream>(None, con))
         }
         (DesiredAuth::Local, TargetAuth::Krb5 { .. } | TargetAuth::Tls { .. }) => {
-            bail!("local auth not supported")
+            refuse!(AuthFailed, "local auth not supported")
         }
         (DesiredAuth::Krb5 { upn, .. }, TargetAuth::Krb5 { spn }) => {
             let upn = upn.as_ref().map(|p| p.as_str());
             channel::write_raw(&mut con, &Hello::Krb5(uifo)).await?;
-            let ctx = krb5_authentication(upn, spn, &mut con).await?;
+            let ctx =
+                krb5_authentication(upn, spn, &mut con).await.map_err(auth_failed)?;
             let mut con = Channel::new(Some(K5CtxWrap::new(ctx)), con);
             match con.receive::<Hello>().await? {
                 Hello::Krb5(_) => (),
-                _ => bail!("protocol error"),
+                _ => refuse!(ProtocolMismatch, "protocol error"),
             }
             Ok(con)
         }
         (DesiredAuth::Krb5 { .. }, TargetAuth::Tls { .. }) => {
-            bail!("desired authentication mechanism not supported")
+            refuse!(AuthFailed, "desired authentication mechanism not supported")
         }
         (DesiredAuth::Tls { .. }, TargetAuth::Tls { name }) => {
-            let tls = tls_ctx.clone().ok_or_else(|| anyhow!("no tls ctx"))?;
+            let tls = tls_ctx.clone().ok_or_else(|| auth_failed("no tls ctx"))?;
             let ctx = task::spawn_blocking({
                 let name = name.clone();
                 move || tls.load(&name)
             })
-            .await??;
-            let name = rustls_pki_types::ServerName::try_from(&**name)?.to_owned();
+            .await?
+            .map_err(auth_failed)?;
+            let name = rustls_pki_types::ServerName::try_from(&**name)
+                .map_err(auth_failed)?
+                .to_owned();
             channel::write_raw(&mut con, &Hello::Tls(uifo)).await?;
-            let tls = ctx.connect(name, con).await?;
+            let tls = ctx.connect(name, con).await.map_err(auth_failed)?;
             let mut con = Channel::new::<
                 ClientCtx,
                 tokio_rustls::client::TlsStream<TcpStream>,
             >(None, tls);
             match con.receive::<Hello>().await? {
                 Hello::Tls(_) => (),
-                _ => bail!("protocol error"),
+                _ => refuse!(ProtocolMismatch, "protocol error"),
             }
             Ok(con)
         }
         (DesiredAuth::Tls { .. }, TargetAuth::Krb5 { .. }) => {
-            bail!("desired authentication mechanism not supported")
+            refuse!(AuthFailed, "desired authentication mechanism not supported")
         }
     }
 }
@@ -309,7 +340,7 @@ impl ConnectionCtx {
         }
         for path in self.timed_out.drain(..) {
             if let Some(req) = self.pending.remove(&path) {
-                let _ = req.finished.send(Err(anyhow!("timed out")));
+                let _ = req.finished.send(Err(SubscribeError::SubscribeTimeout.err()));
             }
         }
         Ok(())
@@ -403,11 +434,15 @@ impl ConnectionCtx {
         Ok(())
     }
 
+    /// `unsub_reason` is why a `From::Unsubscribed` in this batch happened.
+    /// The publisher sends it when it stops publishing; we synthesize one for
+    /// every live subscription when the connection goes down.
     fn process_batch(
         &mut self,
         mut batch: GPooled<Vec<From>>,
         con: &mut WriteChannel,
         subscriber: &Subscriber,
+        unsub_reason: SubscribeError,
     ) -> Result<()> {
         let mut stream_batch = DECODE_BATCHES.take();
         for m in batch.drain(..) {
@@ -442,18 +477,25 @@ impl ConnectionCtx {
                 }
                 From::NoSuchValue(path) => {
                     if let Some(r) = self.pending.remove(&path) {
-                        let _ = r.finished.send(Err(Error::from(NoSuchValue)));
+                        let _ = r.finished.send(Err(SubscribeError::NoSuchValue.err()));
                     }
                 }
                 From::Denied(path) => {
                     if let Some(r) = self.pending.remove(&path) {
-                        let _ = r.finished.send(Err(Error::from(PermissionDenied)));
+                        let _ = r.finished.send(Err(SubscribeError::Denied.err()));
                     }
                 }
                 From::Unsubscribed(id) => {
                     if let Some(s) = self.subscriptions.remove(&id) {
                         let mut t = subscriber.0.lock();
-                        unsubscribe(&mut *t, &mut self.by_chan, s, id, self.conid);
+                        unsubscribe(
+                            &mut *t,
+                            &mut self.by_chan,
+                            s,
+                            id,
+                            self.conid,
+                            unsub_reason,
+                        );
                     }
                 }
                 From::Subscribed(p, id, m) => {
@@ -480,9 +522,12 @@ impl ConnectionCtx {
                                 }
                                 None => {
                                     trace!("alias pair dropped while subscribing");
-                                    let _ = req.finished.send(Err(anyhow!(
-                                        "subscribe alias while unsubscribing"
-                                    )));
+                                    let _ =
+                                        req.finished.send(Err(SubscribeError::Dropped
+                                            .err()
+                                            .context(
+                                                "subscribe alias while unsubscribing",
+                                            )));
                                 }
                             },
                             None => {
@@ -627,7 +672,12 @@ impl ConnectionCtx {
     ) -> Result<bool> {
         if let Some(subscriber) = self.subscriber.upgrade() {
             self.msg_recvd = true;
-            self.process_batch(batch, write_con, &subscriber)?;
+            self.process_batch(
+                batch,
+                write_con,
+                &subscriber,
+                SubscribeError::Unpublished,
+            )?;
         }
         Ok(self.maybe_disconnect_idle())
     }
@@ -702,11 +752,11 @@ impl ConnectionCtx {
         }
     }
 
-    pub(super) async fn start(mut self) -> Result<()> {
+    async fn connect(&mut self) -> Result<Channel> {
         let soc = time::timeout(PERIOD, TcpStream::connect(self.addr)).await??;
         soc.set_nodelay(true)?;
         const HELLO_TIMEOUT: Duration = Duration::from_secs(10);
-        let con = time::timeout(
+        Ok(time::timeout(
             HELLO_TIMEOUT,
             hello_publisher(
                 soc,
@@ -716,7 +766,41 @@ impl ConnectionCtx {
                 &self.target_auth,
             ),
         )
-        .await??;
+        .await??)
+    }
+
+    /// Fail the subscribe requests that were queued for a connection that
+    /// never came up.
+    ///
+    /// Without this they die by dropped oneshot and arrive as
+    /// `ConnectionLost`, which would make `ConnectFailed` and `AuthFailed`
+    /// unreachable — nothing else can see why the connection didn't happen.
+    fn fail_queued(&mut self, errors: SubscribeErrors, msg: &ArcStr) {
+        while let Some(mut batch) = self.from_sub.try_recv() {
+            for m in batch.drain(..) {
+                if let ToCon::Subscribe(req) = m {
+                    let e = Error::from(errors).context(msg.clone());
+                    let _ = req.finished.send(Err(e));
+                }
+            }
+        }
+    }
+
+    pub(super) async fn start(mut self) -> Result<()> {
+        let con = match self.connect().await {
+            Ok(con) => con,
+            Err(e) => {
+                // anything that goes wrong bringing a connection up that
+                // hello_publisher did not classify is a failure to connect
+                let msg: ArcStr = format_compact!("{e}").as_str().into();
+                let errors = e
+                    .downcast_ref::<SubscribeErrors>()
+                    .copied()
+                    .unwrap_or_else(|| SubscribeError::ConnectFailed.into());
+                self.fail_queued(errors, &msg);
+                return Err(Error::from(errors).context(msg));
+            }
+        };
         let (read_con, mut write_con) = con.split();
         let (tx_stop, rx_stop) = oneshot::channel();
         let res = self.run(decode_task(read_con, rx_stop), &mut write_con).await;
@@ -724,9 +808,16 @@ impl ConnectionCtx {
         if let Some(subscriber) = self.subscriber.upgrade() {
             let mut batch = DECODE_BATCHES.take();
             batch.extend(self.subscriptions.keys().map(|id| From::Unsubscribed(*id)));
-            self.process_batch(batch, &mut write_con, &subscriber)?;
+            self.process_batch(
+                batch,
+                &mut write_con,
+                &subscriber,
+                SubscribeError::ConnectionLost,
+            )?;
             for (_, req) in self.pending {
-                let _ = req.finished.send(Err(anyhow!("connection died")));
+                let _ = req.finished.send(Err(SubscribeError::ConnectionLost
+                    .err()
+                    .context("connection died")));
             }
         }
         // info!("connection shutting down {res:?}");

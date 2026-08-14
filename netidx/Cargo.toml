@@ -29,10 +29,12 @@ bitflags = { workspace = true }
 byteorder = { workspace = true }
 bytes = { workspace = true }
 chrono = { workspace = true }
+compact_str = { workspace = true }
 cross-krb5 = { workspace = true }
 ctrlc = { workspace = true }
 derive_builder = { workspace = true }
 dirs = { workspace = true }
+enumflags2 = { workspace = true }
 futures = { workspace = true }
 nohash = { workspace = true }
 ahash = { workspace = true }

@@ -17,7 +17,7 @@ use crate::{
     tls,
 };
 use ahash::{AHashMap, AHashSet};
-use anyhow::Result;
+use anyhow::{Error, Result};
 use arcstr::ArcStr;
 pub use common::DesiredAuth;
 use common::{
@@ -25,7 +25,9 @@ use common::{
     RAWFROMWRITEPOOL, RAWTOREADPOOL, RAWTOWRITEPOOL, RESOLVEDPOOL, ResponseChan,
     TOREADPOOL, TOWRITEPOOL,
 };
+use compact_str::format_compact;
 use futures::future;
+use log::warn;
 use netidx_netproto::resolver::PublisherPriority;
 use parking_lot::{Mutex, RwLock};
 use poolshark::{
@@ -40,6 +42,7 @@ use std::{
         HashMap,
         hash_map::Entry,
     },
+    error, fmt,
     iter::IntoIterator,
     marker::PhantomData,
     net::{IpAddr, Ipv4Addr, SocketAddr},
@@ -51,6 +54,42 @@ use tokio::{sync::watch, time::Instant};
 use write_client::WriteClient;
 
 const MAX_REFERRALS: usize = 128;
+
+/// Why a resolver request failed.
+///
+/// Attached to the `anyhow::Error` of a failed request, so that callers who
+/// need to act on the reason can recover it with `downcast_ref` instead of
+/// matching on message text. Whatever detail does not fit one of these
+/// classifications — the text of a `FromRead::Error`, which server said it —
+/// stays in the error message and in the log.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResolverError {
+    /// The resolver refused the request.
+    Denied,
+    /// The resolver answered with an error.
+    Error,
+    /// No member of the resolver cluster could be reached.
+    Unreachable,
+    /// The referral chain was longer than `MAX_REFERRALS`.
+    ReferralLimit,
+    /// The resolver's reply did not answer the request.
+    Unexpected,
+}
+
+impl fmt::Display for ResolverError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let s = match self {
+            Self::Denied => "permission denied",
+            Self::Error => "the resolver returned an error",
+            Self::Unreachable => "no resolver server could be reached",
+            Self::ReferralLimit => "maximum referral depth reached",
+            Self::Unexpected => "unexpected response from the resolver",
+        };
+        write!(f, "{s}")
+    }
+}
+
+impl error::Error for ResolverError {}
 
 /// The identity of a publisher record returned by a resolver.
 ///
@@ -435,7 +474,10 @@ where
             let mut referral = false;
             let mut publishers = None;
             for r in future::join_all(waiters).await {
-                let (mut p, mut r) = r?;
+                // the connection task drops the reply channel when it has
+                // exhausted its retries, which is the only way this fails
+                let (mut p, mut r) =
+                    r.map_err(|_| Error::from(ResolverError::Unreachable))?;
                 match publishers.as_mut() {
                     None => {
                         publishers = Some(p);
@@ -462,7 +504,8 @@ where
             }
             referrals += 1;
             if referrals > MAX_REFERRALS {
-                bail!("maximum referral depth {} reached, giving up", MAX_REFERRALS);
+                return Err(Error::from(ResolverError::ReferralLimit)
+                    .context(format_compact!("giving up after {MAX_REFERRALS}")));
             }
         }
     }
@@ -519,14 +562,18 @@ impl ResolverRead {
 
     /// Resolve the specified paths to publisher addresses.
     ///
-    /// Results are in send order. Each [`PublisherRef`](crate::protocol::resolver::PublisherRef)
-    /// in a result addresses the returned [`PublisherTable`] with a
+    /// Results are in send order, one per path. A path the resolver refuses
+    /// fails only itself; the rest of the batch is unaffected. Each failure
+    /// carries a [`ResolverError`], recoverable with `downcast_ref`.
+    ///
+    /// Each [`PublisherRef`](crate::protocol::resolver::PublisherRef) in a
+    /// result addresses the returned [`PublisherTable`] with a
     /// [`PublisherKey`] constructed from `Resolved::resolver` and
     /// `PublisherRef::id`.
     pub async fn resolve<I>(
         &self,
         batch: I,
-    ) -> Result<(GPooled<PublisherTable>, GPooled<Vec<Resolved>>)>
+    ) -> Result<(GPooled<PublisherTable>, GPooled<Vec<Result<Resolved>>>)>
     where
         I: IntoIterator<Item = Path>,
     {
@@ -534,23 +581,29 @@ impl ResolverRead {
         to.extend(batch.into_iter().map(ToRead::Resolve));
         let (publishers, mut result) = self.send(&to).await?;
         if result.len() != to.len() {
-            bail!(
+            return Err(Error::from(ResolverError::Unexpected).context(format_compact!(
                 "unexpected number of resolve results {} expected {}",
                 result.len(),
                 to.len()
-            )
-        } else {
-            let mut out = RESOLVEDPOOL.take();
-            for r in result.drain(..) {
-                match r {
-                    FromRead::Resolved(r) => {
-                        out.push(r);
-                    }
-                    m => bail!("unexpected resolve response {:?}", m),
+            )));
+        }
+        let mut out = RESOLVEDPOOL.take();
+        out.extend(result.drain(..).zip(to.iter()).map(|(r, t)| {
+            let path = t.path().map(|p| &**p).unwrap_or("");
+            match r {
+                FromRead::Resolved(r) => Ok(r),
+                FromRead::Denied => Err(Error::from(ResolverError::Denied)),
+                FromRead::Error(e) => {
+                    warn!("resolving {path} failed: {e}");
+                    Err(Error::from(ResolverError::Error).context(e))
+                }
+                m => {
+                    warn!("unexpected resolve response for {path}: {m:?}");
+                    Err(Error::from(ResolverError::Unexpected))
                 }
             }
-            Ok((publishers, out))
-        }
+        }));
+        Ok((publishers, out))
     }
 
     /// List immediate children of the specified path.

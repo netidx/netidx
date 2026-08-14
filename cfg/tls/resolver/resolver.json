@@ -23,6 +23,9 @@
   "perms": {
     "/": {
       "user": "swlpd"
+    },
+    "/denied": {
+      "user": "!s"
     }
   }
 }
