@@ -49,8 +49,8 @@ pub(super) async fn finish_enrollment(
     server_id: admin_proto::AdminServerId,
     enrollment: &admin_proto::EnrollmentRequest,
     prepared_server_unlock: &PreparedServerUnlock,
-) -> Result<()> {
-    grant_enrollment(
+) -> Result<Option<String>> {
+    let warning = grant_enrollment(
         state,
         cfg_path,
         config_lock,
@@ -60,7 +60,7 @@ pub(super) async fn finish_enrollment(
     )
     .await?;
     record_peer(&mut state.cfg, cfg_path, config_lock, enrollment.listen).await;
-    Ok(())
+    Ok(warning)
 }
 
 fn leaf_serial_from_pem(pem: &str) -> Option<u64> {
@@ -130,7 +130,7 @@ pub(super) async fn handle_enroll(
     state
         .write_async(async move |state| {
             let map = state.map.clone();
-            let resp = handle_enroll_request(
+            let mut resp = handle_enroll_request(
                 state.ca.as_mut().expect("CA role held"),
                 req,
                 authentication,
@@ -139,9 +139,11 @@ pub(super) async fn handle_enroll(
                 Some(&map),
             )
             .await;
-            if let SignResponse::Ok(SignOk { signed_cert_pem, .. }) = &resp
-                && !local
-            {
+            let signed_cert_pem = match &resp {
+                SignResponse::Ok(ok) if !local => Some(ok.signed_cert_pem.clone()),
+                _ => None,
+            };
+            if let Some(signed_cert_pem) = signed_cert_pem {
                 let result = match crate::tls::admin_cert_identity_from_pem(
                     signed_cert_pem.as_bytes(),
                 ) {
@@ -158,17 +160,25 @@ pub(super) async fn handle_enroll(
                     }
                     Err(e) => Err(e),
                 };
-                if let Err(e) = result {
-                    if let Some(ca) = state.ca.as_mut()
-                        && let Err(undo) =
-                            undo_enrollment_issuance(ca, signed_cert_pem, None).await
-                    {
-                        return reject(&format!(
-                            "recording enrollment grant: {e:#} (also failed to \
-                             withdraw the cert: {undo:#})"
-                        ));
+                match result {
+                    Err(e) => {
+                        if let Some(ca) = state.ca.as_mut()
+                            && let Err(undo) =
+                                undo_enrollment_issuance(ca, &signed_cert_pem, None).await
+                        {
+                            return reject(&format!(
+                                "recording enrollment grant: {e:#} (also failed to \
+                                 withdraw the cert: {undo:#})"
+                            ));
+                        }
+                        return reject(&format!("recording enrollment grant: {e:#}"));
                     }
-                    return reject(&format!("recording enrollment grant: {e:#}"));
+                    Ok(Some(warning)) => {
+                        if let SignResponse::Ok(SignOk { warnings, .. }) = &mut resp {
+                            warnings.push(warning);
+                        }
+                    }
+                    Ok(None) => {}
                 }
             }
             resp
@@ -183,7 +193,7 @@ async fn grant_enrollment(
     server_id: admin_proto::AdminServerId,
     enrollment: &admin_proto::EnrollmentRequest,
     prepared_server_unlock: &PreparedServerUnlock,
-) -> Result<admin_proto::ResolverClusterId> {
+) -> Result<Option<String>> {
     let MutableState { cfg, map, ca, .. } = state;
     let ca = ca.as_mut().context("this host does not hold the CA")?;
     let ca_dir = ca.dir().to_path_buf();
@@ -224,6 +234,7 @@ async fn grant_enrollment(
     *map = staged;
     // After the grant is durable. Revoking first meant a later persist
     // failure left the old identity dead and the new one withdrawn.
+    let mut warning = None;
     if let Some(old) = enrollment.replaces {
         if let Err(e) = revoke_server_certificates(
             ca,
@@ -233,10 +244,11 @@ async fn grant_enrollment(
         )
         .await
         {
-            warn!(
-                "admin-server: enrollment grant persisted but failed to revoke \
-                 replaced server {old}: {e:#}"
+            let msg = format!(
+                "enrollment grant persisted but failed to revoke replaced server {old}: {e:#}"
             );
+            warn!("admin-server: {msg}");
+            warning = Some(msg);
         }
     }
     if let Some(old_addr) = replaced_addr {
@@ -250,7 +262,7 @@ async fn grant_enrollment(
             );
         }
     }
-    Ok(cluster)
+    Ok(warning)
 }
 
 /// Add the enrolling member's own identity to its resolver cluster's

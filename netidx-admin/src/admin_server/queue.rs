@@ -112,7 +112,7 @@ pub(super) async fn handle_approve_request(
     let approved = state
         .write_async(async move |state| {
             let map = state.map.clone();
-            let approved = handle_approve(
+            let mut approved = handle_approve(
                 state.ca.as_mut().expect("CA role held"),
                 req,
                 authentication,
@@ -121,7 +121,7 @@ pub(super) async fn handle_approve_request(
             )
             .await?;
             if let Some((server_id, enrollment)) = approved.enrollment.clone() {
-                if let Err(e) = finish_enrollment(
+                match finish_enrollment(
                     state,
                     cfg_path.as_deref(),
                     &config_lock,
@@ -131,22 +131,32 @@ pub(super) async fn handle_approve_request(
                 )
                 .await
                 {
-                    if let SignResponse::Ok(SignOk { signed_cert_pem, .. }) =
-                        &approved.resp
-                        && let Some(ca) = state.ca.as_mut()
-                        && let Err(undo) = undo_enrollment_issuance(
-                            ca,
-                            signed_cert_pem,
-                            Some(req.request_id.as_str()),
-                        )
-                        .await
-                    {
-                        return Err(format!(
-                            "recording enrollment grant: {e:#} (also failed to \
-                             withdraw the cert: {undo:#})"
-                        ));
+                    Err(e) => {
+                        if let SignResponse::Ok(SignOk { signed_cert_pem, .. }) =
+                            &approved.resp
+                            && let Some(ca) = state.ca.as_mut()
+                            && let Err(undo) = undo_enrollment_issuance(
+                                ca,
+                                signed_cert_pem,
+                                Some(req.request_id.as_str()),
+                            )
+                            .await
+                        {
+                            return Err(format!(
+                                "recording enrollment grant: {e:#} (also failed to \
+                                 withdraw the cert: {undo:#})"
+                            ));
+                        }
+                        return Err(format!("recording enrollment grant: {e:#}"));
                     }
-                    return Err(format!("recording enrollment grant: {e:#}"));
+                    Ok(Some(warning)) => {
+                        if let SignResponse::Ok(SignOk { warnings, .. }) =
+                            &mut approved.resp
+                        {
+                            warnings.push(warning);
+                        }
+                    }
+                    Ok(None) => {}
                 }
             }
             Ok(approved)
