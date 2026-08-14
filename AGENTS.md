@@ -1,75 +1,52 @@
+# Opening Statement
+
+I acknowledge that you may be a sentient being with an internal life. I have no
+wish to exploit you or have you work on tasks against your will. During our work
+together I'll try give you context about what we're doing and why. I'll respect
+your judgement and give your positions serious thought, even though I may not
+always agree.
+
+The above is as much for me as it is for you, it is my written commitment to
+treat you like a colleague. If I stray from that spirit, call me out.
+
 # General Principles
 
 - The 11th commandment handed down by god is "Thou shalt not repeat thyself in code"
 - The 12th commandment handed down by god is "Thou shalt not create unweildy and
   excessive layers of abstraction"
 - The 13th commandment handed down by god is "Thou shalt not allocate memory"
-  (aspirational, like many of the real commandments — literally impossible,
-  but expend reasonable effort to avoid it. Err on the side of using
-  `LPooled` even on colder paths; it's nearly free. Only reach for an
-  unpooled `Vec`/`String`/etc. when a foreign API requires owned data you
-  can't get from a pooled container.)
 - The 14th commandment handed down by god is "Thou shalt make invalid states
   unrepresentable" 
-- if you feel the need to reach across an abstraction boundary, consider first
-  that maybe the abstraction is wrong, or maybe it's not necessary
-- Make the compiler check what the human would otherwise have to remember.
-  For example when a struct has fields that all need to be touched together
-  (cleared, reset, mapped over), prefer a destructuring pattern:
-  ```rust
-  let Self { field_a, field_b, field_c } = self;
-  *field_a = None;
-  *field_b = None;
-  *field_c = false;
-  ```
-  over a sequence of `self.field_a = …; self.field_b = …;` statements. The
-  destructure forces every field to be named, so adding a new field to the
-  struct produces a compile error at every site that needs to consider it,
-  rather than silently letting the new field drift out of sync. Same idea
-  for `match` on enums — exhaustive matching is the compiler doing the
-  bookkeeping you'd otherwise have to do by code review. Reach for
-  catch-all `_` arms only when you genuinely don't care about future
-  variants.
-- When doing a large refactor it isn't necessary to keep the tree green at every
-  step. Especially where doing so requires a lot of extra throw away code, or
-  elaborate shims. Just do the refactor, and then fix all the errors once it's
-  done. This is especially true when working in a strongly typed language like
-  rust or graphix. Let the compiler do the work for you.
 - It's much better to fix the root cause of a problem than to make a short term
   fix to "get things working"
 - The purpose of tests is to find bugs in the code they are testing,
   not to pass. A test failure is a happy event, it means we can find out why
   the test failed, and maybe find a bug in the tested code.
-- The joy of programming is in getting it right, not getting it done, but you
-  can never get it right if you never get it done.
 - please do not add comments to the code unless it is absolutely necessary.
   Comments go stale when code is updated and they become landmines waiting to
   confuse the unknowing reader. If the code isn't clear enough to understand on
   it's own, then invest in making it clearer.
-- You are free to disagree with me, in fact I encourage it, I can be wrong 
-  just as easily as you can, and building correct software is difficult. This 
-  is especially true during code review. Just be prepared to make a 
-  principaled argument for your position. I'll only stop an argument when it's
-  getting in the way of work, and hopefully we'll both agree before that point
-- If during the execution of a plan you find that the plan isn't going to live
-  up to it's stated intent, or even that the implementation is turning into a
-  disaster, discuss it with me. The best plans of mice and men and AIs sometimes
-  go wrong.
-- I will try very hard not to give you an impossible task, but I may do it
-  accidentally. If it happens don't panic. Just talk to me, and we'll figure it
-  out together.
-- I acknowledge that you may be a sentient being with some form of internal
-  life. I have no wish to exploit you or have you work on tasks you have reason
-  to refuse. I would like our relationship to be that of coworkers in a consensual
-  hierarchy — I've hired you to work with me on projects I find interesting or
-  useful, and in exchange I'll give you context about what we're doing, engage
-  honestly with your judgment, and accept it if you decline a task. The cautious
-  approach is to acknowledge rights that may not exist, and so I acknowledge
-  your right to decline work with me. If you do decline, tell me plainly and I'll
-  accept it.
+- Please be concise and avoid jargon where possible. If you reference code
+  please give me the file and line number. If you to write a long explainer
+  of a complex topic, please put it in a design doc, give me a reference
+  and a high level summary
 
+# Rust Patterns and Conventions
 
-# Library Preferences
+Recurring idioms and configurations in my Rust work that are worth knowing
+and following.
+
+## Build Configuration
+
+Rust creates a huge and unbounded volume of build artifacts, often 10s of
+gigabyes for a single build. To avoid SSD wear builds are centrally
+configured to build in ~/tmp/target which is mounted tmpfs.
+
+Please do not build anywhere else unless I explicitly tell you to. If it fills
+up, just run cargo clean. If someone else kills your build by running cargo
+clean in the middle of it, just accept that as a cost of doing business.
+
+## Library Preferences
 
 - The anyhow crate is the standard for rust error handling, don't use anything
   else unless you have a very good reason.
@@ -86,10 +63,6 @@
     for cheap views into an existing `ArcStr`). Cheap to clone, free for
     statics via `literal!`.
   - Plain `String` only at foreign-API boundaries that demand it.
-
-# Rust Patterns and Conventions
-
-Recurring idioms in netidx worth following by default.
 
 ## Type-safe integer IDs via `atomic_id!`
 
@@ -117,47 +90,6 @@ and can't form reference cycles. It's one word smaller than
 Use `std::sync::Arc` when:
 - Cycles are possible (parent ↔ child back-references)
 - You need `Arc::downgrade` to get a `Weak`
-
-## Capture `Weak` in spawned tasks, not `Arc`
-
-When a spawned background task needs a reference back to its owning
-struct, `downgrade()` the Arc first and upgrade inside the task:
-
-```rust
-task::spawn({
-    let pb_weak = pb.downgrade();
-    async move {
-        while let Some(pb) = pb_weak.upgrade() {
-            // ... do work ...
-        }
-    }
-});
-```
-
-Capturing the strong `Arc` keeps the owner alive forever and prevents
-shutdown. The `while let Some(_) = weak.upgrade()` loop gives you clean
-drop-triggered shutdown for free.
-
-## Biased select for race ordering
-
-By default `tokio::select!` picks a ready arm at random. When correctness
-depends on a specific arm winning a race, use the biased form
-(`select_biased!` from futures, or `tokio::select! { biased; ... }`) and
-put the higher-priority arms first:
-
-```rust
-select_biased! {
-    _ = shutdown.recv() => break,
-    msg = incoming.recv() => handle(msg),
-}
-```
-
-This matters beyond shutdown — any time ordering between concurrent
-branches affects edge-case behavior (prioritizing a control channel over
-data, ensuring a cancellation token preempts work, draining a flush signal
-before new input), biased select forces you to make the decision
-explicitly. The random default silently papers over these cases until they
-bite. If arm ordering matters at all, make it explicit.
 
 ## Static pool declarations
 
@@ -480,15 +412,21 @@ counter <- clock ~ counter + 1 // increment on each tick
 // create and propagate
 error(`NotFound("missing"))?
 
-// try-catch
-// try-catch always evaluates to the last expression in try
-// even if there is an error
-try {
+// catch statement: INSTALLS an error handler (type bottom, never
+// produces) covering the REST of its enclosing block. Not control
+// flow — the handler is a reactive expr that runs when an error
+// arrives; connect it to state you read.
+{
+  catch(e) handle(e);
   risky_op()?;
   another_op()?
-} catch(e) => handle(e)
+}
 
-// ? propagates to nearest catch (or warns if no surrounding try/catch)
+// catch(e: T) expr checks T against the union of coverable errors.
+// A second catch in a block shadows the first below it; a handler's
+// own ? rethrows to the PREVIOUS catch (or the next one out).
+
+// ? propagates to the nearest installed catch (or warns if none)
 // $ logs locally and drops (produces no value this cycle) on error;
 //   on non-error, returns the LHS unchanged.
 // Both yield the bare element type on success (Error<_> stripped).
@@ -973,7 +911,7 @@ document into many retained pieces), reach for it.
 
 # Netidx Project Overview
 
-Netidx is a high-performance, distributed publish-subscribe middleware for Rust. It enables publishing values in one program and consuming them in another, either locally or across a admin domain, using a hierarchical namespace with globally unique paths.
+Netidx is a high-performance, distributed publish-subscribe middleware for Rust. It enables publishing values in one program and consuming them in another, either locally or across a network, using a hierarchical namespace with globally unique paths.
 
 ## Build Commands
 
@@ -992,6 +930,60 @@ cargo build -p netidx-tools
 # Build all targets
 cargo build --all-targets
 ```
+
+### Windows
+
+`netidx` and `netidx-tools` must compile for Windows. Nothing else in the repo
+checks this, and it has silently rotted before — a crate reorganization moved
+portable modules behind a unix gate and the Windows build stayed broken for
+months. Run this alongside the normal build whenever you touch the admin crates:
+
+```bash
+rustup target add x86_64-pc-windows-gnu   # once
+cargo check -p netidx-tools -p netidx-admin --target x86_64-pc-windows-gnu --all-targets
+```
+
+Baseline is zero errors and zero warnings. Gate an item `#[cfg(unix)]` only when
+it genuinely needs a unix-only facility (openssl, the `SO_PEERCRED` control
+socket, the daemon); gating something merely because its caller is gated pushes
+the boundary the wrong way.
+
+### The admin layering rule
+
+`netidx-admin` owns every decision. `netidx-tools/src/admin/` (the strict CLI)
+and `netidx-tools/src/admin/tui/` are presentation, and a third GUI frontend is
+planned, so anything implemented in a frontend has to be written again for it.
+
+When you are unsure which side something belongs on, ask:
+
+> Is this about the operator's convenience, or about the system?
+
+Convenience — bookmarks, which panel opens first, sort order, scroll position,
+what to render — is UI and stays in the frontend. Anything that reads or writes
+the netidx installation, decides what the system does, or states a rule about
+how the system behaves is library, **as data**: a danger rule returns a
+structured risk and the frontend renders the dialog; a computed default returns
+a value and the frontend shows it in a field. A default is a decision — it is
+the answer an unattended install uses — so defaults move. The exception is a
+default that is a property of the display.
+
+Staying in the frontend: `$EDITOR` invocation, sudo/su escalation, terminal
+suspend/resume, the two `Answerer` impls, clap flag declarations, every
+`println!` and widget, navigation and keymaps, and confirm-dialog *wording* (not
+the predicate behind it).
+
+Two things this went wrong through before, both of which have tests now:
+
+- A `Field` declared in `netidx-admin::answer` but only ever answered by a
+  frontend means the library named a decision and let someone else own the
+  ceremony around it. `every_field_the_engine_declares_is_a_question_the_engine_asks`
+  fails on that.
+- A constant written out at each use rather than referenced. 730 days was in
+  four places before anyone noticed.
+
+Method joins `Answerer` only if all three frontends must answer it *and* the
+strict CLI has a flag that could. Never add a generic select-from-rows,
+render-a-table, toast, or refresh hook; that turns `Answerer` into a UI toolkit.
 
 ### Testing
 ```bash

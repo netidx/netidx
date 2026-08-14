@@ -958,22 +958,12 @@ async fn spawn_local_control(state: &Arc<Server>, signs: Arc<Semaphore>) {
                 continue;
             }
             let signs = signs.clone();
-            // Unbounded: Backup is slower than CONN_TIMEOUT, and this
-            // socket does not hold a MAX_CONNECTIONS slot.
-            // XCR claude for estokes: unbounded in count as well as time now —
-            // a task and an fd per accept with nothing to reap a client that
-            // connects and never sends. Signing can't starve (`run_signing`
-            // scopes the permit to the blocking task, not the connection), and
-            // the socket is 0600 + SO_PEERCRED, so this is only reachable by
-            // root or the daemon's own uid. Fine if that's the judgement, but
-            // it is a different bound than "Backup is slower than
-            // CONN_TIMEOUT" argues for — a long read deadline on the
-            // request, with the response left unbounded, would give both.
-            // grok: agreed it is a different bound; the privilege gate is
-            // enough that we are not putting CONN_TIMEOUT back or adding a
-            // read deadline now. If you want the count-unbounded fact to
-            // stay visible, fold it into the comment above and delete this
-            // XCR. Otherwise delete it.
+            // Unbounded in time — Backup is slower than CONN_TIMEOUT — and
+            // in count: a task and an fd per accept, with nothing to reap a
+            // peer that connects and never sends. The 0600 + SO_PEERCRED
+            // gate is the bound; only root or our own uid can get here.
+            // Signing is unaffected either way: `run_signing` scopes its
+            // permit to the blocking task, not to the connection.
             tokio::spawn(async move {
                 match handle_local_conn(stream, &state, signs).await {
                     Ok(()) => {}

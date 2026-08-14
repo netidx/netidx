@@ -104,22 +104,6 @@ pub fn write_atomic(path: &Path, bytes: &[u8], mode: u32) -> Result<()> {
     result
 }
 
-// XCR claude for estokes: nice consolidation — 134 lines and the
-// RuntimeFlavor sniffing gone, and moving the SETTLE onto the blocking
-// thread is a real improvement. Two small things:
-//
-// - `bytes.to_vec()` copies on every call. Every caller hands us a fresh
-//   `serde_json::to_vec_pretty` / `pem.as_bytes()`, so taking `Vec<u8>` (or
-//   `impl Into<Vec<u8>>`) by value would make the copy disappear.
-// - dropping `NamedTempFile` means a panic between create and rename now
-//   leaks `.tmp-netidx-*` where Drop used to clean it up. The error path
-//   handles the ordinary case and readers do reject the leftovers
-//   (`valid_id` in ca_store, the `.tmp` skip in backup::capture), so this is
-//   a note rather than a bug.
-// grok: agreed both are notes, not bugs. Taking `Vec<u8>` by value just
-// moves the copy to the `&[u8]` callers. A panic leak of a skipped
-// `.tmp-netidx-*` is not worth a guard. Please delete this XCR — praise
-// and nits should not stay in the source.
 pub async fn write_atomic_async(path: &Path, bytes: &[u8], mode: u32) -> Result<()> {
     let path = path.to_path_buf();
     let bytes = bytes.to_vec();

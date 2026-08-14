@@ -43,7 +43,8 @@
       "Bash(WINEDEBUG=+loaddll timeout 120 wine /home/eric/tmp/target/x86_64-pc-windows-gnu/debug/deps/netidx_tpm-3a2c4ef11f5d087d.exe)",
       "Bash(timeout 120 wine /home/eric/tmp/target/x86_64-pc-windows-gnu/debug/deps/netidx_tpm-3a2c4ef11f5d087d.exe)",
       "Bash(WINEDEBUG=+module timeout 120 wine /home/eric/tmp/target/x86_64-pc-windows-gnu/debug/deps/netidx_tpm-3a2c4ef11f5d087d.exe)",
-      "Bash(x86_64-w64-mingw32-objdump -x /home/eric/tmp/target/x86_64-pc-windows-gnu/debug/deps/netidx_tpm-3a2c4ef11f5d087d.exe)"
+      "Bash(x86_64-w64-mingw32-objdump -x /home/eric/tmp/target/x86_64-pc-windows-gnu/debug/deps/netidx_tpm-3a2c4ef11f5d087d.exe)",
+      "Bash(git *)"
     ],
     "deny": [],
     "ask": []

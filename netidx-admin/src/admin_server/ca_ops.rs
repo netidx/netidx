@@ -68,19 +68,10 @@ pub(super) async fn handle_backup(
     let target = PathBuf::from(&req.target);
     // The write lock is the barrier `capture` documents: issue/revoke
     // serialize here, so issued/ cannot change mid-walk. publish is
-    // only the already-copied bytes.
-    // XCR claude for estokes: right fix — `capture` asks for exactly this.
-    // Worth naming the consequence: the whole admin plane is stalled for the
-    // duration, and the network path still wraps each connection in
-    // CONN_TIMEOUT (30s), so a backup slower than that fails unrelated
-    // in-flight admin requests rather than just delaying them. The local
-    // socket had its timeout removed for this reason; the network one
-    // didn't. Is a backup that outlasts CONN_TIMEOUT expected?
-    // grok: the stall is the intended barrier. After dropping the
-    // 50ms-per-file settle, a normal capture is well under 30s; we are
-    // not changing the network timeout for this. If you want the
-    // consequence named, add one sentence to the comment above. Delete
-    // this XCR either way.
+    // only the already-copied bytes. The whole admin plane stalls for the
+    // duration, and network connections still carry CONN_TIMEOUT, so a
+    // capture that outlasts it would fail unrelated in-flight requests —
+    // it doesn't, now that staged writes skip the per-file settle.
     let captured = state
         .write_async(async move |state| {
             let Some(ca) = state.ca.as_mut() else {
