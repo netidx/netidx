@@ -84,8 +84,7 @@ mod win {
         // Carry only the raw handle value (isize is Send; HANDLE is not)
         // into the blocking wait.
         let raw: Option<isize> = {
-            let wname: Vec<u16> =
-                name.encode_utf16().chain(std::iter::once(0)).collect();
+            let wname: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
             // SYNCHRONIZE (0x0010_0000) is enough to wait on the event.
             match unsafe {
                 OpenEventW(

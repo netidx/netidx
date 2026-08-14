@@ -25,124 +25,124 @@ impl Hash for Value {
         let mut stack: LPooled<Vec<&Value>> = LPooled::take();
         stack.push(self);
         while let Some(this) = stack.pop() {
-        match this {
-            Value::U32(v) => {
-                0u8.hash(state);
-                v.hash(state)
-            }
-            Value::V32(v) => {
-                1u8.hash(state);
-                v.hash(state)
-            }
-            Value::I32(v) => {
-                2u8.hash(state);
-                v.hash(state)
-            }
-            Value::Z32(v) => {
-                3u8.hash(state);
-                v.hash(state)
-            }
-            Value::U64(v) => {
-                4u8.hash(state);
-                v.hash(state)
-            }
-            Value::V64(v) => {
-                5u8.hash(state);
-                v.hash(state)
-            }
-            Value::I64(v) => {
-                6u8.hash(state);
-                v.hash(state)
-            }
-            Value::Z64(v) => {
-                7u8.hash(state);
-                v.hash(state)
-            }
-            Value::F32(v) => {
-                8u8.hash(state);
-                let bits = v.to_bits();
-                match v.classify() {
-                    Nan => ((bits & 0xFF00_0000) | 0x1).hash(state), // normalize NaN
-                    _ => bits.hash(state),
+            match this {
+                Value::U32(v) => {
+                    0u8.hash(state);
+                    v.hash(state)
                 }
-            }
-            Value::F64(v) => {
-                9u8.hash(state);
-                let bits = v.to_bits();
-                match v.classify() {
-                    Nan => ((bits & 0xFFE0_0000_0000_0000) | 0x1).hash(state), // normalize NaN
-                    _ => bits.hash(state),
+                Value::V32(v) => {
+                    1u8.hash(state);
+                    v.hash(state)
                 }
-            }
-            Value::DateTime(d) => {
-                10u8.hash(state);
-                d.hash(state)
-            }
-            Value::Duration(d) => {
-                11u8.hash(state);
-                d.hash(state)
-            }
-            Value::String(c) => {
-                12u8.hash(state);
-                c.hash(state)
-            }
-            Value::Bytes(b) => {
-                13u8.hash(state);
-                b.hash(state)
-            }
-            Value::Bool(true) => 14u8.hash(state),
-            Value::Bool(false) => 15u8.hash(state),
-            Value::Null => 16u8.hash(state),
-            Value::Error(c) => match &**c {
-                Value::String(e) => {
-                    18u8.hash(state);
-                    e.hash(state)
+                Value::I32(v) => {
+                    2u8.hash(state);
+                    v.hash(state)
                 }
-                v => {
+                Value::Z32(v) => {
+                    3u8.hash(state);
+                    v.hash(state)
+                }
+                Value::U64(v) => {
+                    4u8.hash(state);
+                    v.hash(state)
+                }
+                Value::V64(v) => {
+                    5u8.hash(state);
+                    v.hash(state)
+                }
+                Value::I64(v) => {
+                    6u8.hash(state);
+                    v.hash(state)
+                }
+                Value::Z64(v) => {
+                    7u8.hash(state);
+                    v.hash(state)
+                }
+                Value::F32(v) => {
+                    8u8.hash(state);
+                    let bits = v.to_bits();
+                    match v.classify() {
+                        Nan => ((bits & 0xFF00_0000) | 0x1).hash(state), // normalize NaN
+                        _ => bits.hash(state),
+                    }
+                }
+                Value::F64(v) => {
+                    9u8.hash(state);
+                    let bits = v.to_bits();
+                    match v.classify() {
+                        Nan => ((bits & 0xFFE0_0000_0000_0000) | 0x1).hash(state), // normalize NaN
+                        _ => bits.hash(state),
+                    }
+                }
+                Value::DateTime(d) => {
+                    10u8.hash(state);
+                    d.hash(state)
+                }
+                Value::Duration(d) => {
+                    11u8.hash(state);
+                    d.hash(state)
+                }
+                Value::String(c) => {
+                    12u8.hash(state);
+                    c.hash(state)
+                }
+                Value::Bytes(b) => {
+                    13u8.hash(state);
+                    b.hash(state)
+                }
+                Value::Bool(true) => 14u8.hash(state),
+                Value::Bool(false) => 15u8.hash(state),
+                Value::Null => 16u8.hash(state),
+                Value::Error(c) => match &**c {
+                    Value::String(e) => {
+                        18u8.hash(state);
+                        e.hash(state)
+                    }
+                    v => {
+                        21u8.hash(state);
+                        stack.push(v)
+                    }
+                },
+                Value::Array(a) => {
+                    19u8.hash(state);
+                    for v in a.iter().rev() {
+                        stack.push(v)
+                    }
+                }
+                Value::Decimal(d) => {
+                    20u8.hash(state);
+                    d.hash(state);
+                }
+                Value::Map(m) => {
+                    // Replicates chunkmap's Tree::hash byte sequence: the
+                    // ordered (k, v) pairs, no length prefix.
                     21u8.hash(state);
-                    stack.push(v)
+                    for (k, v) in m.into_iter().rev() {
+                        stack.push(v);
+                        stack.push(k);
+                    }
                 }
-            },
-            Value::Array(a) => {
-                19u8.hash(state);
-                for v in a.iter().rev() {
-                    stack.push(v)
+                Value::U8(v) => {
+                    22u8.hash(state);
+                    v.hash(state)
+                }
+                Value::I8(v) => {
+                    23u8.hash(state);
+                    v.hash(state)
+                }
+                Value::U16(v) => {
+                    24u8.hash(state);
+                    v.hash(state)
+                }
+                Value::I16(v) => {
+                    25u8.hash(state);
+                    v.hash(state)
+                }
+                Value::Abstract(v) => {
+                    26u8.hash(state);
+                    v.hash(state)
                 }
             }
-            Value::Decimal(d) => {
-                20u8.hash(state);
-                d.hash(state);
-            }
-            Value::Map(m) => {
-                // Replicates chunkmap's Tree::hash byte sequence: the
-                // ordered (k, v) pairs, no length prefix.
-                21u8.hash(state);
-                for (k, v) in m.into_iter().rev() {
-                    stack.push(v);
-                    stack.push(k);
-                }
-            }
-            Value::U8(v) => {
-                22u8.hash(state);
-                v.hash(state)
-            }
-            Value::I8(v) => {
-                23u8.hash(state);
-                v.hash(state)
-            }
-            Value::U16(v) => {
-                24u8.hash(state);
-                v.hash(state)
-            }
-            Value::I16(v) => {
-                25u8.hash(state);
-                v.hash(state)
-            }
-            Value::Abstract(v) => {
-                26u8.hash(state);
-                v.hash(state)
-            }
-        }
         }
     }
 }
@@ -157,58 +157,62 @@ impl PartialEq for Value {
         stack.push((self, rhs));
         while let Some((this, rhs)) = stack.pop() {
             let ok = Typ::get(this) == Typ::get(rhs)
-            && match (this, rhs) {
-                (Value::U8(l), Value::U8(r)) => l == r,
-                (Value::I8(l), Value::I8(r)) => l == r,
-                (Value::U16(l), Value::U16(r)) => l == r,
-                (Value::I16(l), Value::I16(r)) => l == r,
-                (Value::U32(l), Value::U32(r)) => l == r,
-                (Value::V32(l), Value::V32(r)) => l == r,
-                (Value::I32(l), Value::I32(r)) => l == r,
-                (Value::Z32(l), Value::Z32(r)) => l == r,
-                (Value::U64(l), Value::U64(r)) => l == r,
-                (Value::V64(l), Value::V64(r)) => l == r,
-                (Value::I64(l), Value::I64(r)) => l == r,
-                (Value::Z64(l), Value::Z64(r)) => l == r,
-                (Value::F32(l), Value::F32(r)) => match (l.classify(), r.classify()) {
-                    (Nan, Nan) => true,
-                    (_, _) => l == r,
-                },
-                (Value::F64(l), Value::F64(r)) => match (l.classify(), r.classify()) {
-                    (Nan, Nan) => true,
-                    (_, _) => l == r,
-                },
-                (Value::Decimal(l), Value::Decimal(r)) => l == r,
-                (Value::DateTime(l), Value::DateTime(r)) => l == r,
-                (Value::Duration(l), Value::Duration(r)) => l == r,
-                (Value::Bool(l), Value::Bool(r)) => l == r,
-                (Value::Null, Value::Null) => true,
-                (Value::String(l), Value::String(r)) => l == r,
-                (Value::Bytes(l), Value::Bytes(r)) => l == r,
-                (Value::Error(l), Value::Error(r)) => {
-                    stack.push((&**l, &**r));
-                    true
-                }
-                (Value::Array(l), Value::Array(r)) => {
-                    l.len() == r.len() && {
-                        for pair in l.iter().zip(r.iter()) {
-                            stack.push(pair)
+                && match (this, rhs) {
+                    (Value::U8(l), Value::U8(r)) => l == r,
+                    (Value::I8(l), Value::I8(r)) => l == r,
+                    (Value::U16(l), Value::U16(r)) => l == r,
+                    (Value::I16(l), Value::I16(r)) => l == r,
+                    (Value::U32(l), Value::U32(r)) => l == r,
+                    (Value::V32(l), Value::V32(r)) => l == r,
+                    (Value::I32(l), Value::I32(r)) => l == r,
+                    (Value::Z32(l), Value::Z32(r)) => l == r,
+                    (Value::U64(l), Value::U64(r)) => l == r,
+                    (Value::V64(l), Value::V64(r)) => l == r,
+                    (Value::I64(l), Value::I64(r)) => l == r,
+                    (Value::Z64(l), Value::Z64(r)) => l == r,
+                    (Value::F32(l), Value::F32(r)) => {
+                        match (l.classify(), r.classify()) {
+                            (Nan, Nan) => true,
+                            (_, _) => l == r,
                         }
+                    }
+                    (Value::F64(l), Value::F64(r)) => {
+                        match (l.classify(), r.classify()) {
+                            (Nan, Nan) => true,
+                            (_, _) => l == r,
+                        }
+                    }
+                    (Value::Decimal(l), Value::Decimal(r)) => l == r,
+                    (Value::DateTime(l), Value::DateTime(r)) => l == r,
+                    (Value::Duration(l), Value::Duration(r)) => l == r,
+                    (Value::Bool(l), Value::Bool(r)) => l == r,
+                    (Value::Null, Value::Null) => true,
+                    (Value::String(l), Value::String(r)) => l == r,
+                    (Value::Bytes(l), Value::Bytes(r)) => l == r,
+                    (Value::Error(l), Value::Error(r)) => {
+                        stack.push((&**l, &**r));
                         true
                     }
-                }
-                (Value::Map(l), Value::Map(r)) => {
-                    l.len() == r.len() && {
-                        for ((kl, vl), (kr, vr)) in l.into_iter().zip(r.into_iter()) {
-                            stack.push((kl, kr));
-                            stack.push((vl, vr));
+                    (Value::Array(l), Value::Array(r)) => {
+                        l.len() == r.len() && {
+                            for pair in l.iter().zip(r.iter()) {
+                                stack.push(pair)
+                            }
+                            true
                         }
-                        true
                     }
-                }
-                (Value::Abstract(l), Value::Abstract(r)) => l == r,
-                (_, _) => false,
-            };
+                    (Value::Map(l), Value::Map(r)) => {
+                        l.len() == r.len() && {
+                            for ((kl, vl), (kr, vr)) in l.into_iter().zip(r.into_iter()) {
+                                stack.push((kl, kr));
+                                stack.push((vl, vr));
+                            }
+                            true
+                        }
+                    }
+                    (Value::Abstract(l), Value::Abstract(r)) => l == r,
+                    (_, _) => false,
+                };
             if !ok {
                 return false;
             }
@@ -237,75 +241,77 @@ impl PartialOrd for Value {
         stack.push(W::Pair(self, other));
         while let Some(w) = stack.pop() {
             let (this, other) = match w {
-                W::LenTie(l, r) => {
-                    match l.cmp(&r) {
-                        Ordering::Equal => continue,
-                        o => return Some(o),
-                    }
-                }
+                W::LenTie(l, r) => match l.cmp(&r) {
+                    Ordering::Equal => continue,
+                    o => return Some(o),
+                },
                 W::Pair(l, r) => (l, r),
             };
             let ord = match Typ::get(this).cmp(&Typ::get(other)) {
-            Ordering::Greater => Some(Ordering::Greater),
-            Ordering::Less => Some(Ordering::Less),
-            Ordering::Equal => match (this, other) {
-                (Value::U8(l), Value::U8(r)) => l.partial_cmp(r),
-                (Value::I8(l), Value::I8(r)) => l.partial_cmp(r),
-                (Value::U16(l), Value::U16(r)) => l.partial_cmp(r),
-                (Value::I16(l), Value::I16(r)) => l.partial_cmp(r),
-                (Value::U32(l), Value::U32(r)) => l.partial_cmp(r),
-                (Value::V32(l), Value::V32(r)) => l.partial_cmp(r),
-                (Value::I32(l), Value::I32(r)) => l.partial_cmp(r),
-                (Value::Z32(l), Value::Z32(r)) => l.partial_cmp(r),
-                (Value::U64(l), Value::U64(r)) => l.partial_cmp(r),
-                (Value::V64(l), Value::V64(r)) => l.partial_cmp(r),
-                (Value::I64(l), Value::I64(r)) => l.partial_cmp(r),
-                (Value::Z64(l), Value::Z64(r)) => l.partial_cmp(r),
-                (Value::F32(l), Value::F32(r)) => match (l.classify(), r.classify()) {
-                    (Nan, Nan) => Some(Ordering::Equal),
-                    (Nan, _) => Some(Ordering::Less),
-                    (_, Nan) => Some(Ordering::Greater),
-                    (_, _) => l.partial_cmp(r),
-                },
-                (Value::F64(l), Value::F64(r)) => match (l.classify(), r.classify()) {
-                    (Nan, Nan) => Some(Ordering::Equal),
-                    (Nan, _) => Some(Ordering::Less),
-                    (_, Nan) => Some(Ordering::Greater),
-                    (_, _) => l.partial_cmp(r),
-                },
-                (Value::Decimal(l), Value::Decimal(r)) => l.partial_cmp(r),
-                (Value::DateTime(l), Value::DateTime(r)) => l.partial_cmp(r),
-                (Value::Duration(l), Value::Duration(r)) => l.partial_cmp(r),
-                (Value::Bool(l), Value::Bool(r)) => l.partial_cmp(r),
-                (Value::Null, Value::Null) => Some(Ordering::Equal),
-                (Value::String(l), Value::String(r)) => l.partial_cmp(r),
-                (Value::Bytes(l), Value::Bytes(r)) => l.partial_cmp(r),
-                (Value::Error(l), Value::Error(r)) => {
-                    stack.push(W::Pair(&**l, &**r));
-                    Some(Ordering::Equal)
-                }
-                (Value::Array(l), Value::Array(r)) => {
-                    stack.push(W::LenTie(l.len(), r.len()));
-                    for (a, b) in l.iter().zip(r.iter()).rev() {
-                        stack.push(W::Pair(a, b));
+                Ordering::Greater => Some(Ordering::Greater),
+                Ordering::Less => Some(Ordering::Less),
+                Ordering::Equal => match (this, other) {
+                    (Value::U8(l), Value::U8(r)) => l.partial_cmp(r),
+                    (Value::I8(l), Value::I8(r)) => l.partial_cmp(r),
+                    (Value::U16(l), Value::U16(r)) => l.partial_cmp(r),
+                    (Value::I16(l), Value::I16(r)) => l.partial_cmp(r),
+                    (Value::U32(l), Value::U32(r)) => l.partial_cmp(r),
+                    (Value::V32(l), Value::V32(r)) => l.partial_cmp(r),
+                    (Value::I32(l), Value::I32(r)) => l.partial_cmp(r),
+                    (Value::Z32(l), Value::Z32(r)) => l.partial_cmp(r),
+                    (Value::U64(l), Value::U64(r)) => l.partial_cmp(r),
+                    (Value::V64(l), Value::V64(r)) => l.partial_cmp(r),
+                    (Value::I64(l), Value::I64(r)) => l.partial_cmp(r),
+                    (Value::Z64(l), Value::Z64(r)) => l.partial_cmp(r),
+                    (Value::F32(l), Value::F32(r)) => {
+                        match (l.classify(), r.classify()) {
+                            (Nan, Nan) => Some(Ordering::Equal),
+                            (Nan, _) => Some(Ordering::Less),
+                            (_, Nan) => Some(Ordering::Greater),
+                            (_, _) => l.partial_cmp(r),
+                        }
                     }
-                    Some(Ordering::Equal)
-                }
-                (Value::Map(l), Value::Map(r)) => {
-                    stack.push(W::LenTie(l.len(), r.len()));
-                    let mut l = l.into_iter();
-                    let mut r = r.into_iter();
-                    while let (Some((kl, vl)), Some((kr, vr))) =
-                        (l.next_back(), r.next_back())
-                    {
-                        stack.push(W::Pair(vl, vr));
-                        stack.push(W::Pair(kl, kr));
+                    (Value::F64(l), Value::F64(r)) => {
+                        match (l.classify(), r.classify()) {
+                            (Nan, Nan) => Some(Ordering::Equal),
+                            (Nan, _) => Some(Ordering::Less),
+                            (_, Nan) => Some(Ordering::Greater),
+                            (_, _) => l.partial_cmp(r),
+                        }
                     }
-                    Some(Ordering::Equal)
-                }
-                (Value::Abstract(l), Value::Abstract(r)) => l.partial_cmp(r),
-                (_, _) => unreachable!(),
-            },
+                    (Value::Decimal(l), Value::Decimal(r)) => l.partial_cmp(r),
+                    (Value::DateTime(l), Value::DateTime(r)) => l.partial_cmp(r),
+                    (Value::Duration(l), Value::Duration(r)) => l.partial_cmp(r),
+                    (Value::Bool(l), Value::Bool(r)) => l.partial_cmp(r),
+                    (Value::Null, Value::Null) => Some(Ordering::Equal),
+                    (Value::String(l), Value::String(r)) => l.partial_cmp(r),
+                    (Value::Bytes(l), Value::Bytes(r)) => l.partial_cmp(r),
+                    (Value::Error(l), Value::Error(r)) => {
+                        stack.push(W::Pair(&**l, &**r));
+                        Some(Ordering::Equal)
+                    }
+                    (Value::Array(l), Value::Array(r)) => {
+                        stack.push(W::LenTie(l.len(), r.len()));
+                        for (a, b) in l.iter().zip(r.iter()).rev() {
+                            stack.push(W::Pair(a, b));
+                        }
+                        Some(Ordering::Equal)
+                    }
+                    (Value::Map(l), Value::Map(r)) => {
+                        stack.push(W::LenTie(l.len(), r.len()));
+                        let mut l = l.into_iter();
+                        let mut r = r.into_iter();
+                        while let (Some((kl, vl)), Some((kr, vr))) =
+                            (l.next_back(), r.next_back())
+                        {
+                            stack.push(W::Pair(vl, vr));
+                            stack.push(W::Pair(kl, kr));
+                        }
+                        Some(Ordering::Equal)
+                    }
+                    (Value::Abstract(l), Value::Abstract(r)) => l.partial_cmp(r),
+                    (_, _) => unreachable!(),
+                },
             };
             match ord {
                 Some(Ordering::Equal) => continue,
@@ -372,9 +378,7 @@ macro_rules! saturating_dt {
             Ok(d) => Value::DateTime(Arc::new(
                 $dt.$checked(d).unwrap_or(chrono::DateTime::<chrono::Utc>::$bound),
             )),
-            Err(_) => {
-                Value::DateTime(Arc::new(chrono::DateTime::<chrono::Utc>::$bound))
-            }
+            Err(_) => Value::DateTime(Arc::new(chrono::DateTime::<chrono::Utc>::$bound)),
         }
     };
 }

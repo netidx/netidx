@@ -27,5 +27,5 @@ pub mod shutdown;
 /// caller's concurrency discipline (give it to one task).
 #[cfg(any(unix, windows))]
 pub mod process {
-    pub use crate::platform::{spawn, stop_proc, Job, Spawned};
+    pub use crate::platform::{Job, Spawned, spawn, stop_proc};
 }

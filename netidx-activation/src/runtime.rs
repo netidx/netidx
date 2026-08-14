@@ -16,12 +16,7 @@ use netidx::{
     config::Config,
     publisher::{BindCfg, DefaultHandle, DesiredAuth, Publisher, PublisherBuilder},
 };
-use std::{
-    collections::HashMap,
-    path::PathBuf,
-    process::ExitStatus,
-    time::Duration,
-};
+use std::{collections::HashMap, path::PathBuf, process::ExitStatus, time::Duration};
 use tokio::{
     fs,
     process::Command,

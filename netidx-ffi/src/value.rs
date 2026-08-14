@@ -182,9 +182,7 @@ pub unsafe extern "C" fn netidx_value_bytes(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn netidx_value_error(inner: *mut NetidxValue) -> *mut NetidxValue {
     let inner_val = unsafe { Box::from_raw(inner) }.inner;
-    Box::into_raw(Box::new(NetidxValue {
-        inner: Value::Error(inner_val.into()),
-    }))
+    Box::into_raw(Box::new(NetidxValue { inner: Value::Error(inner_val.into()) }))
 }
 
 /// Create a Value::Array from an array of Value pointers. Consumes all values.

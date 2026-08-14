@@ -39,7 +39,11 @@ async fn tokio_run(cfg: Config, auth: DesiredAuth, params: ServerParams) -> Resu
 /// (`netidx-activation.exe`). The caller initializes logging first — to a
 /// console (unix / `--foreground`) or to a file (the windowless Windows
 /// binary, which has no console).
-pub(crate) fn run_supervisor(cfg: Config, auth: DesiredAuth, params: Params) -> Result<()> {
+pub(crate) fn run_supervisor(
+    cfg: Config,
+    auth: DesiredAuth,
+    params: Params,
+) -> Result<()> {
     let server_params = ServerParams { bind: params.bind, units_dir: params.units };
     tokio_run(cfg, auth, server_params)
 }

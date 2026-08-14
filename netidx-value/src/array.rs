@@ -22,8 +22,8 @@ use std::{
     ptr,
     slice::Iter,
     sync::{
-        atomic::{AtomicUsize, Ordering},
         LazyLock, Mutex, MutexGuard,
+        atomic::{AtomicUsize, Ordering},
     },
 };
 use triomphe::{Arc, ThinArc};
@@ -171,8 +171,7 @@ fn drain_deferred(tag: usize) {
         let Some(batch) = deferred_lock().remove(&tag) else { break };
         DROP_DEFERRED_LEN.fetch_sub(batch.len(), Ordering::Relaxed);
         for a in batch {
-            let r =
-                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(a)));
+            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(a)));
             if let Err(e) = r {
                 if panic.is_none() {
                     panic = Some(e)

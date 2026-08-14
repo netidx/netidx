@@ -1,4 +1,6 @@
-use crate::{Map, PBytes, Typ, ValError, Value, abstract_type::Abstract, array::ValArray};
+use crate::{
+    Map, PBytes, Typ, ValError, Value, abstract_type::Abstract, array::ValArray,
+};
 use anyhow::{Result, anyhow};
 use arcstr::{ArcStr, literal};
 use bytes::Bytes;

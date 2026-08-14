@@ -184,183 +184,183 @@ impl Value {
                 T::Val(v) => v,
             };
             match this {
-            Value::U8(v) => {
-                if types {
-                    write!(f, "u8:{}", v)
-                } else {
-                    write!(f, "{}", v)
+                Value::U8(v) => {
+                    if types {
+                        write!(f, "u8:{}", v)
+                    } else {
+                        write!(f, "{}", v)
+                    }
                 }
-            }
-            Value::I8(v) => {
-                if types {
-                    write!(f, "i8:{}", v)
-                } else {
-                    write!(f, "{}", v)
+                Value::I8(v) => {
+                    if types {
+                        write!(f, "i8:{}", v)
+                    } else {
+                        write!(f, "{}", v)
+                    }
                 }
-            }
-            Value::U16(v) => {
-                if types {
-                    write!(f, "u16:{}", v)
-                } else {
-                    write!(f, "{}", v)
+                Value::U16(v) => {
+                    if types {
+                        write!(f, "u16:{}", v)
+                    } else {
+                        write!(f, "{}", v)
+                    }
                 }
-            }
-            Value::I16(v) => {
-                if types {
-                    write!(f, "i16:{}", v)
-                } else {
-                    write!(f, "{}", v)
+                Value::I16(v) => {
+                    if types {
+                        write!(f, "i16:{}", v)
+                    } else {
+                        write!(f, "{}", v)
+                    }
                 }
-            }
-            Value::U32(v) => {
-                if types {
-                    write!(f, "u32:{}", v)
-                } else {
-                    write!(f, "{}", v)
+                Value::U32(v) => {
+                    if types {
+                        write!(f, "u32:{}", v)
+                    } else {
+                        write!(f, "{}", v)
+                    }
                 }
-            }
-            Value::V32(v) => {
-                if types {
-                    write!(f, "v32:{}", v)
-                } else {
-                    write!(f, "{}", v)
+                Value::V32(v) => {
+                    if types {
+                        write!(f, "v32:{}", v)
+                    } else {
+                        write!(f, "{}", v)
+                    }
                 }
-            }
-            Value::I32(v) => {
-                if types {
-                    write!(f, "i32:{}", v)
-                } else {
-                    write!(f, "{}", v)
+                Value::I32(v) => {
+                    if types {
+                        write!(f, "i32:{}", v)
+                    } else {
+                        write!(f, "{}", v)
+                    }
                 }
-            }
-            Value::Z32(v) => {
-                if types {
-                    write!(f, "z32:{}", v)
-                } else {
-                    write!(f, "{}", v)
+                Value::Z32(v) => {
+                    if types {
+                        write!(f, "z32:{}", v)
+                    } else {
+                        write!(f, "{}", v)
+                    }
                 }
-            }
-            Value::U64(v) => {
-                if types {
-                    write!(f, "u64:{}", v)
-                } else {
-                    write!(f, "{}", v)
+                Value::U64(v) => {
+                    if types {
+                        write!(f, "u64:{}", v)
+                    } else {
+                        write!(f, "{}", v)
+                    }
                 }
-            }
-            Value::V64(v) => {
-                if types {
-                    write!(f, "v64:{}", v)
-                } else {
-                    write!(f, "{}", v)
+                Value::V64(v) => {
+                    if types {
+                        write!(f, "v64:{}", v)
+                    } else {
+                        write!(f, "{}", v)
+                    }
                 }
-            }
-            Value::I64(v) => {
-                if types {
-                    write!(f, "i64:{}", v)
-                } else {
-                    write!(f, "{}", v)
+                Value::I64(v) => {
+                    if types {
+                        write!(f, "i64:{}", v)
+                    } else {
+                        write!(f, "{}", v)
+                    }
                 }
-            }
-            Value::Z64(v) => {
-                if types {
-                    write!(f, "z64:{}", v)
-                } else {
-                    write!(f, "{}", v)
+                Value::Z64(v) => {
+                    if types {
+                        write!(f, "z64:{}", v)
+                    } else {
+                        write!(f, "{}", v)
+                    }
                 }
-            }
-            Value::F32(v) => {
-                let pfx = if types { "f32:" } else { "" };
-                if v.fract() == 0. {
-                    write!(f, "{}{}.", pfx, v)
-                } else {
-                    write!(f, "{}{}", pfx, v)
+                Value::F32(v) => {
+                    let pfx = if types { "f32:" } else { "" };
+                    if v.fract() == 0. {
+                        write!(f, "{}{}.", pfx, v)
+                    } else {
+                        write!(f, "{}{}", pfx, v)
+                    }
                 }
-            }
-            Value::F64(v) => {
-                let pfx = if types { "f64:" } else { "" };
-                if v.fract() == 0. {
-                    write!(f, "{}{}.", pfx, v)
-                } else {
-                    write!(f, "{}{}", pfx, v)
+                Value::F64(v) => {
+                    let pfx = if types { "f64:" } else { "" };
+                    if v.fract() == 0. {
+                        write!(f, "{}{}.", pfx, v)
+                    } else {
+                        write!(f, "{}{}", pfx, v)
+                    }
                 }
-            }
-            Value::Decimal(v) => {
-                if types {
-                    write!(f, "decimal:{}", DecimalFmt(**v))
-                } else {
-                    write!(f, "{}", DecimalFmt(**v))
+                Value::Decimal(v) => {
+                    if types {
+                        write!(f, "decimal:{}", DecimalFmt(**v))
+                    } else {
+                        write!(f, "{}", DecimalFmt(**v))
+                    }
                 }
-            }
-            Value::DateTime(v) => {
-                if types {
-                    write!(f, r#"datetime:"{}""#, v)
-                } else {
-                    write!(f, r#""{}""#, v)
+                Value::DateTime(v) => {
+                    if types {
+                        write!(f, r#"datetime:"{}""#, v)
+                    } else {
+                        write!(f, r#""{}""#, v)
+                    }
                 }
-            }
-            Value::Duration(v) => {
-                let pfx = if types { "duration:" } else { "" };
-                let v = v.as_secs_f64();
-                if v.fract() == 0. {
-                    write!(f, r#"{}{}.s"#, pfx, v)
-                } else {
-                    write!(f, r#"{}{}s"#, pfx, v)
+                Value::Duration(v) => {
+                    let pfx = if types { "duration:" } else { "" };
+                    let v = v.as_secs_f64();
+                    if v.fract() == 0. {
+                        write!(f, r#"{}{}.s"#, pfx, v)
+                    } else {
+                        write!(f, r#"{}{}s"#, pfx, v)
+                    }
                 }
-            }
-            Value::String(s) => {
-                write!(f, r#""{}""#, esc.escape(&*s))
-            }
-            Value::Bytes(b) => {
-                let pfx = if types || b.is_empty() { "bytes:" } else { "" };
-                if b.is_empty() {
-                    write!(f, "{}==", pfx)
-                } else {
-                    write!(f, "{}{}", pfx, BASE64.encode(&*b))
-                }
-            }
-            Value::Bool(true) => write!(f, "true"),
-            Value::Bool(false) => write!(f, "false"),
-            Value::Null => write!(f, "null"),
-            Value::Error(v) => match &**v {
                 Value::String(s) => {
-                    write!(f, r#"error:"{}""#, esc.escape(&*s))
+                    write!(f, r#""{}""#, esc.escape(&*s))
                 }
-                v => {
-                    write!(f, "error:")?;
-                    stack.push(T::Val(v));
+                Value::Bytes(b) => {
+                    let pfx = if types || b.is_empty() { "bytes:" } else { "" };
+                    if b.is_empty() {
+                        write!(f, "{}==", pfx)
+                    } else {
+                        write!(f, "{}{}", pfx, BASE64.encode(&*b))
+                    }
+                }
+                Value::Bool(true) => write!(f, "true"),
+                Value::Bool(false) => write!(f, "false"),
+                Value::Null => write!(f, "null"),
+                Value::Error(v) => match &**v {
+                    Value::String(s) => {
+                        write!(f, r#"error:"{}""#, esc.escape(&*s))
+                    }
+                    v => {
+                        write!(f, "error:")?;
+                        stack.push(T::Val(v));
+                        Ok(())
+                    }
+                },
+                Value::Array(elts) => {
+                    write!(f, "[")?;
+                    stack.push(T::Lit("]"));
+                    let len = elts.len();
+                    for i in (0..len).rev() {
+                        if i < len - 1 {
+                            stack.push(T::Lit(", "));
+                        }
+                        stack.push(T::Val(&elts[i]));
+                    }
                     Ok(())
                 }
-            },
-            Value::Array(elts) => {
-                write!(f, "[")?;
-                stack.push(T::Lit("]"));
-                let len = elts.len();
-                for i in (0..len).rev() {
-                    if i < len - 1 {
-                        stack.push(T::Lit(", "));
+                Value::Map(m) => {
+                    write!(f, "{{")?;
+                    stack.push(T::Lit("}"));
+                    for (i, (k, v)) in m.into_iter().rev().enumerate() {
+                        if i > 0 {
+                            stack.push(T::Lit(", "));
+                        }
+                        stack.push(T::Val(v));
+                        stack.push(T::Lit(" => "));
+                        stack.push(T::Val(k));
                     }
-                    stack.push(T::Val(&elts[i]));
+                    Ok(())
                 }
-                Ok(())
-            }
-            Value::Map(m) => {
-                write!(f, "{{")?;
-                stack.push(T::Lit("}"));
-                for (i, (k, v)) in m.into_iter().rev().enumerate() {
-                    if i > 0 {
-                        stack.push(T::Lit(", "));
-                    }
-                    stack.push(T::Val(v));
-                    stack.push(T::Lit(" => "));
-                    stack.push(T::Val(k));
+                Value::Abstract(a) => {
+                    let bytes = pack(a).unwrap_or_else(|_| BytesMut::new());
+                    write!(f, "abstract:{}", BASE64.encode(&bytes))
                 }
-                Ok(())
-            }
-            Value::Abstract(a) => {
-                let bytes = pack(a).unwrap_or_else(|_| BytesMut::new());
-                write!(f, "abstract:{}", BASE64.encode(&bytes))
-            }
-        }?;
+            }?;
         }
         Ok(())
     }

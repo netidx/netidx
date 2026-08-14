@@ -529,11 +529,7 @@ impl Pack for Value {
         // size checks) instead of the thread's stack.
         enum Frame {
             Array { len: usize, elts: LPooled<Vec<Value>> },
-            Map {
-                len: usize,
-                pairs: LPooled<Vec<(Value, Value)>>,
-                key: Option<Value>,
-            },
+            Map { len: usize, pairs: LPooled<Vec<(Value, Value)>>, key: Option<Value> },
             Error,
         }
         let mut frames: LPooled<Vec<Frame>> = LPooled::take();
@@ -589,11 +585,7 @@ impl Pack for Value {
                     } else {
                         let mut pairs: LPooled<Vec<(Value, Value)>> = LPooled::take();
                         pairs.reserve(elts);
-                        frames.push(Frame::Map {
-                            len: elts,
-                            pairs,
-                            key: None,
-                        });
+                        frames.push(Frame::Map { len: elts, pairs, key: None });
                         continue;
                     }
                 }
