@@ -107,12 +107,11 @@ pub fn sealed_password_path(path: &str) -> String {
 pub fn load_key_password(askpass: Option<&str>, path: &str) -> Result<Zeroizing<String>> {
     use keyring::Entry;
     use std::process::Command;
-    let mut cache = CACHED.lock();
-    if let Some(pass) = cache.get(path) {
+    if let Some(pass) = CACHED.lock().get(path) {
         return Ok(pass.clone());
     }
     let sealed = sealed_password_path(path);
-    if std::path::Path::new(&sealed).exists() {
+    let password = if std::path::Path::new(&sealed).exists() {
         info!(
             "unsealing password for {} from the {} ({sealed})",
             path,
@@ -128,49 +127,47 @@ pub fn load_key_password(askpass: Option<&str>, path: &str) -> Result<Zeroizing<
                 netidx_tpm::MECHANISM
             )
         })?;
-        let password = match String::from_utf8(secret.to_vec()) {
+        match String::from_utf8(secret.to_vec()) {
             Ok(password) => Zeroizing::new(password),
             Err(e) => {
                 let mut bytes = e.into_bytes();
                 bytes.zeroize();
                 bail!("sealed password is not utf8")
             }
-        };
-        cache.insert(path.into(), password.clone());
-        return Ok(password);
-    }
-    info!("loading password for {} from the system keyring", path);
-    let entry = Entry::new("netidx", path)?;
-    match entry.get_password() {
-        Ok(password) => {
-            let password = Zeroizing::new(password);
-            cache.insert(path.into(), password.clone());
-            Ok(password)
         }
-        Err(e) => match askpass {
-            None => {
-                bail!("password isn't in the keychain and no askpass specified")
-            }
-            Some(askpass) => {
-                info!("failed to find password entry for netidx {}, error {}", path, e);
-                let mut res = Command::new(askpass).arg(path).output()?;
-                let password = Zeroizing::new(
-                    String::from_utf8_lossy(&res.stdout)
-                        .trim_matches(|c| c == '\r' || c == '\n')
-                        .to_owned(),
-                );
-                res.stdout.zeroize();
-                if let Err(e) = entry.set_password(password.as_str()) {
-                    warn!(
-                        "failed to set password entry for netidx {}, error {}",
+    } else {
+        info!("loading password for {} from the system keyring", path);
+        let entry = Entry::new("netidx", path)?;
+        match entry.get_password() {
+            Ok(password) => Zeroizing::new(password),
+            Err(e) => match askpass {
+                None => {
+                    bail!("password isn't in the keychain and no askpass specified")
+                }
+                Some(askpass) => {
+                    info!(
+                        "failed to find password entry for netidx {}, error {}",
                         path, e
                     );
+                    let mut res = Command::new(askpass).arg(path).output()?;
+                    let password = Zeroizing::new(
+                        String::from_utf8_lossy(&res.stdout)
+                            .trim_matches(|c| c == '\r' || c == '\n')
+                            .to_owned(),
+                    );
+                    res.stdout.zeroize();
+                    if let Err(e) = entry.set_password(password.as_str()) {
+                        warn!(
+                            "failed to set password entry for netidx {}, error {}",
+                            path, e
+                        );
+                    }
+                    password
                 }
-                cache.insert(path.into(), password.clone());
-                Ok(password)
-            }
-        },
-    }
+            },
+        }
+    };
+    Ok(CACHED.lock().entry(path.into()).or_insert(password).clone())
 }
 
 /// Save the password in the user's keychain.
