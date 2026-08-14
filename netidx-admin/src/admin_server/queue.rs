@@ -9,7 +9,10 @@ use super::{
         authenticate, one_live_refusal, server_unlock, signing_slot,
     },
     ca_dir,
-    enrollment::{authorize_enrollment, finish_enrollment, stage_enrollment},
+    enrollment::{
+        authorize_enrollment, finish_enrollment, stage_enrollment,
+        undo_enrollment_issuance,
+    },
     issuance::{
         Issuance, IssuanceMode, PushPlan, handle_sign_request_op, issue_serialized,
         one_live_name, propagate_issuance, push_registrations, restore_kind_matches,
@@ -104,20 +107,53 @@ pub(super) async fn handle_approve_request(
             reason: "this host does not hold the CA".to_string(),
         };
     }
+    let cfg_path = state.cfg_path.clone();
+    let config_lock = state.config_lock.clone();
     let approved = state
         .write_async(async move |state| {
             let map = state.map.clone();
-            handle_approve(
+            let approved = handle_approve(
                 state.ca.as_mut().expect("CA role held"),
                 req,
                 authentication,
                 prepared_server_unlock,
                 Some(&map),
             )
-            .await
+            .await?;
+            if let Some((server_id, enrollment)) = approved.enrollment.clone() {
+                if let Err(e) = finish_enrollment(
+                    state,
+                    cfg_path.as_deref(),
+                    &config_lock,
+                    server_id,
+                    &enrollment,
+                    prepared_server_unlock,
+                )
+                .await
+                {
+                    if let SignResponse::Ok(SignOk { signed_cert_pem, .. }) =
+                        &approved.resp
+                        && let Some(ca) = state.ca.as_mut()
+                        && let Err(undo) = undo_enrollment_issuance(
+                            ca,
+                            signed_cert_pem,
+                            Some(req.request_id.as_str()),
+                            prepared_server_unlock,
+                        )
+                        .await
+                    {
+                        return Err(format!(
+                            "recording enrollment grant: {e:#} (also failed to \
+                             withdraw the cert: {undo:#})"
+                        ));
+                    }
+                    return Err(format!("recording enrollment grant: {e:#}"));
+                }
+            }
+            Ok(approved)
         })
         .await;
-    let Approved { resp, push, enrollment, replacement_crl } = match approved {
+    let Approved { resp, push, enrollment: _, replacement_crl } = match approved {
         Ok(approved) => approved,
         Err(reason) => return ApproveResponse::Err { reason },
     };
@@ -132,12 +168,6 @@ pub(super) async fn handle_approve_request(
     };
     let operation_id =
         propagate_issuance(state, &mut warnings, push, replacement_crl).await;
-    if let Some((server_id, enrollment)) = enrollment
-        && let Err(e) =
-            finish_enrollment(state, server_id, &enrollment, prepared_server_unlock).await
-    {
-        warnings.push(format!("recording enrollment grant: {e:#}"));
-    }
     ApproveResponse::Ok(ApproveOk { operation_id, warnings })
 }
 

@@ -9,7 +9,7 @@ use super::{
         reject, safe_auth_failure, scope_covers, server_unlock, signing_slot,
     },
     ca_dir,
-    issuance::{Issuance, IssuanceMode, issue_serialized},
+    issuance::{Issuance, IssuanceMode, issue_serialized, leaf_serial},
     revocation::revoke_server_certificates,
 };
 use crate::{
@@ -18,39 +18,107 @@ use crate::{
         self, AdminDomainMap, EnrollRequest, Role, SERVING_SAN, SignOk, SignResponse,
     },
     ca_store, ca_vault,
+    config_lock::ConfigDirLock,
 };
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use log::warn;
-use std::{net::SocketAddr, sync::Arc};
+use std::{net::SocketAddr, path::Path, sync::Arc};
 
-async fn record_peer(state: &Server, peer: SocketAddr) {
-    let cfg_path = state.cfg_path.clone();
-    let config_lock = state.config_lock.clone();
-    state
-        .write_async(async move |inner| {
-            let cfg = &mut inner.cfg;
-            if peer == cfg.listen || cfg.peers.contains(&peer) {
-                return;
-            }
-            cfg.peers.push(peer);
-            if let Some(path) = &cfg_path
-                && let Err(e) =
-                    crate::admin_server_config::save_async(&config_lock, path, cfg).await
-            {
-                warn!("admin-server: failed to persist enrolled peer {peer}: {e:#}");
-            }
-        })
-        .await;
+async fn record_peer(
+    cfg: &mut crate::admin_server_config::AdminServerConfig,
+    cfg_path: Option<&Path>,
+    config_lock: &ConfigDirLock,
+    peer: SocketAddr,
+) {
+    if peer == cfg.listen || cfg.peers.contains(&peer) {
+        return;
+    }
+    cfg.peers.push(peer);
+    if let Some(path) = cfg_path
+        && let Err(e) =
+            crate::admin_server_config::save_async(config_lock, path, cfg).await
+    {
+        warn!("admin-server: failed to persist enrolled peer {peer}: {e:#}");
+    }
 }
 
 pub(super) async fn finish_enrollment(
-    state: &Arc<Server>,
+    state: &mut MutableState,
+    cfg_path: Option<&Path>,
+    config_lock: &ConfigDirLock,
     server_id: admin_proto::AdminServerId,
     enrollment: &admin_proto::EnrollmentRequest,
     prepared_server_unlock: &PreparedServerUnlock,
 ) -> Result<()> {
-    grant_enrollment(state, server_id, enrollment, prepared_server_unlock).await?;
-    record_peer(state, enrollment.listen).await;
+    grant_enrollment(
+        state,
+        cfg_path,
+        config_lock,
+        server_id,
+        enrollment,
+        prepared_server_unlock,
+    )
+    .await?;
+    record_peer(&mut state.cfg, cfg_path, config_lock, enrollment.listen).await;
+    Ok(())
+}
+
+fn leaf_serial_from_pem(pem: &str) -> Option<u64> {
+    let der =
+        rustls_pemfile::certs(&mut std::io::Cursor::new(pem.as_bytes())).next()?.ok()?;
+    leaf_serial(der.as_ref())
+}
+
+async fn issued_id_for_serial(
+    store: &ca_store::CAStore,
+    serial: u64,
+) -> Result<Option<String>> {
+    let mut entries = store.issued_records().await?;
+    while let Some(rec) = entries.next().await? {
+        if rec.serial == serial {
+            return Ok(Some(rec.req.id.clone()));
+        }
+    }
+    Ok(None)
+}
+
+/// Withdraw a serving cert that was committed before its enrollment grant
+/// failed, while the state write lock is still held.
+pub(super) async fn undo_enrollment_issuance(
+    ca: &mut ca_store::CaDir,
+    signed_cert_pem: &str,
+    queued_id: Option<&str>,
+    prepared_server_unlock: &PreparedServerUnlock,
+) -> Result<()> {
+    let serial = leaf_serial_from_pem(signed_cert_pem);
+    let id = match queued_id {
+        Some(id) => id.to_string(),
+        None => {
+            let Some(serial) = serial else {
+                bail!("cannot withdraw an enrollment cert with no serial");
+            };
+            issued_id_for_serial(&ca.store, serial)
+                .await?
+                .context("cannot withdraw an enrollment cert missing from issued/")?
+        }
+    };
+    if let Some(serial) = serial {
+        let unlocked = server_unlock(ca, prepared_server_unlock)
+            .await
+            .map_err(|reason| anyhow!("{reason}"))?;
+        ca.store
+            .revoke(
+                serial,
+                ca_store::Revocation {
+                    serial,
+                    revoked_unix: ca_store::now_unix(),
+                    reason: "enrollment grant failed".into(),
+                },
+            )
+            .await?;
+        ca.store.write_crl(&unlocked.ca_key_pem).await?;
+    }
+    ca.store.uncommit_signed(&id, queued_id.is_some()).await?;
     Ok(())
 }
 
@@ -73,10 +141,12 @@ pub(super) async fn handle_enroll(
         cluster: req.cluster.clone(),
         replaces: req.replaces,
     };
-    let resp = state
+    let cfg_path = state.cfg_path.clone();
+    let config_lock = state.config_lock.clone();
+    state
         .write_async(async move |state| {
             let map = state.map.clone();
-            handle_enroll_request(
+            let resp = handle_enroll_request(
                 state.ca.as_mut().expect("CA role held"),
                 req,
                 authentication,
@@ -84,107 +154,112 @@ pub(super) async fn handle_enroll(
                 local,
                 Some(&map),
             )
-            .await
-        })
-        .await;
-    if let SignResponse::Ok(SignOk { signed_cert_pem, .. }) = &resp
-        && !local
-    {
-        let result =
-            match crate::tls::admin_cert_identity_from_pem(signed_cert_pem.as_bytes()) {
-                Ok(identity) => {
-                    finish_enrollment(
-                        state,
-                        identity.server_id,
-                        &enrollment,
-                        prepared_server_unlock,
-                    )
-                    .await
+            .await;
+            if let SignResponse::Ok(SignOk { signed_cert_pem, .. }) = &resp
+                && !local
+            {
+                let result = match crate::tls::admin_cert_identity_from_pem(
+                    signed_cert_pem.as_bytes(),
+                ) {
+                    Ok(identity) => {
+                        finish_enrollment(
+                            state,
+                            cfg_path.as_deref(),
+                            &config_lock,
+                            identity.server_id,
+                            &enrollment,
+                            prepared_server_unlock,
+                        )
+                        .await
+                    }
+                    Err(e) => Err(e),
+                };
+                if let Err(e) = result {
+                    if let Some(ca) = state.ca.as_mut()
+                        && let Err(undo) = undo_enrollment_issuance(
+                            ca,
+                            signed_cert_pem,
+                            None,
+                            prepared_server_unlock,
+                        )
+                        .await
+                    {
+                        return reject(&format!(
+                            "recording enrollment grant: {e:#} (also failed to \
+                             withdraw the cert: {undo:#})"
+                        ));
+                    }
+                    return reject(&format!("recording enrollment grant: {e:#}"));
                 }
-                Err(e) => Err(e),
-            };
-        if let Err(e) = result {
-            return SignResponse::Err {
-                reason: format!("recording enrollment grant: {e:#}"),
-            };
-        }
-    }
-    resp
+            }
+            resp
+        })
+        .await
 }
 
 async fn grant_enrollment(
-    state: &Server,
+    state: &mut MutableState,
+    cfg_path: Option<&Path>,
+    config_lock: &ConfigDirLock,
     server_id: admin_proto::AdminServerId,
     enrollment: &admin_proto::EnrollmentRequest,
     prepared_server_unlock: &PreparedServerUnlock,
 ) -> Result<admin_proto::ResolverClusterId> {
-    let cfg_path = state.cfg_path.clone();
-    let config_lock = state.config_lock.clone();
-    let enrollment = enrollment.clone();
-    state
-        .write_async(async move |mutable| {
-            let MutableState { cfg, map, ca, .. } = mutable;
-            let ca = ca.as_mut().context("this host does not hold the CA")?;
-            let ca_dir = ca.dir().to_path_buf();
-            let replaced_addr = enrollment.replaces.and_then(|old| {
-                map.admin_servers
-                    .iter()
-                    .find(|server| server.id == old)
-                    .map(|server| server.addr)
-            });
-            let mut staged = map.clone();
-            let cluster = stage_enrollment(&mut staged, server_id, &enrollment)?;
-            if let Some(old) = enrollment.replaces {
-                revoke_server_certificates(
-                    ca,
-                    old,
-                    "approved restore",
-                    prepared_server_unlock,
-                )
-                .await
-                .context("revoking the replaced server identity")?;
-            }
-            // Take ownership of this host's resolver config *before* the grant
-            // is persisted. From here the CA renders the whole document and the
-            // host stops being authoritative for any of it — including the half
-            // only it could have told us: its bind address, its certificate and
-            // key paths, its pid file, its tuning.
-            //
-            // Before, so that a failure here fails the enrollment. The other
-            // order would leave a granted server whose config the CA does not
-            // own — a server that looks managed and is not. An entry for a
-            // server whose grant then failed is harmless by comparison: nothing
-            // renders for a server that is not in the map.
-            if let Some(installed) = enrollment.resolver_config.clone() {
-                let mut configs = ca
-                    .store
-                    .desired_configs()
-                    .await
-                    .context("reading the desired resolver configs")?;
-                configs.set(server_id, installed);
-                ca.store
-                    .save_desired_configs(&configs)
-                    .await
-                    .context("recording this server's resolver config")?;
-            }
-            grant_member_self_perms(ca, &mut staged, cluster, &enrollment)
-                .await
-                .context("granting the enrolling member its own permissions")?;
-            admin_domain::save_async(&config_lock, &ca_dir, &staged)
-                .await
-                .context("persisting the enrollment grant")?;
-            *map = staged;
-            if let Some(old_addr) = replaced_addr {
-                cfg.peers.retain(|peer| *peer != old_addr);
-                if let Some(path) = &cfg_path {
-                    crate::admin_server_config::save_async(&config_lock, path, cfg)
-                        .await
-                        .context("persisting removal of the replaced peer hint")?;
-                }
-            }
-            Ok(cluster)
-        })
+    let MutableState { cfg, map, ca, .. } = state;
+    let ca = ca.as_mut().context("this host does not hold the CA")?;
+    let ca_dir = ca.dir().to_path_buf();
+    let replaced_addr = enrollment.replaces.and_then(|old| {
+        map.admin_servers.iter().find(|server| server.id == old).map(|server| server.addr)
+    });
+    let mut staged = map.clone();
+    let cluster = stage_enrollment(&mut staged, server_id, &enrollment)?;
+    if let Some(old) = enrollment.replaces {
+        revoke_server_certificates(ca, old, "approved restore", prepared_server_unlock)
+            .await
+            .context("revoking the replaced server identity")?;
+    }
+    // Take ownership of this host's resolver config *before* the grant
+    // is persisted. From here the CA renders the whole document and the
+    // host stops being authoritative for any of it — including the half
+    // only it could have told us: its bind address, its certificate and
+    // key paths, its pid file, its tuning.
+    //
+    // Before, so that a failure here fails the enrollment. The other
+    // order would leave a granted server whose config the CA does not
+    // own — a server that looks managed and is not. An entry for a
+    // server whose grant then failed is harmless by comparison: nothing
+    // renders for a server that is not in the map.
+    if let Some(installed) = enrollment.resolver_config.clone() {
+        let mut configs = ca
+            .store
+            .desired_configs()
+            .await
+            .context("reading the desired resolver configs")?;
+        configs.set(server_id, installed);
+        ca.store
+            .save_desired_configs(&configs)
+            .await
+            .context("recording this server's resolver config")?;
+    }
+    grant_member_self_perms(ca, &mut staged, cluster, &enrollment)
         .await
+        .context("granting the enrolling member its own permissions")?;
+    admin_domain::save_async(config_lock, &ca_dir, &staged)
+        .await
+        .context("persisting the enrollment grant")?;
+    *map = staged;
+    if let Some(old_addr) = replaced_addr {
+        cfg.peers.retain(|peer| *peer != old_addr);
+        if let Some(path) = cfg_path
+            && let Err(e) =
+                crate::admin_server_config::save_async(config_lock, path, cfg).await
+        {
+            warn!(
+                "admin-server: failed to persist removal of the replaced peer hint: {e:#}"
+            );
+        }
+    }
+    Ok(cluster)
 }
 
 /// Add the enrolling member's own identity to its resolver cluster's

@@ -590,6 +590,38 @@ impl CAStore {
         Ok(())
     }
 
+    /// Reverse [`commit_signed`] so the request is no longer `Signed`.
+    /// Writes the original queue entry back first when `restore_queue` is
+    /// set, then removes the issued record — `status` prefers `issued/`, so
+    /// that order never exposes a window of `Unknown`.
+    pub async fn uncommit_signed(
+        &mut self,
+        id: &str,
+        restore_queue: bool,
+    ) -> Result<Option<IssuedRecord>> {
+        anyhow::ensure!(valid_id(id), "malformed request id");
+        let Some(rec) = self.read_issued(id).await? else {
+            return Ok(None);
+        };
+        if restore_queue {
+            let dir = self.queue_dir();
+            tokio::fs::create_dir_all(&dir)
+                .await
+                .with_context(|| format!("creating {}", dir.display()))?;
+            let bytes = serde_json::to_vec_pretty(&rec.req)
+                .context("serializing queued request")?;
+            atomic::write_atomic_async(&self.queue_path(id), &bytes, 0o644).await?;
+        }
+        match tokio::fs::remove_file(self.issued_path(id)).await {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                return Err(e).with_context(|| format!("removing issued record {id}"));
+            }
+        }
+        Ok(Some(rec))
+    }
+
     /// Record a denial and move it out of the active queue.
     pub async fn deny(&mut self, req: &QueuedReq, reason: &str) -> Result<()> {
         anyhow::ensure!(valid_id(&req.id), "malformed request id");
@@ -1119,6 +1151,24 @@ mod tests {
         }
         assert!(!ca.store.queue_path(&r.id).exists());
         assert!(ca.store.issued_path(&r.id).exists());
+    }
+
+    #[tokio::test]
+    async fn uncommit_signed_restores_pending() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("certificate.pem"), b"CA-CERT").unwrap();
+        let mut ca = open(dir.path()).await;
+        let r = req("alice.example.com");
+        ca.store.enqueue(&r).await.unwrap();
+        ca.store
+            .commit_signed(&issued(r.clone(), 5, "alice.example.com", now_unix() + 1000))
+            .await
+            .unwrap();
+        let withdrawn = ca.store.uncommit_signed(&r.id, true).await.unwrap().unwrap();
+        assert_eq!(withdrawn.serial, 5);
+        assert!(matches!(ca.store.status(&r.id).await.unwrap(), Status::Pending(_)));
+        assert!(ca.store.queue_path(&r.id).exists());
+        assert!(!ca.store.issued_path(&r.id).exists());
     }
 
     #[tokio::test]
