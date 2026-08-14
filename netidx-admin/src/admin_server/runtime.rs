@@ -485,9 +485,9 @@ fn build_server_config(
     // unexpired serving cert is refused at the handshake — closing the peer
     // gate (Register/Deregister/ApplyPermsEdit/…) against decommissioned or
     // compromised admin servers. Unknown status stays permitted: absence of a
-    // CRL must not lock the plane out, presence on one must. (The CRL is read
-    // when the acceptor is built; a revocation takes effect on the next
-    // admin-server restart, the same coarseness as a serving-cert rotation.)
+    // CRL must not lock the plane out, presence on one must. The CRL is
+    // read when the acceptor is built; [`SERVING_RELOAD_POLL`] rebuilds
+    // it when the on-disk file changes.
     let crls: Vec<rustls_pki_types::CertificateRevocationListDer<'static>> = match crl_pem
     {
         Some(pem) => rustls_pemfile::crls(&mut std::io::Cursor::new(pem))
