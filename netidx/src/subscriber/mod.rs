@@ -202,6 +202,24 @@ impl error::Error for SubscribeErrors {}
 #[cfg(test)]
 mod classification {
     use super::*;
+    use bytes::BytesMut;
+
+    /// `Event` is what the archive writes, so its encoding is not ours to
+    /// change while adding an error channel beside it.
+    #[test]
+    fn the_event_encoding_is_unchanged() {
+        for e in [Event::Unsubscribed, Event::Update(Value::I64(42))] {
+            let mut buf = BytesMut::new();
+            Pack::encode(&e, &mut buf).unwrap();
+            assert_eq!(<Event as Pack>::decode(&mut buf).unwrap(), e);
+        }
+        let mut buf = BytesMut::new();
+        Pack::encode(&Event::Unsubscribed, &mut buf).unwrap();
+        assert_eq!(&buf[..], &[0x40]);
+        // an exhausted buffer used to index past the end and panic
+        let mut empty = BytesMut::new();
+        assert!(<Event as Pack>::decode(&mut empty).is_err());
+    }
 
     #[test]
     fn a_classified_error_survives_context_layers() {
@@ -323,6 +341,9 @@ impl Pack for Event {
     }
 
     fn decode(buf: &mut impl Buf) -> result::Result<Self, PackError> {
+        if !buf.has_remaining() {
+            return Err(PackError::BufferShort);
+        }
         if buf.chunk()[0] == 0x40 {
             buf.advance(1);
             Ok(Event::Unsubscribed)

@@ -1,5 +1,19 @@
 # Unreleased
 
+- Publishers can find out whether their paths are actually published.
+  `Publisher::errors` takes a channel that reports `(Option<Id>,
+  PublishErrors)` whenever the condition of a published value changes, and
+  `Publisher::publish_errors` asks about one. `None` in place of an id means
+  every published value, which is how a resolver nobody can reach is said
+  once rather than a million times. An empty set means published; a set
+  without `NotPublished` means published but at least one resolver refused
+  it; `NotPublished` means it is not in netidx.
+
+- Fixed: one path a resolver definitively refused (`Denied`, or a
+  non-absolute path) held that connection `degraded`, which replayed the
+  whole publish set at that member on every reconnect, forever. `degraded`
+  now means the member may not have heard us, not that it disagreed.
+
 - Subscribers can find out why a durable subscription isn't subscribed.
   `Subscriber::errors` takes a channel that reports `(SubId,
   SubscribeErrors)` whenever a `Dval`'s error set changes — the union of

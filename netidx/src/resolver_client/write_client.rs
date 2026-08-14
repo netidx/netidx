@@ -10,6 +10,7 @@ use crate::{
         Auth, AuthChallenge, AuthWrite, ClientHello, ClientHelloWrite, FromWrite,
         HashMethod, ReadyForOwnershipCheck, Referral, Secret, ServerHelloWrite, ToWrite,
     },
+    publisher::{PublishError, PublishErrors},
     tls, utils,
 };
 use ahash::{AHashMap, AHasher};
@@ -26,10 +27,17 @@ use indexmap::IndexMap;
 use log::{debug, info, warn};
 use netidx_netproto::resolver::PublisherPriority;
 use parking_lot::{Mutex, RwLock};
-use poolshark::{global::GPooled, local::LPooled};
+use poolshark::{
+    global::{GPooled, Pool},
+    local::LPooled,
+};
 use rand::{RngExt, rng};
 use std::{
-    cmp::max, fmt::Debug, hash::BuildHasherDefault, net::SocketAddr, sync::Arc,
+    cmp::max,
+    fmt::Debug,
+    hash::BuildHasherDefault,
+    net::SocketAddr,
+    sync::{Arc, LazyLock},
     time::Duration,
 };
 use tokio::{
@@ -44,11 +52,64 @@ use tokio::{
 
 const TTL: u64 = 120;
 
+static WRITE_EVENTS: LazyLock<Pool<Vec<WriteEvent>>> =
+    LazyLock::new(|| Pool::new(64, 10_000));
+static OUTCOMES: LazyLock<Pool<Vec<(Path, Option<PublishError>)>>> =
+    LazyLock::new(|| Pool::new(64, 10_000));
+
 type Batch = (GPooled<Vec<(usize, ToWrite)>>, oneshot::Sender<Response<FromWrite>>);
 
 struct ToCon {
     batch: GPooled<Vec<(usize, ToWrite)>>,
     replies: Mutex<Vec<oneshot::Sender<Response<FromWrite>>>>,
+}
+
+/// A change in what the cluster is doing with a path, or with everything this
+/// publisher has published.
+///
+/// `path` is `None` for a condition that isn't tied to one path — a member we
+/// can't reach, a heartbeat reconnect refused — which is exactly the claim
+/// that every published path gained that error, made without emitting a
+/// million identical items.
+#[derive(Debug, Clone)]
+pub(crate) struct WriteEvent {
+    pub(crate) path: Option<Path>,
+    pub(crate) errors: PublishErrors,
+}
+
+/// What one member of the cluster is doing, reported up to `write_mgr`, which
+/// is the only place that knows the whole member set and can therefore say
+/// whether anyone is still accepting.
+enum ConEvent {
+    /// this member answered for these paths; `None` means it accepted
+    Outcome(SocketAddr, GPooled<Vec<(Path, Option<PublishError>)>>),
+    /// this member is not usable
+    Down(SocketAddr, PublishError),
+    /// this member is connected and taking writes
+    Up(SocketAddr),
+}
+
+/// Classify what a resolver said about a path it would not publish.
+///
+/// `FromWrite::Error` is free form text and only one value is recognised, so
+/// anything else collapses to `ResolverError` — warn the text first, or the
+/// only record of what actually happened is gone.
+fn refusal(addr: SocketAddr, path: &Path, reply: &FromWrite) -> Option<PublishError> {
+    match reply {
+        FromWrite::Published | FromWrite::Referral(_) => None,
+        FromWrite::Denied => Some(PublishError::Denied),
+        FromWrite::Error(e) if &**e == "absolute paths required" => {
+            Some(PublishError::InvalidPath)
+        }
+        FromWrite::Error(e) => {
+            warn!("resolver {addr:?} refused {path}: {e}");
+            Some(PublishError::ResolverError)
+        }
+        FromWrite::Unpublished => {
+            warn!("resolver {addr:?} answered publish {path} with unpublished");
+            Some(PublishError::ResolverError)
+        }
+    }
 }
 
 macro_rules! wt {
@@ -97,9 +158,67 @@ struct Connection {
     heartbeat: Interval,
     disconnect: Interval,
     priority: PublisherPriority,
+    events: mpsc::UnboundedSender<ConEvent>,
+    /// what this member has refused, so that only changes are reported. Empty
+    /// in the healthy case, which is why reporting costs nothing there.
+    refused: AHashMap<Path, PublishError>,
+    /// what we last told `write_mgr` about this member. `None` is usable,
+    /// which is also what it assumes about a member it has just started.
+    reported_down: Option<PublishError>,
 }
 
 impl Connection {
+    /// Note what this member said about a path, and report it if it differs
+    /// from what we last said about it.
+    ///
+    /// Returns true if the member is now out of step with what the publisher
+    /// believes. A definitive refusal is not: the member heard us perfectly
+    /// well and said no, and replaying the publish set at it forever would
+    /// change nothing. `degraded` means it may not have heard us.
+    fn note(
+        &mut self,
+        outcomes: &mut GPooled<Vec<(Path, Option<PublishError>)>>,
+        path: &Path,
+        reply: &FromWrite,
+    ) -> bool {
+        match refusal(self.resolver_addr, path, reply) {
+            Some(e) => {
+                if self.refused.insert(path.clone(), e) != Some(e) {
+                    outcomes.push((path.clone(), Some(e)))
+                }
+                !matches!(e, PublishError::Denied | PublishError::InvalidPath)
+            }
+            None => {
+                if self.refused.remove(path).is_some() {
+                    outcomes.push((path.clone(), None))
+                }
+                false
+            }
+        }
+    }
+
+    fn report(&self, outcomes: GPooled<Vec<(Path, Option<PublishError>)>>) {
+        if !outcomes.is_empty() {
+            let _ = self
+                .events
+                .unbounded_send(ConEvent::Outcome(self.resolver_addr, outcomes));
+        }
+    }
+
+    fn report_up(&mut self) {
+        if self.reported_down.take().is_some() {
+            let _ = self.events.unbounded_send(ConEvent::Up(self.resolver_addr));
+        }
+    }
+
+    fn report_down(&mut self, reason: PublishError) {
+        if self.reported_down != Some(reason) {
+            self.reported_down = Some(reason);
+            let _ =
+                self.events.unbounded_send(ConEvent::Down(self.resolver_addr, reason));
+        }
+    }
+
     fn set_ttl(&mut self, ttl: u64) {
         let linger = Duration::from_secs(max(1, ttl / 10));
         let heartbeat = Duration::from_secs(max(1, ttl / 2));
@@ -124,13 +243,18 @@ impl Connection {
             con.queue_send(msg)?;
             nretry += 1;
         }
-        let npub = {
+        // the paths in send order, so each reply can be attributed. The read
+        // guard can't be held across the awaits below, and the set can change
+        // under us in the meantime.
+        let mut sent: LPooled<Vec<Path>> = LPooled::take();
+        {
             let published = self.published.read();
-            for msg in published.values() {
-                con.queue_send(msg)?
+            for (path, msg) in published.iter() {
+                con.queue_send(msg)?;
+                sent.push(path.clone());
             }
-            published.len()
-        };
+        }
+        let npub = sent.len();
         let len = nretry + npub;
         if len == 0 {
             info!("connected to resolver {:?} for write", self.resolver_addr);
@@ -150,30 +274,32 @@ impl Connection {
             ttl_expired, self.degraded, len
         );
         con.flush().await?;
-        let mut success = 0;
+        let mut settled = 0;
         for _ in 0..nretry {
             match con.receive().await? {
-                FromWrite::Unpublished | FromWrite::Referral(_) => success += 1,
+                FromWrite::Unpublished | FromWrite::Referral(_) => settled += 1,
                 r => warn!(
                     "republish unexpected response to retry {:?} from resolver {:?}",
                     r, self.resolver_addr
                 ),
             }
         }
-        if success == nretry {
+        if settled == nretry {
             self.pending_clear = false;
             self.pending_unpublish.clear();
         }
-        for _ in 0..npub {
-            match con.receive().await? {
-                FromWrite::Published | FromWrite::Referral(_) => success += 1,
-                r => warn!("republish unexpected response to publish {:?}", r),
+        let mut outcomes = OUTCOMES.take();
+        for path in sent.drain(..) {
+            let r: FromWrite = con.receive().await?;
+            if !self.note(&mut outcomes, &path, &r) {
+                settled += 1
             }
         }
-        self.degraded = success != len;
+        self.report(outcomes);
+        self.degraded = settled != len;
         info!(
-            "connected to resolver {:?} for write (republished {}) degraded: {}",
-            self.resolver_addr, success, self.degraded
+            "connected to resolver {:?} for write (settled {}) degraded: {}",
+            self.resolver_addr, settled, self.degraded
         );
         Ok(())
     }
@@ -391,6 +517,9 @@ impl Connection {
                 con.send_one(&ReadyForOwnershipCheck)
             )??;
         }
+        // before republishing, so that whatever it discovers is attributed to
+        // a member write_mgr already counts as one that could have accepted
+        self.report_up();
         if !r.ttl_expired && !self.degraded {
             info!("connected to resolver {:?} for write", self.resolver_addr);
             self.con = Some(con);
@@ -406,6 +535,9 @@ impl Connection {
         self.security_context = None;
         self.secrets.write().remove(&self.resolver_addr);
         warn!("write connection {:?} failed {}", self.resolver_addr, e);
+        // the log has the diagnosis; there is nothing more specific we could
+        // call this until the resolver can tell us why it refused us
+        self.report_down(PublishError::ResolverUnreachable);
     }
 
     async fn send_heartbeat(&mut self) {
@@ -452,20 +584,31 @@ impl Connection {
         while rx_batch.len() < tx.batch.len() {
             time::timeout(timeout, c.receive_batch(&mut *rx_batch)).await??
         }
+        let mut outcomes = OUTCOMES.take();
         for ((_, tx), rx) in tx.batch.iter().zip(rx_batch.iter()) {
             match tx {
-                ToWrite::Publish(_)
-                | ToWrite::PublishDefault(_)
-                | ToWrite::PublishWithFlags(_, _)
-                | ToWrite::PublishDefaultWithFlags(_, _) => match rx {
-                    FromWrite::Published | FromWrite::Referral(_) => (),
-                    _ => {
-                        self.degraded = true;
+                ToWrite::Publish(p)
+                | ToWrite::PublishDefault(p)
+                | ToWrite::PublishWithFlags(p, _)
+                | ToWrite::PublishDefaultWithFlags(p, _) => {
+                    if self.note(&mut outcomes, p, rx) {
+                        self.degraded = true
                     }
-                },
-                _ => (),
+                }
+                ToWrite::Unpublish(p) | ToWrite::UnpublishDefault(p) => {
+                    if self.refused.remove(p).is_some() {
+                        outcomes.push((p.clone(), None))
+                    }
+                }
+                ToWrite::Clear => {
+                    for (p, _) in self.refused.drain() {
+                        outcomes.push((p, None))
+                    }
+                }
+                ToWrite::Heartbeat => (),
             }
         }
+        self.report(outcomes);
         let mut result = FROMWRITEPOOL.take();
         // not relevant for writes
         let publishers = PUBLISHERPOOL.take();
@@ -488,6 +631,7 @@ impl Connection {
         secrets: Arc<RwLock<AHashMap<SocketAddr, u128>>>,
         tls: Option<tls::CachedConnector>,
         published: Published,
+        events: mpsc::UnboundedSender<ConEvent>,
         stop: oneshot::Receiver<()>,
     ) {
         let mut stop = stop.fuse();
@@ -509,6 +653,9 @@ impl Connection {
             active: false,
             heartbeat: time::interval_at(now + HB, HB),
             disconnect: time::interval_at(now + LINGER, LINGER),
+            events,
+            refused: AHashMap::default(),
+            reported_down: None,
         };
         // A member added to a cluster that is already publishing has to be
         // brought up to date now. Otherwise it sits empty until the next batch
@@ -600,9 +747,15 @@ fn reconcile(
     write_addr: SocketAddr,
     priority: PublisherPriority,
     tls: &Option<tls::CachedConnector>,
+    con_events: &mpsc::UnboundedSender<ConEvent>,
+    members: &mut AHashMap<SocketAddr, PublishError>,
 ) {
     live.retain(|l| {
-        referral.addrs.iter().any(|(a, auth)| *a == l.addr && *auth == l.auth)
+        let keep = referral.addrs.iter().any(|(a, auth)| *a == l.addr && *auth == l.auth);
+        if !keep {
+            members.remove(&l.addr);
+        }
+        keep
     });
     for (addr, auth) in referral.addrs.iter() {
         if live.iter().any(|l| l.addr == *addr && l.auth == *auth) {
@@ -611,12 +764,16 @@ fn reconcile(
         let (stop, stop_rx) = oneshot::channel();
         live.push(Live { addr: *addr, auth: auth.clone(), _stop: stop });
         let addr = *addr;
+        // a member is assumed usable until it says otherwise, which is what
+        // `Connection::reported_down` starts out agreeing with
+        members.remove(&addr);
         let auth = auth.clone();
         let desired_auth = desired_auth.clone();
         let secrets = secrets.clone();
         let tls = tls.clone();
         let receiver = sender.subscribe();
         let published = published.clone();
+        let con_events = con_events.clone();
         task::spawn(async move {
             Connection::start(
                 receiver,
@@ -628,11 +785,140 @@ fn reconcile(
                 secrets,
                 tls,
                 published,
+                con_events,
                 stop_rx,
             )
             .await;
             info!("write task for {:?} exited", addr);
         });
+    }
+}
+
+/// What the cluster is collectively doing with the paths we publish.
+///
+/// One member accepting is enough for a path to be in netidx, so nothing here
+/// can be decided by a single connection — this is the only place that knows
+/// the whole member set.
+struct Aggregate {
+    /// members that are not usable, and why. Absent means usable.
+    members: AHashMap<SocketAddr, PublishError>,
+    /// paths some member refused, and which members refused them. Empty in
+    /// the healthy case.
+    refused: AHashMap<Path, AHashMap<SocketAddr, PublishError>>,
+    /// what we last told the publisher, so that only changes are sent
+    last_global: PublishErrors,
+    events: Option<mpsc::UnboundedSender<GPooled<Vec<WriteEvent>>>>,
+}
+
+impl Aggregate {
+    /// The condition of a path: the union of what refused it, plus
+    /// `NotPublished` if nobody who could have accepted it did.
+    fn state(&self, path: &Path, live: usize) -> PublishErrors {
+        let mut errors = PublishErrors::default();
+        let refused = match self.refused.get(path) {
+            None => return errors,
+            Some(r) => r,
+        };
+        let mut usable_refusals = 0;
+        for (addr, e) in refused.iter() {
+            errors.insert(*e);
+            if !self.members.contains_key(addr) {
+                usable_refusals += 1
+            }
+        }
+        if usable_refusals >= live.saturating_sub(self.members.len()) {
+            errors.insert(PublishError::NotPublished)
+        }
+        errors
+    }
+
+    /// The condition of every published path: the union of why members are
+    /// unusable, plus `NotPublished` if none of them is left.
+    fn global(&self, live: usize) -> PublishErrors {
+        let mut errors = PublishErrors::default();
+        for e in self.members.values() {
+            errors.insert(*e)
+        }
+        if !errors.is_empty() && self.members.len() >= live {
+            errors.insert(PublishError::NotPublished)
+        }
+        errors
+    }
+
+    fn send(&mut self, batch: GPooled<Vec<WriteEvent>>) {
+        if !batch.is_empty()
+            && let Some(events) = &self.events
+            && events.unbounded_send(batch).is_err()
+        {
+            self.events = None
+        }
+    }
+
+    /// The condition of every refused path, to be compared against after
+    /// something that changes what refusals mean.
+    fn snapshot(&self, live: usize) -> LPooled<Vec<(Path, PublishErrors)>> {
+        self.refused.keys().map(|p| (p.clone(), self.state(p, live))).collect()
+    }
+
+    /// Report what changed since `before`, and the global condition if that
+    /// changed too. Nothing a member does can add a path to `refused`, so
+    /// `before` covers everything that could have moved.
+    fn settle(&mut self, before: LPooled<Vec<(Path, PublishErrors)>>, live: usize) {
+        let mut batch = WRITE_EVENTS.take();
+        for (path, was) in before.iter() {
+            let now = self.state(path, live);
+            if now != *was {
+                batch.push(WriteEvent { path: Some(path.clone()), errors: now })
+            }
+        }
+        let global = self.global(live);
+        if global != self.last_global {
+            self.last_global = global;
+            batch.push(WriteEvent { path: None, errors: global })
+        }
+        self.send(batch)
+    }
+
+    fn handle(&mut self, ev: ConEvent, live: usize) {
+        match ev {
+            ConEvent::Up(addr) => {
+                let before = self.snapshot(live);
+                self.members.remove(&addr);
+                self.settle(before, live)
+            }
+            ConEvent::Down(addr, reason) => {
+                let before = self.snapshot(live);
+                self.members.insert(addr, reason);
+                self.settle(before, live)
+            }
+            ConEvent::Outcome(addr, mut outcomes) => {
+                let mut batch = WRITE_EVENTS.take();
+                for (path, outcome) in outcomes.drain(..) {
+                    let before = self.state(&path, live);
+                    match outcome {
+                        Some(e) => {
+                            self.refused
+                                .entry(path.clone())
+                                .or_insert_with(AHashMap::default)
+                                .insert(addr, e);
+                        }
+                        None => {
+                            if let Some(r) = self.refused.get_mut(&path) {
+                                r.remove(&addr);
+                                if r.is_empty() {
+                                    self.refused.remove(&path);
+                                }
+                            }
+                        }
+                    }
+                    let after = self.state(&path, live);
+                    if after != before {
+                        batch.push(WriteEvent { path: Some(path), errors: after })
+                    }
+                }
+                self.send(batch)
+            }
+        }
     }
 }
 
@@ -644,31 +930,51 @@ async fn write_mgr(
     write_addr: SocketAddr,
     priority: PublisherPriority,
     tls: Option<tls::CachedConnector>,
+    events: Option<mpsc::UnboundedSender<GPooled<Vec<WriteEvent>>>>,
 ) -> Result<()> {
     let published: Published = Arc::new(RwLock::new(IndexMap::default()));
     let (sender, _) = broadcast::channel(100);
-    let mut live: LPooled<Vec<Live>> = LPooled::take();
-    let reconcile_now = |live: &mut LPooled<Vec<Live>>, referral: &Referral| {
-        reconcile(
-            live,
-            referral,
-            &sender,
-            &published,
-            &desired_auth,
-            &secrets,
-            write_addr,
-            priority,
-            &tls,
-        )
+    let (con_events, mut con_events_rx) = mpsc::unbounded();
+    let mut agg = Aggregate {
+        members: AHashMap::default(),
+        refused: AHashMap::default(),
+        last_global: PublishErrors::default(),
+        events,
     };
+    let mut live: LPooled<Vec<Live>> = LPooled::take();
+    let reconcile_now =
+        |live: &mut LPooled<Vec<Live>>, agg: &mut Aggregate, referral: &Referral| {
+            reconcile(
+                live,
+                referral,
+                &sender,
+                &published,
+                &desired_auth,
+                &secrets,
+                write_addr,
+                priority,
+                &tls,
+                &con_events,
+                &mut agg.members,
+            )
+        };
     let referral = resolver.borrow_and_update().clone();
-    reconcile_now(&mut live, &referral);
+    reconcile_now(&mut live, &mut agg, &referral);
     loop {
         let (batch, reply) = select_biased! {
             () = addrs_changed(&mut resolver).fuse() => {
                 let referral = resolver.borrow_and_update().clone();
-                reconcile_now(&mut live, &referral);
+                let before = agg.snapshot(live.len());
+                reconcile_now(&mut live, &mut agg, &referral);
+                agg.settle(before, live.len());
                 continue
+            },
+            ev = con_events_rx.next().fuse() => match ev {
+                None => break,
+                Some(ev) => {
+                    agg.handle(ev, live.len());
+                    continue
+                }
             },
             batch = receiver.next().fuse() => match batch {
                 None => break,
@@ -728,6 +1034,7 @@ impl WriteClient {
         priority: PublisherPriority,
         secrets: Arc<RwLock<AHashMap<SocketAddr, u128>>>,
         tls: Option<tls::CachedConnector>,
+        events: Option<mpsc::UnboundedSender<GPooled<Vec<WriteEvent>>>>,
     ) -> Self {
         let (to_tx, to_rx) = mpsc::unbounded();
         task::spawn(async move {
@@ -739,6 +1046,7 @@ impl WriteClient {
                 write_addr,
                 priority,
                 tls,
+                events,
             )
             .await;
             info!("write manager exited {:?}", r);

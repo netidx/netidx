@@ -1935,18 +1935,27 @@ mod publisher {
 mod errors {
     use crate::{
         config::Config as ClientConfig,
-        publisher::{BindCfg, DesiredAuth, Publisher, PublisherBuilder},
-        resolver_client::ResolverError,
-        resolver_server::{Server, config::Config as ServerConfig},
+        publisher::{
+            BindCfg, DesiredAuth, Id, PublishError, PublishErrors, Publisher,
+            PublisherBuilder,
+        },
+        resolver_client::{ResolverError, ResolverRead},
+        resolver_server::{
+            Server,
+            config::{Config as ServerConfig, PMap, file as sfile},
+        },
         subscriber::{
             SubId, SubscribeError, SubscribeErrors, Subscriber, SubscriberBuilder,
         },
     };
     use anyhow::Result;
+    use arcstr::{ArcStr, literal};
     use futures::{channel::mpsc, prelude::*};
     use netidx_core::path::Path;
     use poolshark::global::GPooled;
-    use std::collections::{HashSet, VecDeque};
+    use std::collections::{HashMap, HashSet, VecDeque};
+    use std::fmt::Debug;
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
     use std::time::Duration;
     use tokio::time;
 
@@ -1960,6 +1969,104 @@ mod errors {
             r.insert(*e)
         }
         r
+    }
+
+    fn perrs(es: &[PublishError]) -> PublishErrors {
+        let mut r = PublishErrors::default();
+        for e in es {
+            r.insert(*e)
+        }
+        r
+    }
+
+    fn addr(port: u16) -> SocketAddr {
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port)
+    }
+
+    /// Take a port the OS says is free and hand it back, so a member can be
+    /// restarted on the address its clients already know.
+    fn free_port() -> u16 {
+        std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
+    }
+
+    fn pmap(entries: &[(&str, &str)]) -> PMap {
+        let mut m = HashMap::new();
+        for (path, bits) in entries {
+            let mut tbl = HashMap::new();
+            tbl.insert(ArcStr::from("user"), ArcStr::from(*bits));
+            m.insert(ArcStr::from(*path), tbl);
+        }
+        PMap(m)
+    }
+
+    fn anon_member(port: u16, writer_ttl: u64) -> sfile::MemberServer {
+        sfile::MemberServerBuilder::default()
+            .addr(addr(port))
+            .bind_addr(IpAddr::V4(Ipv4Addr::LOCALHOST))
+            .auth(sfile::Auth::Anonymous)
+            .writer_ttl(writer_ttl)
+            .build()
+            .unwrap()
+    }
+
+    fn tls_member(port: u16) -> sfile::MemberServer {
+        sfile::MemberServerBuilder::default()
+            .addr(addr(port))
+            .bind_addr(IpAddr::V4(Ipv4Addr::LOCALHOST))
+            .auth(sfile::Auth::Tls {
+                name: literal!("resolver.example.com"),
+                trusted: literal!("../cfg/tls/ca/certificate"),
+                certificate: literal!("../cfg/tls/resolver/certificate"),
+                private_key: literal!("../cfg/tls/resolver/private.key"),
+            })
+            .id_map_command(literal!("../cfg/tls/id"))
+            .build()
+            .unwrap()
+    }
+
+    /// Every member of the cluster, but only this one's permissions. Members
+    /// are started from separate configs so that a test can make one of them
+    /// disagree with the others about a path.
+    fn tls_cluster(ports: &[u16], perms: &[(&str, &str)]) -> sfile::Config {
+        sfile::ConfigBuilder::default()
+            .member_servers(ports.iter().map(|p| tls_member(*p)).collect::<Vec<_>>())
+            .perms(pmap(perms))
+            .build()
+            .unwrap()
+    }
+
+    /// Start member `id`, waiting out a previous incarnation's listener.
+    async fn start(cfg: sfile::Config, id: usize) -> Server {
+        let cfg = ServerConfig::from_file(cfg).unwrap();
+        let deadline = time::Instant::now() + Duration::from_secs(10);
+        loop {
+            match Server::new(cfg.clone(), false, id).await {
+                Ok(s) => break s,
+                Err(e) => {
+                    if time::Instant::now() >= deadline {
+                        panic!("member {id} would not start: {e}")
+                    }
+                    time::sleep(Duration::from_millis(50)).await
+                }
+            }
+        }
+    }
+
+    /// The tls client config, pointed at a cluster on known ports.
+    fn tls_client(ports: &[u16]) -> Result<ClientConfig> {
+        let mut cfg = ClientConfig::load("../cfg/tls/publisher/client.json")?;
+        let auth = cfg.addrs[0].1.clone();
+        cfg.addrs = ports.iter().map(|p| (addr(*p), auth.clone())).collect();
+        cfg.detach();
+        Ok(cfg)
+    }
+
+    fn anon_client(ports: &[u16]) -> Result<ClientConfig> {
+        let mut cfg = ClientConfig::load("../cfg/simple-client.json")?;
+        let auth = cfg.addrs[0].1.clone();
+        cfg.addrs = ports.iter().map(|p| (addr(*p), auth.clone())).collect();
+        cfg.detach();
+        Ok(cfg)
     }
 
     fn bind() -> BindCfg {
@@ -1999,21 +2106,31 @@ mod errors {
         SubscriberBuilder::new(cfg.clone()).desired_auth(auth).build()
     }
 
-    /// The errors channel, flattened back into single items so a test can say
-    /// what it expects to happen next.
-    struct Errors {
-        rx: mpsc::Receiver<GPooled<Vec<(SubId, SubscribeErrors)>>>,
-        buf: VecDeque<(SubId, SubscribeErrors)>,
+    fn sub_errors(subscriber: &Subscriber) -> Errors<(SubId, SubscribeErrors)> {
+        let (tx, rx) = mpsc::channel(10);
+        subscriber.errors(tx);
+        Errors::new(rx)
     }
 
-    impl Errors {
-        fn attach(subscriber: &Subscriber) -> Self {
-            let (tx, rx) = mpsc::channel(10);
-            subscriber.errors(tx);
+    fn pub_errors(publisher: &Publisher) -> Errors<(Option<Id>, PublishErrors)> {
+        let (tx, rx) = mpsc::channel(10);
+        publisher.errors(tx);
+        Errors::new(rx)
+    }
+
+    /// An errors channel, flattened back into single items so a test can say
+    /// what it expects to happen next.
+    struct Errors<T: Send + Sync + 'static> {
+        rx: mpsc::Receiver<GPooled<Vec<T>>>,
+        buf: VecDeque<T>,
+    }
+
+    impl<T: Copy + Debug + Send + Sync + 'static> Errors<T> {
+        fn new(rx: mpsc::Receiver<GPooled<Vec<T>>>) -> Self {
             Self { rx, buf: VecDeque::new() }
         }
 
-        async fn next(&mut self, wait: Duration) -> Option<(SubId, SubscribeErrors)> {
+        async fn next(&mut self, wait: Duration) -> Option<T> {
             loop {
                 if let Some(i) = self.buf.pop_front() {
                     break Some(i);
@@ -2025,8 +2142,8 @@ mod errors {
             }
         }
 
-        /// Assert nothing more is said. A subscription that keeps failing for
-        /// the same reason it already reported must go quiet.
+        /// Assert nothing more is said. Something that keeps failing for the
+        /// same reason it already reported must go quiet.
         async fn expect_quiet(&mut self) {
             if let Some(i) = self.next(QUIET).await {
                 panic!("expected silence, got {i:?}")
@@ -2068,7 +2185,7 @@ mod errors {
         let _v1 = pb.publish(Path::from("/denied/x"), 42i64)?;
         pb.flushed().await;
         let subscriber = subscriber(&cfg, auth)?;
-        let mut e = Errors::attach(&subscriber);
+        let mut e = sub_errors(&subscriber);
         let denied = subscriber.subscribe(Path::from("/denied/x"));
         let allowed = subscriber.subscribe(Path::from("/app/v0"));
         time::timeout(TO, allowed.wait_subscribed()).await??;
@@ -2106,7 +2223,7 @@ mod errors {
         let d = subscriber.subscribe(Path::from("/app/v0"));
         time::timeout(TO, d.wait_subscribed()).await??;
         assert_eq!(d.last_error(), None);
-        let mut e = Errors::attach(&subscriber);
+        let mut e = sub_errors(&subscriber);
         drop(v);
         pb.shutdown().await;
         assert_eq!(
@@ -2133,7 +2250,7 @@ mod errors {
         let subscriber = subscriber(&cfg, DesiredAuth::Anonymous)?;
         let d = subscriber.subscribe(Path::from("/app/v0"));
         time::timeout(TO, d.wait_subscribed()).await??;
-        let mut e = Errors::attach(&subscriber);
+        let mut e = sub_errors(&subscriber);
         drop(v);
         pb.shutdown().await;
         assert_eq!(
@@ -2162,6 +2279,159 @@ mod errors {
         Ok(())
     }
 
+    /// The publisher's side of the same question: is my thing published?
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_denied_publish_reports_not_published() -> Result<()> {
+        const N: usize = 20;
+        let _ = env_logger::try_init();
+        let port = free_port();
+        let server =
+            start(tls_cluster(&[port], &[("/", "swlpd"), ("/nopub", "!p")]), 0).await;
+        let cfg = tls_client(&[port])?;
+        let pb = publisher(&cfg, DesiredAuth::Tls { identity: None }).await?;
+        let mut e = pub_errors(&pb);
+        let mut denied = Vec::new();
+        let mut allowed = Vec::new();
+        for i in 0..N {
+            denied.push(pb.publish(Path::from(format!("/nopub/v{i}")), 42i64)?);
+            allowed.push(pb.publish(Path::from(format!("/app/v{i}")), 42i64)?);
+        }
+        pb.flushed().await;
+        let gone = perrs(&[PublishError::NotPublished, PublishError::Denied]);
+        let mut seen = HashSet::new();
+        while seen.len() < N {
+            match e.next(TO).await {
+                None => panic!("only {} of {N} denied paths reported", seen.len()),
+                Some((id, errors)) => {
+                    let id = id.expect("a denied path is not a global condition");
+                    assert_eq!(errors, gone);
+                    assert!(seen.insert(id), "{id:?} reported twice");
+                }
+            }
+        }
+        assert_eq!(seen, denied.iter().map(|v| v.id()).collect::<HashSet<_>>());
+        for v in denied.iter() {
+            assert_eq!(pb.publish_errors(v.id()), gone);
+        }
+        // the paths it could publish have nothing to say, and neither does
+        // anything else once every reason has been given
+        for v in allowed.iter() {
+            assert_eq!(pb.publish_errors(v.id()), PublishErrors::default());
+        }
+        e.expect_quiet().await;
+        drop(server);
+        Ok(())
+    }
+
+    /// One member accepting is enough, so a path a single member refuses is
+    /// degraded, not gone — and it really is still resolvable through the
+    /// member that took it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn one_member_refusing_is_degraded_not_unpublished() -> Result<()> {
+        let _ = env_logger::try_init();
+        let ports = [free_port(), free_port()];
+        let takes_it = start(tls_cluster(&ports, &[("/", "swlpd")]), 0).await;
+        let refuses_it =
+            start(tls_cluster(&ports, &[("/", "swlpd"), ("/nopub", "!p")]), 1).await;
+        let cfg = tls_client(&ports)?;
+        let pb = publisher(&cfg, DesiredAuth::Tls { identity: None }).await?;
+        let mut e = pub_errors(&pb);
+        let v = pb.publish(Path::from("/nopub/v0"), 42i64)?;
+        pb.flushed().await;
+        assert_eq!(
+            e.next(TO).await,
+            Some((Some(v.id()), perrs(&[PublishError::Denied])))
+        );
+        assert!(!pb.publish_errors(v.id()).contains(PublishError::NotPublished));
+        // ask the member that took it, not whichever the cluster picks
+        let r = ResolverRead::new(
+            tls_client(&ports[..1])?,
+            DesiredAuth::Tls { identity: None },
+        );
+        let (_, res) = time::timeout(TO, r.resolve([Path::from("/nopub/v0")])).await??;
+        assert_eq!(res[0].as_ref().unwrap().publishers.len(), 1);
+        e.expect_quiet().await;
+        drop((takes_it, refuses_it));
+        Ok(())
+    }
+
+    /// The case per-reason partial/total flags get wrong: one member denies
+    /// while the other is unreachable. Every reason is individually partial,
+    /// yet the path is published nowhere.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_denied_path_with_the_rest_unreachable_is_not_published() -> Result<()> {
+        let _ = env_logger::try_init();
+        let ports = [free_port(), free_port()];
+        // only member 0 is ever started
+        let refuses_it =
+            start(tls_cluster(&ports, &[("/", "swlpd"), ("/nopub", "!p")]), 0).await;
+        let cfg = tls_client(&ports)?;
+        let pb = publisher(&cfg, DesiredAuth::Tls { identity: None }).await?;
+        let mut e = pub_errors(&pb);
+        let v = pb.publish(Path::from("/nopub/v0"), 42i64)?;
+        pb.flushed().await;
+        let want = perrs(&[
+            PublishError::NotPublished,
+            PublishError::Denied,
+            PublishError::ResolverUnreachable,
+        ]);
+        loop {
+            match e.next(TO).await {
+                None => panic!("never reported {want}"),
+                Some(_) if pb.publish_errors(v.id()) == want => break,
+                Some(_) => (),
+            }
+        }
+        drop(refuses_it);
+        Ok(())
+    }
+
+    /// A resolver nobody can reach isn't about any one path, so it is said
+    /// once rather than a million times.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_unreachable_resolver_is_reported_once_for_everything() -> Result<()> {
+        const N: usize = 20;
+        let _ = env_logger::try_init();
+        let port = free_port();
+        let cfg = sfile::ConfigBuilder::default()
+            .member_servers(vec![anon_member(port, 4)])
+            .build()
+            .unwrap();
+        let server = start(cfg.clone(), 0).await;
+        let client = anon_client(&[port])?;
+        let pb = publisher(&client, DesiredAuth::Anonymous).await?;
+        let mut vals = Vec::new();
+        for i in 0..N {
+            vals.push(pb.publish(Path::from(format!("/app/v{i}")), 42i64)?);
+        }
+        pb.flushed().await;
+        let mut e = pub_errors(&pb);
+        drop(server);
+        let gone =
+            perrs(&[PublishError::NotPublished, PublishError::ResolverUnreachable]);
+        assert_eq!(e.next(TO).await, Some((None, gone)));
+        for v in vals.iter() {
+            assert_eq!(pb.publish_errors(v.id()), gone);
+        }
+        // a value published while nothing is reaching the resolver inherits it
+        let late = pb.publish(Path::from("/app/late"), 42i64)?;
+        assert_eq!(pb.publish_errors(late.id()), gone);
+        e.expect_quiet().await;
+        let server = start(cfg, 0).await;
+        loop {
+            match e.next(TO).await {
+                None => panic!("recovery was never reported"),
+                Some((None, errors)) if errors.is_empty() => break,
+                Some(i) => panic!("unexpected {i:?}"),
+            }
+        }
+        for v in vals.iter() {
+            assert_eq!(pb.publish_errors(v.id()), PublishErrors::default());
+        }
+        drop(server);
+        Ok(())
+    }
+
     /// The failure everyone actually hits: a resolver or a publisher goes
     /// away and takes every subscription with it.
     #[tokio::test(flavor = "multi_thread")]
@@ -2182,7 +2452,7 @@ mod errors {
         for d in dvals.iter() {
             time::timeout(TO, d.wait_subscribed()).await??;
         }
-        let mut e = Errors::attach(&subscriber);
+        let mut e = sub_errors(&subscriber);
         vals.clear();
         pb.shutdown().await;
         let mut lost: HashSet<SubId> = HashSet::new();

@@ -26,7 +26,10 @@ use common::{
     TOREADPOOL, TOWRITEPOOL,
 };
 use compact_str::format_compact;
-use futures::future;
+use futures::{
+    channel::mpsc::{self, UnboundedReceiver, UnboundedSender},
+    future,
+};
 use log::warn;
 use netidx_netproto::resolver::PublisherPriority;
 use parking_lot::{Mutex, RwLock};
@@ -52,6 +55,7 @@ use std::{
 };
 use tokio::{sync::watch, time::Instant};
 use write_client::WriteClient;
+pub(crate) use write_client::WriteEvent;
 
 const MAX_REFERRALS: usize = 128;
 
@@ -275,6 +279,7 @@ where
         priority: PublisherPriority,
         secrets: Arc<RwLock<AHashMap<SocketAddr, u128>>>,
         tls: Option<tls::CachedConnector>,
+        events: Option<UnboundedSender<GPooled<Vec<WriteEvent>>>>,
     ) -> Self;
     fn send(&mut self, batch: GPooled<Vec<(usize, T)>>) -> ResponseChan<F>;
 }
@@ -287,6 +292,7 @@ impl Connection<ToRead, FromRead> for ReadClient {
         _priority: PublisherPriority,
         _secrets: Arc<RwLock<AHashMap<SocketAddr, u128>>>,
         tls: Option<tls::CachedConnector>,
+        _events: Option<UnboundedSender<GPooled<Vec<WriteEvent>>>>,
     ) -> Self {
         ReadClient::new(resolver, desired_auth, tls)
     }
@@ -304,8 +310,17 @@ impl Connection<ToWrite, FromWrite> for WriteClient {
         priority: PublisherPriority,
         secrets: Arc<RwLock<AHashMap<SocketAddr, u128>>>,
         tls: Option<tls::CachedConnector>,
+        events: Option<UnboundedSender<GPooled<Vec<WriteEvent>>>>,
     ) -> Self {
-        WriteClient::new(resolver, desired_auth, writer_addr, priority, secrets, tls)
+        WriteClient::new(
+            resolver,
+            desired_auth,
+            writer_addr,
+            priority,
+            secrets,
+            tls,
+            events,
+        )
     }
 
     fn send(&mut self, batch: GPooled<Vec<(usize, ToWrite)>>) -> ResponseChan<FromWrite> {
@@ -332,6 +347,9 @@ where
     priority: PublisherPriority,
     secrets: Arc<RwLock<AHashMap<SocketAddr, u128>>>,
     tls: Option<tls::CachedConnector>,
+    /// where write connections report what the cluster is doing with our
+    /// paths, handed to every connection as it is created
+    events: Option<UnboundedSender<GPooled<Vec<WriteEvent>>>>,
     phantom: PhantomData<(T, F)>,
     f_pool: Pool<Vec<F>>,
     fi_pool: Pool<Vec<(usize, F)>>,
@@ -378,6 +396,7 @@ where
                         self.priority,
                         self.secrets.clone(),
                         self.tls.clone(),
+                        self.events.clone(),
                     ));
                 }
                 self.default_con.as_mut().unwrap().send(batch)
@@ -392,6 +411,7 @@ where
                         self.priority,
                         self.secrets.clone(),
                         self.tls.clone(),
+                        self.events.clone(),
                     );
                     self.by_server.insert(r, con.clone());
                     con.send(batch)
@@ -418,6 +438,7 @@ where
         desired_auth: DesiredAuth,
         writer_addr: SocketAddr,
         priority: PublisherPriority,
+        events: Option<UnboundedSender<GPooled<Vec<WriteEvent>>>>,
         f_pool: Pool<Vec<F>>,
         fi_pool: Pool<Vec<(usize, F)>>,
         ti_pool: Pool<Vec<(usize, T)>>,
@@ -441,6 +462,7 @@ where
             priority,
             secrets,
             tls,
+            events,
             f_pool,
             fi_pool,
             ti_pool,
@@ -546,6 +568,7 @@ impl ResolverRead {
             desired_auth,
             SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), 0),
             PublisherPriority::Normal,
+            None,
             RAWFROMREADPOOL.clone(),
             FROMREADPOOL.clone(),
             TOREADPOOL.clone(),
@@ -807,7 +830,11 @@ impl ResolverRead {
 /// Used by publishers to register and unregister published paths, including
 /// default publishers. Handles authentication and referrals automatically.
 #[derive(Debug, Clone)]
-pub struct ResolverWrite(ResolverWrap<WriteClient, ToWrite, FromWrite>);
+pub struct ResolverWrite {
+    inner: ResolverWrap<WriteClient, ToWrite, FromWrite>,
+    /// taken once, by the publisher
+    events: Arc<Mutex<Option<UnboundedReceiver<GPooled<Vec<WriteEvent>>>>>>,
+}
 
 impl ResolverWrite {
     pub fn new(
@@ -830,15 +857,29 @@ impl ResolverWrite {
                 }
             },
         }
-        Ok(ResolverWrite(ResolverWrap::new(
-            default,
-            desired_auth,
-            writer_addr,
-            priority,
-            RAWFROMWRITEPOOL.clone(),
-            FROMWRITEPOOL.clone(),
-            TOWRITEPOOL.clone(),
-        )))
+        let (events_tx, events_rx) = mpsc::unbounded();
+        Ok(ResolverWrite {
+            inner: ResolverWrap::new(
+                default,
+                desired_auth,
+                writer_addr,
+                priority,
+                Some(events_tx),
+                RAWFROMWRITEPOOL.clone(),
+                FROMWRITEPOOL.clone(),
+                TOWRITEPOOL.clone(),
+            ),
+            events: Arc::new(Mutex::new(Some(events_rx))),
+        })
+    }
+
+    /// The stream of changes in what the resolver cluster is doing with the
+    /// paths we publish.
+    ///
+    /// There is exactly one consumer — the publisher, which turns this into
+    /// `Publisher::errors` — so this yields the receiver and then `None`.
+    pub(crate) fn events(&self) -> Option<UnboundedReceiver<GPooled<Vec<WriteEvent>>>> {
+        self.events.lock().take()
     }
 
     /// Send the specified messages to the resolver and return responses.
@@ -846,7 +887,7 @@ impl ResolverWrite {
         &self,
         batch: &GPooled<Vec<ToWrite>>,
     ) -> Result<GPooled<Vec<FromWrite>>> {
-        let (_, r) = self.0.send(batch).await?;
+        let (_, r) = self.inner.send(batch).await?;
         Ok(r)
     }
 
@@ -863,7 +904,7 @@ impl ResolverWrite {
         let mut to = RAWTOWRITEPOOL.take();
         let len = to.len();
         to.extend(batch.into_iter().map(f));
-        let (_, mut from) = self.0.send(&to).await?;
+        let (_, mut from) = self.inner.send(&to).await?;
         if from.len() != to.len() {
             bail!("unexpected number of responses {} vs expected {}", from.len(), len);
         }
@@ -933,7 +974,7 @@ impl ResolverWrite {
     pub async fn clear(&self) -> Result<()> {
         let mut batch = RAWTOWRITEPOOL.take();
         batch.push(ToWrite::Clear);
-        let (_, r) = self.0.send(&batch).await?;
+        let (_, r) = self.inner.send(&batch).await?;
         if r.len() != 1 {
             bail!("unexpected response to clear command {:?}", r)
         } else {
@@ -945,6 +986,6 @@ impl ResolverWrite {
     }
 
     pub(crate) fn secrets(&self) -> Arc<RwLock<AHashMap<SocketAddr, u128>>> {
-        self.0.secrets()
+        self.inner.secrets()
     }
 }
