@@ -22,7 +22,6 @@ use anyhow::{Context, Result, bail};
 use compact_str::format_compact;
 use serde::Serialize;
 use std::{io::Write, path::Path};
-use tokio::io::AsyncWriteExt;
 
 /// How long an atomic write waits before returning: one filesystem timestamp
 /// tick, so two writes to the same path can never share a modification time.
@@ -32,20 +31,13 @@ use tokio::io::AsyncWriteExt;
 /// crates, and there is only one fact.
 pub use netidx_core::utils::FS_TIMESTAMP_SETTLE as SETTLE;
 
-/// Write `bytes` to a new `path` inside an exclusive staging directory.
-///
-/// Mode is applied at creation and reasserted after the umask, then the
-/// file is fsynced. There is no sibling rename and no [`SETTLE`]: the
-/// caller publishes the whole tree with [`publish_dir`], and no follower
-/// compares mtimes on the staging path.
-pub fn write_staged(path: &Path, bytes: &[u8], mode: u32) -> Result<()> {
-    let raw_dir = path
-        .parent()
-        .ok_or_else(|| anyhow!("staged write target {:?} has no parent dir", path))?;
-    let dir: &Path =
-        if raw_dir.as_os_str().is_empty() { Path::new(".") } else { raw_dir };
-    std::fs::create_dir_all(dir)
-        .with_context(|| format!("creating parent dir {dir:?}"))?;
+fn parent_dir(path: &Path) -> Result<&Path> {
+    let raw =
+        path.parent().ok_or_else(|| anyhow!("path {:?} has no parent dir", path))?;
+    Ok(if raw.as_os_str().is_empty() { Path::new(".") } else { raw })
+}
+
+fn create_with_mode(path: &Path, bytes: &[u8], mode: u32) -> Result<()> {
     let mut options = std::fs::OpenOptions::new();
     options.create_new(true).write(true);
     #[cfg(unix)]
@@ -53,20 +45,37 @@ pub fn write_staged(path: &Path, bytes: &[u8], mode: u32) -> Result<()> {
         use std::os::unix::fs::OpenOptionsExt;
         options.mode(mode);
     }
-    let mut file =
-        options.open(path).with_context(|| format!("creating staged file {path:?}"))?;
-    file.write_all(bytes).with_context(|| format!("writing staged file {path:?}"))?;
+    let mut file = options.open(path).with_context(|| format!("creating {path:?}"))?;
+    file.write_all(bytes).with_context(|| format!("writing {path:?}"))?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
-            .with_context(|| {
-                format!("setting mode {:o} on staged file {path:?}", mode)
-            })?;
+            .with_context(|| format!("setting mode {:o} on {path:?}", mode))?;
     }
     #[cfg(not(unix))]
     let _ = mode;
-    file.sync_all().context("fsync staged file")?;
+    file.sync_all().context("fsync file")?;
+    Ok(())
+}
+
+async fn run_blocking<T: Send + 'static>(
+    f: impl FnOnce() -> Result<T> + Send + 'static,
+) -> Result<T> {
+    tokio::task::spawn_blocking(f).await.context("blocking filesystem task panicked")?
+}
+
+/// Write `bytes` to a new `path` inside an exclusive staging directory.
+///
+/// Mode is applied at creation and reasserted after the umask, then the
+/// file is fsynced. There is no sibling rename and no [`SETTLE`]: the
+/// caller publishes the whole tree with [`publish_dir`], and no follower
+/// compares mtimes on the staging path.
+pub fn write_staged(path: &Path, bytes: &[u8], mode: u32) -> Result<()> {
+    let dir = parent_dir(path)?;
+    std::fs::create_dir_all(dir)
+        .with_context(|| format!("creating parent dir {dir:?}"))?;
+    create_with_mode(path, bytes, mode)?;
     #[cfg(unix)]
     fsync_dir(dir).with_context(|| format!("fsync parent dir {dir:?}"))?;
     Ok(())
@@ -75,96 +84,30 @@ pub fn write_staged(path: &Path, bytes: &[u8], mode: u32) -> Result<()> {
 /// Write `bytes` to `path` atomically (temp file + rename), with the
 /// given unix `mode`. On Windows the mode is ignored.
 pub fn write_atomic(path: &Path, bytes: &[u8], mode: u32) -> Result<()> {
-    let raw_dir = path
-        .parent()
-        .ok_or_else(|| anyhow!("atomic write target {:?} has no parent dir", path))?;
-    // Normalize an empty parent (`path` is a bare filename) to "." so
-    // tempfile creation and the directory fsync below don't trip.
-    let dir: &Path =
-        if raw_dir.as_os_str().is_empty() { Path::new(".") } else { raw_dir };
+    let dir = parent_dir(path)?;
     std::fs::create_dir_all(dir)
         .with_context(|| format!("creating parent dir {dir:?}"))?;
-    let mut tmp = tempfile::NamedTempFile::new_in(dir)
-        .with_context(|| format!("creating temp file in {dir:?}"))?;
-    tmp.as_file_mut()
-        .write_all(bytes)
-        .with_context(|| format!("writing temp file for {path:?}"))?;
-    tmp.as_file_mut().sync_all().with_context(|| "fsync temp file")?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(tmp.path(), std::fs::Permissions::from_mode(mode))
-            .with_context(|| {
-                format!("setting mode {:o} on temp file for {path:?}", mode)
-            })?;
+    let tmp = dir.join(format_compact!(".tmp-netidx-{}", uuid::Uuid::new_v4()).as_str());
+    let result = (|| {
+        create_with_mode(&tmp, bytes, mode)?;
+        std::fs::rename(&tmp, path)
+            .with_context(|| format!("atomic rename to {path:?}"))?;
+        #[cfg(unix)]
+        fsync_dir(dir).with_context(|| format!("fsync parent dir {dir:?}"))?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    } else {
+        std::thread::sleep(SETTLE);
     }
-    #[cfg(not(unix))]
-    let _ = mode;
-    tmp.persist(path)
-        .map_err(|e| anyhow!("atomic rename to {:?} failed: {}", path, e.error))?;
-    // Without this, the rename can be lost on crash even though the
-    // file's data was fsynced. Linux ext4/xfs/btrfs all need a
-    // directory fsync to make the dirent change durable.
-    #[cfg(unix)]
-    fsync_dir(dir).with_context(|| format!("fsync parent dir {dir:?}"))?;
-    std::thread::sleep(SETTLE);
-    Ok(())
+    result
 }
 
 pub async fn write_atomic_async(path: &Path, bytes: &[u8], mode: u32) -> Result<()> {
-    let raw_dir = path
-        .parent()
-        .ok_or_else(|| anyhow!("atomic write target {:?} has no parent dir", path))?;
-    let dir: &Path =
-        if raw_dir.as_os_str().is_empty() { Path::new(".") } else { raw_dir };
-    tokio::fs::create_dir_all(dir)
-        .await
-        .with_context(|| format!("creating parent dir {dir:?}"))?;
-    let tmp = dir.join(format_compact!(".tmp-netidx-{}", uuid::Uuid::new_v4()).as_str());
-    let result = async {
-        let mut options = tokio::fs::OpenOptions::new();
-        options.create_new(true).write(true);
-        // The mode must be set at creation: a chmod after the write leaves the
-        // payload readable at the umask default for the whole write.
-        #[cfg(unix)]
-        options.mode(mode);
-        let mut file = options
-            .open(&tmp)
-            .await
-            .with_context(|| format!("creating temp file in {dir:?}"))?;
-        file.write_all(bytes)
-            .await
-            .with_context(|| format!("writing temp file for {path:?}"))?;
-        // The creation mode above is masked by the umask, which can only clear
-        // bits; reassert the exact mode the caller asked for.
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            tokio::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(mode))
-                .await
-                .with_context(|| {
-                    format!("setting mode {:o} on temp file for {path:?}", mode)
-                })?;
-        }
-        #[cfg(not(unix))]
-        let _ = mode;
-        file.sync_all().await.context("fsync temp file")?;
-        drop(file);
-        final_commit(|| {
-            std::fs::rename(&tmp, path)
-                .with_context(|| format!("atomic rename to {path:?}"))?;
-            #[cfg(unix)]
-            fsync_dir(dir).with_context(|| format!("fsync parent dir {dir:?}"))?;
-            Ok(())
-        })
-    }
-    .await;
-    if result.is_err() {
-        let _ = tokio::fs::remove_file(&tmp).await;
-    } else {
-        tokio::time::sleep(SETTLE).await;
-    }
-    result
+    let path = path.to_path_buf();
+    let bytes = bytes.to_vec();
+    run_blocking(move || write_atomic(&path, &bytes, mode)).await
 }
 
 /// Atomically publish a newly-created directory by renaming it to a sibling
@@ -175,11 +118,7 @@ pub fn publish_dir(src: &Path, dst: &Path) -> Result<()> {
     if dst.exists() {
         bail!("refusing to replace existing directory {dst:?}");
     }
-    let raw_parent = dst
-        .parent()
-        .ok_or_else(|| anyhow!("directory publish target {dst:?} has no parent"))?;
-    let parent =
-        if raw_parent.as_os_str().is_empty() { Path::new(".") } else { raw_parent };
+    let parent = parent_dir(dst)?;
     #[cfg(not(unix))]
     let _ = parent;
     std::fs::rename(src, dst)
@@ -190,32 +129,9 @@ pub fn publish_dir(src: &Path, dst: &Path) -> Result<()> {
 }
 
 pub async fn publish_dir_async(src: &Path, dst: &Path) -> Result<()> {
-    if tokio::fs::try_exists(dst).await? {
-        bail!("refusing to replace existing directory {dst:?}");
-    }
-    let raw_parent = dst
-        .parent()
-        .ok_or_else(|| anyhow!("directory publish target {dst:?} has no parent"))?;
-    let parent =
-        if raw_parent.as_os_str().is_empty() { Path::new(".") } else { raw_parent };
-    #[cfg(not(unix))]
-    let _ = parent;
-    final_commit(|| {
-        std::fs::rename(src, dst)
-            .with_context(|| format!("publishing staged directory {src:?} as {dst:?}"))?;
-        #[cfg(unix)]
-        fsync_dir(parent).with_context(|| format!("fsync parent dir {parent:?}"))?;
-        Ok(())
-    })
-}
-
-fn final_commit(f: impl FnOnce() -> Result<()>) -> Result<()> {
-    // tokio's RuntimeFlavor is non_exhaustive; only MultiThread permits (and
-    // needs) block_in_place.
-    match tokio::runtime::Handle::try_current().map(|handle| handle.runtime_flavor()) {
-        Ok(tokio::runtime::RuntimeFlavor::MultiThread) => tokio::task::block_in_place(f),
-        _ => f(),
-    }
+    let src = src.to_path_buf();
+    let dst = dst.to_path_buf();
+    run_blocking(move || publish_dir(&src, &dst)).await
 }
 
 #[cfg(unix)]
