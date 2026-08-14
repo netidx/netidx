@@ -534,15 +534,12 @@ async fn serving_crl_path(state: &Server) -> PathBuf {
         .await
 }
 
-async fn load_serving_crl(state: &Server) -> Option<Vec<u8>> {
+async fn load_serving_crl(state: &Server) -> Result<Option<Vec<u8>>> {
     let path = serving_crl_path(state).await;
     match tokio::fs::read(&path).await {
-        Ok(bytes) => Some(bytes),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-        Err(e) => {
-            warn!("admin-server: reading CRL {path:?}: {e:#} (revocation NOT enforced)");
-            None
-        }
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e).with_context(|| format!("reading CRL {path:?}")),
     }
 }
 
@@ -599,7 +596,7 @@ async fn build_serving_acceptor(
     cert_pem: &[u8],
     key_pem: &[u8],
 ) -> Result<TlsAcceptor> {
-    let crl = load_serving_crl(state).await;
+    let crl = load_serving_crl(state).await?;
     Ok(TlsAcceptor::from(Arc::new(build_server_config(
         cert_pem,
         key_pem,
