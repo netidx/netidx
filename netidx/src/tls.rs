@@ -435,11 +435,11 @@ impl CrlWatchingAcceptor {
                     *state = (mtimes, acceptor);
                 }
                 Err(e) => {
-                    // Keep serving with the previous acceptor; don't
-                    // re-attempt on every connection while the file is
-                    // broken — wait for the next change.
+                    // Keep the previous acceptor and the last-good mtimes
+                    // so the next accept retries. Advancing mtimes here
+                    // would swallow a transient CRL/key read until some
+                    // later file change — the Cached path does not.
                     warn!("failed to reload TLS acceptor after cert/CRL change: {e:#}");
-                    state.0 = mtimes;
                 }
             }
         }
