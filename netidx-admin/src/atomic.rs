@@ -13,8 +13,10 @@
 //! step is a no-op (NTFS rename atomicity does not require it; there
 //! is no portable way to fsync a directory handle on Windows).
 //!
-//! Both variants settle for [`SETTLE`] before returning, so that two
-//! writes to the same path can never land in one filesystem timestamp.
+//! [`write_atomic`] and [`write_atomic_async`] settle for [`SETTLE`]
+//! before returning, so two writes to the same path can never land in
+//! one filesystem timestamp. [`write_staged`] is for exclusive staging
+//! directories that no watcher follows: write, fsync, no settle.
 
 use anyhow::{Context, Result, bail};
 use compact_str::format_compact;
@@ -29,6 +31,46 @@ use tokio::io::AsyncWriteExt;
 /// on this — the resolver, the netidx client, the id-map daemon — are in other
 /// crates, and there is only one fact.
 pub use netidx_core::utils::FS_TIMESTAMP_SETTLE as SETTLE;
+
+/// Write `bytes` to a new `path` inside an exclusive staging directory.
+///
+/// Mode is applied at creation and reasserted after the umask, then the
+/// file is fsynced. There is no sibling rename and no [`SETTLE`]: the
+/// caller publishes the whole tree with [`publish_dir`], and no follower
+/// compares mtimes on the staging path.
+pub fn write_staged(path: &Path, bytes: &[u8], mode: u32) -> Result<()> {
+    let raw_dir = path
+        .parent()
+        .ok_or_else(|| anyhow!("staged write target {:?} has no parent dir", path))?;
+    let dir: &Path =
+        if raw_dir.as_os_str().is_empty() { Path::new(".") } else { raw_dir };
+    std::fs::create_dir_all(dir)
+        .with_context(|| format!("creating parent dir {dir:?}"))?;
+    let mut options = std::fs::OpenOptions::new();
+    options.create_new(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(mode);
+    }
+    let mut file =
+        options.open(path).with_context(|| format!("creating staged file {path:?}"))?;
+    file.write_all(bytes).with_context(|| format!("writing staged file {path:?}"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
+            .with_context(|| {
+                format!("setting mode {:o} on staged file {path:?}", mode)
+            })?;
+    }
+    #[cfg(not(unix))]
+    let _ = mode;
+    file.sync_all().context("fsync staged file")?;
+    #[cfg(unix)]
+    fsync_dir(dir).with_context(|| format!("fsync parent dir {dir:?}"))?;
+    Ok(())
+}
 
 /// Write `bytes` to `path` atomically (temp file + rename), with the
 /// given unix `mode`. On Windows the mode is ignored.
@@ -213,6 +255,21 @@ mod tests {
         write_atomic(&p, b"{\"read_gated\":\"Yes\"}", 0o644).unwrap();
         let second = mtime();
         assert_ne!(first, second, "a follower comparing times would miss this write");
+    }
+
+    #[test]
+    fn staged_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("nested/secret");
+        write_staged(&p, b"hello", 0o600).unwrap();
+        assert_eq!(std::fs::read(&p).unwrap(), b"hello");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&p).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+        assert!(write_staged(&p, b"again", 0o600).is_err());
     }
 
     #[test]

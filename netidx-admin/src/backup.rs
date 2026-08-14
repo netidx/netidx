@@ -307,13 +307,13 @@ pub fn publish(
     }
     let bytes = snapshot.files.iter().map(|f| f.bytes.len() as u64).sum();
     for file in &snapshot.files {
-        atomic::write_atomic(&stage.path().join(&file.path), &file.bytes, file.mode)?;
+        atomic::write_staged(&stage.path().join(&file.path), &file.bytes, file.mode)?;
     }
     let manifest_bytes = serde_json::to_vec_pretty(&snapshot.manifest)
         .context("encoding backup manifest")?;
     let manifest_sha256 = digest(&manifest_bytes);
-    atomic::write_atomic(&stage.path().join(MANIFEST_FILE), &manifest_bytes, 0o600)?;
-    atomic::write_atomic(
+    atomic::write_staged(&stage.path().join(MANIFEST_FILE), &manifest_bytes, 0o600)?;
+    atomic::write_staged(
         &stage.path().join(MANIFEST_SIGNATURE_FILE),
         &snapshot.signature,
         0o600,
@@ -486,7 +486,7 @@ pub fn restore(
         let relative =
             Path::new(&file.path).strip_prefix("ca").expect("filtered CA path");
         let contents = fs::read(bundle.join(&file.path))?;
-        atomic::write_atomic(&stage.path().join(relative), &contents, file.mode)?;
+        atomic::write_staged(&stage.path().join(relative), &contents, file.mode)?;
     }
     let staged = stage.keep();
     if let Err(e) = atomic::publish_dir(&staged, ca_dir) {

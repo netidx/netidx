@@ -537,7 +537,7 @@ fn copy_ca_bundle(source: &Path, dest: &Path) -> Result<()> {
             if meta.is_dir() {
                 copy_dir(&entry.path(), &target)?;
             } else if meta.is_file() {
-                atomic::write_atomic(
+                atomic::write_staged(
                     &target,
                     &fs::read(entry.path())?,
                     file_mode(&meta),
@@ -690,7 +690,7 @@ pub fn create(
         fs::set_permissions(stage.path(), fs::Permissions::from_mode(0o700))?;
     }
     for file in &captured {
-        atomic::write_atomic(
+        atomic::write_staged(
             &stage.path().join(FILES_DIR).join(&file.relative),
             &file.bytes,
             file.mode,
@@ -710,7 +710,7 @@ pub fn create(
     }
     let manifest_bytes = serde_json::to_vec_pretty(&manifest)?;
     let manifest_sha256 = digest(&manifest_bytes);
-    atomic::write_atomic(&stage.path().join(MANIFEST_FILE), &manifest_bytes, 0o600)?;
+    atomic::write_staged(&stage.path().join(MANIFEST_FILE), &manifest_bytes, 0o600)?;
     let bytes = captured.iter().map(|f| f.bytes.len() as u64).sum();
     let staged = stage.keep();
     if let Err(e) = atomic::publish_dir(&staged, &target) {
@@ -1106,7 +1106,7 @@ pub fn restore_files_with_addresses(
     for file in &manifest.files {
         let source = fs::read(bundle.join(FILES_DIR).join(&file.path))?;
         let restored = restored_bytes(file, source, &manifest, root, addresses)?;
-        atomic::write_atomic(&stage.path().join(&file.path), &restored, file.mode)?;
+        atomic::write_staged(&stage.path().join(&file.path), &restored, file.mode)?;
     }
     let staged = stage.keep();
     if let Err(e) = atomic::publish_dir(&staged, root) {

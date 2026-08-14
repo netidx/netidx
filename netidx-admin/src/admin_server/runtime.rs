@@ -958,18 +958,14 @@ async fn spawn_local_control(state: &Arc<Server>, signs: Arc<Semaphore>) {
                 continue;
             }
             let signs = signs.clone();
+            // Unbounded: Backup is slower than CONN_TIMEOUT, and this
+            // socket does not hold a MAX_CONNECTIONS slot.
             tokio::spawn(async move {
-                match tokio::time::timeout(
-                    CONN_TIMEOUT,
-                    handle_local_conn(stream, &state, signs),
-                )
-                .await
-                {
-                    Ok(Ok(())) => {}
-                    Ok(Err(e)) => {
+                match handle_local_conn(stream, &state, signs).await {
+                    Ok(()) => {}
+                    Err(e) => {
                         debug!("admin-server: local control connection ended: {e:#}")
                     }
-                    Err(_) => debug!("admin-server: local control connection timed out"),
                 }
             });
         }
