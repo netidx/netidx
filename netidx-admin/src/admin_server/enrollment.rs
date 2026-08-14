@@ -83,41 +83,25 @@ async fn issued_id_for_serial(
 }
 
 /// Withdraw a serving cert that was committed before its enrollment grant
-/// failed, while the state write lock is still held.
+/// failed, while the state write lock is still held. The cert never left
+/// this lock, so it is not revoked — `issued/` is the CRL's source, and
+/// deleting the record after a revoke would drop the serial on the next
+/// `write_crl`.
 pub(super) async fn undo_enrollment_issuance(
     ca: &mut ca_store::CaDir,
     signed_cert_pem: &str,
     queued_id: Option<&str>,
-    prepared_server_unlock: &PreparedServerUnlock,
 ) -> Result<()> {
-    let serial = leaf_serial_from_pem(signed_cert_pem);
     let id = match queued_id {
         Some(id) => id.to_string(),
         None => {
-            let Some(serial) = serial else {
-                bail!("cannot withdraw an enrollment cert with no serial");
-            };
+            let serial = leaf_serial_from_pem(signed_cert_pem)
+                .context("cannot withdraw an enrollment cert with no serial")?;
             issued_id_for_serial(&ca.store, serial)
                 .await?
                 .context("cannot withdraw an enrollment cert missing from issued/")?
         }
     };
-    if let Some(serial) = serial {
-        let unlocked = server_unlock(ca, prepared_server_unlock)
-            .await
-            .map_err(|reason| anyhow!("{reason}"))?;
-        ca.store
-            .revoke(
-                serial,
-                ca_store::Revocation {
-                    serial,
-                    revoked_unix: ca_store::now_unix(),
-                    reason: "enrollment grant failed".into(),
-                },
-            )
-            .await?;
-        ca.store.write_crl(&unlocked.ca_key_pem).await?;
-    }
     ca.store.uncommit_signed(&id, queued_id.is_some()).await?;
     Ok(())
 }
@@ -176,13 +160,8 @@ pub(super) async fn handle_enroll(
                 };
                 if let Err(e) = result {
                     if let Some(ca) = state.ca.as_mut()
-                        && let Err(undo) = undo_enrollment_issuance(
-                            ca,
-                            signed_cert_pem,
-                            None,
-                            prepared_server_unlock,
-                        )
-                        .await
+                        && let Err(undo) =
+                            undo_enrollment_issuance(ca, signed_cert_pem, None).await
                     {
                         return reject(&format!(
                             "recording enrollment grant: {e:#} (also failed to \
@@ -213,11 +192,6 @@ async fn grant_enrollment(
     });
     let mut staged = map.clone();
     let cluster = stage_enrollment(&mut staged, server_id, &enrollment)?;
-    if let Some(old) = enrollment.replaces {
-        revoke_server_certificates(ca, old, "approved restore", prepared_server_unlock)
-            .await
-            .context("revoking the replaced server identity")?;
-    }
     // Take ownership of this host's resolver config *before* the grant
     // is persisted. From here the CA renders the whole document and the
     // host stops being authoritative for any of it — including the half
@@ -248,6 +222,23 @@ async fn grant_enrollment(
         .await
         .context("persisting the enrollment grant")?;
     *map = staged;
+    // After the grant is durable. Revoking first meant a later persist
+    // failure left the old identity dead and the new one withdrawn.
+    if let Some(old) = enrollment.replaces {
+        if let Err(e) = revoke_server_certificates(
+            ca,
+            old,
+            "approved restore",
+            prepared_server_unlock,
+        )
+        .await
+        {
+            warn!(
+                "admin-server: enrollment grant persisted but failed to revoke \
+                 replaced server {old}: {e:#}"
+            );
+        }
+    }
     if let Some(old_addr) = replaced_addr {
         cfg.peers.retain(|peer| *peer != old_addr);
         if let Some(path) = cfg_path

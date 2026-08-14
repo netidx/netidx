@@ -138,7 +138,6 @@ pub(super) async fn handle_approve_request(
                             ca,
                             signed_cert_pem,
                             Some(req.request_id.as_str()),
-                            prepared_server_unlock,
                         )
                         .await
                     {

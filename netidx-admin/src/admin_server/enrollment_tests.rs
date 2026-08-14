@@ -1,7 +1,79 @@
 use super::*;
-use crate::admin_proto::{InfoAuth, ResolverAddr};
+use crate::{
+    admin_proto::{InfoAuth, ResolverAddr},
+    ca::{SanEntry, Subject, generate_csr},
+};
 use enumflags2::BitFlags;
 use std::time::Duration;
+
+fn enrollment_csr() -> String {
+    let csr = generate_csr(
+        &Subject::cn(SERVING_SAN),
+        &[SanEntry::Dns(SERVING_SAN.to_string())],
+        crate::ca::MIN_KEY_BITS,
+        None,
+    )
+    .unwrap();
+    String::from_utf8(csr.csr_pem).unwrap()
+}
+
+fn satellite_enrollment() -> admin_proto::EnrollmentRequest {
+    let member = ResolverAddr {
+        addr: "10.0.0.10:4564".parse().unwrap(),
+        auth: InfoAuth::Anonymous,
+    };
+    admin_proto::EnrollmentRequest {
+        resolver_config: None,
+        listen: "10.0.0.10:4565".parse().unwrap(),
+        roles: Role::Resolver.into(),
+        resolver_member: Some(member.clone()),
+        resolver_members: vec![member],
+        cluster: admin_proto::ResolverClusterPlacement::Create { base: "/eu".into() },
+        replaces: None,
+    }
+}
+
+#[tokio::test]
+async fn a_failed_grant_withdraws_the_issued_cert() {
+    use super::super::test_support::{signing_ca, test_server};
+    let fixture = signing_ca().await;
+    let ca_dir = fixture.dir.path().to_path_buf();
+    let state = test_server(Some(fixture.ca));
+    std::fs::create_dir(ca_dir.join("admin-domain.json")).unwrap();
+    let req = EnrollRequest {
+        credential: fixture.credential.clone(),
+        csr_pem: enrollment_csr(),
+        listen: "10.0.0.10:4565".parse().unwrap(),
+        roles: Role::Resolver.into(),
+        resolver_member: satellite_enrollment().resolver_member,
+        resolver_members: satellite_enrollment().resolver_members,
+        cluster: admin_proto::ResolverClusterPlacement::Create { base: "/eu".into() },
+        renew_identity: None,
+        replaces: None,
+        resolver_config: None,
+    };
+    let resp = handle_enroll(
+        &state,
+        &req,
+        &fixture.authentication,
+        &fixture.server_unlock,
+        false,
+    )
+    .await;
+    match resp {
+        SignResponse::Err { reason } => {
+            assert!(reason.contains("recording enrollment grant"), "{reason}")
+        }
+        other => panic!("expected a grant error, got {other:?}"),
+    }
+    let issued = state
+        .read_async(async move |state| {
+            state.ca.as_ref().unwrap().store.list_signed().await
+        })
+        .await
+        .unwrap();
+    assert!(issued.is_empty(), "withdrawn cert must not remain in issued/");
+}
 
 #[test]
 fn ca_identity_is_renewal_only_and_preserved() {

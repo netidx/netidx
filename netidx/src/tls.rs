@@ -13,6 +13,7 @@ use std::{
     collections::BTreeMap,
     fmt,
     sync::{Arc, LazyLock},
+    time::{Duration, Instant},
 };
 use x509_parser::prelude::GeneralName;
 use zeroize::{Zeroize, Zeroizing};
@@ -365,7 +366,7 @@ struct CrlWatchingInner {
     root_certificates: String,
     certificate: String,
     private_key: String,
-    state: Mutex<(CertMtimes, tokio_rustls::TlsAcceptor)>,
+    state: Mutex<(CertMtimes, Option<Instant>, tokio_rustls::TlsAcceptor)>,
 }
 
 impl fmt::Debug for CrlWatchingAcceptor {
@@ -382,6 +383,8 @@ impl fmt::Debug for CrlWatchingAcceptor {
 /// presenting (or serving) the cert it loaded at startup until it restarts,
 /// which silently defeats certificate renewal.
 type CertMtimes = [Option<std::time::SystemTime>; 4];
+
+const CRL_REBUILD_RETRY: Duration = Duration::from_secs(1);
 
 fn cert_set_mtimes(certificate: &str, private_key: &str, trusted: &str) -> CertMtimes {
     let m = |p: &std::path::Path| std::fs::metadata(p).and_then(|x| x.modified()).ok();
@@ -409,6 +412,7 @@ impl CrlWatchingAcceptor {
             private_key: String::from(private_key),
             state: Mutex::new((
                 cert_set_mtimes(certificate, private_key, root_certificates),
+                None,
                 acceptor,
             )),
         })))
@@ -420,7 +424,9 @@ impl CrlWatchingAcceptor {
         let mtimes =
             cert_set_mtimes(&t.certificate, &t.private_key, &t.root_certificates);
         let mut state = t.state.lock();
-        if mtimes != state.0 {
+        if mtimes != state.0
+            && state.1.is_none_or(|failed_at| failed_at.elapsed() >= CRL_REBUILD_RETRY)
+        {
             match create_tls_acceptor(
                 t.askpass.as_deref(),
                 &t.root_certificates,
@@ -429,18 +435,15 @@ impl CrlWatchingAcceptor {
             ) {
                 Ok(acceptor) => {
                     info!("reloaded TLS acceptor (serving cert or CRL changed)");
-                    *state = (mtimes, acceptor);
+                    *state = (mtimes, None, acceptor);
                 }
                 Err(e) => {
-                    // Keep the previous acceptor and the last-good mtimes
-                    // so the next accept retries. Advancing mtimes here
-                    // would swallow a transient CRL/key read until some
-                    // later file change — the Cached path does not.
                     warn!("failed to reload TLS acceptor after cert/CRL change: {e:#}");
+                    state.1 = Some(Instant::now());
                 }
             }
         }
-        state.1.clone()
+        state.2.clone()
     }
 }
 

@@ -1,4 +1,8 @@
-use super::{MutableState, Server, password_limiter::PasswordLimiter};
+use super::{
+    AUTORENEW_ADMIN, MutableState, Server,
+    auth::{PreparedAdminAuthentication, PreparedServerUnlock},
+    password_limiter::PasswordLimiter,
+};
 use crate::{
     admin_proto::{self, AdminDomainMap},
     admin_server_config::AdminServerConfig,
@@ -49,6 +53,60 @@ pub(super) fn test_server(ca: Option<ca_store::CaDir>) -> Arc<Server> {
         CertificateDer::from(Vec::new()),
     )
     .unwrap()
+}
+
+/// A real signing CA plus prepared credentials, for handler tests that
+/// have to issue a leaf.
+pub(super) struct SigningCa {
+    pub dir: tempfile::TempDir,
+    pub ca: ca_store::CaDir,
+    pub server_unlock: PreparedServerUnlock,
+    pub authentication: PreparedAdminAuthentication,
+    pub credential: admin_proto::AdminCredential,
+}
+
+pub(super) async fn signing_ca() -> SigningCa {
+    let dir = tempfile::tempdir().unwrap();
+    Ca::init(
+        &CaParams {
+            directory: dir.path().to_path_buf(),
+            subject: Subject::cn("test-ca"),
+            san: vec![],
+            key_bits: MIN_KEY_BITS,
+            validity: Duration::from_secs(30 * 86400),
+        },
+        None,
+    )
+    .unwrap();
+    let key = std::fs::read(dir.path().join("private.key")).unwrap();
+    let lock = ConfigDirLock::acquire_for_ca_dir(dir.path()).await.unwrap();
+    let mut ca = ca_store::CaDir::open(lock, dir.path()).await.unwrap();
+    ca.vault
+        .create(&key, "recovery", "rpw", netidx_admin_proto::policy::recovery_policy())
+        .await
+        .unwrap();
+    ca.vault
+        .add_signing_slot(
+            "rpw",
+            AUTORENEW_ADMIN,
+            "apw",
+            netidx_admin_proto::policy::autorenew_policy(),
+        )
+        .await
+        .unwrap();
+    ca.autorenew_pw = Some(zeroize::Zeroizing::new("apw".to_string()));
+    let snapshot = ca.vault.snapshot().unwrap();
+    let authenticated = snapshot.authenticate(AUTORENEW_ADMIN, "apw").unwrap();
+    let unlocked = snapshot.unlock("apw").unwrap();
+    SigningCa {
+        dir,
+        ca,
+        server_unlock: PreparedServerUnlock::from_result(Ok(triomphe::Arc::new(
+            unlocked,
+        ))),
+        authentication: PreparedAdminAuthentication::Password(Ok(authenticated)),
+        credential: admin_proto::AdminCredential::password(AUTORENEW_ADMIN, "apw"),
+    }
 }
 
 pub(super) async fn signed_empty_crl(dir: &Path, name: &str) -> (String, Vec<u8>) {

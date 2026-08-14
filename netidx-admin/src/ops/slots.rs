@@ -1171,6 +1171,19 @@ mod tests {
         old_autorenew: String,
     }
 
+    async fn wait_for_local_rpc(config: &std::path::Path) -> bool {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(60);
+        loop {
+            if crate::local::daemon_running(config).await {
+                return true;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return false;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    }
+
     async fn recoverable_ca() -> CaFixture {
         use crate::admin_server_config::{CaRole, Roles};
         use netidx_admin_proto::{
@@ -1607,13 +1620,7 @@ mod tests {
         drop(lock);
         let config = fixture.config.clone();
         let daemon = tokio::spawn(crate::admin_server::serve(config.clone()));
-        for _ in 0..500 {
-            if crate::local::daemon_running(&config).await {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-        if !crate::local::daemon_running(&config).await {
+        if !wait_for_local_rpc(&config).await {
             if daemon.is_finished() {
                 panic!("recovered CA exited before local RPC: {:?}", daemon.await);
             }
@@ -1749,13 +1756,10 @@ mod tests {
         drop(lock);
         let config = fixture.config.clone();
         let daemon = tokio::spawn(crate::admin_server::serve(config.clone()));
-        for _ in 0..500 {
-            if crate::local::daemon_running(&config).await {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-        assert!(crate::local::daemon_running(&config).await);
+        assert!(
+            wait_for_local_rpc(&config).await,
+            "recovered CA never opened its local RPC socket"
+        );
         let (_, csr) = crate::local::external_ca_csr(&config).await.unwrap();
         let csr = openssl::x509::X509Req::from_pem(csr.as_bytes()).unwrap();
         assert_eq!(
