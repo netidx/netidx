@@ -366,7 +366,13 @@ struct CrlWatchingInner {
     root_certificates: String,
     certificate: String,
     private_key: String,
-    state: Mutex<(CertMtimes, Option<Instant>, tokio_rustls::TlsAcceptor)>,
+    state: Mutex<CrlWatchingState>,
+}
+
+struct CrlWatchingState {
+    mtimes: CertMtimes,
+    last_failed_rebuild: Option<Instant>,
+    acceptor: tokio_rustls::TlsAcceptor,
 }
 
 impl fmt::Debug for CrlWatchingAcceptor {
@@ -410,11 +416,11 @@ impl CrlWatchingAcceptor {
             root_certificates: String::from(root_certificates),
             certificate: String::from(certificate),
             private_key: String::from(private_key),
-            state: Mutex::new((
-                cert_set_mtimes(certificate, private_key, root_certificates),
-                None,
+            state: Mutex::new(CrlWatchingState {
+                mtimes: cert_set_mtimes(certificate, private_key, root_certificates),
+                last_failed_rebuild: None,
                 acceptor,
-            )),
+            }),
         })))
     }
 
@@ -424,8 +430,10 @@ impl CrlWatchingAcceptor {
         let mtimes =
             cert_set_mtimes(&t.certificate, &t.private_key, &t.root_certificates);
         let mut state = t.state.lock();
-        if mtimes != state.0
-            && state.1.is_none_or(|failed_at| failed_at.elapsed() >= CRL_REBUILD_RETRY)
+        if mtimes != state.mtimes
+            && state
+                .last_failed_rebuild
+                .is_none_or(|failed_at| failed_at.elapsed() >= CRL_REBUILD_RETRY)
         {
             match create_tls_acceptor(
                 t.askpass.as_deref(),
@@ -435,15 +443,16 @@ impl CrlWatchingAcceptor {
             ) {
                 Ok(acceptor) => {
                     info!("reloaded TLS acceptor (serving cert or CRL changed)");
-                    *state = (mtimes, None, acceptor);
+                    *state =
+                        CrlWatchingState { mtimes, last_failed_rebuild: None, acceptor };
                 }
                 Err(e) => {
                     warn!("failed to reload TLS acceptor after cert/CRL change: {e:#}");
-                    state.1 = Some(Instant::now());
+                    state.last_failed_rebuild = Some(Instant::now());
                 }
             }
         }
-        state.2.clone()
+        state.acceptor.clone()
     }
 }
 
