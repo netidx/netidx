@@ -1,4 +1,4 @@
-use super::PublisherTable;
+use super::{PublisherTable, ResolverErrors};
 use crate::{
     channel,
     path::Path,
@@ -10,7 +10,7 @@ use cross_krb5::{ClientCtx, InitiateFlags, Step};
 use futures::channel::oneshot;
 use netidx_core::pack::BoundedBytes;
 use poolshark::global::{GPooled, Pool};
-use std::{fmt::Debug, str::FromStr, sync::LazyLock, time::Duration};
+use std::{fmt::Debug, result, str::FromStr, sync::LazyLock, time::Duration};
 use tokio::{net::TcpStream, task, time};
 
 pub(super) const HELLO_TO: Duration = Duration::from_secs(15);
@@ -99,7 +99,11 @@ pub(super) async fn addrs_changed(
 
 pub(super) type Response<F> = (GPooled<PublisherTable>, GPooled<Vec<(usize, F)>>);
 
-pub(super) type ResponseChan<F> = oneshot::Receiver<Response<F>>;
+/// A batch's reply, or why the connection that would have answered it never
+/// came up. A dropped sender means the same thing without a reason, which is
+/// what a task that dies rather than gives up leaves behind.
+pub(super) type ResponseChan<F> =
+    oneshot::Receiver<result::Result<Response<F>, ResolverErrors>>;
 
 pub(crate) async fn krb5_authentication(
     principal: Option<&str>,

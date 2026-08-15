@@ -12,7 +12,9 @@ use crate::{
         resolver::{Publisher, Resolved, TargetAuth},
     },
     publisher::PublishFlags,
-    resolver_client::{PublisherKey, PublisherTable, ResolverError, ResolverRead},
+    resolver_client::{
+        PublisherKey, PublisherTable, ResolverError, ResolverErrors, ResolverRead,
+    },
     tls,
     utils::{BatchItem, Batched, ChanWrap},
 };
@@ -225,6 +227,22 @@ mod classification {
         // an exhausted buffer used to index past the end and panic
         let mut empty = BytesMut::new();
         assert!(<Event as Pack>::decode(&mut empty).is_err());
+    }
+
+    /// A cluster that failed several ways at once keeps all of them across
+    /// the restatement. Collapsing to one would name a single fix for a
+    /// situation that needs two.
+    #[test]
+    fn every_resolver_reason_becomes_a_subscribe_reason() {
+        let path = Path::from("/foo");
+        let mut errors = ResolverErrors::default();
+        errors.insert(ResolverError::Unreachable);
+        errors.insert(ResolverError::TlsError);
+        let e = resolve_failed(&Error::from(errors), &path);
+        let mut want = SubscribeErrors::default();
+        want.insert(SubscribeError::ResolverUnreachable);
+        want.insert(SubscribeError::TlsError);
+        assert_eq!(SubscribeErrors::classify(&e, &path), want);
     }
 
     #[test]
@@ -691,21 +709,33 @@ fn pick(n: usize) -> usize {
 }
 
 /// Restate a resolver failure as a subscribe failure.
+///
+/// A cluster can fail for several reasons at once, and all of them are the
+/// subscriber's business: a member with a certificate we won't accept and a
+/// member that is down are different problems with different fixes.
 fn resolve_failed(e: &Error, path: &Path) -> Error {
-    let cause = match e.downcast_ref::<ResolverError>() {
-        Some(ResolverError::Denied) => SubscribeError::ResolverDenied,
-        Some(ResolverError::Unreachable) => SubscribeError::ResolverUnreachable,
-        Some(
-            ResolverError::Error
-            | ResolverError::ReferralLimit
-            | ResolverError::Unexpected,
-        ) => SubscribeError::ResolverError,
+    let cause = match e.downcast_ref::<ResolverErrors>() {
         None => {
             warn!("unclassified resolver error for {path}: {e:?}");
-            SubscribeError::Unspecified
+            SubscribeErrors::from(SubscribeError::Unspecified)
+        }
+        Some(errors) => {
+            let mut cause = SubscribeErrors::default();
+            for e in errors.iter() {
+                cause.insert(match e {
+                    ResolverError::Denied => SubscribeError::ResolverDenied,
+                    ResolverError::Unreachable => SubscribeError::ResolverUnreachable,
+                    ResolverError::KrbError => SubscribeError::KrbError,
+                    ResolverError::TlsError => SubscribeError::TlsError,
+                    ResolverError::Error
+                    | ResolverError::ReferralLimit
+                    | ResolverError::Unexpected => SubscribeError::ResolverError,
+                })
+            }
+            cause
         }
     };
-    cause.err().context(format_compact!("resolving {path} failed: {e}"))
+    Error::from(cause).context(format_compact!("resolving {path} failed: {e}"))
 }
 
 /// Give every waiter on the same path the same failure.

@@ -1,5 +1,13 @@
 # Unreleased
 
+- **Breaking `netidx` API:** a failed resolver request carries a
+  `ResolverErrors` set rather than a single `ResolverError`, because a
+  cluster can fail for several reasons at once and each has a different
+  fix. A subscriber whose cluster has one member with a certificate it will
+  not accept and one member that is down now reports `resolver unreachable,
+  tls error` instead of whichever member it happened to try last.
+  `ResolverError` gains `KrbError` and `TlsError` alongside it.
+
 - An authentication failure is no longer reported as an unreachable peer.
   `PublishError` and `SubscribeError` gain `KrbError` and `TlsError`, which
   say which mechanism failed so the operator knows which kind of message to

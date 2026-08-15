@@ -2,7 +2,7 @@ use super::common::{
     DesiredAuth, FROMREADPOOL, HELLO_TO, PUBLISHERPOOL, RAWFROMREADPOOL, Response,
     ResponseChan, addrs_changed, krb5_authentication,
 };
-use super::insert_publisher;
+use super::{ResolverError, ResolverErrors, insert_publisher};
 use crate::{
     channel::{self, Channel, K5CtxWrap},
     os::local_auth::AuthClient,
@@ -36,16 +36,18 @@ use tokio::{net::TcpStream, sync::watch, task, time};
 /// named. `warn` for the same reason — a member that hangs up on you is a
 /// failed connection attempt like any other.
 macro_rules! cwt {
-    ($step:expr, $addr:expr, $e:expr) => {{
+    ($step:expr, $addr:expr, $errors:expr, $why:expr, $e:expr) => {{
         let step = $step;
         let addr = $addr;
         match time::timeout(HELLO_TO, $e).await {
             Err(_) => {
                 warn!("resolver server {addr} timed out during {step}");
+                $errors.insert($why);
                 continue;
             }
             Ok(Err(e)) => {
                 warn!("resolver server {addr} failed during {step}: {e}");
+                $errors.insert($why);
                 continue;
             }
             Ok(Ok(r)) => r,
@@ -60,7 +62,9 @@ async fn connect(
     resolver: &Referral,
     desired_auth: &DesiredAuth,
     tls: &Option<tls::CachedConnector>,
+    errors: &mut ResolverErrors,
 ) -> Result<(SocketAddr, Channel)> {
+    use ResolverError::{KrbError, TlsError, Unreachable};
     let mut addrs = resolver.addrs.clone();
     addrs.as_mut_slice().shuffle(&mut rng());
     let mut n = 0;
@@ -99,8 +103,21 @@ async fn connect(
             }
         };
         try_cf!("no delay", con.set_nodelay(true));
-        cwt!("send version", addr, channel::write_raw(&mut con, &3u64));
-        if cwt!("recv version", addr, channel::read_raw::<u64, _, 1024>(&mut con)) != 3 {
+        cwt!(
+            "send version",
+            addr,
+            errors,
+            Unreachable,
+            channel::write_raw(&mut con, &3u64)
+        );
+        if cwt!(
+            "recv version",
+            addr,
+            errors,
+            Unreachable,
+            channel::read_raw::<u64, _, 1024>(&mut con)
+        ) != 3
+        {
             continue;
         }
         let con = match (desired_auth, auth) {
@@ -109,9 +126,12 @@ async fn connect(
                 cwt!(
                     "hello",
                     addr,
+                    errors,
+                    Unreachable,
                     con.send_one(&ClientHello::ReadOnly(AuthRead::Anonymous))
                 );
-                match cwt!("reply", addr, con.receive::<AuthRead>()) {
+                match cwt!("reply", addr, errors, Unreachable, con.receive::<AuthRead>())
+                {
                     AuthRead::Anonymous => (),
                     AuthRead::Local | AuthRead::Krb5 | AuthRead::Tls => {
                         bail!("protocol error")
@@ -130,14 +150,23 @@ async fn connect(
                 Auth::Local { path },
             ) => {
                 let mut con = Channel::new::<ClientCtx, TcpStream>(None, con);
-                let tok = cwt!("local token", addr, AuthClient::token(&*path));
+                let tok = cwt!(
+                    "local token",
+                    addr,
+                    errors,
+                    Unreachable,
+                    AuthClient::token(&*path)
+                );
                 cwt!(
                     "hello",
                     addr,
+                    errors,
+                    Unreachable,
                     con.send_one(&ClientHello::ReadOnly(AuthRead::Local))
                 );
-                cwt!("token", addr, con.send_one(&tok));
-                match cwt!("reply", addr, con.receive::<AuthRead>()) {
+                cwt!("token", addr, errors, Unreachable, con.send_one(&tok));
+                match cwt!("reply", addr, errors, Unreachable, con.receive::<AuthRead>())
+                {
                     AuthRead::Local => (),
                     AuthRead::Krb5 | AuthRead::Anonymous | AuthRead::Tls => {
                         bail!("protocol error")
@@ -154,11 +183,25 @@ async fn connect(
             (DesiredAuth::Krb5 { upn, .. }, Auth::Krb5 { spn }) => {
                 let upn = upn.as_ref().map(|s| s.as_str());
                 let hello = ClientHello::ReadOnly(AuthRead::Krb5);
-                cwt!("hello", addr, channel::write_raw(&mut con, &hello));
-                let ctx = cwt!("k5auth", addr, krb5_authentication(upn, &*spn, &mut con));
+                cwt!(
+                    "hello",
+                    addr,
+                    errors,
+                    Unreachable,
+                    channel::write_raw(&mut con, &hello)
+                );
+                let ctx = cwt!(
+                    "k5auth",
+                    addr,
+                    errors,
+                    KrbError,
+                    krb5_authentication(upn, &*spn, &mut con)
+                );
                 match cwt!(
                     "reply",
                     addr,
+                    errors,
+                    KrbError,
                     channel::read_raw::<AuthRead, _, 1024>(&mut con)
                 ) {
                     AuthRead::Krb5 => Channel::new(Some(K5CtxWrap::new(ctx)), con),
@@ -177,32 +220,45 @@ async fn connect(
                 // next address, not give up on the cluster — and a server
                 // that accepts the connection and then says nothing must not
                 // hang us, which is what a read-gated member looks like.
-                let ctx = try_cf!(
-                    "loading tls connector",
-                    continue,
-                    task::spawn_blocking({
-                        let tls = tls.clone();
-                        let name = name.clone();
-                        move || tls.load(&name)
-                    })
-                    .await
-                    .context("joining tls connector load")
-                    .and_then(|r| r)
-                );
+                let ctx = match task::spawn_blocking({
+                    let tls = tls.clone();
+                    let name = name.clone();
+                    move || tls.load(&name)
+                })
+                .await
+                .context("joining tls connector load")
+                .and_then(|r| r)
+                {
+                    Ok(ctx) => ctx,
+                    Err(e) => {
+                        warn!("loading the tls connector for {addr} failed: {e}");
+                        errors.insert(TlsError);
+                        continue;
+                    }
+                };
                 let hello = ClientHello::ReadOnly(AuthRead::Tls);
-                cwt!("hello", addr, channel::write_raw(&mut con, &hello));
-                let name = try_cf!(
-                    "creating rustls servername",
-                    continue,
-                    rustls_pki_types::ServerName::try_from(&**name)
-                )
-                .to_owned();
-                let tls = cwt!("tls handshake", addr, ctx.connect(name, con));
+                cwt!(
+                    "hello",
+                    addr,
+                    errors,
+                    Unreachable,
+                    channel::write_raw(&mut con, &hello)
+                );
+                let name = match rustls_pki_types::ServerName::try_from(&**name) {
+                    Ok(n) => n.to_owned(),
+                    Err(e) => {
+                        warn!("resolver server {addr} has an unusable name: {e}");
+                        errors.insert(TlsError);
+                        continue;
+                    }
+                };
+                let tls =
+                    cwt!("tls handshake", addr, errors, TlsError, ctx.connect(name, con));
                 let mut con = Channel::new::<
                     ClientCtx,
                     tokio_rustls::client::TlsStream<TcpStream>,
                 >(None, tls);
-                match cwt!("reply", addr, con.receive::<AuthRead>()) {
+                match cwt!("reply", addr, errors, TlsError, con.receive::<AuthRead>()) {
                     AuthRead::Tls => con,
                     AuthRead::Local | AuthRead::Anonymous | AuthRead::Krb5 { .. } => {
                         bail!("protocol error")
@@ -214,7 +270,10 @@ async fn connect(
     }
 }
 
-type Batch = (GPooled<Vec<(usize, ToRead)>>, oneshot::Sender<Response<FromRead>>);
+type Batch = (
+    GPooled<Vec<(usize, ToRead)>>,
+    oneshot::Sender<std::result::Result<Response<FromRead>, ResolverErrors>>,
+);
 
 fn partition_publishers(m: FromRead) -> Either<FromRead, Publisher> {
     match m {
@@ -258,9 +317,14 @@ async fn connection(
             None => break,
             Some((tx_batch, reply)) => {
                 let mut tries: usize = 0;
-                'batch: loop {
+                // what every member we tried had wrong with it, so that a
+                // cluster with one bad certificate and one dead member says
+                // both rather than whichever we happened to try last
+                let mut errors = ResolverErrors::default();
+                let answer = 'batch: loop {
                     if tries > 3 {
-                        break;
+                        errors.insert(ResolverError::Unreachable);
+                        break Err(errors);
                     }
                     if tries > 1 {
                         let wait = rng().random_range(1..12);
@@ -271,8 +335,14 @@ async fn connection(
                         Some((_, ref mut c)) => c,
                         None => {
                             let current = resolver.borrow_and_update().clone();
-                            match connect(&mut *bad_addrs, &current, &desired_auth, &tls)
-                                .await
+                            match connect(
+                                &mut *bad_addrs,
+                                &current,
+                                &desired_auth,
+                                &tls,
+                                &mut errors,
+                            )
+                            .await
                             {
                                 Ok(c) => {
                                     con = Some(c);
@@ -347,11 +417,11 @@ async fn connection(
                                     .enumerate()
                                     .map(|(i, m)| (tx_batch[i].0, m)),
                             );
-                            let _ = reply.send((publishers, result));
-                            break;
+                            break Ok((publishers, result));
                         }
                     }
-                }
+                };
+                let _ = reply.send(answer);
             }
         }
     }

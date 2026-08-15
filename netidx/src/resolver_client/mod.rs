@@ -26,6 +26,7 @@ use common::{
     TOREADPOOL, TOWRITEPOOL,
 };
 use compact_str::format_compact;
+use enumflags2::{BitFlags, bitflags};
 use futures::{
     channel::mpsc::{self, UnboundedReceiver, UnboundedSender},
     future,
@@ -66,6 +67,8 @@ const MAX_REFERRALS: usize = 128;
 /// matching on message text. Whatever detail does not fit one of these
 /// classifications — the text of a `FromRead::Error`, which server said it —
 /// stays in the error message and in the log.
+#[bitflags]
+#[repr(u64)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResolverError {
     /// The resolver refused the request.
@@ -74,26 +77,94 @@ pub enum ResolverError {
     Error,
     /// No member of the resolver cluster could be reached.
     Unreachable,
+    /// The kerberos exchange with a member failed. The gssapi error is in
+    /// the log.
+    KrbError,
+    /// The tls session with a member failed. The rustls error is in the log.
+    TlsError,
     /// The referral chain was longer than `MAX_REFERRALS`.
     ReferralLimit,
     /// The resolver's reply did not answer the request.
     Unexpected,
 }
 
-impl fmt::Display for ResolverError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let s = match self {
+impl ResolverError {
+    /// An `anyhow::Error` carrying this classification, which
+    /// `ResolverErrors::classify` can recover.
+    pub(crate) fn err(self) -> Error {
+        Error::from(ResolverErrors::from(self))
+    }
+
+    fn name(&self) -> &'static str {
+        match self {
             Self::Denied => "permission denied",
             Self::Error => "the resolver returned an error",
             Self::Unreachable => "no resolver server could be reached",
+            Self::KrbError => "kerberos error",
+            Self::TlsError => "tls error",
             Self::ReferralLimit => "maximum referral depth reached",
             Self::Unexpected => "unexpected response from the resolver",
-        };
-        write!(f, "{s}")
+        }
+    }
+}
+
+impl fmt::Display for ResolverError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.name())
     }
 }
 
 impl error::Error for ResolverError {}
+
+/// The set of reasons a resolver request failed.
+///
+/// A cluster is asked as a whole, so a request can fail for more than one
+/// reason at once: a member we refuse to speak tls to and a member that is
+/// down are two different problems, and hearing only one of them sends you
+/// to fix the wrong thing.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ResolverErrors(pub BitFlags<ResolverError>);
+
+impl ResolverErrors {
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    pub fn contains(&self, e: ResolverError) -> bool {
+        self.0.contains(e)
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = ResolverError> {
+        self.0.iter()
+    }
+
+    pub fn insert(&mut self, e: impl Into<BitFlags<ResolverError>>) {
+        self.0 |= e.into();
+    }
+}
+
+impl From<ResolverError> for ResolverErrors {
+    fn from(e: ResolverError) -> Self {
+        Self(e.into())
+    }
+}
+
+impl fmt::Display for ResolverErrors {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.0.is_empty() {
+            return write!(f, "no errors");
+        }
+        for (i, e) in self.0.iter().enumerate() {
+            if i > 0 {
+                write!(f, ", ")?
+            }
+            write!(f, "{}", e.name())?
+        }
+        Ok(())
+    }
+}
+
+impl error::Error for ResolverErrors {}
 
 /// The identity of a publisher record returned by a resolver.
 ///
@@ -496,10 +567,12 @@ where
             let mut referral = false;
             let mut publishers = None;
             for r in future::join_all(waiters).await {
-                // the connection task drops the reply channel when it has
-                // exhausted its retries, which is the only way this fails
-                let (mut p, mut r) =
-                    r.map_err(|_| Error::from(ResolverError::Unreachable))?;
+                // a task that gave up says why; one that died says nothing,
+                // and there is nothing to say about it but that it is gone
+                let (mut p, mut r) = match r {
+                    Err(_) => return Err(ResolverError::Unreachable.err()),
+                    Ok(r) => r.map_err(Error::from)?,
+                };
                 match publishers.as_mut() {
                     None => {
                         publishers = Some(p);
@@ -526,7 +599,8 @@ where
             }
             referrals += 1;
             if referrals > MAX_REFERRALS {
-                return Err(Error::from(ResolverError::ReferralLimit)
+                return Err(ResolverError::ReferralLimit
+                    .err()
                     .context(format_compact!("giving up after {MAX_REFERRALS}")));
             }
         }
@@ -604,7 +678,7 @@ impl ResolverRead {
         to.extend(batch.into_iter().map(ToRead::Resolve));
         let (publishers, mut result) = self.send(&to).await?;
         if result.len() != to.len() {
-            return Err(Error::from(ResolverError::Unexpected).context(format_compact!(
+            return Err(ResolverError::Unexpected.err().context(format_compact!(
                 "unexpected number of resolve results {} expected {}",
                 result.len(),
                 to.len()
@@ -615,14 +689,14 @@ impl ResolverRead {
             let path = t.path().map(|p| &**p).unwrap_or("");
             match r {
                 FromRead::Resolved(r) => Ok(r),
-                FromRead::Denied => Err(Error::from(ResolverError::Denied)),
+                FromRead::Denied => Err(ResolverError::Denied.err()),
                 FromRead::Error(e) => {
                     warn!("resolving {path} failed: {e}");
-                    Err(Error::from(ResolverError::Error).context(e))
+                    Err(ResolverError::Error.err().context(e))
                 }
                 m => {
                     warn!("unexpected resolve response for {path}: {m:?}");
-                    Err(Error::from(ResolverError::Unexpected))
+                    Err(ResolverError::Unexpected.err())
                 }
             }
         }));
@@ -681,7 +755,10 @@ impl ResolverRead {
                 }
             }
             for r in future::join_all(waiters).await {
-                let (_, mut r) = r?;
+                let (_, mut r) = match r {
+                    Err(_) => return Err(ResolverError::Unreachable.err()),
+                    Ok(r) => r.map_err(Error::from)?,
+                };
                 for (_, reply) in r.drain(..) {
                     let mut referrals = process_reply(reply)?;
                     for r in referrals.drain(..) {

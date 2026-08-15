@@ -11,6 +11,7 @@ use crate::{
         HashMethod, ReadyForOwnershipCheck, Referral, Secret, ServerHelloWrite, ToWrite,
     },
     publisher::{PublishError, PublishErrors},
+    resolver_client::{ResolverError, ResolverErrors},
     tls, utils,
 };
 use ahash::{AHashMap, AHasher};
@@ -57,7 +58,10 @@ static WRITE_EVENTS: LazyLock<Pool<Vec<WriteEvent>>> =
 static OUTCOMES: LazyLock<Pool<Vec<(Path, Option<PublishError>)>>> =
     LazyLock::new(|| Pool::new(64, 10_000));
 
-type Batch = (GPooled<Vec<(usize, ToWrite)>>, oneshot::Sender<Response<FromWrite>>);
+type Batch = (
+    GPooled<Vec<(usize, ToWrite)>>,
+    oneshot::Sender<std::result::Result<Response<FromWrite>, ResolverErrors>>,
+);
 
 struct ToCon {
     batch: GPooled<Vec<(usize, ToWrite)>>,
@@ -1040,9 +1044,12 @@ async fn write_mgr(
         let tx_batch = Arc::new(ToCon { batch, replies: Mutex::new(replies) });
         let _ = sender.send(tx_batch);
         match select_ok(waiters).await {
-            Err(e) => warn!("write_mgr: write failed on all writers {}", e),
+            Err(e) => {
+                warn!("write_mgr: write failed on all writers {}", e);
+                let _ = reply.send(Err(ResolverError::Unreachable.into()));
+            }
             Ok((rx_batch, _)) => {
-                let _ = reply.send(rx_batch);
+                let _ = reply.send(Ok(rx_batch));
             }
         }
     }

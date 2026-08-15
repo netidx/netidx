@@ -1940,7 +1940,7 @@ mod errors {
             BindCfg, DesiredAuth, Id, PublishError, PublishErrors, Publisher,
             PublisherBuilder,
         },
-        resolver_client::{ResolverError, ResolverRead},
+        resolver_client::{ResolverError, ResolverErrors, ResolverRead},
         resolver_server::{
             Server,
             config::{Config as ServerConfig, PMap, file as sfile},
@@ -1974,6 +1974,14 @@ mod errors {
 
     fn perrs(es: &[PublishError]) -> PublishErrors {
         let mut r = PublishErrors::default();
+        for e in es {
+            r.insert(*e)
+        }
+        r
+    }
+
+    fn rerrs(es: &[ResolverError]) -> ResolverErrors {
+        let mut r = ResolverErrors::default();
         for e in es {
             r.insert(*e)
         }
@@ -2171,7 +2179,8 @@ mod errors {
         assert_eq!(res[0].as_ref().unwrap().publishers.len(), 1);
         assert!(!publishers.is_empty());
         let e = res[1].as_ref().unwrap_err();
-        assert_eq!(e.downcast_ref::<ResolverError>(), Some(&ResolverError::Denied));
+        let denied = ResolverErrors::from(ResolverError::Denied);
+        assert_eq!(e.downcast_ref::<ResolverErrors>(), Some(&denied));
         drop(server);
         Ok(())
     }
@@ -2480,6 +2489,30 @@ mod errors {
             }
         }
         drop((refuses_it, takes_it));
+        Ok(())
+    }
+
+    /// A cluster can be broken in more than one way at a time, and each way
+    /// has a different fix. Reporting whichever member we happened to try
+    /// last would send the operator to fix one of two problems, at random.
+    ///
+    /// Ignored because failing costs the read client its whole retry budget,
+    /// which is eleven sleeps of one to eleven seconds.
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore]
+    async fn every_reason_the_cluster_failed_is_reported() -> Result<()> {
+        let _ = env_logger::try_init();
+        let ports = [free_port(), free_port()];
+        // member 1 is never started, so it is simply unreachable
+        let server = start(tls_cluster(&ports, &[("/", "swlpd")]), 0).await;
+        let mut cfg = tls_client(&ports)?;
+        // and member 0's certificate does not say this, so we refuse it
+        cfg.addrs[0].1 = Auth::Tls { name: literal!("wrong.example.com") };
+        let r = ResolverRead::new(cfg, DesiredAuth::Tls { identity: None });
+        let e = r.resolve([Path::from("/app/v0")]).await.unwrap_err();
+        let want = rerrs(&[ResolverError::Unreachable, ResolverError::TlsError]);
+        assert_eq!(e.downcast_ref::<ResolverErrors>(), Some(&want));
+        drop(server);
         Ok(())
     }
 
