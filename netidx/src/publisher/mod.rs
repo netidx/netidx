@@ -19,6 +19,7 @@ use crate::{
 };
 use ahash::{AHashMap, AHashSet};
 use anyhow::{Error, Result, anyhow};
+use compact_str::format_compact;
 use enumflags2::{BitFlags, bitflags};
 use futures::{
     channel::{
@@ -338,6 +339,12 @@ pub enum PublishError {
     ResolverError,
     /// The resolver could not be reached.
     ResolverUnreachable,
+    /// The kerberos exchange with the resolver failed. The gssapi error is in
+    /// the log.
+    KrbError,
+    /// The tls session with the resolver failed. The rustls error is in the
+    /// log.
+    TlsError,
     // the resolver refused the publisher's address at hello time
     LinkLocalAddr,
     BroadcastAddr,
@@ -377,6 +384,8 @@ impl PublishError {
             Self::InvalidPath => "invalid path",
             Self::ResolverError => "resolver error",
             Self::ResolverUnreachable => "resolver unreachable",
+            Self::KrbError => "kerberos error",
+            Self::TlsError => "tls error",
             Self::LinkLocalAddr => "the publisher address is link local",
             Self::BroadcastAddr => "the publisher address is a broadcast address",
             Self::PrivateAddr => {
@@ -388,6 +397,12 @@ impl PublishError {
                 "the publisher address is loopback and the resolver is not"
             }
         }
+    }
+
+    /// An `anyhow::Error` carrying this classification, which
+    /// `handle_failed_connect` can recover, and `d` as its message.
+    pub(crate) fn err(self, d: impl fmt::Display) -> Error {
+        Error::from(self).context(format_compact!("{d}"))
     }
 }
 

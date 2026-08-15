@@ -1935,6 +1935,7 @@ mod publisher {
 mod errors {
     use crate::{
         config::Config as ClientConfig,
+        protocol::resolver::Auth,
         publisher::{
             BindCfg, DesiredAuth, Id, PublishError, PublishErrors, Publisher,
             PublisherBuilder,
@@ -2479,6 +2480,36 @@ mod errors {
             }
         }
         drop((refuses_it, takes_it));
+        Ok(())
+    }
+
+    /// A resolver we refuse to speak to is not a resolver that is down. The
+    /// distinction is the whole point: retrying will never fix this one, and
+    /// an operator told "unreachable" goes and checks the network.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_rejected_certificate_is_not_an_unreachable_resolver() -> Result<()> {
+        let _ = env_logger::try_init();
+        let ports = [free_port()];
+        let server = start(tls_cluster(&ports, &[("/", "swlpd")]), 0).await;
+        let mut cfg = tls_client(&ports)?;
+        for (_, auth) in cfg.addrs.iter_mut() {
+            *auth = Auth::Tls { name: literal!("wrong.example.com") };
+        }
+        // the publisher starts failing the moment it is built, which it does
+        // before a test can register for the events, so read the condition
+        let pb = publisher(&cfg, DesiredAuth::Tls { identity: None }).await?;
+        let v = pb.publish(Path::from("/app/v0"), 42i64)?;
+        // a publish issued while no resolver is usable waits out the batch
+        // itself, which is HELLO_TO, before anything is said about it
+        let deadline = time::Instant::now() + TO * 2;
+        while !pb.publish_errors(v.id()).contains(PublishError::TlsError) {
+            if time::Instant::now() >= deadline {
+                panic!("never blamed tls, said {}", pb.publish_errors(v.id()))
+            }
+            time::sleep(Duration::from_millis(50)).await
+        }
+        assert!(!pb.publish_errors(v.id()).contains(PublishError::ResolverUnreachable));
+        drop(server);
         Ok(())
     }
 

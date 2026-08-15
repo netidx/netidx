@@ -84,6 +84,10 @@ pub enum SubscribeError {
     ConnectFailed,
     /// Authentication with the publisher failed.
     AuthFailed,
+    /// The kerberos exchange failed. The gssapi error is in the log.
+    KrbError,
+    /// The tls session failed. The rustls error is in the log.
+    TlsError,
     /// The publisher speaks a different protocol version.
     ProtocolMismatch,
     /// The publisher refused the subscription.
@@ -114,6 +118,8 @@ impl SubscribeError {
             Self::ConnectionLost => "connection lost",
             Self::ConnectFailed => "connect failed",
             Self::AuthFailed => "authentication failed",
+            Self::KrbError => "kerberos error",
+            Self::TlsError => "tls error",
             Self::ProtocolMismatch => "protocol mismatch",
             Self::Denied => "permission denied",
             Self::NoSuchValue => "no such value",

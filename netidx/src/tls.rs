@@ -18,6 +18,19 @@ use std::{
 use x509_parser::prelude::GeneralName;
 use zeroize::{Zeroize, Zeroizing};
 
+/// Did the tls session itself fail, as opposed to the connection under it?
+///
+/// A tls 1.3 client finishes its side of the handshake before the server has
+/// looked at its certificate, so a rejected client certificate does not fail
+/// `connect` — it arrives as an alert on the next read, which is otherwise
+/// indistinguishable from the peer hanging up.
+pub(crate) fn is_tls_error(e: &anyhow::Error) -> bool {
+    e.chain().any(|e| match e.downcast_ref::<std::io::Error>() {
+        None => e.is::<rustls::Error>(),
+        Some(e) => e.get_ref().is_some_and(|e| e.is::<rustls::Error>()),
+    })
+}
+
 pub(crate) fn load_certs(
     path: &str,
 ) -> Result<Vec<rustls_pki_types::CertificateDer<'static>>> {
@@ -621,6 +634,25 @@ impl CachedAcceptor {
 #[cfg(test)]
 mod test {
     use super::*;
+
+    /// The nesting is the whole trick, and it is tokio-rustls' business, not
+    /// ours: if it ever stops boxing the rustls error inside the io error,
+    /// every rejected certificate silently becomes an unreachable resolver.
+    #[test]
+    fn a_rustls_error_is_found_through_the_io_error_carrying_it() {
+        let alert = rustls::Error::AlertReceived(rustls::AlertDescription::UnknownCA);
+        let e = anyhow::Error::from(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            alert,
+        ));
+        assert!(is_tls_error(&e));
+        assert!(is_tls_error(&e.context("connecting to the resolver")));
+        let e = anyhow::Error::from(std::io::Error::new(
+            std::io::ErrorKind::ConnectionReset,
+            "connection reset by peer",
+        ));
+        assert!(!is_tls_error(&e));
+    }
 
     #[test]
     fn test_get_match() {

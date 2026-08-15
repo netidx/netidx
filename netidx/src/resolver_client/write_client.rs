@@ -14,7 +14,7 @@ use crate::{
     tls, utils,
 };
 use ahash::{AHashMap, AHasher};
-use anyhow::{Error, Result, anyhow};
+use anyhow::{Error, Result};
 use arcstr::ArcStr;
 use cross_krb5::{ClientCtx, K5Ctx};
 use futures::{
@@ -427,10 +427,9 @@ impl Connection {
                         (None | Some(_), _) => {
                             debug!("starting a new krb5 session");
                             let upn = upn.as_ref().map(|s| s.as_str());
-                            let spn =
-                                ArcStr::from(spn.clone().ok_or_else(|| {
-                                    anyhow!("spn is required for writers")
-                                })?);
+                            let spn = ArcStr::from(spn.clone().ok_or_else(|| {
+                                PublishError::KrbError.err("spn is required for writers")
+                            })?);
                             wt!(
                                 "write krb5 hello",
                                 channel::write_raw(
@@ -438,8 +437,9 @@ impl Connection {
                                     &hello(AuthWrite::Krb5 { spn })
                                 )
                             )??;
-                            let ctx =
-                                krb5_authentication(upn, &*target_spn, &mut con).await?;
+                            let ctx = krb5_authentication(upn, &*target_spn, &mut con)
+                                .await
+                                .map_err(|e| PublishError::KrbError.err(e))?;
                             let ctx = K5CtxWrap::new(ctx);
                             let mut con = Channel::new(Some(ctx.clone()), con);
                             let r: ServerHelloWrite =
@@ -454,16 +454,21 @@ impl Connection {
                 }
                 (DesiredAuth::Tls { identity }, Auth::Tls { name }) => {
                     debug!("tls auth selected");
-                    let tls = self.tls.as_ref().ok_or_else(|| anyhow!("no tls ctx"))?;
+                    let tls = self
+                        .tls
+                        .as_ref()
+                        .ok_or_else(|| PublishError::TlsError.err("no tls ctx"))?;
                     let ctx = task::spawn_blocking({
                         let tls = tls.clone();
                         let name = name.clone();
                         move || tls.load(&name)
                     })
-                    .await??;
+                    .await?
+                    .map_err(|e| PublishError::TlsError.err(e))?;
                     let secret = self.secrets.read().get(&self.resolver_addr).map(|u| *u);
-                    let name =
-                        rustls_pki_types::ServerName::try_from(&**name)?.to_owned();
+                    let name = rustls_pki_types::ServerName::try_from(&**name)
+                        .map_err(|e| PublishError::TlsError.err(e))?
+                        .to_owned();
                     match secret {
                         Some(secret) => {
                             debug!("reusing existing tls session");
@@ -471,7 +476,10 @@ impl Connection {
                                 "write tls hello reuse",
                                 channel::write_raw(&mut con, &hello(AuthWrite::Reuse))
                             )??;
-                            let tls = ctx.connect(name, con).await?;
+                            let tls = ctx
+                                .connect(name, con)
+                                .await
+                                .map_err(|e| PublishError::TlsError.err(e))?;
                             let mut con = Channel::new::<
                                 ClientCtx,
                                 tokio_rustls::client::TlsStream<TcpStream>,
@@ -485,14 +493,20 @@ impl Connection {
                             let publisher_name = ArcStr::from(match identity {
                                 None => tls.default_identity().name.clone(),
                                 Some(id) => match tls.get_identity(id) {
-                                    None => bail!("identity not found"),
+                                    None => {
+                                        return Err(PublishError::TlsError
+                                            .err("identity not found"));
+                                    }
                                     Some(id) => id.name.clone(),
                                 },
                             });
                             debug!("starting a new tls session for {}", publisher_name);
                             let h = hello(AuthWrite::Tls { name: publisher_name });
                             wt!("write tls hello", channel::write_raw(&mut con, &h))??;
-                            let tls = ctx.connect(name, con).await?;
+                            let tls = ctx
+                                .connect(name, con)
+                                .await
+                                .map_err(|e| PublishError::TlsError.err(e))?;
                             let mut con = Channel::new::<
                                 ClientCtx,
                                 tokio_rustls::client::TlsStream<TcpStream>,
@@ -542,10 +556,13 @@ impl Connection {
         warn!("write connection {:?} failed {}", self.resolver_addr, e);
         // a resolver that told us why said so in the hello; everything else
         // is a connection we could not make, and the log has the detail
-        let reason = e
-            .downcast_ref::<PublishError>()
-            .copied()
-            .unwrap_or(PublishError::ResolverUnreachable);
+        let reason = e.downcast_ref::<PublishError>().copied().unwrap_or_else(|| {
+            if tls::is_tls_error(&e) {
+                PublishError::TlsError
+            } else {
+                PublishError::ResolverUnreachable
+            }
+        });
         self.report_down(reason);
     }
 

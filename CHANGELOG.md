@@ -1,5 +1,17 @@
 # Unreleased
 
+- An authentication failure is no longer reported as an unreachable peer.
+  `PublishError` and `SubscribeError` gain `KrbError` and `TlsError`, which
+  say which mechanism failed so the operator knows which kind of message to
+  go find in the log. Before this, a publisher whose certificate the
+  resolver rejected — or whose keytab was wrong — retried forever saying
+  "resolver unreachable", which sends you to look at the network for a
+  problem that is not there and that retrying will never fix. A rejected
+  certificate is recognized wherever it surfaces: a tls 1.3 client finishes
+  its side of the handshake before the server has looked at its
+  certificate, so the rejection arrives as an alert on the next read rather
+  than as a failed `connect`.
+
 - A resolver that refuses a publisher's write address now says why instead
   of dropping the socket. `ServerHelloWrite` gains a trailing
   `#[pack(default)] refused: Option<WriteRefusal>`, so this is not a

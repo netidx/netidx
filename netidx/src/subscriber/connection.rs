@@ -136,9 +136,11 @@ macro_rules! refuse {
     };
 }
 
-/// The exchange itself failed, rather than us refusing to attempt it.
-fn auth_failed(e: impl fmt::Display) -> Error {
-    SubscribeError::AuthFailed.err().context(format_compact!("{e}").as_str().to_owned())
+/// The exchange itself failed, rather than us refusing to attempt it. `cause`
+/// says which mechanism, so the operator knows which of the two kinds of
+/// message in the log to go looking for.
+fn auth_failed(cause: SubscribeError, e: impl fmt::Display) -> Error {
+    cause.err().context(format_compact!("{e}"))
 }
 
 async fn hello_publisher(
@@ -191,8 +193,9 @@ async fn hello_publisher(
         (DesiredAuth::Krb5 { upn, .. }, TargetAuth::Krb5 { spn }) => {
             let upn = upn.as_ref().map(|p| p.as_str());
             channel::write_raw(&mut con, &Hello::Krb5(uifo)).await?;
-            let ctx =
-                krb5_authentication(upn, spn, &mut con).await.map_err(auth_failed)?;
+            let ctx = krb5_authentication(upn, spn, &mut con)
+                .await
+                .map_err(|e| auth_failed(SubscribeError::KrbError, e))?;
             let mut con = Channel::new(Some(K5CtxWrap::new(ctx)), con);
             match con.receive::<Hello>().await? {
                 Hello::Krb5(_) => (),
@@ -204,18 +207,23 @@ async fn hello_publisher(
             refuse!(AuthFailed, "desired authentication mechanism not supported")
         }
         (DesiredAuth::Tls { .. }, TargetAuth::Tls { name }) => {
-            let tls = tls_ctx.clone().ok_or_else(|| auth_failed("no tls ctx"))?;
+            let tls = tls_ctx
+                .clone()
+                .ok_or_else(|| auth_failed(SubscribeError::TlsError, "no tls ctx"))?;
             let ctx = task::spawn_blocking({
                 let name = name.clone();
                 move || tls.load(&name)
             })
             .await?
-            .map_err(auth_failed)?;
+            .map_err(|e| auth_failed(SubscribeError::TlsError, e))?;
             let name = rustls_pki_types::ServerName::try_from(&**name)
-                .map_err(auth_failed)?
+                .map_err(|e| auth_failed(SubscribeError::TlsError, e))?
                 .to_owned();
             channel::write_raw(&mut con, &Hello::Tls(uifo)).await?;
-            let tls = ctx.connect(name, con).await.map_err(auth_failed)?;
+            let tls = ctx
+                .connect(name, con)
+                .await
+                .map_err(|e| auth_failed(SubscribeError::TlsError, e))?;
             let mut con = Channel::new::<
                 ClientCtx,
                 tokio_rustls::client::TlsStream<TcpStream>,
@@ -793,10 +801,14 @@ impl ConnectionCtx {
                 // anything that goes wrong bringing a connection up that
                 // hello_publisher did not classify is a failure to connect
                 let msg: ArcStr = format_compact!("{e}").as_str().into();
-                let errors = e
-                    .downcast_ref::<SubscribeErrors>()
-                    .copied()
-                    .unwrap_or_else(|| SubscribeError::ConnectFailed.into());
+                let errors =
+                    e.downcast_ref::<SubscribeErrors>().copied().unwrap_or_else(|| {
+                        if tls::is_tls_error(&e) {
+                            SubscribeError::TlsError.into()
+                        } else {
+                            SubscribeError::ConnectFailed.into()
+                        }
+                    });
                 self.fail_queued(errors, &msg);
                 return Err(Error::from(errors).context(msg));
             }
