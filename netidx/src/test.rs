@@ -2224,12 +2224,14 @@ mod errors {
         time::timeout(TO, d.wait_subscribed()).await??;
         assert_eq!(d.last_error(), None);
         let mut e = sub_errors(&subscriber);
-        drop(v);
+        // the publisher goes away without unpublishing: had we dropped `v`
+        // first that would be an unpublish, which is a different thing
         pb.shutdown().await;
         assert_eq!(
             e.next(TO).await,
             Some((d.id(), errs(&[SubscribeError::ConnectionLost])))
         );
+        drop(v);
         // the union grows as the retries discover more, and every new reason
         // is reported exactly once — the set never repeats itself
         let mut last = errs(&[SubscribeError::ConnectionLost]);
@@ -2250,6 +2252,30 @@ mod errors {
         Ok(())
     }
 
+    /// A publisher that stops publishing something is not a publisher that
+    /// died, and a subscriber has always had to guess which it was.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_unpublished_value_is_not_a_lost_connection() -> Result<()> {
+        let _ = env_logger::try_init();
+        let (server, cfg) = anon_server().await?;
+        let pb = publisher(&cfg, DesiredAuth::Anonymous).await?;
+        let v = pb.publish(Path::from("/app/v0"), 42i64)?;
+        pb.flushed().await;
+        let subscriber = subscriber(&cfg, DesiredAuth::Anonymous)?;
+        let d = subscriber.subscribe(Path::from("/app/v0"));
+        time::timeout(TO, d.wait_subscribed()).await??;
+        let mut e = sub_errors(&subscriber);
+        // the publisher stays up, it just stops publishing this
+        drop(v);
+        pb.flushed().await;
+        assert_eq!(
+            e.next(TO).await,
+            Some((d.id(), errs(&[SubscribeError::Unpublished])))
+        );
+        drop((pb, server));
+        Ok(())
+    }
+
     /// Recovery is on the same channel, so a consumer watching only errors
     /// isn't left thinking a subscription is still dead.
     #[tokio::test(flavor = "multi_thread")]
@@ -2263,12 +2289,12 @@ mod errors {
         let d = subscriber.subscribe(Path::from("/app/v0"));
         time::timeout(TO, d.wait_subscribed()).await??;
         let mut e = sub_errors(&subscriber);
-        drop(v);
         pb.shutdown().await;
         assert_eq!(
             e.next(TO).await,
             Some((d.id(), errs(&[SubscribeError::ConnectionLost])))
         );
+        drop(v);
         let pb = publisher(&cfg, DesiredAuth::Anonymous).await?;
         let _v = pb.publish(Path::from("/app/v0"), 42i64)?;
         pb.flushed().await;
@@ -2350,20 +2376,67 @@ mod errors {
         let mut e = pub_errors(&pb);
         let v = pb.publish(Path::from("/nopub/v0"), 42i64)?;
         pb.flushed().await;
-        assert_eq!(
-            e.next(TO).await,
-            Some((Some(v.id()), perrs(&[PublishError::Denied])))
-        );
-        assert!(!pb.publish_errors(v.id()).contains(PublishError::NotPublished));
-        // ask the member that took it, not whichever the cluster picks
+        // one member refused it and the other took it, so it is degraded and
+        // nothing more — in particular not NotPublished
+        let degraded = perrs(&[PublishError::Denied]);
+        loop {
+            match e.next(TO).await {
+                None => panic!("never settled on {degraded}"),
+                Some(_) if pb.publish_errors(v.id()) == degraded => break,
+                Some(_) => (),
+            }
+        }
+        // ask the member that took it, not whichever the cluster picks. A
+        // publish is answered by whichever member answers first, so the one
+        // that took it may not have finished storing it yet.
         let r = ResolverRead::new(
             tls_client(&ports[..1])?,
             DesiredAuth::Tls { identity: None },
         );
-        let (_, res) = time::timeout(TO, r.resolve([Path::from("/nopub/v0")])).await??;
-        assert_eq!(res[0].as_ref().unwrap().publishers.len(), 1);
+        let deadline = time::Instant::now() + TO;
+        loop {
+            let (_, res) =
+                time::timeout(TO, r.resolve([Path::from("/nopub/v0")])).await??;
+            if res[0].as_ref().unwrap().publishers.len() == 1 {
+                break;
+            }
+            if time::Instant::now() >= deadline {
+                panic!("the member that took it never published it")
+            }
+            time::sleep(Duration::from_millis(50)).await
+        }
         e.expect_quiet().await;
         drop((takes_it, refuses_it));
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_cluster_that_all_refuses_is_not_published() -> Result<()> {
+        let _ = env_logger::try_init();
+        let ports = [free_port(), free_port()];
+        let cfg = tls_cluster(&ports, &[("/", "swlpd"), ("/nopub", "!p")]);
+        let m0 = start(cfg.clone(), 0).await;
+        let m1 = start(cfg, 1).await;
+        let client = tls_client(&ports)?;
+        let pb = publisher(&client, DesiredAuth::Tls { identity: None }).await?;
+        let mut e = pub_errors(&pb);
+        let v = pb.publish(Path::from("/nopub/v0"), 42i64)?;
+        pb.flushed().await;
+        let gone = perrs(&[PublishError::NotPublished, PublishError::Denied]);
+        loop {
+            match e.next(TO).await {
+                None => panic!("never reported {gone}"),
+                Some((id, errors)) => {
+                    assert_eq!(id, Some(v.id()));
+                    if errors == gone {
+                        break;
+                    }
+                    // the first member to answer leaves it merely degraded
+                    assert_eq!(errors, perrs(&[PublishError::Denied]));
+                }
+            }
+        }
+        drop((m0, m1));
         Ok(())
     }
 
@@ -2394,7 +2467,18 @@ mod errors {
                 Some(_) => (),
             }
         }
-        drop(refuses_it);
+        // bring the missing member up: the global condition clears, and the
+        // path's own Denied is still standing under it
+        let takes_it = start(tls_cluster(&ports, &[("/", "swlpd")]), 1).await;
+        let degraded = perrs(&[PublishError::Denied]);
+        loop {
+            match e.next(TO).await {
+                None => panic!("the recovered member was never noticed"),
+                Some(_) if pb.publish_errors(v.id()) == degraded => break,
+                Some(_) => (),
+            }
+        }
+        drop((refuses_it, takes_it));
         Ok(())
     }
 
@@ -2498,7 +2582,6 @@ mod errors {
             time::timeout(TO, d.wait_subscribed()).await??;
         }
         let mut e = sub_errors(&subscriber);
-        vals.clear();
         pb.shutdown().await;
         let mut lost: HashSet<SubId> = HashSet::new();
         while lost.len() < N {
@@ -2516,6 +2599,7 @@ mod errors {
             }
         }
         assert_eq!(lost, dvals.iter().map(|d| d.id()).collect::<HashSet<_>>());
+        drop(vals);
         drop(server);
         Ok(())
     }
