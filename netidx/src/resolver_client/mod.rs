@@ -38,6 +38,7 @@ use poolshark::{
     global::{GPooled, Pool},
     local::LPooled,
 };
+pub(crate) use read_client::MAX_REQUEST;
 use read_client::ReadClient;
 use std::{
     collections::{

@@ -23,8 +23,29 @@ use futures::{
 use log::{info, warn};
 use poolshark::{global::GPooled, local::LPooled};
 use rand::{RngExt, rng, seq::SliceRandom};
-use std::{cmp::max, fmt::Debug, net::SocketAddr, sync::Arc, time::Duration};
-use tokio::{net::TcpStream, sync::watch, task, time};
+use std::{
+    cmp::{max, min},
+    fmt::Debug,
+    net::SocketAddr,
+    sync::Arc,
+    time::Duration,
+};
+use tokio::{
+    net::TcpStream,
+    sync::watch,
+    task,
+    time::{self, Instant},
+};
+
+/// The longest the connection task will keep trying before it gives up and
+/// answers with why it could not.
+///
+/// A caller that stops waiting sooner gets a timeout instead of the reasons,
+/// and a timeout is the one answer nobody can act on — so callers derive
+/// their own deadline from this rather than picking a number. It is longer
+/// than the retry loop needs in any case where the members fail promptly;
+/// it exists to bound the case where they accept the connection and stall.
+pub(crate) const MAX_REQUEST: Duration = Duration::from_secs(180);
 
 /// Try a step of the hello exchange with `addr`, moving on to the next member
 /// if it fails or times out.
@@ -63,6 +84,7 @@ async fn connect(
     desired_auth: &DesiredAuth,
     tls: &Option<tls::CachedConnector>,
     errors: &mut ResolverErrors,
+    deadline: Instant,
 ) -> Result<(SocketAddr, Channel)> {
     use ResolverError::{KrbError, TlsError, Unreachable};
     let mut addrs = resolver.addrs.clone();
@@ -75,6 +97,11 @@ async fn connect(
         if tries >= 3 {
             bail!("can't connect to any resolver servers");
         }
+        // one member that accepts and stalls can eat several `HELLO_TO`s, so
+        // the deadline is checked per member rather than per request
+        if Instant::now() >= deadline {
+            bail!("ran out of time to connect to a resolver server");
+        }
         if tries == 0 && bad_addrs.contains(&addr) {
             n += 1;
             continue;
@@ -82,8 +109,8 @@ async fn connect(
             bad_addrs.clear()
         }
         if n % addrs.len() == 0 && tries > 0 {
-            let wait = rng().random_range(1..12);
-            time::sleep(Duration::from_secs(wait)).await;
+            let wait = Duration::from_secs(rng().random_range(1..12));
+            time::sleep_until(min(deadline, Instant::now() + wait)).await;
         }
         n += 1;
         let mut con = match time::timeout(HELLO_TO, TcpStream::connect(&addr)).await {
@@ -321,14 +348,15 @@ async fn connection(
                 // cluster with one bad certificate and one dead member says
                 // both rather than whichever we happened to try last
                 let mut errors = ResolverErrors::default();
+                let deadline = Instant::now() + MAX_REQUEST;
                 let answer = 'batch: loop {
-                    if tries > 3 {
+                    if tries > 3 || Instant::now() >= deadline {
                         errors.insert(ResolverError::Unreachable);
                         break Err(errors);
                     }
                     if tries > 1 {
-                        let wait = rng().random_range(1..12);
-                        time::sleep(Duration::from_secs(wait)).await
+                        let wait = Duration::from_secs(rng().random_range(1..12));
+                        time::sleep_until(min(deadline, Instant::now() + wait)).await
                     }
                     tries += 1;
                     let c = match con {
@@ -341,6 +369,7 @@ async fn connection(
                                 &desired_auth,
                                 &tls,
                                 &mut errors,
+                                deadline,
                             )
                             .await
                             {

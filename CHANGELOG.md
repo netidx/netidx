@@ -1,5 +1,13 @@
 # Unreleased
 
+- Fixed: a durable subscription reported `ResolveTimeout` rather than why
+  the resolver could not be used, because it stopped waiting after 40s while
+  the resolver client's own retry budget runs to about 70. The subscriber
+  gave up on the resolver before the resolver client did, so the answer it
+  reported was its own timeout. The resolver client now has an explicit
+  bound on how long a request can take, and the subscriber derives its wait
+  from that constant rather than from a number of its own.
+
 - **Breaking `netidx` API:** a failed resolver request carries a
   `ResolverErrors` set rather than a single `ResolverError`, because a
   cluster can fail for several reasons at once and each has a different

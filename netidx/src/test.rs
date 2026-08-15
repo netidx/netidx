@@ -2516,6 +2516,30 @@ mod errors {
         Ok(())
     }
 
+    /// And a subscription hears all of it. The subscriber has to outwait the
+    /// resolver client, or it answers its own question with `ResolveTimeout`
+    /// before the resolver client has said anything. Ignored for the same
+    /// reason as the test above.
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore]
+    async fn a_subscription_hears_the_reasons_not_a_timeout() -> Result<()> {
+        let _ = env_logger::try_init();
+        let ports = [free_port(), free_port()];
+        let server = start(tls_cluster(&ports, &[("/", "swlpd")]), 0).await;
+        let mut cfg = tls_client(&ports)?;
+        cfg.addrs[0].1 = Auth::Tls { name: literal!("wrong.example.com") };
+        let sub = subscriber(&cfg, DesiredAuth::Tls { identity: None })?;
+        let mut e = sub_errors(&sub);
+        let dv = sub.subscribe(Path::from("/app/v0"));
+        let want = errs(&[SubscribeError::ResolverUnreachable, SubscribeError::TlsError]);
+        match e.next(TO * 8).await {
+            None => panic!("never reported {want}, said {:?}", dv.last_error()),
+            Some((_, errors)) => assert_eq!(errors, want),
+        }
+        drop(server);
+        Ok(())
+    }
+
     /// A resolver we refuse to speak to is not a resolver that is down. The
     /// distinction is the whole point: retrying will never fix this one, and
     /// an operator told "unreachable" goes and checks the network.

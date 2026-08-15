@@ -13,7 +13,8 @@ use crate::{
     },
     publisher::PublishFlags,
     resolver_client::{
-        PublisherKey, PublisherTable, ResolverError, ResolverErrors, ResolverRead,
+        MAX_REQUEST, PublisherKey, PublisherTable, ResolverError, ResolverErrors,
+        ResolverRead,
     },
     tls,
     utils::{BatchItem, Batched, ChanWrap},
@@ -1268,8 +1269,12 @@ impl Subscriber {
                 for p in dead.iter().chain(batch.iter().map(|(p, _)| p)) {
                     durable_dead.remove(p);
                 }
-                let timeout = 30 + max(10, batch.len() / 10000) * max_tries;
-                (batch, Duration::from_secs(timeout as u64))
+                // the resolver client answers with why it failed, but only
+                // once it has spent its own budget. Waiting any less than
+                // that replaces the reasons with `ResolveTimeout`, which is
+                // the one answer a subscriber can do nothing with.
+                let extra = max(10, batch.len() / 10000) * max_tries;
+                (batch, MAX_REQUEST + Duration::from_secs(extra as u64))
             };
             if batch.len() == 0 {
                 let mut subscriber = subscriber.0.lock();
