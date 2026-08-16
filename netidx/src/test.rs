@@ -1937,7 +1937,7 @@ mod errors {
         config::Config as ClientConfig,
         protocol::resolver::Auth,
         publisher::{
-            BindCfg, DesiredAuth, Id, PublishError, PublishErrors, Publisher,
+            BindCfg, DesiredAuth, PublishError, PublishErrors, Publisher,
             PublisherBuilder,
         },
         resolver_client::{ResolverError, ResolverErrors, ResolverRead},
@@ -2121,7 +2121,7 @@ mod errors {
         Errors::new(rx)
     }
 
-    fn pub_errors(publisher: &Publisher) -> Errors<(Option<Id>, PublishErrors)> {
+    fn pub_errors(publisher: &Publisher) -> Errors<(Path, PublishErrors)> {
         let (tx, rx) = mpsc::channel(10);
         publisher.errors(tx);
         Errors::new(rx)
@@ -2134,7 +2134,7 @@ mod errors {
         buf: VecDeque<T>,
     }
 
-    impl<T: Copy + Debug + Send + Sync + 'static> Errors<T> {
+    impl<T: Debug + Send + Sync + 'static> Errors<T> {
         fn new(rx: mpsc::Receiver<GPooled<Vec<T>>>) -> Self {
             Self { rx, buf: VecDeque::new() }
         }
@@ -2350,16 +2350,18 @@ mod errors {
         while seen.len() < N {
             match e.next(TO).await {
                 None => panic!("only {} of {N} denied paths reported", seen.len()),
-                Some((id, errors)) => {
-                    let id = id.expect("a denied path is not a global condition");
+                Some((path, errors)) => {
                     assert_eq!(errors, gone);
-                    assert!(seen.insert(id), "{id:?} reported twice");
+                    assert!(seen.insert(path.clone()), "{path} reported twice");
                 }
             }
         }
-        assert_eq!(seen, denied.iter().map(|v| v.id()).collect::<HashSet<_>>());
+        let want: HashSet<Path> =
+            denied.iter().map(|v| pb.path(v.id()).unwrap()).collect();
+        assert_eq!(seen, want);
         for v in denied.iter() {
             assert_eq!(pb.publish_errors(v.id()), gone);
+            assert_eq!(pb.publish_errors_for_path(pb.path(v.id()).unwrap()), gone);
         }
         // the paths it could publish have nothing to say, and neither does
         // anything else once every reason has been given
@@ -2436,8 +2438,8 @@ mod errors {
         loop {
             match e.next(TO).await {
                 None => panic!("never reported {gone}"),
-                Some((id, errors)) => {
-                    assert_eq!(id, Some(v.id()));
+                Some((path, errors)) => {
+                    assert_eq!(path, pb.path(v.id()).unwrap());
                     if errors == gone {
                         break;
                     }
@@ -2570,10 +2572,68 @@ mod errors {
         Ok(())
     }
 
-    /// A resolver nobody can reach isn't about any one path, so it is said
-    /// once rather than a million times.
+    /// A `publish_default` base has no id — it is a claim on a subtree, not a
+    /// published value — so an id-keyed report would leave the one kind of
+    /// publisher that claims the most unable to hear that it was refused.
     #[tokio::test(flavor = "multi_thread")]
-    async fn an_unreachable_resolver_is_reported_once_for_everything() -> Result<()> {
+    async fn a_denied_default_publish_is_reported() -> Result<()> {
+        let _ = env_logger::try_init();
+        let port = free_port();
+        let server =
+            start(tls_cluster(&[port], &[("/", "swlpd"), ("/nopub", "!pd")]), 0).await;
+        let cfg = tls_client(&[port])?;
+        let pb = publisher(&cfg, DesiredAuth::Tls { identity: None }).await?;
+        let mut e = pub_errors(&pb);
+        let base = Path::from("/nopub");
+        let handle = pb.publish_default(base.clone())?;
+        pb.flushed().await;
+        let gone = perrs(&[PublishError::NotPublished, PublishError::Denied]);
+        assert_eq!(e.next(TO).await, Some((base.clone(), gone)));
+        assert_eq!(pb.publish_errors_for_path(&base), gone);
+        // and dropping the claim drops the condition with it, or it would be
+        // held against a base nobody is publishing
+        drop(handle);
+        assert_eq!(e.next(TO).await, Some((base.clone(), PublishErrors::default())));
+        assert_eq!(pb.publish_errors_for_path(&base), PublishErrors::default());
+        drop(server);
+        Ok(())
+    }
+
+    /// One value can be published under several names, and the resolver can
+    /// treat them differently. An id has one slot for what may be two
+    /// different answers.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_refused_alias_is_reported_against_the_alias() -> Result<()> {
+        let _ = env_logger::try_init();
+        let port = free_port();
+        let server =
+            start(tls_cluster(&[port], &[("/", "swlpd"), ("/nopub", "!p")]), 0).await;
+        let cfg = tls_client(&[port])?;
+        let pb = publisher(&cfg, DesiredAuth::Tls { identity: None }).await?;
+        let mut e = pub_errors(&pb);
+        let path = Path::from("/app/v0");
+        let alias = Path::from("/nopub/v0");
+        let v = pb.publish(path.clone(), 42i64)?;
+        pb.alias(v.id(), alias.clone())?;
+        pb.flushed().await;
+        let gone = perrs(&[PublishError::NotPublished, PublishError::Denied]);
+        assert_eq!(e.next(TO).await, Some((alias.clone(), gone)));
+        // the name that was refused is refused; the one that was not is not
+        assert_eq!(pb.publish_errors_for_path(&alias), gone);
+        assert_eq!(pb.publish_errors_for_path(&path), PublishErrors::default());
+        // and the value as a whole is degraded, because one of its names is
+        assert_eq!(pb.publish_errors(v.id()), gone);
+        e.expect_quiet().await;
+        drop(server);
+        Ok(())
+    }
+
+    /// A resolver nobody can reach is a fact about every path that resolver
+    /// was holding, and each one is named. Which of a publisher's paths a
+    /// given resolver holds is a property of the delegation hierarchy, so a
+    /// report about "everything" is one only the resolver client can decode.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_unreachable_resolver_is_reported_for_every_path() -> Result<()> {
         const N: usize = 20;
         let _ = env_logger::try_init();
         let port = free_port();
@@ -2585,30 +2645,56 @@ mod errors {
         let client = anon_client(&[port])?;
         let pb = publisher(&client, DesiredAuth::Anonymous).await?;
         let mut vals = Vec::new();
+        let mut published = HashSet::new();
         for i in 0..N {
-            vals.push(pb.publish(Path::from(format!("/app/v{i}")), 42i64)?);
+            let path = Path::from(format!("/app/v{i}"));
+            vals.push(pb.publish(path.clone(), 42i64)?);
+            published.insert(path);
         }
         pb.flushed().await;
         let mut e = pub_errors(&pb);
         drop(server);
         let gone =
             perrs(&[PublishError::NotPublished, PublishError::ResolverUnreachable]);
-        assert_eq!(e.next(TO).await, Some((None, gone)));
+        let mut seen = HashSet::new();
+        while seen.len() < N {
+            match e.next(TO).await {
+                None => panic!("only {} of {N} paths reported", seen.len()),
+                Some((path, errors)) => {
+                    assert_eq!(errors, gone);
+                    assert!(seen.insert(path.clone()), "{path} reported twice");
+                }
+            }
+        }
+        assert_eq!(seen, published);
         for v in vals.iter() {
             assert_eq!(pb.publish_errors(v.id()), gone);
         }
-        // a value published while nothing is reaching the resolver inherits it
-        let late = pb.publish(Path::from("/app/late"), 42i64)?;
-        assert_eq!(pb.publish_errors(late.id()), gone);
+        // a value published while nothing is reaching the resolver is born
+        // into that condition, and is told so by name — nothing else would
+        // tell it, because the member that would have answered is the one
+        // that is down
+        let late = Path::from("/app/late");
+        let late_val = pb.publish(late.clone(), 42i64)?;
+        assert_eq!(e.next(TO).await, Some((late.clone(), gone)));
+        assert_eq!(pb.publish_errors(late_val.id()), gone);
+        assert_eq!(pb.publish_errors_for_path(&late), gone);
         e.expect_quiet().await;
         let server = start(cfg, 0).await;
-        loop {
+        published.insert(late);
+        let mut seen = HashSet::new();
+        while seen.len() < N + 1 {
             match e.next(TO).await {
-                None => panic!("recovery was never reported"),
-                Some((None, errors)) if errors.is_empty() => break,
-                Some(i) => panic!("unexpected {i:?}"),
+                None => {
+                    panic!("only {} of {} recoveries reported", seen.len(), N + 1)
+                }
+                Some((path, errors)) => {
+                    assert_eq!(errors, PublishErrors::default());
+                    assert!(seen.insert(path.clone()), "{path} reported twice");
+                }
             }
         }
+        assert_eq!(seen, published);
         for v in vals.iter() {
             assert_eq!(pb.publish_errors(v.id()), PublishErrors::default());
         }
@@ -2643,8 +2729,9 @@ mod errors {
         let v = pb.publish(Path::from("/app/v0"), 42i64)?;
         pb.flushed().await;
         let want = perrs(&[PublishError::NotPublished, PublishError::LoopbackAddr]);
-        assert_eq!(e.next(TO).await, Some((None, want)));
+        assert_eq!(e.next(TO).await, Some((Path::from("/app/v0"), want)));
         assert_eq!(pb.publish_errors(v.id()), want);
+        assert_eq!(pb.publish_errors_for_path("/app/v0"), want);
         drop(server);
         Ok(())
     }

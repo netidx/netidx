@@ -1,5 +1,25 @@
 # Unreleased
 
+- **Breaking `netidx` API:** `Publisher::errors` reports
+  `(Path, PublishErrors)` rather than `(Option<Id>, PublishErrors)`, where
+  `None` used to mean "every published value". A resolver we cannot reach is
+  now named against each path that resolver was holding. The compressed form
+  could not be decoded by the one it was for: with a delegated hierarchy the
+  publisher would have to know which referral holds which of its paths to
+  work out what "everything" covered, and hiding that is most of the point
+  of netidx. It also could not say anything about a
+  `Publisher::publish_default` base, which has no id, nor distinguish an
+  alias the resolver refused from the value's own path, which does have one
+  but shares it. `Publisher::publish_errors` still takes an `Id`, and now
+  answers for the value's path and all of its aliases;
+  `Publisher::publish_errors_for_path` asks about a single name.
+
+- Fixed: a path published while no resolver was reachable was never told so.
+  The publish loop waits on the publish it just issued, which does not
+  return until a resolver is reachable, so it could not deliver conditions
+  while it waited. Recording what the resolver client says is now its own
+  task.
+
 - Fixed: a durable subscription reported `ResolveTimeout` rather than why
   the resolver could not be used, because it stopped waiting after 40s while
   the resolver client's own retry budget runs to about 70. The subscriber

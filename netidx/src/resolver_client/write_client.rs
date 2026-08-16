@@ -37,6 +37,7 @@ use std::{
     cmp::max,
     fmt::Debug,
     hash::BuildHasherDefault,
+    mem,
     net::SocketAddr,
     sync::{Arc, LazyLock},
     time::Duration,
@@ -53,8 +54,15 @@ use tokio::{
 
 const TTL: u64 = 120;
 
+/// How many events go in one batch, and equally the pool's bound — a batch
+/// that grows past it is dropped instead of cached, so the two must agree.
+///
+/// A publisher with a million paths absorbs a cluster-wide change in chunks
+/// this size, each one a separate short hold of the publisher lock.
+const EVENT_CHUNK: usize = 10_000;
+
 static WRITE_EVENTS: LazyLock<Pool<Vec<WriteEvent>>> =
-    LazyLock::new(|| Pool::new(64, 10_000));
+    LazyLock::new(|| Pool::new(64, EVENT_CHUNK));
 static OUTCOMES: LazyLock<Pool<Vec<(Path, Option<PublishError>)>>> =
     LazyLock::new(|| Pool::new(64, 10_000));
 
@@ -68,16 +76,16 @@ struct ToCon {
     replies: Mutex<Vec<oneshot::Sender<Response<FromWrite>>>>,
 }
 
-/// A change in what the cluster is doing with a path, or with everything this
-/// publisher has published.
+/// A change in what the cluster is doing with a path.
 ///
-/// `path` is `None` for a condition that isn't tied to one path — a member we
-/// can't reach, a heartbeat reconnect refused — which is exactly the claim
-/// that every published path gained that error, made without emitting a
-/// million identical items.
+/// Everything is said about a path, including what is true of every path —
+/// a member we can't reach is expanded here rather than passed up as a claim
+/// about "everything", because only this side knows what everything is. Which
+/// paths a referral holds is exactly the geometry the publisher must not have
+/// to know.
 #[derive(Debug, Clone)]
 pub(crate) struct WriteEvent {
-    pub(crate) path: Option<Path>,
+    pub(crate) path: Path,
     pub(crate) errors: PublishErrors,
 }
 
@@ -835,15 +843,19 @@ struct Aggregate {
     /// paths some member refused, and which members refused them. Empty in
     /// the healthy case.
     refused: AHashMap<Path, AHashMap<SocketAddr, PublishError>>,
-    /// what we last told the publisher, so that only changes are sent
+    /// the global condition as of the last report. When this moves every
+    /// path's condition moves with it, which is the only thing that makes us
+    /// walk the whole publish set.
     last_global: PublishErrors,
+    /// the paths this connection asserts, which is what "everything" means
+    published: Published,
     events: Option<mpsc::UnboundedSender<GPooled<Vec<WriteEvent>>>>,
 }
 
 impl Aggregate {
-    /// The condition of a path: the union of what refused it, plus
-    /// `NotPublished` if nobody who could have accepted it did.
-    fn state(&self, path: &Path, live: usize) -> PublishErrors {
+    /// What refused `path`, plus `NotPublished` if nobody who could have
+    /// accepted it did.
+    fn refusals(&self, path: &Path, live: usize) -> PublishErrors {
         let mut errors = PublishErrors::default();
         let refused = match self.refused.get(path) {
             None => return errors,
@@ -862,8 +874,8 @@ impl Aggregate {
         errors
     }
 
-    /// The condition of every published path: the union of why members are
-    /// unusable, plus `NotPublished` if none of them is left.
+    /// True of every published path: the union of why members are unusable,
+    /// plus `NotPublished` if none of them is left.
     fn global(&self, live: usize) -> PublishErrors {
         let mut errors = PublishErrors::default();
         for e in self.members.values() {
@@ -872,6 +884,19 @@ impl Aggregate {
         if !errors.is_empty() && self.members.len() >= live {
             errors.insert(PublishError::NotPublished)
         }
+        errors
+    }
+
+    /// Everything true of `path`: what refused it, and what is true of
+    /// everything.
+    fn condition(
+        &self,
+        path: &Path,
+        live: usize,
+        global: PublishErrors,
+    ) -> PublishErrors {
+        let mut errors = self.refusals(path, live);
+        errors.insert(global.0);
         errors
     }
 
@@ -884,27 +909,68 @@ impl Aggregate {
         }
     }
 
+    /// Add to `batch`, sending it on whenever it fills, so that a change to
+    /// everything arrives as many small batches rather than one enormous one.
+    fn emit(&mut self, batch: &mut GPooled<Vec<WriteEvent>>, ev: WriteEvent) {
+        if batch.len() >= EVENT_CHUNK {
+            let full = mem::replace(batch, WRITE_EVENTS.take());
+            self.send(full)
+        }
+        batch.push(ev)
+    }
+
+    /// Say what every published path's condition is, because something moved
+    /// under all of them.
+    fn emit_all(&mut self, live: usize, global: PublishErrors) {
+        let mut batch = WRITE_EVENTS.take();
+        let published = self.published.clone();
+        for path in published.read().keys() {
+            let errors = self.condition(path, live, global);
+            self.emit(&mut batch, WriteEvent { path: path.clone(), errors })
+        }
+        self.send(batch)
+    }
+
     /// The condition of every refused path, to be compared against after
     /// something that changes what refusals mean.
     fn snapshot(&self, live: usize) -> LPooled<Vec<(Path, PublishErrors)>> {
-        self.refused.keys().map(|p| (p.clone(), self.state(p, live))).collect()
+        let global = self.global(live);
+        self.refused
+            .keys()
+            .map(|p| (p.clone(), self.condition(p, live, global)))
+            .collect()
     }
 
-    /// Report what changed since `before`, and the global condition if that
-    /// changed too. Nothing a member does can add a path to `refused`, so
-    /// `before` covers everything that could have moved.
+    /// Report what changed since `before` — or every path, if what changed
+    /// was the global condition. Nothing a member does can add a path to
+    /// `refused`, so `before` covers everything else that could have moved.
     fn settle(&mut self, before: LPooled<Vec<(Path, PublishErrors)>>, live: usize) {
-        let mut batch = WRITE_EVENTS.take();
-        for (path, was) in before.iter() {
-            let now = self.state(path, live);
-            if now != *was {
-                batch.push(WriteEvent { path: Some(path.clone()), errors: now })
-            }
-        }
         let global = self.global(live);
         if global != self.last_global {
             self.last_global = global;
-            batch.push(WriteEvent { path: None, errors: global })
+            return self.emit_all(live, global);
+        }
+        let mut batch = WRITE_EVENTS.take();
+        for (path, was) in before.iter() {
+            let now = self.condition(path, live, global);
+            if now != *was {
+                self.emit(&mut batch, WriteEvent { path: path.clone(), errors: now })
+            }
+        }
+        self.send(batch)
+    }
+
+    /// Give paths we have just been asked to publish the condition they are
+    /// born into. Nothing else would tell them: the members that would have
+    /// answered for them are the ones that are down.
+    fn note_published(&mut self, paths: &mut LPooled<Vec<Path>>, live: usize) {
+        let global = self.global(live);
+        let mut batch = WRITE_EVENTS.take();
+        for path in paths.drain(..) {
+            let errors = self.condition(&path, live, global);
+            if !errors.is_empty() {
+                self.emit(&mut batch, WriteEvent { path, errors })
+            }
         }
         self.send(batch)
     }
@@ -922,9 +988,18 @@ impl Aggregate {
                 self.settle(before, live)
             }
             ConEvent::Outcome(addr, mut outcomes) => {
+                let global = self.global(live);
                 let mut batch = WRITE_EVENTS.take();
+                let published = self.published.clone();
+                let published = published.read();
                 for (path, outcome) in outcomes.drain(..) {
-                    let before = self.state(&path, live);
+                    // a path we have since unpublished has no condition, and
+                    // keeping one would leave an entry nothing can ever clear
+                    if !published.contains_key(&path) {
+                        self.refused.remove(&path);
+                        continue;
+                    }
+                    let before = self.condition(&path, live, global);
                     match outcome {
                         Some(e) => {
                             self.refused
@@ -941,9 +1016,9 @@ impl Aggregate {
                             }
                         }
                     }
-                    let after = self.state(&path, live);
+                    let after = self.condition(&path, live, global);
                     if after != before {
-                        batch.push(WriteEvent { path: Some(path), errors: after })
+                        self.emit(&mut batch, WriteEvent { path, errors: after })
                     }
                 }
                 self.send(batch)
@@ -969,6 +1044,7 @@ async fn write_mgr(
         members: AHashMap::default(),
         refused: AHashMap::default(),
         last_global: PublishErrors::default(),
+        published: published.clone(),
         events,
     };
     let mut live: LPooled<Vec<Live>> = LPooled::take();
@@ -1016,6 +1092,11 @@ async fn write_mgr(
         // fell behind the broadcast, or because it doesn't exist yet — still
         // finds it here when it connects, which is the only way it could ever
         // learn.
+        let mut fresh: LPooled<Vec<Path>> = LPooled::take();
+        // nothing can yet be true of a path nobody has answered for, unless
+        // something is already true of all of them, so in the healthy case
+        // this costs nothing
+        let note = !agg.last_global.is_empty();
         {
             let mut published = published.write();
             for (_, m) in batch.iter() {
@@ -1025,6 +1106,9 @@ async fn write_mgr(
                     | ToWrite::PublishWithFlags(p, _)
                     | ToWrite::PublishDefaultWithFlags(p, _) => {
                         published.insert(p.clone(), m.clone());
+                        if note {
+                            fresh.push(p.clone())
+                        }
                     }
                     ToWrite::Unpublish(p) | ToWrite::UnpublishDefault(p) => {
                         published.swap_remove(p);
@@ -1034,6 +1118,7 @@ async fn write_mgr(
                 }
             }
         }
+        agg.note_published(&mut fresh, live.len());
         let mut replies = vec![];
         let mut waiters = vec![];
         for _ in live.iter() {

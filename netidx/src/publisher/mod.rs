@@ -27,7 +27,6 @@ use futures::{
         oneshot,
     },
     prelude::*,
-    select_biased,
     stream::FusedStream,
 };
 use if_addrs::get_if_addrs;
@@ -312,7 +311,7 @@ static RAWUNSUBS: LazyLock<Pool<Vec<(ClId, Id)>>> =
 static UNSUBS: LazyLock<Pool<Vec<Id>>> = LazyLock::new(|| Pool::new(100, 10_000));
 static BATCH: LazyLock<Pool<IntMap<ClId, Update>>> =
     LazyLock::new(|| Pool::new(100, 1000));
-static PUB_ERRORS: LazyLock<Pool<Vec<(Option<Id>, PublishErrors)>>> =
+static PUB_ERRORS: LazyLock<Pool<Vec<(Path, PublishErrors)>>> =
     LazyLock::new(|| Pool::new(64, 10_000));
 
 /// Why the resolver would not publish a path.
@@ -842,6 +841,7 @@ impl DefaultHandle {
                 }
             };
             if removed && !pbl.by_path.contains_key(path) {
+                pbl.record_error(path.clone(), PublishErrors::default());
                 pbl.to_unpublish.insert(path.clone());
                 pbl.to_publish.remove(path);
                 pbl.trigger_publish()
@@ -855,10 +855,12 @@ impl Drop for DefaultHandle {
         if let Some(t) = self.publisher.upgrade() {
             let mut pb = t.0.lock();
             pb.default.remove(self.path.as_ref());
+            pb.record_error(self.path.clone(), PublishErrors::default());
             pb.to_unpublish_default.insert(self.path.clone());
             if let Some(paths) = pb.advertised.remove(&self.path) {
                 for path in paths {
                     if !pb.by_path.contains_key(&path) {
+                        pb.record_error(path.clone(), PublishErrors::default());
                         pb.to_publish.remove(&path);
                         pb.to_unpublish.insert(path);
                     }
@@ -1047,38 +1049,37 @@ struct PublisherInner {
     wait_clients: AHashMap<Id, Vec<oneshot::Sender<()>>>,
     wait_any_client: Vec<oneshot::Sender<()>>,
     default: BTreeMap<Path, UnboundedSender<(Path, oneshot::Sender<()>)>>,
-    /// ids the resolver is not holding as we asked. Empty in the happy path.
-    failing: IntMap<Id, PublishErrors>,
-    /// what applies to every published value, e.g. a resolver we can't reach
-    global_errors: PublishErrors,
-    error_chans: Vec<Sender<GPooled<Vec<(Option<Id>, PublishErrors)>>>>,
+    /// paths the resolver is not holding as we asked. Empty in the happy path.
+    failing: AHashMap<Path, PublishErrors>,
+    error_chans: Vec<Sender<GPooled<Vec<(Path, PublishErrors)>>>>,
     /// staged under this lock, sent by the error task, which is the only
     /// place that can wait on a slow consumer without stalling publishing
-    pending_errors: GPooled<Vec<(Option<Id>, PublishErrors)>>,
+    pending_errors: GPooled<Vec<(Path, PublishErrors)>>,
     error_notify: Sender<()>,
 }
 
 impl PublisherInner {
-    /// Record that `key`'s error set is now `errors`, if it changed. A
+    /// Record that `path`'s error set is now `errors`, if it changed. A
     /// publisher restates its whole publish set on every heartbeat, so level
     /// triggering would emit one denied path forever.
-    fn record_error(&mut self, key: Option<Id>, errors: PublishErrors) {
-        let changed = match key {
-            None => {
-                let changed = self.global_errors != errors;
-                self.global_errors = errors;
-                changed
-            }
-            Some(id) => {
-                if errors.is_empty() {
-                    self.failing.remove(&id).is_some()
-                } else {
-                    self.failing.insert(id, errors) != Some(errors)
+    fn record_error(&mut self, path: Path, errors: PublishErrors) {
+        let changed = if errors.is_empty() {
+            self.failing.remove(&path).is_some()
+        } else {
+            match self.failing.get_mut(&path) {
+                Some(e) if *e == errors => false,
+                Some(e) => {
+                    *e = errors;
+                    true
+                }
+                None => {
+                    self.failing.insert(path.clone(), errors);
+                    true
                 }
             }
         };
         if changed && !self.error_chans.is_empty() {
-            self.pending_errors.push((key, errors));
+            self.pending_errors.push((path, errors));
             // a queued notification already says "there is work"
             let _ = self.error_notify.try_send(());
         }
@@ -1124,11 +1125,11 @@ impl PublisherInner {
 
     fn destroy_val(&mut self, id: Id) {
         if let Some(pbl) = self.by_id.remove(&id) {
-            // a value nobody asked us to publish any more has no condition
-            self.record_error(Some(id), PublishErrors::default());
             let path = pbl.path;
             for path in iter::once(&path).chain(pbl.aliases.iter().flat_map(|v| v.iter()))
             {
+                // a name nobody asked us to publish any more has no condition
+                self.record_error(path.clone(), PublishErrors::default());
                 self.unpublish(path)
             }
             self.wait_clients.remove(&id);
@@ -1442,8 +1443,7 @@ impl Publisher {
             wait_clients: AHashMap::default(),
             wait_any_client: Vec::new(),
             default: BTreeMap::new(),
-            failing: IntMap::default(),
-            global_errors: PublishErrors::default(),
+            failing: AHashMap::default(),
             error_chans: Vec::new(),
             pending_errors: PUB_ERRORS.take(),
             error_notify,
@@ -1467,10 +1467,19 @@ impl Publisher {
         task::spawn({
             let pb_weak = pb.downgrade();
             async move {
-                publish_loop(pb_weak, rx_trigger, write_events).await;
+                publish_loop(pb_weak, rx_trigger).await;
                 info!("publish loop shutdown")
             }
         });
+        if let Some(write_events) = write_events {
+            task::spawn({
+                let pb_weak = pb.downgrade();
+                async move {
+                    record_loop(pb_weak, write_events).await;
+                    info!("publisher record loop shutdown")
+                }
+            });
+        }
         task::spawn({
             let pb_weak = pb.downgrade();
             async move {
@@ -1960,14 +1969,13 @@ impl Publisher {
         self.0.lock().on_event_by_id_chans.entry(id).or_insert(vec![]).push(tx);
     }
 
-    /// Register a channel to receive errors about published values.
+    /// Register a channel to receive errors about published paths.
     ///
-    /// An item is sent whenever the condition of a published value changes.
-    /// `None` in place of an id means the errors apply to *every* published
-    /// value — a resolver we can't reach isn't about any one path, and saying
-    /// so once beats saying it a million times. An id's effective condition is
-    /// therefore the global set or'd with its own, which
-    /// [`publish_errors`](Publisher::publish_errors) will do for you.
+    /// An item is sent whenever a path's condition changes, and it names every
+    /// path that is affected. A resolver we can't reach is therefore reported
+    /// against each path it was holding, not once against "everything" —
+    /// which of your paths a given resolver holds depends on the delegation
+    /// hierarchy, and that is precisely what you should not have to know.
     ///
     /// An empty set means published with nothing wrong. A set without
     /// `NotPublished` means published, but at least one resolver refused it.
@@ -1975,19 +1983,35 @@ impl Publisher {
     /// The set is a classification. Which resolver said what is in the log.
     ///
     /// Drop the channel to stop receiving.
-    pub fn errors(&self, tx: Sender<GPooled<Vec<(Option<Id>, PublishErrors)>>>) {
+    pub fn errors(&self, tx: Sender<GPooled<Vec<(Path, PublishErrors)>>>) {
         self.0.lock().error_chans.push(tx)
     }
 
-    /// The condition of a published value, including anything that applies to
-    /// every published value.
+    /// The condition of a published value: everything true of its path, or of
+    /// any of its aliases.
     pub fn publish_errors(&self, id: Id) -> PublishErrors {
         let t = self.0.lock();
-        let mut errors = t.global_errors;
-        if let Some(e) = t.failing.get(&id) {
-            errors.insert(e.0)
+        let mut errors = PublishErrors::default();
+        if let Some(pbl) = t.by_id.get(&id) {
+            let paths =
+                iter::once(&pbl.path).chain(pbl.aliases.iter().flat_map(|v| v.iter()));
+            for path in paths {
+                if let Some(e) = t.failing.get(path) {
+                    errors.insert(e.0)
+                }
+            }
         }
         errors
+    }
+
+    /// The condition of one published path.
+    ///
+    /// Unlike [`publish_errors`](Publisher::publish_errors) this asks about a
+    /// single name, which is the only way to ask about an alias the resolver
+    /// treated differently from the value's own path, or about a
+    /// [`publish_default`](Publisher::publish_default) base, which has no id.
+    pub fn publish_errors_for_path<S: AsRef<str>>(&self, path: S) -> PublishErrors {
+        self.0.lock().failing.get(path.as_ref()).copied().unwrap_or_default()
     }
 }
 
@@ -2017,7 +2041,7 @@ async fn error_loop(publisher: PublisherWeak, mut notify: Receiver<()>) {
             };
             for c in chans.iter_mut() {
                 let mut b = PUB_ERRORS.take();
-                b.extend_from_slice(&batch);
+                b.extend(batch.iter().cloned());
                 let _ = c.send(b).await;
             }
             if let Some(p) = publisher.upgrade() {
@@ -2027,48 +2051,37 @@ async fn error_loop(publisher: PublisherWeak, mut notify: Receiver<()>) {
     }
 }
 
-async fn next_write_event(
-    events: &mut Option<UnboundedReceiver<GPooled<Vec<WriteEvent>>>>,
-) -> Option<GPooled<Vec<WriteEvent>>> {
-    match events {
-        None => future::pending().await,
-        Some(events) => events.next().await,
+/// Record what the resolver client says about our paths.
+///
+/// Its own task rather than an arm of `publish_loop`, because that loop waits
+/// on the very thing being reported about: a publish issued while no resolver
+/// is reachable does not return until one is, and a path published into an
+/// outage would learn its condition only once the outage was over.
+async fn record_loop(
+    publisher: PublisherWeak,
+    mut events: UnboundedReceiver<GPooled<Vec<WriteEvent>>>,
+) {
+    while let Some(mut batch) = events.next().await {
+        match publisher.upgrade() {
+            None => break,
+            Some(publisher) => {
+                let mut pb = publisher.0.lock();
+                for ev in batch.drain(..) {
+                    pb.record_error(ev.path, ev.errors)
+                }
+            }
+        }
     }
 }
 
 async fn publish_loop(
     publisher: PublisherWeak,
     mut trigger_rx: UnboundedReceiver<Option<oneshot::Sender<()>>>,
-    mut write_events: Option<UnboundedReceiver<GPooled<Vec<WriteEvent>>>>,
 ) {
     loop {
-        // publishing wins: a flood of error events must not delay it
-        let reply = select_biased! {
-            reply = trigger_rx.next().fuse() => match reply {
-                None => break,
-                Some(reply) => reply,
-            },
-            ev = next_write_event(&mut write_events).fuse() => {
-                match ev {
-                    // the resolver client is gone; it can say nothing more
-                    None => write_events = None,
-                    Some(mut batch) => if let Some(publisher) = publisher.upgrade() {
-                        let mut pb = publisher.0.lock();
-                        for ev in batch.drain(..) {
-                            let id = match ev.path {
-                                None => None,
-                                Some(path) => match pb.by_path.get(&path) {
-                                    // a path we no longer publish
-                                    None => continue,
-                                    Some(id) => Some(*id),
-                                },
-                            };
-                            pb.record_error(id, ev.errors)
-                        }
-                    },
-                }
-                continue
-            },
+        let reply = match trigger_rx.next().await {
+            None => break,
+            Some(reply) => reply,
         };
         if let Some(publisher) = publisher.upgrade() {
             let mut to_publish;
