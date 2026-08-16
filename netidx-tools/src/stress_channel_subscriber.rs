@@ -47,6 +47,7 @@ async fn run_client(config: Config, auth: DesiredAuth, p: Params) -> Result<()> 
         Some(Duration::from_micros(p.delay))
     };
     let subscriber = Subscriber::new(config, auth)?;
+    crate::log_errors::subscriber(&subscriber);
     let mut interval = time::interval(Duration::from_secs(1));
     let mut delay_interval = time::interval(delay.unwrap_or(Duration::from_secs(1)));
     let con = Arc::new(Connection::connect(&subscriber, p.base.clone()).await?);

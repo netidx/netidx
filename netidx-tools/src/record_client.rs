@@ -303,11 +303,13 @@ pub(super) async fn run(cmd: Cmd) -> Result<()> {
         Cmd::Oneshot { common, params } => {
             let (cfg, auth) = common.load();
             let subscriber = Subscriber::new(cfg, auth).context("create subscriber")?;
+            crate::log_errors::subscriber(&subscriber);
             oneshot(subscriber, params).await
         }
         Cmd::Session { common, params } => {
             let (cfg, auth) = common.load();
             let subscriber = Subscriber::new(cfg, auth).context("create subscriber")?;
+            crate::log_errors::subscriber(&subscriber);
             session(subscriber, params).await
         }
         Cmd::Compress { file, window, keep } => {

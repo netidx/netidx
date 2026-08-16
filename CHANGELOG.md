@@ -66,7 +66,7 @@
   now means the member may not have heard us, not that it disagreed.
 
 - Subscribers can find out why a durable subscription isn't subscribed.
-  `Subscriber::errors` takes a channel that reports `(SubId,
+  `Subscriber::errors` takes a channel that reports `(Path,
   SubscribeErrors)` whenever a `Dval`'s error set changes — the union of
   everything that has gone wrong since it last succeeded, or the empty set
   when it resubscribes — and `Dval::last_error` asks about one
@@ -74,6 +74,13 @@
   `NoSuchValue`, `ConnectionLost`, `ResolverDenied`, `NotFound`, ...); the
   log still carries the diagnosis. Nothing else changes: `subscriber::Event`
   and therefore the archive record format are untouched.
+
+- The command line tools report both of the above on stderr. A path the
+  resolver will not hold, or a subscription that is not subscribed, is logged
+  at `error` — visible with no `RUST_LOG` set, since env_logger's default
+  filter is `error` — and named by path. Recovery is logged at `info`. Before
+  this, a `netidx publisher` whose paths the resolver refused printed nothing
+  and looked exactly like one that was working.
 
 - **Breaking `netidx` API:** `ResolverRead::resolve` returns a `Result` per
   path instead of failing the whole batch on the first refusal. Previously a

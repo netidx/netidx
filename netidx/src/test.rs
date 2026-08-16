@@ -1945,9 +1945,7 @@ mod errors {
             Server,
             config::{Config as ServerConfig, PMap, file as sfile},
         },
-        subscriber::{
-            SubId, SubscribeError, SubscribeErrors, Subscriber, SubscriberBuilder,
-        },
+        subscriber::{SubscribeError, SubscribeErrors, Subscriber, SubscriberBuilder},
     };
     use anyhow::Result;
     use arcstr::{ArcStr, literal};
@@ -2119,7 +2117,7 @@ mod errors {
         SubscriberBuilder::new(cfg.clone()).desired_auth(auth).build()
     }
 
-    fn sub_errors(subscriber: &Subscriber) -> Errors<(SubId, SubscribeErrors)> {
+    fn sub_errors(subscriber: &Subscriber) -> Errors<(Path, SubscribeErrors)> {
         let (tx, rx) = mpsc::channel(10);
         subscriber.errors(tx);
         Errors::new(rx)
@@ -2200,18 +2198,20 @@ mod errors {
         pb.flushed().await;
         let subscriber = subscriber(&cfg, auth)?;
         let mut e = sub_errors(&subscriber);
-        let denied = subscriber.subscribe(Path::from("/denied/x"));
-        let allowed = subscriber.subscribe(Path::from("/app/v0"));
+        let denied_path = Path::from("/denied/x");
+        let allowed_path = Path::from("/app/v0");
+        let denied = subscriber.subscribe(denied_path.clone());
+        let allowed = subscriber.subscribe(allowed_path.clone());
         time::timeout(TO, allowed.wait_subscribed()).await??;
         loop {
             match e.next(TO).await {
                 None => panic!("the denied subscription never reported"),
-                Some((id, errors)) if id == denied.id() => {
+                Some((path, errors)) if path == denied_path => {
                     assert_eq!(errors, errs(&[SubscribeError::ResolverDenied]));
                     break;
                 }
-                Some((id, errors)) => {
-                    assert_eq!(id, allowed.id());
+                Some((path, errors)) => {
+                    assert_eq!(path, allowed_path);
                     assert!(!errors.is_empty(), "a healthy sub said nothing was wrong")
                 }
             }
@@ -2234,7 +2234,8 @@ mod errors {
         let v = pb.publish(Path::from("/app/v0"), 42i64)?;
         pb.flushed().await;
         let subscriber = subscriber(&cfg, DesiredAuth::Anonymous)?;
-        let d = subscriber.subscribe(Path::from("/app/v0"));
+        let path = Path::from("/app/v0");
+        let d = subscriber.subscribe(path.clone());
         time::timeout(TO, d.wait_subscribed()).await??;
         assert_eq!(d.last_error(), None);
         let mut e = sub_errors(&subscriber);
@@ -2243,7 +2244,7 @@ mod errors {
         pb.shutdown().await;
         assert_eq!(
             e.next(TO).await,
-            Some((d.id(), errs(&[SubscribeError::ConnectionLost])))
+            Some((path.clone(), errs(&[SubscribeError::ConnectionLost])))
         );
         drop(v);
         // the union grows as the retries discover more, and every new reason
@@ -2252,8 +2253,8 @@ mod errors {
         while !last.contains(SubscribeError::NotFound) {
             match e.next(TO).await {
                 None => panic!("the publisher is gone and it never said so: {last}"),
-                Some((id, errors)) => {
-                    assert_eq!(id, d.id());
+                Some((p, errors)) => {
+                    assert_eq!(p, path);
                     assert!(errors.0.contains(last.0), "{last} is not kept by {errors}");
                     assert_ne!(errors, last);
                     last = errors;
@@ -2276,16 +2277,14 @@ mod errors {
         let v = pb.publish(Path::from("/app/v0"), 42i64)?;
         pb.flushed().await;
         let subscriber = subscriber(&cfg, DesiredAuth::Anonymous)?;
-        let d = subscriber.subscribe(Path::from("/app/v0"));
+        let path = Path::from("/app/v0");
+        let d = subscriber.subscribe(path.clone());
         time::timeout(TO, d.wait_subscribed()).await??;
         let mut e = sub_errors(&subscriber);
         // the publisher stays up, it just stops publishing this
         drop(v);
         pb.flushed().await;
-        assert_eq!(
-            e.next(TO).await,
-            Some((d.id(), errs(&[SubscribeError::Unpublished])))
-        );
+        assert_eq!(e.next(TO).await, Some((path, errs(&[SubscribeError::Unpublished]))));
         drop((pb, server));
         Ok(())
     }
@@ -2300,13 +2299,14 @@ mod errors {
         let v = pb.publish(Path::from("/app/v0"), 42i64)?;
         pb.flushed().await;
         let subscriber = subscriber(&cfg, DesiredAuth::Anonymous)?;
-        let d = subscriber.subscribe(Path::from("/app/v0"));
+        let path = Path::from("/app/v0");
+        let d = subscriber.subscribe(path.clone());
         time::timeout(TO, d.wait_subscribed()).await??;
         let mut e = sub_errors(&subscriber);
         pb.shutdown().await;
         assert_eq!(
             e.next(TO).await,
-            Some((d.id(), errs(&[SubscribeError::ConnectionLost])))
+            Some((path.clone(), errs(&[SubscribeError::ConnectionLost])))
         );
         drop(v);
         let pb = publisher(&cfg, DesiredAuth::Anonymous).await?;
@@ -2316,8 +2316,8 @@ mod errors {
         loop {
             match e.next(TO).await {
                 None => panic!("recovery was never reported"),
-                Some((id, errors)) => {
-                    assert_eq!(id, d.id());
+                Some((p, errors)) => {
+                    assert_eq!(p, path);
                     if errors.is_empty() {
                         break;
                     }
@@ -2787,22 +2787,23 @@ mod errors {
         }
         pb.flushed().await;
         let subscriber = subscriber(&cfg, DesiredAuth::Anonymous)?;
-        let dvals = (0..N)
-            .map(|i| subscriber.subscribe(Path::from(format!("/app/v{i}"))))
-            .collect::<Vec<_>>();
+        let paths =
+            (0..N).map(|i| Path::from(format!("/app/v{i}"))).collect::<HashSet<_>>();
+        let dvals =
+            paths.iter().map(|p| subscriber.subscribe(p.clone())).collect::<Vec<_>>();
         for d in dvals.iter() {
             time::timeout(TO, d.wait_subscribed()).await??;
         }
         let mut e = sub_errors(&subscriber);
         pb.shutdown().await;
-        let mut lost: HashSet<SubId> = HashSet::new();
+        let mut lost: HashSet<Path> = HashSet::new();
         while lost.len() < N {
             match e.next(TO).await {
                 None => panic!("only {} of {N} subscriptions reported", lost.len()),
-                Some((id, errors)) => {
+                Some((path, errors)) => {
                     // the death itself is what every one of them reports
                     // first; a retry may have found more by now
-                    if lost.insert(id) {
+                    if lost.insert(path) {
                         assert_eq!(errors, errs(&[SubscribeError::ConnectionLost]))
                     } else {
                         assert!(errors.contains(SubscribeError::ConnectionLost))
@@ -2810,7 +2811,7 @@ mod errors {
                 }
             }
         }
-        assert_eq!(lost, dvals.iter().map(|d| d.id()).collect::<HashSet<_>>());
+        assert_eq!(lost, paths);
         drop(vals);
         drop(server);
         Ok(())

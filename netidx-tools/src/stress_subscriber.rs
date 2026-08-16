@@ -24,6 +24,7 @@ pub(super) async fn run(config: Config, auth: DesiredAuth, p: Params) -> Result<
     let r = ResolverRead::new(config.clone(), auth.clone());
     let table = r.table(Path::from(p.base)).await.context("load table")?;
     let subscriber = Subscriber::new(config, auth).context("create subscriber")?;
+    crate::log_errors::subscriber(&subscriber);
     let subs = {
         let mut subs = Vec::with_capacity(table.rows.len() * table.cols.len());
         for row in table.rows.iter() {

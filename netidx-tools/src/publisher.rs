@@ -85,6 +85,7 @@ pub(super) async fn run(config: Config, auth: DesiredAuth, params: Params) -> Re
         .build()
         .await
         .context("creating publisher")?;
+    crate::log_errors::publisher(&publisher);
     let (writes_tx, writes_rx) = mpsc::channel(100);
     let mut buf = String::new();
     let mut stdin = BufReader::new(stdin());

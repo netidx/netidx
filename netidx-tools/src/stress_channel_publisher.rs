@@ -79,6 +79,7 @@ async fn run_publisher(config: Config, auth: DesiredAuth, p: Params) -> Result<(
         .build()
         .await
         .context("create publisher")?;
+    crate::log_errors::publisher(&publisher);
     let mut listener = Listener::new(&publisher, None, p.base.clone()).await?;
     loop {
         let client = listener.accept().await?;

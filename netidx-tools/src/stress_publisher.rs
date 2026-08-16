@@ -34,6 +34,7 @@ async fn run_publisher(config: Config, auth: DesiredAuth, p: Params) -> Result<(
         .build()
         .await
         .context("failed to create publisher")?;
+    crate::log_errors::publisher(&publisher);
     let mut sent: usize = 0;
     let mut published = {
         let mut published = Vec::with_capacity(p.rows * p.cols);
