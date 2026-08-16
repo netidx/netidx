@@ -1,24 +1,14 @@
 # Unreleased
 
-- **Breaking `netidx` API:** `Publisher::errors` reports
-  `(Path, PublishErrors)` rather than `(Option<Id>, PublishErrors)`, where
-  `None` used to mean "every published value". A resolver we cannot reach is
-  now named against each path that resolver was holding. The compressed form
-  could not be decoded by the one it was for: with a delegated hierarchy the
-  publisher would have to know which referral holds which of its paths to
-  work out what "everything" covered, and hiding that is most of the point
-  of netidx. It also could not say anything about a
-  `Publisher::publish_default` base, which has no id, nor distinguish an
-  alias the resolver refused from the value's own path, which does have one
-  but shares it. `Publisher::publish_errors` still takes an `Id`, and now
-  answers for the value's path and all of its aliases;
-  `Publisher::publish_errors_for_path` asks about a single name.
-
-- Fixed: a path published while no resolver was reachable was never told so.
-  The publish loop waits on the publish it just issued, which does not
-  return until a resolver is reachable, so it could not deliver conditions
-  while it waited. Recording what the resolver client says is now its own
-  task.
+- A resolver that authenticates a publisher and then cannot decide what it is
+  allowed to do now refuses it with `WriteRefusal::Unauthorized` instead of
+  dropping the socket. A clean handshake followed by a close is
+  indistinguishable from the resolver going away, so the publisher reported
+  `ResolverUnreachable` and retried forever — sending the operator to look at
+  the network for a problem in the user database, usually an id map that is
+  not answering. The publisher reports it as `PublishError::Unauthorized`. The
+  kerberos path looked up the user *after* sending the hello, which is past
+  the last point a reason can be attached, so it now does so before.
 
 - Fixed: a durable subscription reported `ResolveTimeout` rather than why
   the resolver could not be used, because it stopped waiting after 40s while
@@ -27,14 +17,6 @@
   reported was its own timeout. The resolver client now has an explicit
   bound on how long a request can take, and the subscriber derives its wait
   from that constant rather than from a number of its own.
-
-- **Breaking `netidx` API:** a failed resolver request carries a
-  `ResolverErrors` set rather than a single `ResolverError`, because a
-  cluster can fail for several reasons at once and each has a different
-  fix. A subscriber whose cluster has one member with a certificate it will
-  not accept and one member that is down now reports `resolver unreachable,
-  tls error` instead of whichever member it happened to try last.
-  `ResolverError` gains `KrbError` and `TlsError` alongside it.
 
 - An authentication failure is no longer reported as an unreachable peer.
   `PublishError` and `SubscribeError` gain `KrbError` and `TlsError`, which
@@ -59,13 +41,24 @@
   `AddrError` rather than one of six strings.
 
 - Publishers can find out whether their paths are actually published.
-  `Publisher::errors` takes a channel that reports `(Option<Id>,
-  PublishErrors)` whenever the condition of a published value changes, and
-  `Publisher::publish_errors` asks about one. `None` in place of an id means
-  every published value, which is how a resolver nobody can reach is said
-  once rather than a million times. An empty set means published; a set
-  without `NotPublished` means published but at least one resolver refused
-  it; `NotPublished` means it is not in netidx.
+  `Publisher::errors` takes a channel that reports `(Path, PublishErrors)`
+  whenever a path's condition changes; `Publisher::publish_errors` asks about
+  one value, answering for its path and all of its aliases, and
+  `Publisher::publish_errors_for_path` asks about a single name. An empty set
+  means published; a set without `NotPublished` means published but at least
+  one resolver refused it; `NotPublished` means it is not in netidx.
+
+  Everything is reported by path, including what is true of every path: a
+  resolver nobody can reach is named against each path that resolver was
+  holding. Reporting it once against "everything" would only be decodable by
+  someone who knows which referral holds which path, which is the geometry
+  netidx exists to hide, and it could say nothing at all about a
+  `publish_default` base, which has no id, or about an alias the resolver
+  refused when the value's own path was accepted.
+
+  A path published while no resolver is reachable is told its condition too,
+  rather than waiting out the outage — the publish loop waits on the publish
+  it issued, so recording what the resolver client says is its own task.
 
 - Fixed: one path a resolver definitively refused (`Denied`, or a
   non-absolute path) held that connection `degraded`, which replayed the
@@ -85,8 +78,12 @@
 - **Breaking `netidx` API:** `ResolverRead::resolve` returns a `Result` per
   path instead of failing the whole batch on the first refusal. Previously a
   single `Denied` failed every path in the batch, and a resubscription batch
-  can hold 100,000 paths. Failures carry a `ResolverError`, recoverable with
-  `downcast_ref`.
+  can hold 100,000 paths. Failures carry a `ResolverErrors` set, recoverable
+  with `downcast_ref` — a set rather than one reason because a cluster can
+  fail several ways at once and each has a different fix. A subscriber whose
+  cluster has one member with a certificate it will not accept and one member
+  that is down reports `resolver unreachable, tls error` rather than whichever
+  member it happened to try last.
 
 - **Breaking `netidx` API:** the `PermissionDenied` and `NoSuchValue` marker
   error types are replaced by `SubscribeErrors`.

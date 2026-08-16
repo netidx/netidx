@@ -194,6 +194,7 @@ mod resolver {
             Just(WriteRefusal::UnspecifiedAddr),
             Just(WriteRefusal::MulticastAddr),
             Just(WriteRefusal::LoopbackAddr),
+            Just(WriteRefusal::Unauthorized),
         ]
     }
 

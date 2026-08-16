@@ -2019,6 +2019,10 @@ mod errors {
     }
 
     fn tls_member(port: u16) -> sfile::MemberServer {
+        tls_member_id_map(port, literal!("../cfg/tls/id"))
+    }
+
+    fn tls_member_id_map(port: u16, id_map: ArcStr) -> sfile::MemberServer {
         sfile::MemberServerBuilder::default()
             .addr(addr(port))
             .bind_addr(IpAddr::V4(Ipv4Addr::LOCALHOST))
@@ -2028,7 +2032,7 @@ mod errors {
                 certificate: literal!("../cfg/tls/resolver/certificate"),
                 private_key: literal!("../cfg/tls/resolver/private.key"),
             })
-            .id_map_command(literal!("../cfg/tls/id"))
+            .id_map_command(id_map)
             .build()
             .unwrap()
     }
@@ -2567,6 +2571,39 @@ mod errors {
             }
             time::sleep(Duration::from_millis(50)).await
         }
+        assert!(!pb.publish_errors(v.id()).contains(PublishError::ResolverUnreachable));
+        drop(server);
+        Ok(())
+    }
+
+    /// A resolver that cannot work out what a publisher may do used to drop
+    /// the socket after a clean handshake, which is indistinguishable from the
+    /// resolver going away — so the publisher retried forever, and the
+    /// operator was sent to look at the network for a problem in the user
+    /// database.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_publisher_the_resolver_cannot_authorize_is_told_so() -> Result<()> {
+        let _ = env_logger::try_init();
+        let port = free_port();
+        // an id map that answers every identity with failure, which is what a
+        // resolver whose sssd is down looks like
+        let member = tls_member_id_map(port, literal!("/bin/false"));
+        let cfg = sfile::ConfigBuilder::default()
+            .member_servers(vec![member])
+            .perms(pmap(&[("/", "swlpd")]))
+            .build()
+            .unwrap();
+        let server = start(cfg, 0).await;
+        let client = tls_client(&[port])?;
+        let pb = publisher(&client, DesiredAuth::Tls { identity: None }).await?;
+        let mut e = pub_errors(&pb);
+        let path = Path::from("/app/v0");
+        let v = pb.publish(path.clone(), 42i64)?;
+        pb.flushed().await;
+        let want = perrs(&[PublishError::NotPublished, PublishError::Unauthorized]);
+        assert_eq!(e.next(TO).await, Some((path, want)));
+        assert_eq!(pb.publish_errors(v.id()), want);
+        // in particular it is not the network, and does not say it is
         assert!(!pb.publish_errors(v.id()).contains(PublishError::ResolverUnreachable));
         drop(server);
         Ok(())

@@ -84,6 +84,12 @@ pub enum WriteRefusal {
     UnspecifiedAddr,
     MulticastAddr,
     LoopbackAddr,
+    /// The handshake succeeded, but the resolver could not decide what the
+    /// publisher is allowed to do — the name it presented did not map to a
+    /// user, or the map that would have said so did not answer. Which of
+    /// those is in the resolver's log; the publisher can act on neither, and
+    /// needs only to know that retrying will not help.
+    Unauthorized,
 }
 
 impl From<netidx_core::utils::AddrError> for WriteRefusal {

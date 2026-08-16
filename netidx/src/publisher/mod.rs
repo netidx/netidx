@@ -344,6 +344,12 @@ pub enum PublishError {
     /// The tls session with the resolver failed. The rustls error is in the
     /// log.
     TlsError,
+    /// The resolver authenticated the publisher and then could not decide
+    /// what it is allowed to do. The name it presented did not map to a user,
+    /// or the map that would have said so did not answer — the resolver's log
+    /// says which. Nothing the publisher can do about either, but it is not
+    /// the network, and retrying will not help.
+    Unauthorized,
     // the resolver refused the publisher's address at hello time
     LinkLocalAddr,
     BroadcastAddr,
@@ -363,6 +369,7 @@ impl std::convert::From<WriteRefusal> for PublishError {
             WriteRefusal::UnspecifiedAddr => Self::UnspecifiedAddr,
             WriteRefusal::MulticastAddr => Self::MulticastAddr,
             WriteRefusal::LoopbackAddr => Self::LoopbackAddr,
+            WriteRefusal::Unauthorized => Self::Unauthorized,
         }
     }
 }
@@ -385,6 +392,7 @@ impl PublishError {
             Self::ResolverUnreachable => "resolver unreachable",
             Self::KrbError => "kerberos error",
             Self::TlsError => "tls error",
+            Self::Unauthorized => "the resolver could not authorize this publisher",
             Self::LinkLocalAddr => "the publisher address is link local",
             Self::BroadcastAddr => "the publisher address is a broadcast address",
             Self::PrivateAddr => {
