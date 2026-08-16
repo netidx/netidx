@@ -31,7 +31,6 @@ pub async fn run(
         .context("creating publisher")?;
     let subscriber = Subscriber::new(cfg, auth).context("create subscriber")?;
     crate::log_errors::publisher(&publisher);
-    crate::log_errors::subscriber(&subscriber);
     let net_config = NetConfig::Ready { publisher, subscriber };
     ShellBuilder::<NoExt>::default()
         .mode(Mode::Script(Source::Internal(literal!(include_str!("browser.gx")))))

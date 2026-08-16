@@ -103,7 +103,7 @@ fn unsubscribe(
                 next_try: Instant::now(),
                 errors,
             }));
-            subscriber.record_error(sub.path.clone(), errors);
+            subscriber.record_error(inner.sub_id, errors);
             subscriber.durable_dead.insert(sub.path.clone(), dsw);
             let _ = subscriber.trigger_resub.unbounded_send(());
         }

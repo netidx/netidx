@@ -21,7 +21,9 @@ use netidx::{
     path::Path,
     protocol::value_parser::{VAL_ESC, VAL_MUST_ESC, escaped_string, value},
     resolver_client::DesiredAuth,
-    subscriber::{Dval, Event, SubId, Subscriber, Typ, UpdatesFlags, Value},
+    subscriber::{
+        Dval, Event, SubId, SubscribeErrors, Subscriber, Typ, UpdatesFlags, Value,
+    },
     utils::{BatchItem, Batched},
 };
 use netidx_protocols::rpc::client::Proc;
@@ -196,6 +198,7 @@ impl<'a> Out<'a> {
 
 struct Ctx {
     sender_updates: Sender<GPooled<Vec<(SubId, Event)>>>,
+    errors: Receiver<GPooled<Vec<(SubId, SubscribeErrors)>>>,
     paths: HashMap<SubId, Path>,
     subscriptions: HashMap<Path, Dval>,
     rpcs: HashMap<Path, Proc>,
@@ -220,8 +223,11 @@ fn completes_oneshot(event: &Event) -> bool {
 impl Ctx {
     fn new(subscriber: Subscriber, p: Params) -> Self {
         let (sender_updates, updates) = mpsc::channel(100);
+        let (sender_errors, errors) = mpsc::channel(3);
+        subscriber.errors(sender_errors);
         Ctx {
             sender_updates,
+            errors,
             paths: HashMap::new(),
             subscriber,
             subscriptions: HashMap::new(),
@@ -478,7 +484,6 @@ mod tests {
 pub(super) async fn run(cfg: Config, auth: DesiredAuth, p: Params) -> Result<()> {
     env_logger::init();
     let subscriber = Subscriber::new(cfg, auth).context("create subscriber")?;
-    crate::log_errors::subscriber(&subscriber);
     let mut ctx = Ctx::new(subscriber, p);
     let mut tick = time::interval(Duration::from_secs(1));
     loop {
@@ -492,6 +497,15 @@ pub(super) async fn run(cfg: Config, auth: DesiredAuth, p: Params) -> Result<()>
             u = ctx.updates.next() => match ctx.process_update(u).await {
                 Ok(()) => (),
                 Err(_) => break,
+            },
+            e = ctx.errors.next() => if let Some(mut batch) = e {
+                for (id, errors) in batch.drain(..) {
+                    // a subscription we have since removed is not ours to
+                    // explain, and we no longer have a name for it
+                    if let Some(path) = ctx.paths.get(&id) {
+                        crate::log_errors::subscription(path, errors)
+                    }
+                }
             },
             r = ctx.requests.next() => match ctx.process_request(r).await {
                 Ok(()) => (),

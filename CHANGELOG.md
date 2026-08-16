@@ -66,7 +66,7 @@
   now means the member may not have heard us, not that it disagreed.
 
 - Subscribers can find out why a durable subscription isn't subscribed.
-  `Subscriber::errors` takes a channel that reports `(Path,
+  `Subscriber::errors` takes a channel that reports `(SubId,
   SubscribeErrors)` whenever a `Dval`'s error set changes — the union of
   everything that has gone wrong since it last succeeded, or the empty set
   when it resubscribes — and `Dval::last_error` asks about one
@@ -80,7 +80,10 @@
   at `error` — visible with no `RUST_LOG` set, since env_logger's default
   filter is `error` — and named by path. Recovery is logged at `info`. Before
   this, a `netidx publisher` whose paths the resolver refused printed nothing
-  and looked exactly like one that was working.
+  and looked exactly like one that was working. Tools whose subscriptions
+  belong to another crate (`browser`, `wsproxy`, `stress-channel-subscriber`)
+  report the publisher side only; they have no id to path mapping to name a
+  subscription with, and that is their owner's to report.
 
 - **Breaking `netidx` API:** `ResolverRead::resolve` returns a `Result` per
   path instead of failing the whole batch on the first refusal. Previously a

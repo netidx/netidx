@@ -8,7 +8,7 @@ use netidx::{
     resolver_client::{DesiredAuth, ResolverRead},
     subscriber::{Subscriber, UpdatesFlags},
 };
-use std::time::Duration;
+use std::{collections::HashMap, time::Duration};
 use tokio::time::{self, Instant};
 
 #[derive(Args, Debug)]
@@ -24,16 +24,20 @@ pub(super) async fn run(config: Config, auth: DesiredAuth, p: Params) -> Result<
     let r = ResolverRead::new(config.clone(), auth.clone());
     let table = r.table(Path::from(p.base)).await.context("load table")?;
     let subscriber = Subscriber::new(config, auth).context("create subscriber")?;
-    crate::log_errors::subscriber(&subscriber);
+    let mut paths = HashMap::with_capacity(table.rows.len() * table.cols.len());
     let subs = {
         let mut subs = Vec::with_capacity(table.rows.len() * table.cols.len());
         for row in table.rows.iter() {
             for (col, _) in table.cols.iter() {
-                subs.push(subscriber.subscribe(row.append(col)));
+                let path = row.append(col);
+                let s = subscriber.subscribe(path.clone());
+                paths.insert(s.id(), path);
+                subs.push(s);
             }
         }
         subs
     };
+    crate::log_errors::subscriber(&subscriber, paths);
     let (tx, mut vals) = mpsc::channel(3);
     for s in subs.iter() {
         s.updates(

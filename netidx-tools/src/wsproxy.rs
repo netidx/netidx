@@ -28,7 +28,6 @@ pub(super) async fn run(
                 .context("creating publisher")?;
             let subscriber = Subscriber::new(cfg, auth).context("creating subscriber")?;
             crate::log_errors::publisher(&publisher);
-            crate::log_errors::subscriber(&subscriber);
             Ok((publisher, subscriber))
         }
     };

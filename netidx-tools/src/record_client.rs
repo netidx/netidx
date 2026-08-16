@@ -14,7 +14,11 @@ use netidx_archive::{
     recorder_client::{Client, OneshotReplyShard},
 };
 use netidx_tools_core::ClientParams;
-use std::{collections::HashSet, future, path::PathBuf};
+use std::{
+    collections::{HashMap, HashSet},
+    future,
+    path::PathBuf,
+};
 use tokio::io::{AsyncWriteExt, stdout};
 use triomphe::Arc;
 
@@ -188,12 +192,19 @@ async fn session(subscriber: Subscriber, params: SessionParams) -> Result<()> {
     session.wait_subscribed().await?;
     let session_id = session.write_with_recipt(Value::Null).await?.cast_to::<String>()?;
     let session_base = base.append(&session_id);
-    let with_session_base = |path: &str| subscriber.subscribe(session_base.append(path));
+    let mut paths = HashMap::new();
+    let mut with_session_base = |p: &str| {
+        let path = session_base.append(p);
+        let dv = subscriber.subscribe(path.clone());
+        paths.insert(dv.id(), path);
+        dv
+    };
     let session_speed = with_session_base("control/speed/current");
     let session_start = with_session_base("control/start/current");
     let session_end = with_session_base("control/end/current");
     let session_pos = with_session_base("control/pos/current");
     let session_state = with_session_base("control/state/current");
+    crate::log_errors::subscriber(&subscriber, paths);
     session_speed.wait_subscribed().await?;
     session_start.wait_subscribed().await?;
     session_end.wait_subscribed().await?;
@@ -303,13 +314,11 @@ pub(super) async fn run(cmd: Cmd) -> Result<()> {
         Cmd::Oneshot { common, params } => {
             let (cfg, auth) = common.load();
             let subscriber = Subscriber::new(cfg, auth).context("create subscriber")?;
-            crate::log_errors::subscriber(&subscriber);
             oneshot(subscriber, params).await
         }
         Cmd::Session { common, params } => {
             let (cfg, auth) = common.load();
             let subscriber = Subscriber::new(cfg, auth).context("create subscriber")?;
-            crate::log_errors::subscriber(&subscriber);
             session(subscriber, params).await
         }
         Cmd::Compress { file, window, keep } => {

@@ -64,7 +64,7 @@ use triomphe::Arc as TArc;
 static BATCHES: LazyLock<Pool<Vec<(SubId, Event)>>> =
     LazyLock::new(|| Pool::new(64, 16384));
 static DECODE_BATCHES: LazyLock<Pool<Vec<From>>> = LazyLock::new(|| Pool::new(64, 16384));
-static ERRORS: LazyLock<Pool<Vec<(Path, SubscribeErrors)>>> =
+static ERRORS: LazyLock<Pool<Vec<(SubId, SubscribeErrors)>>> =
     LazyLock::new(|| Pool::new(64, 16384));
 
 /// Why a subscription failed.
@@ -814,21 +814,21 @@ struct SubscriberInner {
     desired_auth: DesiredAuth,
     tls_ctx: Option<tls::CachedConnector>,
     interfaces: Vec<NetworkInterface>,
-    error_chans: Vec<Sender<GPooled<Vec<(Path, SubscribeErrors)>>>>,
+    error_chans: Vec<Sender<GPooled<Vec<(SubId, SubscribeErrors)>>>>,
     /// staged by whoever changed a durable subscription's error state, drained
     /// by the error task, which is the only place that can wait on a slow
     /// consumer without holding this lock or stalling a resubscription
-    pending_errors: GPooled<Vec<(Path, SubscribeErrors)>>,
+    pending_errors: GPooled<Vec<(SubId, SubscribeErrors)>>,
     error_notify: Sender<()>,
 }
 
 impl SubscriberInner {
-    /// Record that `path`'s error set is now `errors`. Only call this when the
+    /// Record that `id`'s error set is now `errors`. Only call this when the
     /// set has actually changed; a durable subscription restates its condition
     /// on every retry and level triggering would emit forever.
-    fn record_error(&mut self, path: Path, errors: SubscribeErrors) {
+    fn record_error(&mut self, id: SubId, errors: SubscribeErrors) {
         if !self.error_chans.is_empty() {
-            self.pending_errors.push((path, errors));
+            self.pending_errors.push((id, errors));
             // a queued notification already says "there is work"
             let _ = self.error_notify.try_send(());
         }
@@ -1172,10 +1172,6 @@ impl Subscriber {
 
     /// Register a channel to receive errors about durable subscriptions.
     ///
-    /// Keyed by path, which is the name a durable subscription is asked for
-    /// and the only one it has — there is exactly one `Dval` per path, and no
-    /// way to get from a `SubId` back to what it was a subscription to.
-    ///
     /// An item is sent whenever a `Dval`'s error set changes: the union of
     /// everything that has gone wrong since it last succeeded, or the empty
     /// set when it resubscribes. So a consumer watching only this channel sees
@@ -1186,7 +1182,7 @@ impl Subscriber {
     ///
     /// Non durable subscriptions report through their `Result` instead, and
     /// never appear here. Drop the channel to stop receiving.
-    pub fn errors(&self, tx: Sender<GPooled<Vec<(Path, SubscribeErrors)>>>) {
+    pub fn errors(&self, tx: Sender<GPooled<Vec<(SubId, SubscribeErrors)>>>) {
         self.0.lock().error_chans.push(tx)
     }
 
@@ -1304,6 +1300,7 @@ impl Subscriber {
                         trace!("processing pending subscrition to {p}");
                         let dsw = ds.downgrade();
                         let mut dv = ds.0.lock();
+                        let sub_id = dv.sub_id;
                         macro_rules! failed {
                             ($e:expr) => {{
                                 let e: Error = $e;
@@ -1325,7 +1322,7 @@ impl Subscriber {
                                             .insert(SubscribeErrors::classify(&e, &p).0);
                                         if d.errors != before {
                                             let errors = d.errors;
-                                            subscriber.record_error(p.clone(), errors);
+                                            subscriber.record_error(sub_id, errors);
                                         }
                                         subscriber.durable_dead.insert(p.clone(), dsw);
                                     }
@@ -1359,7 +1356,7 @@ impl Subscriber {
                                     }
                                     if !d.errors.is_empty() {
                                         subscriber.record_error(
-                                            p.clone(),
+                                            sub_id,
                                             SubscribeErrors::default(),
                                         );
                                     }
@@ -1488,7 +1485,7 @@ impl Subscriber {
                     };
                     for c in chans.iter_mut() {
                         let mut b = ERRORS.take();
-                        b.extend(batch.iter().cloned());
+                        b.extend_from_slice(&batch);
                         let _ = c.send(b).await;
                     }
                     if let Some(s) = subscriber.upgrade() {
