@@ -1940,7 +1940,7 @@ mod errors {
             BindCfg, DesiredAuth, PublishError, PublishErrors, Publisher,
             PublisherBuilder,
         },
-        resolver_client::{ResolverError, ResolverErrors, ResolverRead},
+        resolver_client::{MAX_REQUEST, ResolverError, ResolverErrors, ResolverRead},
         resolver_server::{
             Server,
             config::{Config as ServerConfig, PMap, file as sfile},
@@ -2519,6 +2519,49 @@ mod errors {
         let want = rerrs(&[ResolverError::Unreachable, ResolverError::TlsError]);
         assert_eq!(e.downcast_ref::<ResolverErrors>(), Some(&want));
         drop(server);
+        Ok(())
+    }
+
+    /// A member that accepts and then says nothing, which is what a resolver
+    /// behind a dropping firewall looks like, and what a bound on the whole
+    /// request has to survive.
+    ///
+    /// Every handshake step carries its own `HELLO_TO`, so a deadline checked
+    /// only between steps lets one start just under it and finish well past.
+    /// The subscriber derives its own wait from `MAX_REQUEST`, so a request
+    /// that overruns it turns the reasons back into `ResolveTimeout` — the one
+    /// answer nobody can act on, and the thing this bound exists to prevent.
+    ///
+    /// A member that is merely *down* cannot catch this: it refuses instantly,
+    /// so no step ever runs long enough to overshoot.
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore]
+    async fn a_stalling_resolver_cannot_overrun_the_request_bound() -> Result<()> {
+        let _ = env_logger::try_init();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let addr = listener.local_addr()?;
+        tokio::task::spawn(async move {
+            // accepted and then held, never answered
+            let mut held = Vec::new();
+            while let Ok((s, _)) = listener.accept().await {
+                held.push(s)
+            }
+        });
+        let mut cfg = anon_client(&[0])?;
+        cfg.addrs = vec![(addr, Auth::Anonymous)];
+        cfg.detach();
+        let r = ResolverRead::new(cfg, DesiredAuth::Anonymous);
+        let start = time::Instant::now();
+        let e = r.resolve([Path::from("/app/v0")]).await.unwrap_err();
+        let elapsed = start.elapsed();
+        assert_eq!(
+            e.downcast_ref::<ResolverErrors>(),
+            Some(&rerrs(&[ResolverError::Unreachable]))
+        );
+        assert!(
+            elapsed < MAX_REQUEST + Duration::from_secs(5),
+            "the request took {elapsed:?}, past its own bound of {MAX_REQUEST:?}"
+        );
         Ok(())
     }
 

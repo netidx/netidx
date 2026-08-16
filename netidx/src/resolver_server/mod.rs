@@ -547,16 +547,21 @@ async fn refuse_write(
 /// away, and it retries forever against a user database that will keep saying
 /// the same thing. `refused` is the only word that distinguishes "I will not
 /// have you" from "I am not here".
+///
+/// Logged at error rather than warn: the publisher is told to come here for
+/// the reason, and a resolver run at the default filter would otherwise have
+/// nothing to show it.
 async fn authorized(
     ctx: &Ctx,
     con: &mut Channel,
     auth: AuthWrite,
+    write_addr: SocketAddr,
     uifo: Result<Arc<UserInfo>>,
 ) -> Result<Arc<UserInfo>> {
     match uifo {
         Ok(uifo) => Ok(uifo),
         Err(e) => {
-            warn!("hello_write could not authorize the publisher: {e:?}");
+            error!("refusing publisher {write_addr}, could not authorize it: {e:#}");
             Err(refuse_write(ctx, con, auth, WriteRefusal::Unauthorized).await)
         }
     }
@@ -609,7 +614,8 @@ async fn write_client_local_auth(
     let mut con = Channel::new::<ServerCtx, TcpStream>(None, con);
     let cred = a.0.authenticate(&*tok)?;
     let uifo = a.1.write().await.users.ifo(ctx.id, Some(&cred.user)).await;
-    let uifo = authorized(ctx, &mut con, AuthWrite::Local, uifo).await?;
+    let uifo =
+        authorized(ctx, &mut con, AuthWrite::Local, hello.write_addr, uifo).await?;
     if let Some(r) = refused {
         return Err(refuse_write(ctx, &mut con, AuthWrite::Local, r).await);
     }
@@ -644,7 +650,8 @@ async fn write_client_reuse_local(
     let uifo = a.1.write().await.users.ifo(ctx.id, Some(&*d.user)).await;
     let mut con = Channel::new::<ServerCtx, TcpStream>(None, con);
     challenge_auth(&ctx.cfg, &mut con, d.secret).await?;
-    let uifo = authorized(ctx, &mut con, AuthWrite::Reuse, uifo).await?;
+    let uifo =
+        authorized(ctx, &mut con, AuthWrite::Reuse, hello.write_addr, uifo).await?;
     if let Some(r) = refused {
         return Err(refuse_write(ctx, &mut con, AuthWrite::Reuse, r).await);
     }
@@ -687,7 +694,7 @@ async fn write_client_krb5_auth(
     // above the hello rather than below it, because the hello is the last
     // thing we can attach a reason to
     let uifo = krb5_uifo(ctx.id, &k5ctx, a).await;
-    let uifo = authorized(ctx, &mut con, auth.clone(), uifo).await?;
+    let uifo = authorized(ctx, &mut con, auth.clone(), hello.write_addr, uifo).await?;
     if let Some(r) = refused {
         return Err(refuse_write(ctx, &mut con, auth, r).await);
     }
@@ -734,7 +741,8 @@ async fn write_client_reuse_krb5(
     let mut con = Channel::new(Some(d.ctx), con);
     info!("hello_write all traffic now encrypted");
     challenge_auth(&ctx.cfg, &mut con, d.secret).await?;
-    let uifo = authorized(ctx, &mut con, AuthWrite::Reuse, uifo).await?;
+    let uifo =
+        authorized(ctx, &mut con, AuthWrite::Reuse, hello.write_addr, uifo).await?;
     if let Some(r) = refused {
         return Err(refuse_write(ctx, &mut con, AuthWrite::Reuse, r).await);
     }
@@ -799,7 +807,7 @@ async fn write_client_tls_auth(
         Channel::new::<ServerCtx, tokio_rustls::server::TlsStream<TcpStream>>(None, tls);
     info!("hello_write all traffic now encrypted");
     let auth = AuthWrite::Tls { name: literal!("") };
-    let uifo = authorized(ctx, &mut con, auth.clone(), uifo).await?;
+    let uifo = authorized(ctx, &mut con, auth.clone(), hello.write_addr, uifo).await?;
     if let Some(r) = refused {
         return Err(refuse_write(ctx, &mut con, auth, r).await);
     }
@@ -837,7 +845,8 @@ async fn write_client_reuse_tls(
         Channel::new::<ServerCtx, tokio_rustls::server::TlsStream<TcpStream>>(None, tls);
     info!("hello_write all traffic now encrypted");
     challenge_auth(&ctx.cfg, &mut con, d.0).await?;
-    let uifo = authorized(ctx, &mut con, AuthWrite::Reuse, uifo).await?;
+    let uifo =
+        authorized(ctx, &mut con, AuthWrite::Reuse, hello.write_addr, uifo).await?;
     if let Some(r) = refused {
         return Err(refuse_write(ctx, &mut con, AuthWrite::Reuse, r).await);
     }
@@ -880,7 +889,7 @@ async fn hello_client_write(
     // finish negotiating, and it is the answer it has never been able to get
     let refused =
         utils::check_addr(hello.write_addr.ip(), &[(ctx.id, ())]).err().map(|e| {
-            warn!("refusing publisher {}: {e}", hello.write_addr);
+            error!("refusing publisher {}: {e}", hello.write_addr);
             WriteRefusal::from(e)
         });
     let (con, uifo, publisher, rx_stop) = match hello.auth {

@@ -8,7 +8,19 @@
   the network for a problem in the user database, usually an id map that is
   not answering. The publisher reports it as `PublishError::Unauthorized`. The
   kerberos path looked up the user *after* sending the hello, which is past
-  the last point a reason can be attached, so it now does so before.
+  the last point a reason can be attached, so it now does so before. The
+  resolver logs the reason it refused at `error` rather than `warn`: a
+  publisher is told to come here for it, and env_logger's default filter would
+  otherwise have left it nothing to find.
+
+- Fixed: a resolver behind a dropping firewall — one that accepts and then
+  says nothing, rather than refusing — could carry a request past
+  `MAX_REQUEST` and so past the wait the subscriber derives from it, turning
+  the reasons back into `ResolveTimeout`. Each handshake step carries its own
+  `HELLO_TO`, and a deadline checked only between steps lets one start just
+  under it and finish 13s later. The bound is now enforced on the request
+  rather than trusted to the steps inside it. A member that is merely down
+  cannot show this: it refuses instantly, so no step runs long enough.
 
 - Fixed: a durable subscription reported `ResolveTimeout` rather than why
   the resolver could not be used, because it stopped waiting after 40s while

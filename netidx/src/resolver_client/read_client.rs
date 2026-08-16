@@ -363,21 +363,37 @@ async fn connection(
                         Some((_, ref mut c)) => c,
                         None => {
                             let current = resolver.borrow_and_update().clone();
-                            match connect(
-                                &mut *bad_addrs,
-                                &current,
-                                &desired_auth,
-                                &tls,
-                                &mut errors,
+                            // enforced here rather than trusted to the steps
+                            // inside: each of those is bounded by `HELLO_TO`,
+                            // and a step that starts just under the deadline
+                            // would carry the request past it — which is the
+                            // caller's budget, not ours to overrun. Whatever
+                            // `connect` recorded in `errors` before being cut
+                            // off still stands.
+                            let r = time::timeout_at(
                                 deadline,
+                                connect(
+                                    &mut *bad_addrs,
+                                    &current,
+                                    &desired_auth,
+                                    &tls,
+                                    &mut errors,
+                                    deadline,
+                                ),
                             )
-                            .await
-                            {
-                                Ok(c) => {
+                            .await;
+                            match r {
+                                Ok(Ok(c)) => {
                                     con = Some(c);
                                     &mut con.as_mut().unwrap().1
                                 }
-                                Err(e) => {
+                                Err(_) => {
+                                    con = None;
+                                    errors.insert(ResolverError::Unreachable);
+                                    warn!("connect_read ran out of time");
+                                    continue;
+                                }
+                                Ok(Err(e)) => {
                                     con = None;
                                     warn!(
                                         "connect_read failed: {}, {}",
@@ -425,7 +441,11 @@ async fn connection(
                                             }
                                         }
                                     });
-                                match time::timeout(timeout, f).await {
+                                // whichever comes first: a member that has gone
+                                // quiet must not hold the request past the
+                                // budget the caller is waiting on
+                                let until = min(deadline, Instant::now() + timeout);
+                                match time::timeout_at(until, f).await {
                                     Ok(Ok(())) => (),
                                     Ok(Err(e)) => {
                                         warn!("read connection failed {}", e);
