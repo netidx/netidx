@@ -136,7 +136,7 @@ enum EventV {
     OneTimeSecret { id: u64, kind: OneTimeSecretKindV, password: String },
     VerificationCode { purpose: String, fp: FingerprintV },
     ClearVerificationCode,
-    Progress { stage: StageV, message: String, expected: Option<Duration> },
+    Progress { stage: StageV, message: String, duration: Option<Duration> },
     Note(String),
     Warn(String),
     Done(Value),
@@ -514,7 +514,7 @@ impl Answerer for GxAnswerer {
         self.emit(EventV::Progress {
             stage: progress.stage.into(),
             message: progress.message.to_string(),
-            expected: progress.duration,
+            duration: progress.duration,
         });
     }
 

@@ -47,9 +47,13 @@ lambda params, struct fields, field access). The reservation is
 consistent, so this is a language-design question, not an
 inconsistency: field-name position (`{ x: … }`, `.x`) is grammatically
 unambiguous, and mirrors of external data will keep wanting `string`/
-`duration`/`bool` as field names. **Disposition: design question for
-Eric — relax keywords in field positions, or keep the reservation.
-Interim: the package renames the event field to `expected`.**
+`duration`/`bool` as field names. **Disposition: FIXED in graphix
+(f100e4fa, same day — Eric: "we should fix that one"): field names may
+be any lowercase identifier in struct literals/types/patterns, field
+access, and functional update; keyword shorthand stays refused (it
+names a binding); printers never re-sugar keyword fields; the
+round-trip generator and the tree-sitter grammar exercise the space.
+The package's interim rename is reverted — the field is `duration`.**
 
 ## 2026-08-18 — reserved-word parse errors are unactionable
 
@@ -60,7 +64,9 @@ from the offending `duration:`. Nothing names the real problem
 committed-error merge again (the known refusal-message problem —
 `grow::parsing` solved this for depth refusals via the thread-local;
 reserved-word refusals need the same treatment or a keyword check with
-its own error). **Disposition: graphix work item — diagnostics.**
+its own error). **Disposition: graphix work item — diagnostics. (Still open: the
+keyword-field fix removes this instance, but any reserved word in a
+binding position still reports the misleading merged expectation.)**
 
 ## 2026-08-18 — parameterized abstract types cross the builtin boundary (positive)
 

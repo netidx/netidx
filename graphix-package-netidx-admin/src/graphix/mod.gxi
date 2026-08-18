@@ -123,7 +123,7 @@ type Event<'r> = [
   `OneTimeSecret({ id: u64, kind: OneTimeSecretKind, password: string }),
   `VerificationCode({ purpose: string, fp: Fingerprint }),
   `ClearVerificationCode,
-  `Progress({ stage: Stage, message: string, expected: [duration, null] }),
+  `Progress({ stage: Stage, message: string, duration: [duration, null] }),
   `Note(string),
   `Warn(string),
   `Done(Result<'r, AdminError>)
