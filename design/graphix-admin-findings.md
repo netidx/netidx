@@ -76,3 +76,17 @@ typechecks and runs through `defpackage!` on the first try — the
 into a `select` and extracts `Done`'s `Result<Target, AdminError>`
 payload on both engines. The design doc's open question 2 is closed:
 no per-ceremony concrete event types needed.
+
+## 2026-08-18 — overlay widget built; synthetic key events mostly exist
+
+Prerequisite 1 (modal/overlay) is DONE in graphix: `tui::overlay` —
+`overlay(#layers: &Array<Layer>, base)` + `layer(#width?, #height?,
+#size?, child)`, centered/cleared layers, topmost captures input,
+empty stack = base (graphix repo, with book chapter and a runnable
+modal example). Discovery along the way: prerequisite 3 (synthetic
+key events) is MOSTLY BUILT already — graphix-package-tui's headless
+`TuiTestHarness` (src/test/mod.rs) renders to a `TestBackend` buffer,
+dispatches crossterm events into `handle_event` (the live path), and
+watches named bindings; the overlay input-capture tests drive a real
+modal with it. What remains for the TUI-app lab is packaging that
+harness for programs outside the tui crate (it is `pub(crate)`).
