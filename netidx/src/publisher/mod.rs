@@ -1036,6 +1036,8 @@ impl Published {
     }
 }
 
+type ErrorChan = Sender<GPooled<Vec<(Path, PublishErrors)>>>;
+
 #[derive(Debug)]
 struct PublisherInner {
     addr: SocketAddr,
@@ -1064,7 +1066,10 @@ struct PublisherInner {
     default: BTreeMap<Path, UnboundedSender<(Path, oneshot::Sender<()>)>>,
     /// paths the resolver is not holding as we asked. Empty in the happy path.
     failing: AHashMap<Path, PublishErrors>,
-    error_chans: Vec<Sender<GPooled<Vec<(Path, PublishErrors)>>>>,
+    error_chans: Vec<ErrorChan>,
+    /// registered but not yet told what is already wrong. The error task
+    /// moves them to `error_chans` when it has told them.
+    new_error_chans: Vec<ErrorChan>,
     /// staged under this lock, sent by the error task, which is the only
     /// place that may wait on a slow consumer
     pending_errors: GPooled<Vec<(Path, PublishErrors)>>,
@@ -1097,12 +1102,10 @@ impl PublisherInner {
         }
     }
 
-    /// Stage everything that is already wrong, for a consumer that has just
+    /// Everything that is already wrong, for a consumer that has just
     /// arrived. Nothing else restates a condition that has stopped changing.
-    fn stage_current_errors(&mut self) {
-        let t = &mut *self;
-        t.pending_errors.extend(t.failing.iter().map(|(p, e)| (p.clone(), *e)));
-        let _ = t.error_notify.try_send(());
+    fn current_errors(&self) -> LPooled<Vec<(Path, PublishErrors)>> {
+        self.failing.iter().map(|(p, e)| (p.clone(), *e)).collect()
     }
 
     fn is_advertised(&self, path: &Path) -> bool {
@@ -1465,6 +1468,7 @@ impl Publisher {
             default: BTreeMap::new(),
             failing: AHashMap::default(),
             error_chans: Vec::new(),
+            new_error_chans: Vec::new(),
             pending_errors: PUB_ERRORS.take(),
             error_notify,
         })));
@@ -2002,13 +2006,14 @@ impl Publisher {
     ///
     /// The set is a classification. Which resolver said what is in the log.
     ///
-    /// Registering restates whatever is already failing.
+    /// Registering restates whatever is already failing, to the new channel
+    /// alone. Channels that are already registered hear only about changes.
     ///
     /// Drop the channel to stop receiving.
     pub fn errors(&self, tx: Sender<GPooled<Vec<(Path, PublishErrors)>>>) {
         let mut t = self.0.lock();
-        t.error_chans.push(tx);
-        t.stage_current_errors()
+        t.new_error_chans.push(tx);
+        let _ = t.error_notify.try_send(());
     }
 
     /// The condition of a published value: everything true of its path, or of
@@ -2039,32 +2044,45 @@ impl Publisher {
     }
 }
 
-/// Deliver staged error state changes to the registered channels. The only
-/// place that waits on a consumer; producers just stage.
+async fn send_errors(batch: &[(Path, PublishErrors)], chans: &mut [ErrorChan]) {
+    if !batch.is_empty() {
+        for c in chans.iter_mut() {
+            let mut b = PUB_ERRORS.take();
+            b.extend(batch.iter().cloned());
+            let _ = c.send(b).await;
+        }
+    }
+}
+
+/// Deliver staged error state changes to the registered channels, and the
+/// whole current state to channels that have just registered. The only place
+/// that waits on a consumer; producers just stage.
 async fn error_loop(publisher: PublisherWeak, mut notify: Receiver<()>) {
     while let Some(()) = notify.next().await {
         // whatever is staged while we are blocked goes out too
         loop {
-            let (batch, mut chans) = match publisher.upgrade() {
+            let (batch, current, mut chans, mut joining) = match publisher.upgrade() {
                 None => return,
                 Some(p) => {
                     let mut pb = p.0.lock();
-                    if pb.pending_errors.is_empty() {
+                    let joining: LPooled<Vec<_>> = pb.new_error_chans.drain(..).collect();
+                    if pb.pending_errors.is_empty() && joining.is_empty() {
                         break;
                     }
                     let batch = mem::replace(&mut pb.pending_errors, PUB_ERRORS.take());
-                    if pb.error_chans.is_empty() {
-                        continue;
-                    }
+                    let current = if joining.is_empty() {
+                        LPooled::take()
+                    } else {
+                        pb.current_errors()
+                    };
                     let chans: LPooled<Vec<_>> = pb.error_chans.iter().cloned().collect();
-                    (batch, chans)
+                    // from here on they are told about changes like anyone else
+                    pb.error_chans.extend(joining.iter().cloned());
+                    (batch, current, chans, joining)
                 }
             };
-            for c in chans.iter_mut() {
-                let mut b = PUB_ERRORS.take();
-                b.extend(batch.iter().cloned());
-                let _ = c.send(b).await;
-            }
+            send_errors(&batch, &mut chans).await;
+            send_errors(&current, &mut joining).await;
             if let Some(p) = publisher.upgrade() {
                 p.0.lock().error_chans.retain(|c| !c.is_closed());
             }

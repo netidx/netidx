@@ -800,6 +800,8 @@ fn publisher_for<'a>(
     publishers.get(&PublisherKey::new(resolved.resolver, publisher.id))
 }
 
+type ErrorChan = Sender<GPooled<Vec<(SubId, SubscribeErrors)>>>;
+
 #[derive(Debug)]
 struct SubscriberInner {
     id: SubscriberId,
@@ -814,7 +816,10 @@ struct SubscriberInner {
     desired_auth: DesiredAuth,
     tls_ctx: Option<tls::CachedConnector>,
     interfaces: Vec<NetworkInterface>,
-    error_chans: Vec<Sender<GPooled<Vec<(SubId, SubscribeErrors)>>>>,
+    error_chans: Vec<ErrorChan>,
+    /// registered but not yet told what is already wrong. The error task
+    /// moves them to `error_chans` when it has told them.
+    new_error_chans: Vec<ErrorChan>,
     /// staged by whoever changed a durable subscription's error state, drained
     /// by the error task, which is the only place that may wait on a slow
     /// consumer
@@ -834,9 +839,9 @@ impl SubscriberInner {
         }
     }
 
-    /// Stage everything that is already wrong, for a consumer that has just
+    /// Everything that is already wrong, for a consumer that has just
     /// arrived. Nothing else restates a condition that has stopped changing.
-    fn stage_current_errors(&mut self) {
+    fn current_errors(&self) -> LPooled<Vec<(SubId, SubscribeErrors)>> {
         let mut staged: LPooled<Vec<(SubId, SubscribeErrors)>> = LPooled::take();
         for w in self.durable_dead.values().chain(self.durable_pending.values()) {
             if let Some(dv) = w.upgrade() {
@@ -848,8 +853,7 @@ impl SubscriberInner {
                 }
             }
         }
-        self.pending_errors.extend(staged.drain(..));
-        let _ = self.error_notify.try_send(());
+        staged
     }
 
     fn durable_id(&self, path: &Path) -> Option<SubId> {
@@ -1125,6 +1129,16 @@ impl SubscriberBuilder {
     }
 }
 
+async fn send_errors(batch: &[(SubId, SubscribeErrors)], chans: &mut [ErrorChan]) {
+    if !batch.is_empty() {
+        for c in chans.iter_mut() {
+            let mut b = ERRORS.take();
+            b.extend_from_slice(batch);
+            let _ = c.send(b).await;
+        }
+    }
+}
+
 /// Subscribe to published values.
 #[derive(Clone, Debug)]
 pub struct Subscriber(Arc<Mutex<SubscriberInner>>);
@@ -1150,6 +1164,7 @@ impl Subscriber {
             tls_ctx,
             interfaces: get_if_addrs()?,
             error_chans: Vec::new(),
+            new_error_chans: Vec::new(),
             pending_errors: ERRORS.take(),
             error_notify,
         })));
@@ -1198,14 +1213,15 @@ impl Subscriber {
     ///
     /// The set is a classification. What exactly failed is in the log.
     ///
-    /// Registering restates whatever is already failing.
+    /// Registering restates whatever is already failing, to the new channel
+    /// alone. Channels that are already registered hear only about changes.
     ///
     /// Non durable subscriptions report through their `Result` instead, and
     /// never appear here. Drop the channel to stop receiving.
     pub fn errors(&self, tx: Sender<GPooled<Vec<(SubId, SubscribeErrors)>>>) {
         let mut t = self.0.lock();
-        t.error_chans.push(tx);
-        t.stage_current_errors()
+        t.new_error_chans.push(tx);
+        let _ = t.error_notify.try_send(());
     }
 
     fn downgrade(&self) -> SubscriberWeak {
@@ -1476,36 +1492,42 @@ impl Subscriber {
         });
     }
 
-    /// Deliver staged error state changes to the registered channels. The
-    /// only place that waits on a consumer; producers just stage.
+    /// Deliver staged error state changes to the registered channels, and the
+    /// whole current state to channels that have just registered. The only
+    /// place that waits on a consumer; producers just stage.
     fn start_error_task(&self, mut notify: Receiver<()>) {
         let subscriber = self.downgrade();
         task::spawn(async move {
             while let Some(()) = notify.next().await {
                 // whatever is staged while we are blocked goes out too
                 loop {
-                    let (batch, mut chans) = match subscriber.upgrade() {
-                        None => return,
-                        Some(s) => {
-                            let mut t = s.0.lock();
-                            if t.pending_errors.is_empty() {
-                                break;
+                    let (batch, current, mut chans, mut joining) =
+                        match subscriber.upgrade() {
+                            None => return,
+                            Some(s) => {
+                                let mut t = s.0.lock();
+                                let joining: LPooled<Vec<_>> =
+                                    t.new_error_chans.drain(..).collect();
+                                if t.pending_errors.is_empty() && joining.is_empty() {
+                                    break;
+                                }
+                                let batch =
+                                    mem::replace(&mut t.pending_errors, ERRORS.take());
+                                let current = if joining.is_empty() {
+                                    LPooled::take()
+                                } else {
+                                    t.current_errors()
+                                };
+                                let chans: LPooled<Vec<_>> =
+                                    t.error_chans.iter().cloned().collect();
+                                // from here on they hear about changes like
+                                // anyone else
+                                t.error_chans.extend(joining.iter().cloned());
+                                (batch, current, chans, joining)
                             }
-                            let batch =
-                                mem::replace(&mut t.pending_errors, ERRORS.take());
-                            if t.error_chans.is_empty() {
-                                continue;
-                            }
-                            let chans: LPooled<Vec<_>> =
-                                t.error_chans.iter().cloned().collect();
-                            (batch, chans)
-                        }
-                    };
-                    for c in chans.iter_mut() {
-                        let mut b = ERRORS.take();
-                        b.extend_from_slice(&batch);
-                        let _ = c.send(b).await;
-                    }
+                        };
+                    send_errors(&batch, &mut chans).await;
+                    send_errors(&current, &mut joining).await;
                     if let Some(s) = subscriber.upgrade() {
                         s.0.lock().error_chans.retain(|c| !c.is_closed());
                     }

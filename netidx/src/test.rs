@@ -2226,6 +2226,67 @@ mod errors {
         Ok(())
     }
 
+    /// A consumer that arrives is told what is already wrong. Everyone who
+    /// was already listening has heard it and must not hear it again.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_new_listener_does_not_restate_to_the_old_ones() -> Result<()> {
+        let _ = env_logger::try_init();
+        let ports = [free_port()];
+        let server = start(
+            tls_cluster(&ports, &[("/", "swlpd"), ("/nopub", "!p"), ("/nosub", "!s")]),
+            0,
+        )
+        .await;
+        let cfg = tls_client(&ports)?;
+        let auth = DesiredAuth::Tls { identity: None };
+        let pb = publisher(&cfg, auth.clone()).await?;
+        let path = Path::from("/nopub/v0");
+        let v = pb.publish(path.clone(), 42i64)?;
+        pb.flushed().await;
+        let want = perrs(&[PublishError::NotPublished, PublishError::Denied]);
+        let mut first = pub_errors(&pb);
+        let deadline = time::Instant::now() + TO;
+        while pb.publish_errors(v.id()) != want {
+            if time::Instant::now() >= deadline {
+                panic!("never refused it, said {}", pb.publish_errors(v.id()))
+            }
+            time::sleep(Duration::from_millis(50)).await
+        }
+        loop {
+            match first.next(TO).await {
+                Some(e) if e == (path.clone(), want) => break,
+                Some(_) => (),
+                None => panic!("the listener that was already there never heard it"),
+            }
+        }
+        let mut second = pub_errors(&pb);
+        assert_eq!(second.next(TO).await, Some((path, want)));
+        first.expect_quiet().await;
+        let sub = subscriber(&cfg, auth)?;
+        let dv = sub.subscribe(Path::from("/nosub/v0"));
+        let denied = errs(&[SubscribeError::ResolverDenied]);
+        let mut first = sub_errors(&sub);
+        let deadline = time::Instant::now() + TO;
+        while dv.last_error() != Some(denied) {
+            if time::Instant::now() >= deadline {
+                panic!("the subscription never reported, said {:?}", dv.last_error())
+            }
+            time::sleep(Duration::from_millis(50)).await
+        }
+        loop {
+            match first.next(TO).await {
+                Some(e) if e == (dv.id(), denied) => break,
+                Some(_) => (),
+                None => panic!("the listener that was already there never heard it"),
+            }
+        }
+        let mut second = sub_errors(&sub);
+        assert_eq!(second.next(TO).await, Some((dv.id(), denied)));
+        first.expect_quiet().await;
+        drop(server);
+        Ok(())
+    }
+
     /// One denied path used to fail every path in the batch with it, and
     /// `do_resub` batches up to 100,000 of them.
     #[tokio::test(flavor = "multi_thread")]
