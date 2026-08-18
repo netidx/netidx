@@ -85,9 +85,10 @@ not graphix `stdlib/`:
   `netidx-admin` + `netidx-admin-proto` in-workspace.
 
 Crate name `graphix-package-netidx-admin` (the naming convention);
-Graphix module name **`admin`** (short, and the program that uses it is
-an admin tool — `netidx_admin` if collision anxiety wins; open question
-below).
+Graphix module name **`netidx_admin`** — the package name is the
+top-level module by construction, and a package that can in theory be
+mixed with any other package doesn't get to claim a name as generic as
+`admin` (Eric, 2026-08-18).
 
 Platform: the crate compiles everywhere. Unix-only surface
 (daemon/local-socket/CA ops) is declared in the `.gxi` unconditionally
@@ -117,8 +118,8 @@ type ServerDrift = { server: string, current: bool, /* … */ };
 ```
 
 Handles are opaque: `type Session;` (an authenticated remote admin
-connection), `type Target;` (`admin::local(cfg_path)` on unix /
-`admin::remote(session)`), `type Ceremony<'r>;` (layer 3). Private
+connection), `type Target;` (`netidx_admin::local(cfg_path)` on unix /
+`netidx_admin::remote(session)`), `type Ceremony<'r>;` (layer 3). Private
 fields like the per-request RPC id stay behind the code-as-id rule —
 the Graphix surface addresses rows only by code, same as every other
 frontend.
@@ -231,16 +232,16 @@ regardless. Accepted, recorded here.
 ## The TUI
 
 **Source lives in the package**, as Graphix modules
-(`src/graphix/tui/…` → `admin::tui`), exactly as the netidx browser
+(`src/graphix/tui/…` → `netidx_admin::tui`), exactly as the netidx browser
 ships inside graphix-package-tui. This solves multi-file structure
 (a multi-thousand-line program is modules with `.gxi` interfaces, not
 one embedded string) and makes the TUI itself installable Graphix
 source a user can read — the best documentation of "how to build a
 real app" we could produce. The `netidx admin` binary embed is then a
-one-liner program (`use admin::tui; tui::main()`) through the
+one-liner program (`use netidx_admin::tui; tui::main()`) through the
 browser's 44-line `ShellBuilder` pattern; CLI params (config root,
 `--server`, …) are seeded through `setup_context` into libstate and
-exposed as `admin::params()`.
+exposed as `netidx_admin::params()`.
 
 Port order — best-fit material first, hardest platform dependencies
 last:
@@ -270,7 +271,13 @@ graphix-repo work item, to be done *there*, not worked around here:
    `$EDITOR` on the real terminal, then resumes. Needs a tui-package
    capability composing with `sys::process` Inherit stdio.
    Prerequisite for phase 5 only.
-3. **Program-scale compile performance.** 209 lines → thousands is a
+3. **Synthetic key-event injection** for `input_handler`, so a test
+   harness can lab-drive the TUI (navigate panels, answer modals,
+   assert resulting state). Complements — never replaces — looking at
+   the rendered output and testing that real terminal events work.
+   Wanted early so the test suite grows with the program instead of
+   being retrofitted.
+4. **Program-scale compile performance.** 209 lines → thousands is a
    20–50× jump on the biggest program the compiler has ever seen.
    Not a known bug — a known *unknown*, measured continuously per the
    findings discipline above.
@@ -288,7 +295,8 @@ JIT does with a program two orders of magnitude past its test corpus.
   scripted admin + live dashboards in Graphix.
 - **B — ceremony bridge** (layer 3) + a scripted-answerer test driving
   `join --dry-run` end-to-end from Graphix.
-- **C — graphix-repo prerequisites** (modal/overlay; suspend/resume
+- **C — graphix-repo prerequisites** (modal/overlay; synthetic
+  key-event injection; suspend/resume
   deferred to E).
 - **D — TUI port**, panels in the order above, findings log running
   throughout.
@@ -297,15 +305,14 @@ JIT does with a program two orders of magnitude past its test corpus.
 
 A and C can proceed in parallel (different repos). B blocks D.
 
-## Open questions
+## Resolved questions (Eric, 2026-08-18)
 
-1. Graphix module name: `admin` vs `netidx_admin`. Recommend `admin`.
-2. Does `Ceremony<'r>`'s parameterized-abstract + generic `Event<'r>`
-   typecheck cleanly through `defpackage!`, or does the `Done` payload
-   need a per-ceremony concrete event type? (First real stress of
-   parameterized abstract types across the builtin boundary — if it
-   doesn't hold, that's finding #1, not a redesign.)
-3. TUI testability: is there a story for driving `input_handler` with
-   synthetic key events from a test harness, or does the Graphix TUI
-   remain manually tested like the Rust one? Worth designing while the
-   program is small.
+1. Module name: **`netidx_admin`** — see Placement.
+2. `Ceremony<'r>` stays as designed. Whether a parameterized abstract
+   type + generic `Event<'r>` survives the builtin boundary is
+   empirical ("I hope it does, I guess we'll see") — if it doesn't,
+   that's a finding to fix in Graphix, not a cue to redesign around it.
+3. Synthetic key events: yes — prerequisite item 3 above. They drive
+   the lab; visual review and real-terminal event testing still happen.
+4. Port order: implementer's discretion; the order above is the
+   default, not a mandate.
