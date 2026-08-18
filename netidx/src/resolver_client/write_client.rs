@@ -54,11 +54,8 @@ use tokio::{
 
 const TTL: u64 = 120;
 
-/// How many events go in one batch, and equally the pool's bound — a batch
-/// that grows past it is dropped instead of cached, so the two must agree.
-///
-/// A publisher with a million paths absorbs a cluster-wide change in chunks
-/// this size, each one a separate short hold of the publisher lock.
+/// How many events go in one batch, and equally the pool's bound: a batch that
+/// grows past it is dropped instead of cached, so the two must agree.
 const EVENT_CHUNK: usize = 10_000;
 
 static WRITE_EVENTS: LazyLock<Pool<Vec<WriteEvent>>> =
@@ -76,13 +73,8 @@ struct ToCon {
     replies: Mutex<Vec<oneshot::Sender<Response<FromWrite>>>>,
 }
 
-/// A change in what the cluster is doing with a path.
-///
-/// Everything is said about a path, including what is true of every path —
-/// a member we can't reach is expanded here rather than passed up as a claim
-/// about "everything", because only this side knows what everything is. Which
-/// paths a referral holds is exactly the geometry the publisher must not have
-/// to know.
+/// A change in what the cluster is doing with a path. What is true of every
+/// path is expanded here, one event per path.
 #[derive(Debug, Clone)]
 pub(crate) struct WriteEvent {
     pub(crate) path: Path,
@@ -90,8 +82,7 @@ pub(crate) struct WriteEvent {
 }
 
 /// What one member of the cluster is doing, reported up to `write_mgr`, which
-/// is the only place that knows the whole member set and can therefore say
-/// whether anyone is still accepting.
+/// is the only place that knows the whole member set.
 enum ConEvent {
     /// this member answered for these paths; `None` means it accepted
     Outcome(SocketAddr, GPooled<Vec<(Path, Option<PublishError>)>>),
@@ -103,9 +94,8 @@ enum ConEvent {
 
 /// Classify what a resolver said about a path it would not publish.
 ///
-/// `FromWrite::Error` is free form text and only one value is recognised, so
-/// anything else collapses to `ResolverError` — warn the text first, or the
-/// only record of what actually happened is gone.
+/// `FromWrite::Error` is free form text, so anything unrecognised collapses to
+/// `ResolverError`. Log the text first or it is lost.
 fn refusal(addr: SocketAddr, path: &Path, reply: &FromWrite) -> Option<PublishError> {
     match reply {
         FromWrite::Published | FromWrite::Referral(_) => None,
@@ -141,13 +131,7 @@ const HB: Duration = Duration::from_secs(TTL / 2);
 const LINGER: Duration = Duration::from_secs(TTL / 10);
 
 /// What every member of this referral's cluster should be holding for us.
-///
-/// The publisher is the only authority on this, and a resolver keeps a
-/// publisher's records only while the publisher keeps talking to it, so any
-/// connection may have to rebuild a member's whole view from scratch.
-/// `write_mgr` sees every batch before it broadcasts, so it maintains this and
-/// the connections only read it — one copy for the cluster rather than one per
-/// member.
+/// `write_mgr` is the only writer; connections only read it.
 type Published = Arc<RwLock<IndexMap<Path, ToWrite, BuildHasherDefault<AHasher>>>>;
 
 struct Connection {
@@ -171,11 +155,9 @@ struct Connection {
     disconnect: Interval,
     priority: PublisherPriority,
     events: mpsc::UnboundedSender<ConEvent>,
-    /// what this member has refused, so that only changes are reported. Empty
-    /// in the healthy case, which is why reporting costs nothing there.
+    /// what this member has refused, so that only changes are reported
     refused: AHashMap<Path, PublishError>,
-    /// what we last told `write_mgr` about this member. `None` is usable,
-    /// which is also what it assumes about a member it has just started.
+    /// what we last told `write_mgr` about this member. `None` is usable.
     reported_down: Option<PublishError>,
 }
 
@@ -183,10 +165,8 @@ impl Connection {
     /// Note what this member said about a path, and report it if it differs
     /// from what we last said about it.
     ///
-    /// Returns true if the member is now out of step with what the publisher
-    /// believes. A definitive refusal is not: the member heard us perfectly
-    /// well and said no, and replaying the publish set at it forever would
-    /// change nothing. `degraded` means it may not have heard us.
+    /// Returns true if the member may not have heard us. A definitive refusal
+    /// is not that: it heard us and said no.
     fn note(
         &mut self,
         outcomes: &mut GPooled<Vec<(Path, Option<PublishError>)>>,
@@ -241,10 +221,8 @@ impl Connection {
 
     /// Bring this member back in line with what the publisher believes.
     ///
-    /// Retries first — a pending `Clear` has to precede the republish it would
-    /// otherwise wipe out — then the desired state. An unpublish replayed
-    /// against a member that never had the path is a no-op, so this is safe
-    /// whether the member kept our records or lost them.
+    /// Retries first, then the desired state: a pending `Clear` has to precede
+    /// the republish it would otherwise wipe out.
     async fn republish(&mut self, con: &mut Channel, ttl_expired: bool) -> Result<()> {
         let mut nretry = 0;
         if self.pending_clear {
@@ -255,9 +233,7 @@ impl Connection {
             con.queue_send(msg)?;
             nretry += 1;
         }
-        // the paths in send order, so each reply can be attributed. The read
-        // guard can't be held across the awaits below, and the set can change
-        // under us in the meantime.
+        // in send order, so each reply can be attributed
         let mut sent: LPooled<Vec<Path>> = LPooled::take();
         {
             let published = self.published.read();
@@ -548,8 +524,8 @@ impl Connection {
                 con.send_one(&ReadyForOwnershipCheck)
             )??;
         }
-        // before republishing, so that whatever it discovers is attributed to
-        // a member write_mgr already counts as one that could have accepted
+        // before republishing, so its outcomes land against a member
+        // `write_mgr` already counts as usable
         self.report_up();
         if !r.ttl_expired && !self.degraded {
             info!("connected to resolver {:?} for write", self.resolver_addr);
@@ -566,8 +542,6 @@ impl Connection {
         self.security_context = None;
         self.secrets.write().remove(&self.resolver_addr);
         warn!("write connection {:?} failed {}", self.resolver_addr, e);
-        // a resolver that told us why said so in the hello; everything else
-        // is a connection we could not make, and the log has the detail
         let reason = e.downcast_ref::<PublishError>().copied().unwrap_or_else(|| {
             if tls::is_tls_error(&e) {
                 PublishError::TlsError
@@ -695,20 +669,15 @@ impl Connection {
             refused: AHashMap::default(),
             reported_down: None,
         };
-        // A member added to a cluster that is already publishing has to be
-        // brought up to date now. Otherwise it sits empty until the next batch
-        // or heartbeat, and a heartbeat is half a ttl away. When there is
-        // nothing to say — the ordinary case at startup — stay lazy and don't
-        // touch the resolver until the publisher does.
+        // a member added to a cluster that is already publishing has to be
+        // brought up to date now; the next heartbeat is half a ttl away
         if !t.published.read().is_empty() {
             t.send_heartbeat().await;
         }
         loop {
             select_biased! {
                 _ = stop => {
-                    // This member has left the cluster. Stop heartbeating and
-                    // let the resolver expire our records; unpublishing would
-                    // be pointless work against a server nobody is reading.
+                    // stop heartbeating and let the resolver expire our records
                     info!("write_con {:?} left the cluster", t.resolver_addr);
                     break
                 },
@@ -738,10 +707,8 @@ impl Connection {
                         Err(e) => {
                             t.con = None;
                             t.degraded = true;
-                            // Publishes need no note: they are in `published`,
-                            // and being degraded means the whole of it gets
-                            // replayed. Removals are already gone from there,
-                            // so only this connection remembers them.
+                            // removals are already gone from `published`, so
+                            // only this connection remembers them
                             for (_, tx) in batch.batch.iter() {
                                 match tx {
                                     ToWrite::Publish(_)
@@ -772,9 +739,7 @@ struct Live {
 }
 
 /// Start a connection to every member of `referral` we don't already have one
-/// for, and retire the ones that are no longer in it. A new member finds the
-/// publish set already waiting for it in `published`, so nothing has to be
-/// handed over.
+/// for, and retire the ones that are no longer in it.
 fn reconcile(
     live: &mut LPooled<Vec<Live>>,
     referral: &Referral,
@@ -786,12 +751,12 @@ fn reconcile(
     priority: PublisherPriority,
     tls: &Option<tls::CachedConnector>,
     con_events: &mpsc::UnboundedSender<ConEvent>,
-    members: &mut AHashMap<SocketAddr, PublishError>,
+    agg: &mut Aggregate,
 ) {
     live.retain(|l| {
         let keep = referral.addrs.iter().any(|(a, auth)| *a == l.addr && *auth == l.auth);
         if !keep {
-            members.remove(&l.addr);
+            agg.member_left(l.addr);
         }
         keep
     });
@@ -802,9 +767,8 @@ fn reconcile(
         let (stop, stop_rx) = oneshot::channel();
         live.push(Live { addr: *addr, auth: auth.clone(), _stop: stop });
         let addr = *addr;
-        // a member is assumed usable until it says otherwise, which is what
-        // `Connection::reported_down` starts out agreeing with
-        members.remove(&addr);
+        // a member is usable until it says otherwise
+        agg.members.remove(&addr);
         let auth = auth.clone();
         let desired_auth = desired_auth.clone();
         let secrets = secrets.clone();
@@ -832,20 +796,17 @@ fn reconcile(
     }
 }
 
-/// What the cluster is collectively doing with the paths we publish.
-///
-/// One member accepting is enough for a path to be in netidx, so nothing here
-/// can be decided by a single connection — this is the only place that knows
-/// the whole member set.
+/// What the cluster is collectively doing with the paths we publish. One
+/// member accepting is enough for a path to be in netidx, so nothing here can
+/// be decided by a single connection.
 struct Aggregate {
     /// members that are not usable, and why. Absent means usable.
     members: AHashMap<SocketAddr, PublishError>,
     /// paths some member refused, and which members refused them. Empty in
     /// the healthy case.
     refused: AHashMap<Path, AHashMap<SocketAddr, PublishError>>,
-    /// the global condition as of the last report. When this moves every
-    /// path's condition moves with it, which is the only thing that makes us
-    /// walk the whole publish set.
+    /// the global condition as of the last report. When this moves, every
+    /// path's condition moves with it.
     last_global: PublishErrors,
     /// the paths this connection asserts, which is what "everything" means
     published: Published,
@@ -881,10 +842,20 @@ impl Aggregate {
         for e in self.members.values() {
             errors.insert(*e)
         }
-        if !errors.is_empty() && self.members.len() >= live {
+        if live == 0 || (!errors.is_empty() && self.members.len() >= live) {
             errors.insert(PublishError::NotPublished)
         }
         errors
+    }
+
+    /// Forget a member that has left the cluster, refusals included: only a
+    /// current member can be one that could have accepted a path.
+    fn member_left(&mut self, addr: SocketAddr) {
+        self.members.remove(&addr);
+        self.refused.retain(|_, by| {
+            by.remove(&addr);
+            !by.is_empty()
+        });
     }
 
     /// Everything true of `path`: what refused it, and what is true of
@@ -909,8 +880,7 @@ impl Aggregate {
         }
     }
 
-    /// Add to `batch`, sending it on whenever it fills, so that a change to
-    /// everything arrives as many small batches rather than one enormous one.
+    /// Add to `batch`, sending it on whenever it fills.
     fn emit(&mut self, batch: &mut GPooled<Vec<WriteEvent>>, ev: WriteEvent) {
         if batch.len() >= EVENT_CHUNK {
             let full = mem::replace(batch, WRITE_EVENTS.take());
@@ -919,8 +889,7 @@ impl Aggregate {
         batch.push(ev)
     }
 
-    /// Say what every published path's condition is, because something moved
-    /// under all of them.
+    /// Say what every published path's condition is.
     fn emit_all(&mut self, live: usize, global: PublishErrors) {
         let mut batch = WRITE_EVENTS.take();
         let published = self.published.clone();
@@ -931,8 +900,7 @@ impl Aggregate {
         self.send(batch)
     }
 
-    /// The condition of every refused path, to be compared against after
-    /// something that changes what refusals mean.
+    /// The condition of every refused path, to compare `settle` against.
     fn snapshot(&self, live: usize) -> LPooled<Vec<(Path, PublishErrors)>> {
         let global = self.global(live);
         self.refused
@@ -941,8 +909,8 @@ impl Aggregate {
             .collect()
     }
 
-    /// Report what changed since `before` — or every path, if what changed
-    /// was the global condition. Nothing a member does can add a path to
+    /// Report what changed since `before`, or every path if what changed was
+    /// the global condition. Nothing a member does can add a path to
     /// `refused`, so `before` covers everything else that could have moved.
     fn settle(&mut self, before: LPooled<Vec<(Path, PublishErrors)>>, live: usize) {
         let global = self.global(live);
@@ -961,8 +929,7 @@ impl Aggregate {
     }
 
     /// Give paths we have just been asked to publish the condition they are
-    /// born into. Nothing else would tell them: the members that would have
-    /// answered for them are the ones that are down.
+    /// born into. Nothing else would tell them.
     fn note_published(&mut self, paths: &mut LPooled<Vec<Path>>, live: usize) {
         let global = self.global(live);
         let mut batch = WRITE_EVENTS.take();
@@ -993,8 +960,8 @@ impl Aggregate {
                 let published = self.published.clone();
                 let published = published.read();
                 for (path, outcome) in outcomes.drain(..) {
-                    // a path we have since unpublished has no condition, and
-                    // keeping one would leave an entry nothing can ever clear
+                    // an unpublished path has no condition, and keeping one
+                    // would leave an entry nothing can clear
                     if !published.contains_key(&path) {
                         self.refused.remove(&path);
                         continue;
@@ -1061,7 +1028,7 @@ async fn write_mgr(
                 priority,
                 &tls,
                 &con_events,
-                &mut agg.members,
+                agg,
             )
         };
     let referral = resolver.borrow_and_update().clone();
@@ -1087,15 +1054,9 @@ async fn write_mgr(
                 Some(b) => b,
             },
         };
-        // Record what the publisher wants before telling anyone about it. A
-        // connection that misses this batch — because it is down, because it
-        // fell behind the broadcast, or because it doesn't exist yet — still
-        // finds it here when it connects, which is the only way it could ever
-        // learn.
+        // record what the publisher wants before broadcasting it: a
+        // connection that misses this batch finds it here when it connects
         let mut fresh: LPooled<Vec<Path>> = LPooled::take();
-        // nothing can yet be true of a path nobody has answered for, unless
-        // something is already true of all of them, so in the healthy case
-        // this costs nothing
         let note = !agg.last_global.is_empty();
         {
             let mut published = published.write();

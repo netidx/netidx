@@ -350,6 +350,9 @@ pub enum PublishError {
     /// says which. Nothing the publisher can do about either, but it is not
     /// the network, and retrying will not help.
     Unauthorized,
+    /// The resolver refused the publisher for a reason this version has no
+    /// name for. Retrying will not help.
+    Refused,
     // the resolver refused the publisher's address at hello time
     LinkLocalAddr,
     BroadcastAddr,
@@ -370,6 +373,7 @@ impl std::convert::From<WriteRefusal> for PublishError {
             WriteRefusal::MulticastAddr => Self::MulticastAddr,
             WriteRefusal::LoopbackAddr => Self::LoopbackAddr,
             WriteRefusal::Unauthorized => Self::Unauthorized,
+            WriteRefusal::Unknown => Self::Refused,
         }
     }
 }
@@ -393,6 +397,7 @@ impl PublishError {
             Self::KrbError => "kerberos error",
             Self::TlsError => "tls error",
             Self::Unauthorized => "the resolver could not authorize this publisher",
+            Self::Refused => "the resolver refused this publisher, see its log",
             Self::LinkLocalAddr => "the publisher address is link local",
             Self::BroadcastAddr => "the publisher address is a broadcast address",
             Self::PrivateAddr => {
@@ -1061,15 +1066,14 @@ struct PublisherInner {
     failing: AHashMap<Path, PublishErrors>,
     error_chans: Vec<Sender<GPooled<Vec<(Path, PublishErrors)>>>>,
     /// staged under this lock, sent by the error task, which is the only
-    /// place that can wait on a slow consumer without stalling publishing
+    /// place that may wait on a slow consumer
     pending_errors: GPooled<Vec<(Path, PublishErrors)>>,
     error_notify: Sender<()>,
 }
 
 impl PublisherInner {
-    /// Record that `path`'s error set is now `errors`, if it changed. A
-    /// publisher restates its whole publish set on every heartbeat, so level
-    /// triggering would emit one denied path forever.
+    /// Record that `path`'s error set is now `errors`. Edge triggered: a
+    /// publisher restates its whole publish set on every heartbeat.
     fn record_error(&mut self, path: Path, errors: PublishErrors) {
         let changed = if errors.is_empty() {
             self.failing.remove(&path).is_some()
@@ -1091,6 +1095,14 @@ impl PublisherInner {
             // a queued notification already says "there is work"
             let _ = self.error_notify.try_send(());
         }
+    }
+
+    /// Stage everything that is already wrong, for a consumer that has just
+    /// arrived. Nothing else restates a condition that has stopped changing.
+    fn stage_current_errors(&mut self) {
+        let t = &mut *self;
+        t.pending_errors.extend(t.failing.iter().map(|(p, e)| (p.clone(), *e)));
+        let _ = t.error_notify.try_send(());
     }
 
     fn is_advertised(&self, path: &Path) -> bool {
@@ -1990,9 +2002,13 @@ impl Publisher {
     ///
     /// The set is a classification. Which resolver said what is in the log.
     ///
+    /// Registering restates whatever is already failing.
+    ///
     /// Drop the channel to stop receiving.
     pub fn errors(&self, tx: Sender<GPooled<Vec<(Path, PublishErrors)>>>) {
-        self.0.lock().error_chans.push(tx)
+        let mut t = self.0.lock();
+        t.error_chans.push(tx);
+        t.stage_current_errors()
     }
 
     /// The condition of a published value: everything true of its path, or of
@@ -2023,11 +2039,8 @@ impl Publisher {
     }
 }
 
-/// Deliver staged error state changes to the registered channels.
-///
-/// Its own task because it is the one place that waits: a consumer that stops
-/// reading must not stall publishing, so `publish_loop` only stages under the
-/// publisher lock and this task does the sending.
+/// Deliver staged error state changes to the registered channels. The only
+/// place that waits on a consumer; producers just stage.
 async fn error_loop(publisher: PublisherWeak, mut notify: Receiver<()>) {
     while let Some(()) = notify.next().await {
         // whatever is staged while we are blocked goes out too
@@ -2059,12 +2072,8 @@ async fn error_loop(publisher: PublisherWeak, mut notify: Receiver<()>) {
     }
 }
 
-/// Record what the resolver client says about our paths.
-///
-/// Its own task rather than an arm of `publish_loop`, because that loop waits
-/// on the very thing being reported about: a publish issued while no resolver
-/// is reachable does not return until one is, and a path published into an
-/// outage would learn its condition only once the outage was over.
+/// Must not be an arm of `publish_loop`, which waits on the very thing being
+/// reported about.
 async fn record_loop(
     publisher: PublisherWeak,
     mut events: UnboundedReceiver<GPooled<Vec<WriteEvent>>>,

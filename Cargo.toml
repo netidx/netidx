@@ -6,6 +6,8 @@ debug = false
 
 
 [profile.dev]
+opt-level = "s"
+lto = "thin"
 debug = false
 
 [workspace.dependencies]

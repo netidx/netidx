@@ -188,7 +188,14 @@ async fn oneshot(subscriber: Subscriber, params: OneshotParams) -> Result<()> {
 
 async fn session(subscriber: Subscriber, params: SessionParams) -> Result<()> {
     let base = params.base;
-    let session = subscriber.subscribe(base.append("session"));
+    let session_path = base.append("session");
+    let session = subscriber.subscribe(session_path.clone());
+    // must precede the wait below, which never returns for a path that will
+    // not resolve
+    crate::log_errors::subscriber(
+        &subscriber,
+        HashMap::from([(session.id(), session_path)]),
+    );
     session.wait_subscribed().await?;
     let session_id = session.write_with_recipt(Value::Null).await?.cast_to::<String>()?;
     let session_base = base.append(&session_id);

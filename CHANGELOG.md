@@ -1,5 +1,42 @@
 # Unreleased
 
+- Fixed: a resolver that rejected our certificate was reported as unreachable
+  as well. The read client only recorded a reason when a handshake step
+  failed, so a member that was simply down named nothing, and giving up added
+  `Unreachable` unconditionally to cover it. A one member cluster whose
+  certificate we would not accept therefore said `no resolver server could be
+  reached, tls error` — the misclassification the publisher side already got
+  right. A failed tcp connect now says so where it happens, and giving up adds
+  nothing that was already explained.
+
+- Fixed: a member that left the cluster took its address out of the publisher's
+  member set but left its refusals behind, where they went on counting as a
+  member that could have accepted the path. A path the remaining member was
+  serving read `not published, permission denied`, naming a resolver nobody
+  publishes to any more, and nothing could ever clear it.
+
+- Fixed: `MAX_REQUEST` bounded one hop of a referral walk rather than the
+  walk, so a request the caller was told takes at most that long could take
+  `MAX_REFERRALS` times it — and the caller, having derived its own wait from
+  the figure it was given, heard `ResolveTimeout` instead of the reasons. The
+  walk now shares one budget. The write side is unchanged: every step a write
+  connection takes is bounded already, and nothing derives a promise from how
+  long a publish takes.
+
+- `Publisher::errors` and `Subscriber::errors` restate whatever is already
+  failing when a channel is registered. Nothing else ever restates a condition
+  that has stopped changing, and a publisher built against a resolver that is
+  already down starts failing before its caller can reach `errors` — so the
+  answer to "why isn't this published" depended on who got there first.
+  `netidx record session` waited on a subscription that would never resolve
+  before registering, and so hung with nothing on stderr.
+
+- An unknown `WriteRefusal` no longer fails the whole `ServerHelloWrite`.
+  Pack has no tag it can skip, so a reason added by a future resolver would
+  have turned the one message that says *why* into a decode error, and the
+  publisher would have reported the resolver unreachable. The variant is now
+  `#[pack(other)]`, reported as `PublishError::Refused`.
+
 - A resolver that authenticates a publisher and then cannot decide what it is
   allowed to do now refuses it with `WriteRefusal::Unauthorized` instead of
   dropping the socket. A clean handshake followed by a close is

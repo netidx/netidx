@@ -816,22 +816,40 @@ struct SubscriberInner {
     interfaces: Vec<NetworkInterface>,
     error_chans: Vec<Sender<GPooled<Vec<(SubId, SubscribeErrors)>>>>,
     /// staged by whoever changed a durable subscription's error state, drained
-    /// by the error task, which is the only place that can wait on a slow
-    /// consumer without holding this lock or stalling a resubscription
+    /// by the error task, which is the only place that may wait on a slow
+    /// consumer
     pending_errors: GPooled<Vec<(SubId, SubscribeErrors)>>,
     error_notify: Sender<()>,
 }
 
 impl SubscriberInner {
     /// Record that `id`'s error set is now `errors`. Only call this when the
-    /// set has actually changed; a durable subscription restates its condition
-    /// on every retry and level triggering would emit forever.
+    /// set has actually changed: a durable subscription restates its condition
+    /// on every retry.
     fn record_error(&mut self, id: SubId, errors: SubscribeErrors) {
         if !self.error_chans.is_empty() {
             self.pending_errors.push((id, errors));
             // a queued notification already says "there is work"
             let _ = self.error_notify.try_send(());
         }
+    }
+
+    /// Stage everything that is already wrong, for a consumer that has just
+    /// arrived. Nothing else restates a condition that has stopped changing.
+    fn stage_current_errors(&mut self) {
+        let mut staged: LPooled<Vec<(SubId, SubscribeErrors)>> = LPooled::take();
+        for w in self.durable_dead.values().chain(self.durable_pending.values()) {
+            if let Some(dv) = w.upgrade() {
+                let t = dv.0.lock();
+                if let DvState::Dead(d) = &t.sub
+                    && !d.errors.is_empty()
+                {
+                    staged.push((t.sub_id, d.errors))
+                }
+            }
+        }
+        self.pending_errors.extend(staged.drain(..));
+        let _ = self.error_notify.try_send(());
     }
 
     fn durable_id(&self, path: &Path) -> Option<SubId> {
@@ -1180,10 +1198,14 @@ impl Subscriber {
     ///
     /// The set is a classification. What exactly failed is in the log.
     ///
+    /// Registering restates whatever is already failing.
+    ///
     /// Non durable subscriptions report through their `Result` instead, and
     /// never appear here. Drop the channel to stop receiving.
     pub fn errors(&self, tx: Sender<GPooled<Vec<(SubId, SubscribeErrors)>>>) {
-        self.0.lock().error_chans.push(tx)
+        let mut t = self.0.lock();
+        t.error_chans.push(tx);
+        t.stage_current_errors()
     }
 
     fn downgrade(&self) -> SubscriberWeak {
@@ -1454,12 +1476,8 @@ impl Subscriber {
         });
     }
 
-    /// Deliver staged error state changes to the registered channels.
-    ///
-    /// Its own task because it is the one place that waits: a consumer that
-    /// stops reading must not stall resubscription or a connection, so the
-    /// producers only stage under the subscriber lock and this task does the
-    /// sending.
+    /// Deliver staged error state changes to the registered channels. The
+    /// only place that waits on a consumer; producers just stage.
     fn start_error_task(&self, mut notify: Receiver<()>) {
         let subscriber = self.downgrade();
         task::spawn(async move {

@@ -2074,6 +2074,22 @@ mod errors {
         Ok(cfg)
     }
 
+    /// The same config as a file the client will keep following. The tls paths
+    /// inside it are relative to the working directory, not to the config, so
+    /// writing it to a tempdir changes nothing but the addresses.
+    fn write_tls_client_cfg(path: &std::path::Path, ports: &[u16]) {
+        let src = std::fs::read_to_string("../cfg/tls/publisher/client.json").unwrap();
+        let mut cfg: serde_json::Value = serde_json::from_str(&src).unwrap();
+        let auth = cfg["addrs"][0][1].clone();
+        cfg["addrs"] = ports
+            .iter()
+            .map(|p| serde_json::json!([addr(*p).to_string(), auth]))
+            .collect();
+        let tmp = path.with_extension("tmp");
+        std::fs::write(&tmp, serde_json::to_string(&cfg).unwrap()).unwrap();
+        std::fs::rename(&tmp, path).unwrap();
+    }
+
     fn anon_client(ports: &[u16]) -> Result<ClientConfig> {
         let mut cfg = ClientConfig::load("../cfg/simple-client.json")?;
         let auth = cfg.addrs[0].1.clone();
@@ -2162,6 +2178,52 @@ mod errors {
                 panic!("expected silence, got {i:?}")
             }
         }
+    }
+
+    /// A consumer that arrives after the failure still hears about it. Nothing
+    /// restates a condition that has stopped changing, and a publisher built
+    /// against a resolver that is already down fails before its caller can
+    /// reach `errors`.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_late_listener_hears_what_already_failed() -> Result<()> {
+        let _ = env_logger::try_init();
+        let ports = [free_port()];
+        let server = start(
+            tls_cluster(&ports, &[("/", "swlpd"), ("/nopub", "!p"), ("/nosub", "!s")]),
+            0,
+        )
+        .await;
+        let cfg = tls_client(&ports)?;
+        let auth = DesiredAuth::Tls { identity: None };
+        let pb = publisher(&cfg, auth.clone()).await?;
+        let path = Path::from("/nopub/v0");
+        let v = pb.publish(path.clone(), 42i64)?;
+        pb.flushed().await;
+        let want = perrs(&[PublishError::NotPublished, PublishError::Denied]);
+        let deadline = time::Instant::now() + TO;
+        while pb.publish_errors(v.id()) != want {
+            if time::Instant::now() >= deadline {
+                panic!("never refused it, said {}", pb.publish_errors(v.id()))
+            }
+            time::sleep(Duration::from_millis(50)).await
+        }
+        // only now does anyone ask
+        let mut e = pub_errors(&pb);
+        assert_eq!(e.next(TO).await, Some((path, want)));
+        let sub = subscriber(&cfg, auth)?;
+        let dv = sub.subscribe(Path::from("/nosub/v0"));
+        let denied = errs(&[SubscribeError::ResolverDenied]);
+        let deadline = time::Instant::now() + TO;
+        while dv.last_error() != Some(denied) {
+            if time::Instant::now() >= deadline {
+                panic!("the subscription never reported, said {:?}", dv.last_error())
+            }
+            time::sleep(Duration::from_millis(50)).await
+        }
+        let mut e = sub_errors(&sub);
+        assert_eq!(e.next(TO).await, Some((dv.id(), denied)));
+        drop(server);
+        Ok(())
     }
 
     /// One denied path used to fail every path in the batch with it, and
@@ -2426,6 +2488,47 @@ mod errors {
         Ok(())
     }
 
+    /// And when that member leaves the cluster its refusal goes with it: a
+    /// resolver nobody publishes to any more is not one that could have
+    /// accepted the path.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_departed_member_takes_its_refusal_with_it() -> Result<()> {
+        let _ = env_logger::try_init();
+        let ports = [free_port(), free_port()];
+        let takes_it = start(tls_cluster(&ports, &[("/", "swlpd")]), 0).await;
+        let refuses_it =
+            start(tls_cluster(&ports, &[("/", "swlpd"), ("/nopub", "!p")]), 1).await;
+        let dir = tempfile::tempdir().unwrap();
+        let cfg_path = dir.path().join("client.json");
+        write_tls_client_cfg(&cfg_path, &ports);
+        let cfg = ClientConfig::load(&cfg_path)?;
+        let pb = publisher(&cfg, DesiredAuth::Tls { identity: None }).await?;
+        let path = Path::from("/nopub/v0");
+        let v = pb.publish(path.clone(), 42i64)?;
+        pb.flushed().await;
+        let degraded = perrs(&[PublishError::Denied]);
+        let deadline = time::Instant::now() + TO;
+        while pb.publish_errors(v.id()) != degraded {
+            if time::Instant::now() >= deadline {
+                panic!("never refused it, said {}", pb.publish_errors(v.id()))
+            }
+            time::sleep(Duration::from_millis(50)).await
+        }
+        write_tls_client_cfg(&cfg_path, &ports[..1]);
+        let deadline = time::Instant::now() + TO;
+        while !pb.publish_errors(v.id()).is_empty() {
+            if time::Instant::now() >= deadline {
+                panic!(
+                    "the member that refused it left and it still says {}",
+                    pb.publish_errors(v.id())
+                )
+            }
+            time::sleep(Duration::from_millis(50)).await
+        }
+        drop((takes_it, refuses_it));
+        Ok(())
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn a_cluster_that_all_refuses_is_not_published() -> Result<()> {
         let _ = env_logger::try_init();
@@ -2498,14 +2601,28 @@ mod errors {
         Ok(())
     }
 
+    /// The read side of `a_rejected_certificate_is_not_an_unreachable_resolver`.
+    /// A one member cluster can only fail one way, so anything else the report
+    /// names is invented.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_rejected_certificate_is_not_an_unreachable_cluster() -> Result<()> {
+        let _ = env_logger::try_init();
+        let ports = [free_port()];
+        let server = start(tls_cluster(&ports, &[("/", "swlpd")]), 0).await;
+        let mut cfg = tls_client(&ports)?;
+        cfg.addrs[0].1 = Auth::Tls { name: literal!("wrong.example.com") };
+        let r = ResolverRead::new(cfg, DesiredAuth::Tls { identity: None });
+        let e = r.resolve([Path::from("/app/v0")]).await.unwrap_err();
+        let want = rerrs(&[ResolverError::TlsError]);
+        assert_eq!(e.downcast_ref::<ResolverErrors>(), Some(&want));
+        drop(server);
+        Ok(())
+    }
+
     /// A cluster can be broken in more than one way at a time, and each way
     /// has a different fix. Reporting whichever member we happened to try
     /// last would send the operator to fix one of two problems, at random.
-    ///
-    /// Ignored because failing costs the read client its whole retry budget,
-    /// which is eleven sleeps of one to eleven seconds.
     #[tokio::test(flavor = "multi_thread")]
-    #[ignore]
     async fn every_reason_the_cluster_failed_is_reported() -> Result<()> {
         let _ = env_logger::try_init();
         let ports = [free_port(), free_port()];
@@ -2522,31 +2639,15 @@ mod errors {
         Ok(())
     }
 
-    /// A member that accepts and then says nothing, which is what a resolver
-    /// behind a dropping firewall looks like, and what a bound on the whole
-    /// request has to survive.
-    ///
-    /// Every handshake step carries its own `HELLO_TO`, so a deadline checked
-    /// only between steps lets one start just under it and finish well past.
-    /// The subscriber derives its own wait from `MAX_REQUEST`, so a request
-    /// that overruns it turns the reasons back into `ResolveTimeout` — the one
-    /// answer nobody can act on, and the thing this bound exists to prevent.
-    ///
-    /// A member that is merely *down* cannot catch this: it refuses instantly,
-    /// so no step ever runs long enough to overshoot.
+    /// A member that accepts and then says nothing cannot carry the request
+    /// past `MAX_REQUEST`. Every handshake step carries its own `HELLO_TO`, so
+    /// a deadline checked only between steps lets one start just under it and
+    /// finish well past. A member that is merely down cannot catch this: it
+    /// refuses instantly, so no step runs long enough to overshoot.
     #[tokio::test(flavor = "multi_thread")]
-    #[ignore]
     async fn a_stalling_resolver_cannot_overrun_the_request_bound() -> Result<()> {
         let _ = env_logger::try_init();
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
-        let addr = listener.local_addr()?;
-        tokio::task::spawn(async move {
-            // accepted and then held, never answered
-            let mut held = Vec::new();
-            while let Ok((s, _)) = listener.accept().await {
-                held.push(s)
-            }
-        });
+        let addr = black_hole().await?;
         let mut cfg = anon_client(&[0])?;
         cfg.addrs = vec![(addr, Auth::Anonymous)];
         cfg.detach();
@@ -2565,12 +2666,105 @@ mod errors {
         Ok(())
     }
 
+    /// Accept every connection and answer none of them, as a resolver behind a
+    /// dropping firewall does.
+    async fn black_hole() -> Result<SocketAddr> {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let addr = listener.local_addr()?;
+        tokio::task::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((s, _)) = listener.accept().await {
+                held.push(s)
+            }
+        });
+        Ok(addr)
+    }
+
+    /// An anonymous resolver that answers every request with a referral to
+    /// `child`, `delay` after being asked. A hop that is slow and successful is
+    /// the only shape in which a per-hop budget shows as an overrun, and
+    /// nothing real is slow on loopback.
+    async fn slow_referrer(delay: Duration, child: SocketAddr) -> Result<SocketAddr> {
+        use crate::{
+            channel::Channel,
+            protocol::resolver::{AuthRead, ClientHello, FromRead, Referral, ToRead},
+        };
+        use cross_krb5::ClientCtx;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let me = listener.local_addr()?;
+        tokio::task::spawn(async move {
+            while let Ok((mut s, _)) = listener.accept().await {
+                tokio::task::spawn(async move {
+                    let r: Result<()> = async {
+                        crate::channel::write_raw(&mut s, &3u64).await?;
+                        let v = crate::channel::read_raw::<u64, _, 1024>(&mut s).await?;
+                        anyhow::ensure!(v == 3, "version");
+                        let h = crate::channel::read_raw::<ClientHello, _, 1024>(&mut s)
+                            .await?;
+                        anyhow::ensure!(
+                            matches!(h, ClientHello::ReadOnly(AuthRead::Anonymous)),
+                            "anonymous only"
+                        );
+                        crate::channel::write_raw(&mut s, &AuthRead::Anonymous).await?;
+                        let mut con = Channel::new::<ClientCtx, _>(None, s);
+                        let mut batch: Vec<ToRead> = Vec::new();
+                        loop {
+                            con.receive_batch(&mut batch).await?;
+                            for _ in batch.drain(..) {
+                                time::sleep(delay).await;
+                                con.queue_send(&FromRead::Referral(Referral {
+                                    path: Path::from("/eu"),
+                                    ttl: Some(1),
+                                    addrs: GPooled::orphan(vec![(
+                                        child,
+                                        Auth::Anonymous,
+                                    )]),
+                                }))?;
+                            }
+                            con.flush().await?
+                        }
+                    }
+                    .await;
+                    if let Err(e) = r {
+                        log::info!("slow referrer connection ended: {e}")
+                    }
+                });
+            }
+        });
+        Ok(me)
+    }
+
+    /// The bound covers the referral walk, not each hop of it: a per-hop
+    /// budget lets a request take `MAX_REFERRALS` times `MAX_REQUEST`, past
+    /// the wait its caller derived from that figure.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_stalling_child_cannot_overrun_the_request_bound() -> Result<()> {
+        let _ = env_logger::try_init();
+        let child = black_hole().await?;
+        let slow = MAX_REQUEST / 2;
+        let root = slow_referrer(slow, child).await?;
+        let mut cfg = anon_client(&[0])?;
+        cfg.addrs = vec![(root, Auth::Anonymous)];
+        cfg.detach();
+        let r = ResolverRead::new(cfg, DesiredAuth::Anonymous);
+        let start = time::Instant::now();
+        let e = r.resolve([Path::from("/eu/app/v0")]).await.unwrap_err();
+        let elapsed = start.elapsed();
+        assert_eq!(
+            e.downcast_ref::<ResolverErrors>(),
+            Some(&rerrs(&[ResolverError::Unreachable]))
+        );
+        assert!(
+            elapsed < MAX_REQUEST + Duration::from_secs(5),
+            "the walk took {elapsed:?}, past its own bound of {MAX_REQUEST:?}"
+        );
+        Ok(())
+    }
+
     /// And a subscription hears all of it. The subscriber has to outwait the
     /// resolver client, or it answers its own question with `ResolveTimeout`
-    /// before the resolver client has said anything. Ignored for the same
-    /// reason as the test above.
+    /// before the resolver client has said anything.
     #[tokio::test(flavor = "multi_thread")]
-    #[ignore]
     async fn a_subscription_hears_the_reasons_not_a_timeout() -> Result<()> {
         let _ = env_logger::try_init();
         let ports = [free_port(), free_port()];
@@ -2601,8 +2795,6 @@ mod errors {
         for (_, auth) in cfg.addrs.iter_mut() {
             *auth = Auth::Tls { name: literal!("wrong.example.com") };
         }
-        // the publisher starts failing the moment it is built, which it does
-        // before a test can register for the events, so read the condition
         let pb = publisher(&cfg, DesiredAuth::Tls { identity: None }).await?;
         let v = pb.publish(Path::from("/app/v0"), 42i64)?;
         // a publish issued while no resolver is usable waits out the batch
@@ -2621,9 +2813,12 @@ mod errors {
 
     /// A resolver that cannot work out what a publisher may do used to drop
     /// the socket after a clean handshake, which is indistinguishable from the
-    /// resolver going away — so the publisher retried forever, and the
-    /// operator was sent to look at the network for a problem in the user
-    /// database.
+    /// resolver going away, which is not what happened and not what to fix.
+    ///
+    /// Unix only for want of an id map that fails: windows has no `/bin/false`,
+    /// and the config rejects a command that isn't there before the server
+    /// starts.
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     async fn a_publisher_the_resolver_cannot_authorize_is_told_so() -> Result<()> {
         let _ = env_logger::try_init();

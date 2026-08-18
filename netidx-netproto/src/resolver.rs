@@ -70,25 +70,24 @@ pub enum ClientHello {
     WriteOnly(ClientHelloWrite),
 }
 
-/// Why the resolver will not accept this publisher, sent instead of dropping
-/// the socket and leaving it to guess.
+/// Why the resolver will not accept this publisher.
 ///
-/// One value, not a set: a single server refuses for a single reason. A
-/// client that doesn't recognise one just knows it was refused.
+/// Tags are positional: the order of these variants is the wire format. Add
+/// new reasons to the end.
 #[derive(Clone, Debug, Copy, PartialEq, Eq, Pack)]
 #[repr(u8)]
 pub enum WriteRefusal {
+    /// A reason this version has no name for. Never sent.
+    #[pack(other)]
+    Unknown,
     LinkLocalAddr,
     BroadcastAddr,
     PrivateAddr,
     UnspecifiedAddr,
     MulticastAddr,
     LoopbackAddr,
-    /// The handshake succeeded, but the resolver could not decide what the
-    /// publisher is allowed to do — the name it presented did not map to a
-    /// user, or the map that would have said so did not answer. Which of
-    /// those is in the resolver's log; the publisher can act on neither, and
-    /// needs only to know that retrying will not help.
+    /// The resolver authenticated the publisher and could not then decide what
+    /// it may do. Retrying will not help.
     Unauthorized,
 }
 
@@ -113,10 +112,7 @@ pub struct ServerHelloWrite {
     pub auth: AuthWrite,
     pub resolver_id: SocketAddr,
     /// If set, everything above is moot: the connection is about to close.
-    ///
-    /// A trailing `#[pack(default)]` field, so a 0.32 publisher decodes the
-    /// message, skips it, and then sees the connection close — which is what
-    /// it sees today. No protocol version bump.
+    /// Must stay trailing and defaulted.
     #[pack(default)]
     pub refused: Option<WriteRefusal>,
 }

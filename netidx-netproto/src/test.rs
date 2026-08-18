@@ -186,6 +186,70 @@ mod resolver {
         assert_eq!(<ServerHelloWriteBefore as Pack>::decode(&mut buf).unwrap(), before);
     }
 
+    /// A resolver from the future, refusing for a reason that does not exist
+    /// yet. Add reasons to the end of this and leave the current type alone.
+    #[derive(Clone, Debug, PartialEq, Eq, netidx_derive::Pack)]
+    enum WriteRefusalAfter {
+        Unknown,
+        LinkLocalAddr,
+        BroadcastAddr,
+        PrivateAddr,
+        UnspecifiedAddr,
+        MulticastAddr,
+        LoopbackAddr,
+        Unauthorized,
+        SomeoneElsesProblem,
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq, netidx_derive::Pack)]
+    struct ServerHelloWriteAfter {
+        ttl: u64,
+        ttl_expired: bool,
+        auth: AuthWrite,
+        resolver_id: SocketAddr,
+        #[pack(default)]
+        refused: Option<WriteRefusalAfter>,
+    }
+
+    /// An unrecognised reason must decode as `Unknown` rather than failing
+    /// the whole hello.
+    #[test]
+    fn a_reason_from_the_future_is_still_a_refusal() {
+        let addr: SocketAddr = "127.0.0.1:1234".parse().unwrap();
+        let future = ServerHelloWriteAfter {
+            ttl: 120,
+            ttl_expired: false,
+            auth: AuthWrite::Anonymous,
+            resolver_id: addr,
+            refused: Some(WriteRefusalAfter::SomeoneElsesProblem),
+        };
+        let mut buf = pack(&future).unwrap();
+        let now = <ServerHelloWrite as Pack>::decode(&mut buf).unwrap();
+        assert_eq!(now.refused, Some(WriteRefusal::Unknown));
+        assert_eq!(now.resolver_id, addr);
+    }
+
+    /// Tags are positional, so the order of the variants is the wire format.
+    /// Adding a reason anywhere but the end renumbers everything below it.
+    #[test]
+    fn the_reasons_keep_their_tags() {
+        use WriteRefusal as W;
+        use WriteRefusalAfter as A;
+        for (now, after) in [
+            (W::Unknown, A::Unknown),
+            (W::LinkLocalAddr, A::LinkLocalAddr),
+            (W::BroadcastAddr, A::BroadcastAddr),
+            (W::PrivateAddr, A::PrivateAddr),
+            (W::UnspecifiedAddr, A::UnspecifiedAddr),
+            (W::MulticastAddr, A::MulticastAddr),
+            (W::LoopbackAddr, A::LoopbackAddr),
+            (W::Unauthorized, A::Unauthorized),
+        ] {
+            let mut buf = pack(&now).unwrap();
+            assert_eq!(<WriteRefusalAfter as Pack>::decode(&mut buf).unwrap(), after);
+        }
+    }
+
     fn write_refusal() -> impl Strategy<Value = WriteRefusal> {
         prop_oneof![
             Just(WriteRefusal::LinkLocalAddr),
@@ -195,6 +259,7 @@ mod resolver {
             Just(WriteRefusal::MulticastAddr),
             Just(WriteRefusal::LoopbackAddr),
             Just(WriteRefusal::Unauthorized),
+            Just(WriteRefusal::Unknown),
         ]
     }
 

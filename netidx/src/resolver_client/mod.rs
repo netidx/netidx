@@ -353,7 +353,12 @@ where
         tls: Option<tls::CachedConnector>,
         events: Option<UnboundedSender<GPooled<Vec<WriteEvent>>>>,
     ) -> Self;
-    fn send(&mut self, batch: GPooled<Vec<(usize, T)>>) -> ResponseChan<F>;
+    /// `deadline` is the budget for the whole request, referrals included.
+    fn send(
+        &mut self,
+        deadline: Instant,
+        batch: GPooled<Vec<(usize, T)>>,
+    ) -> ResponseChan<F>;
 }
 
 impl Connection<ToRead, FromRead> for ReadClient {
@@ -369,8 +374,12 @@ impl Connection<ToRead, FromRead> for ReadClient {
         ReadClient::new(resolver, desired_auth, tls)
     }
 
-    fn send(&mut self, batch: GPooled<Vec<(usize, ToRead)>>) -> ResponseChan<FromRead> {
-        ReadClient::send(self, batch)
+    fn send(
+        &mut self,
+        deadline: Instant,
+        batch: GPooled<Vec<(usize, ToRead)>>,
+    ) -> ResponseChan<FromRead> {
+        ReadClient::send(self, deadline, batch)
     }
 }
 
@@ -395,7 +404,13 @@ impl Connection<ToWrite, FromWrite> for WriteClient {
         )
     }
 
-    fn send(&mut self, batch: GPooled<Vec<(usize, ToWrite)>>) -> ResponseChan<FromWrite> {
+    /// The write side has no request budget; every step it takes is bounded
+    /// on its own.
+    fn send(
+        &mut self,
+        _deadline: Instant,
+        batch: GPooled<Vec<(usize, ToWrite)>>,
+    ) -> ResponseChan<FromWrite> {
         WriteClient::send(self, batch)
     }
 }
@@ -449,6 +464,7 @@ where
 
     fn send_to_server(
         &mut self,
+        deadline: Instant,
         server: Option<Arc<Referral>>,
         batch: GPooled<Vec<(usize, T)>>,
     ) -> ResponseChan<F> {
@@ -471,10 +487,10 @@ where
                         self.events.clone(),
                     ));
                 }
-                self.default_con.as_mut().unwrap().send(batch)
+                self.default_con.as_mut().unwrap().send(deadline, batch)
             }
             Some(r) => match self.by_server.get_mut(&r) {
-                Some(con) => con.send(batch),
+                Some(con) => con.send(deadline, batch),
                 None => {
                     let mut con = C::new(
                         constant(r.clone()),
@@ -486,7 +502,7 @@ where
                         self.events.clone(),
                     );
                     self.by_server.insert(r, con.clone());
-                    con.send(batch)
+                    con.send(deadline, batch)
                 }
             },
         }
@@ -550,6 +566,8 @@ where
         &self,
         batch: &GPooled<Vec<T>>,
     ) -> Result<(GPooled<PublisherTable>, GPooled<Vec<F>>)> {
+        // one budget for the walk, not one per hop
+        let deadline = Instant::now() + MAX_REQUEST;
         let mut referrals = 0;
         loop {
             let mut waiters = Vec::new();
@@ -561,7 +579,7 @@ where
                     inner.by_server.clear(); // a workable sledgehammer
                 }
                 for (r, batch) in inner.router.route_batch(&inner.ti_pool, batch) {
-                    waiters.push(inner.send_to_server(r, batch))
+                    waiters.push(inner.send_to_server(deadline, r, batch))
                 }
                 (inner.fi_pool.take(), inner.f_pool.take())
             };
@@ -735,6 +753,8 @@ impl ResolverRead {
         message: ToRead,
         mut process_reply: F,
     ) -> Result<()> {
+        // one budget for the walk, not one per hop
+        let deadline = Instant::now() + MAX_REQUEST;
         let mut pending: LPooled<Vec<Option<Arc<Referral>>>> = LPooled::take();
         pending.push(None);
         let mut done: LPooled<AHashSet<Arc<Referral>>> = LPooled::take();
@@ -751,7 +771,7 @@ impl ResolverRead {
                         let referral = inner.router.add_referral(referral);
                         let mut to = TOREADPOOL.take();
                         to.push((0, message.clone()));
-                        waiters.push(inner.send_to_server(Some(referral), to));
+                        waiters.push(inner.send_to_server(deadline, Some(referral), to));
                     }
                 }
             }

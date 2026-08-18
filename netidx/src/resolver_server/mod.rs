@@ -512,12 +512,8 @@ fn refusal_hello(ctx: &Ctx, auth: AuthWrite, refused: WriteRefusal) -> ServerHel
     }
 }
 
-/// Say why, rather than dropping the socket and leaving the publisher to
-/// guess. It has nothing else to go on: it will retry forever either way.
-///
 /// Sent where the publisher is already waiting to read a `ServerHelloWrite`,
-/// and before anything is registered, so refusing costs it one round trip and
-/// us nothing.
+/// and before anything is registered.
 async fn refuse_write_raw(
     ctx: &Ctx,
     con: &mut TcpStream,
@@ -540,17 +536,8 @@ async fn refuse_write(
     anyhow!("refused the publisher: {refused:?}")
 }
 
-/// Turn a failure to work out who the publisher is into a refusal.
-///
-/// The handshake has already succeeded by the time this is asked, so dropping
-/// the socket here looks to the publisher exactly like the resolver going
-/// away, and it retries forever against a user database that will keep saying
-/// the same thing. `refused` is the only word that distinguishes "I will not
-/// have you" from "I am not here".
-///
-/// Logged at error rather than warn: the publisher is told to come here for
-/// the reason, and a resolver run at the default filter would otherwise have
-/// nothing to show it.
+/// Turn a failure to work out who the publisher is into a refusal. Must log at
+/// `error`: the refusal sends the publisher's operator here for the reason.
 async fn authorized(
     ctx: &Ctx,
     con: &mut Channel,
@@ -609,8 +596,8 @@ async fn write_client_local_auth(
 ) -> AuthResult {
     let tok: BoundedBytes<TOKEN_MAX> = recv(ctx.cfg.hello_timeout, &mut con).await?;
     // the channel frames a lone message exactly as `write_raw` does, so
-    // building it here rather than after the hello changes no bytes, and lets
-    // everything below refuse through the same path
+    // building it here changes no bytes and lets everything below refuse
+    // through the same path
     let mut con = Channel::new::<ServerCtx, TcpStream>(None, con);
     let cred = a.0.authenticate(&*tok)?;
     let uifo = a.1.write().await.users.ifo(ctx.id, Some(&cred.user)).await;

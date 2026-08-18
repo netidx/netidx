@@ -37,25 +37,27 @@ use tokio::{
     time::{self, Instant},
 };
 
-/// The longest the connection task will keep trying before it gives up and
-/// answers with why it could not.
-///
-/// A caller that stops waiting sooner gets a timeout instead of the reasons,
-/// and a timeout is the one answer nobody can act on — so callers derive
-/// their own deadline from this rather than picking a number. It is longer
-/// than the retry loop needs in any case where the members fail promptly;
-/// it exists to bound the case where they accept the connection and stall.
+/// The budget for a whole request, referrals included. Callers waiting on a
+/// request derive their wait from this rather than picking a number.
+#[cfg(not(test))]
 pub(crate) const MAX_REQUEST: Duration = Duration::from_secs(180);
+
+/// Must stay longer than `HELLO_TO`.
+#[cfg(test)]
+pub(crate) const MAX_REQUEST: Duration = Duration::from_secs(20);
+
+/// How long to wait before trying the cluster again. Randomized, or a cluster
+/// coming back takes every client's retry in the same instant.
+fn backoff() -> Duration {
+    #[cfg(not(test))]
+    const MAX: u64 = 12;
+    #[cfg(test)]
+    const MAX: u64 = 2;
+    Duration::from_secs(rng().random_range(1..MAX))
+}
 
 /// Try a step of the hello exchange with `addr`, moving on to the next member
 /// if it fails or times out.
-///
-/// The address is in the message because these are the failures you cannot
-/// otherwise attribute: a member refusing reads (a read gate) closes the
-/// connection mid-hello, and without the address the operator is left looking
-/// at the members that are merely *down*, which are the ones that do get
-/// named. `warn` for the same reason — a member that hangs up on you is a
-/// failed connection attempt like any other.
 macro_rules! cwt {
     ($step:expr, $addr:expr, $errors:expr, $why:expr, $e:expr) => {{
         let step = $step;
@@ -77,7 +79,7 @@ macro_rules! cwt {
 }
 
 /// Connect to any one member of `resolver`, returning which one it turned out
-/// to be so the caller can tell when that member leaves the cluster.
+/// to be.
 async fn connect(
     bad_addrs: &mut AHashSet<SocketAddr>,
     resolver: &Referral,
@@ -97,8 +99,6 @@ async fn connect(
         if tries >= 3 {
             bail!("can't connect to any resolver servers");
         }
-        // one member that accepts and stalls can eat several `HELLO_TO`s, so
-        // the deadline is checked per member rather than per request
         if Instant::now() >= deadline {
             bail!("ran out of time to connect to a resolver server");
         }
@@ -109,8 +109,7 @@ async fn connect(
             bad_addrs.clear()
         }
         if n % addrs.len() == 0 && tries > 0 {
-            let wait = Duration::from_secs(rng().random_range(1..12));
-            time::sleep_until(min(deadline, Instant::now() + wait)).await;
+            time::sleep_until(min(deadline, Instant::now() + backoff())).await;
         }
         n += 1;
         let mut con = match time::timeout(HELLO_TO, TcpStream::connect(&addr)).await {
@@ -120,11 +119,13 @@ async fn connect(
                     "failed to connect to resolver server {} connection timed out",
                     addr
                 );
+                errors.insert(Unreachable);
                 bad_addrs.insert(addr);
                 continue;
             }
             Ok(Err(e)) => {
                 warn!("failed to connect to resolver server {} error: {}", addr, e);
+                errors.insert(Unreachable);
                 bad_addrs.insert(addr);
                 continue;
             }
@@ -242,11 +243,6 @@ async fn connect(
             }
             (DesiredAuth::Tls { .. }, Auth::Tls { name }) => {
                 let tls = tls.as_ref().ok_or_else(|| anyhow!("no tls cache"))?;
-                // Everything from here on is specific to *this* server: its
-                // identity, its name, its handshake. A failure means try the
-                // next address, not give up on the cluster — and a server
-                // that accepts the connection and then says nothing must not
-                // hang us, which is what a read-gated member looks like.
                 let ctx = match task::spawn_blocking({
                     let tls = tls.clone();
                     let name = name.clone();
@@ -298,6 +294,7 @@ async fn connect(
 }
 
 type Batch = (
+    Instant,
     GPooled<Vec<(usize, ToRead)>>,
     oneshot::Sender<std::result::Result<Response<FromRead>, ResolverErrors>>,
 );
@@ -327,9 +324,6 @@ async fn connection(
     'main: loop {
         let batch = select_biased! {
             () = addrs_changed(&mut resolver).fuse() => {
-                // Nothing forces us off a member that is still in the cluster,
-                // but staying connected to one that has left would keep
-                // answering from a resolver nobody is publishing to any more.
                 if let Some((addr, _)) = con.as_ref()
                     && !resolver.borrow().addrs.iter().any(|(a, _)| a == addr)
                 {
@@ -342,34 +336,24 @@ async fn connection(
         };
         match batch {
             None => break,
-            Some((tx_batch, reply)) => {
+            Some((deadline, tx_batch, reply)) => {
                 let mut tries: usize = 0;
-                // what every member we tried had wrong with it, so that a
-                // cluster with one bad certificate and one dead member says
-                // both rather than whichever we happened to try last
                 let mut errors = ResolverErrors::default();
-                let deadline = Instant::now() + MAX_REQUEST;
                 let answer = 'batch: loop {
                     if tries > 3 || Instant::now() >= deadline {
-                        errors.insert(ResolverError::Unreachable);
+                        if errors.is_empty() {
+                            errors.insert(ResolverError::Unreachable);
+                        }
                         break Err(errors);
                     }
                     if tries > 1 {
-                        let wait = Duration::from_secs(rng().random_range(1..12));
-                        time::sleep_until(min(deadline, Instant::now() + wait)).await
+                        time::sleep_until(min(deadline, Instant::now() + backoff())).await
                     }
                     tries += 1;
                     let c = match con {
                         Some((_, ref mut c)) => c,
                         None => {
                             let current = resolver.borrow_and_update().clone();
-                            // enforced here rather than trusted to the steps
-                            // inside: each of those is bounded by `HELLO_TO`,
-                            // and a step that starts just under the deadline
-                            // would carry the request past it — which is the
-                            // caller's budget, not ours to overrun. Whatever
-                            // `connect` recorded in `errors` before being cut
-                            // off still stands.
                             let r = time::timeout_at(
                                 deadline,
                                 connect(
@@ -441,9 +425,6 @@ async fn connection(
                                             }
                                         }
                                     });
-                                // whichever comes first: a member that has gone
-                                // quiet must not hold the request past the
-                                // budget the caller is waiting on
                                 let until = min(deadline, Instant::now() + timeout);
                                 match time::timeout_at(until, f).await {
                                     Ok(Ok(())) => (),
@@ -495,10 +476,11 @@ impl ReadClient {
 
     pub(crate) fn send(
         &mut self,
+        deadline: Instant,
         batch: GPooled<Vec<(usize, ToRead)>>,
     ) -> ResponseChan<FromRead> {
         let (tx, rx) = oneshot::channel();
-        let _ = self.0.unbounded_send((batch, tx));
+        let _ = self.0.unbounded_send((deadline, batch, tx));
         rx
     }
 }
