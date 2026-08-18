@@ -1,0 +1,42 @@
+[package]
+name = "graphix-package-netidx-admin"
+version = "0.32.0"
+authors = ["Eric Stokes <letaris@gmail.com>"]
+edition = "2024"
+license = "MIT"
+description = "netidx administration from Graphix: the admin-plane query/action API and interactive ceremonies"
+homepage = "https://netidx.github.io/netidx-book/"
+repository = "https://github.com/estokes/netidx"
+readme = "../README.md"
+documentation = "https://docs.rs/graphix-package-netidx-admin"
+keywords = ["networking", "distributed", "configuration"]
+categories = ["network-programming"]
+
+[dependencies]
+anyhow = { workspace = true }
+arcstr = { workspace = true }
+bytes = { workspace = true }
+compact_str = { workspace = true }
+graphix-compiler = { workspace = true }
+graphix-derive = { workspace = true }
+graphix-package = { workspace = true }
+graphix-package-core = { workspace = true }
+graphix-rt = { workspace = true }
+netidx-admin = { path = "../netidx-admin", version = "0.32.0" }
+netidx-admin-proto = { path = "../netidx-admin-proto", version = "0.32.0" }
+netidx-core = { path = "../netidx-core", version = "0.32.0" }
+netidx-derive = { path = "../netidx-derive", version = "0.32.0" }
+netidx-value = { path = "../netidx-value", version = "0.32.0" }
+ahash = { workspace = true }
+nohash = { workspace = true }
+parking_lot = { workspace = true }
+poolshark = { workspace = true }
+tokio = { workspace = true }
+triomphe = { workspace = true }
+uuid = { workspace = true }
+
+[build-dependencies]
+graphix-ast-pack = { workspace = true }
+
+[dev-dependencies]
+env_logger = { workspace = true }

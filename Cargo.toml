@@ -48,6 +48,8 @@ graphix-rt = { version = "0.9.0", path = "../graphix/graphix-rt" }
 graphix-compiler = { version = "0.9.0", path = "../graphix/graphix-compiler" }
 graphix-package = { version = "0.9.0", path = "../graphix/graphix-package" }
 graphix-package-core = { version = "0.9.0", path = "../graphix/stdlib/graphix-package-core" }
+graphix-derive = { version = "0.9.0", path = "../graphix/graphix-derive" }
+graphix-ast-pack = { version = "0.9.0", path = "../graphix/graphix-ast-pack" }
 hdrhistogram = "7"
 humantime = "2"
 humantime-serde = "1"
@@ -158,6 +160,7 @@ members = [
     "netidx-id-map",
     "netidx-admin-proto",
     "netidx-admin",
+    "graphix-package-netidx-admin",
     "netidx-tpm",
     "netidx-container",
     "netidx-derive",

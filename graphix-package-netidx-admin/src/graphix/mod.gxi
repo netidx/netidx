@@ -1,0 +1,79 @@
+/// The error union every admin operation can fail with.
+/// `PasswordChangeRequired` is its own variant because frontends route
+/// on it (open the change-password flow); the payload is the admin name.
+/// `Unsupported` is a unix-only operation invoked on another platform.
+type AdminError = [
+  `Admin(string),
+  `PasswordChangeRequired(string),
+  `Unsupported(string)
+];
+
+/// A grouped-base32 SPKI fingerprint: the out-of-band code operators
+/// relay and match. `code` is the full grouped text an operator reads
+/// out; `short` is the abbreviated display form.
+type Fingerprint = { code: string, short: string };
+
+/// How one piece of a server's state compares to what the CA recorded.
+type Agreement = [
+  `Current({ version: u64 }),
+  `Behind({ reported: [u64, null], want: u64 }),
+  `Unrecorded,
+  `Ahead({ reported: u64, ca: u64 })
+];
+
+/// One server's agreement with the CA, per kind of state. A null
+/// agreement means that kind of state doesn't apply to this server.
+type ServerDrift = {
+  server: string,
+  addr: string,
+  perms: [Agreement, null],
+  id_map: [Agreement, null],
+  config: [Agreement, null],
+  config_drift: bool
+};
+
+/// Whether an admin keyslot can recover the CA key (`Signing`) or only
+/// authenticate a scoped role admin (`Role`).
+type SlotKind = [`Signing, `Role];
+
+/// What the admin server will do on an admin's behalf.
+type Policy = {
+  allowed_san: Array<string>,
+  max_validity: duration,
+  id_map_groups: Array<string>,
+  server_enroll_scopes: Array<string>
+};
+
+/// One admin keyslot's public facts, from the roster.
+type AdminInfo = {
+  slot_id: string,
+  admin: string,
+  kind: SlotKind,
+  policy: Policy,
+  must_change: bool
+};
+
+/// Which admin server an operation talks to: this host's own (over its
+/// local control socket) or an authenticated remote session.
+type Target;
+
+/// This host's own admin server as a target, over its local control
+/// socket (unix only). Discovers the admin-server config when
+/// `#cfg_path` is null. Fires per `trigger` delivery.
+val local: fn(?#cfg_path: [string, null], trigger: Any) -> Result<Target, AdminError>;
+
+/// Every registered server's agreement with the CA, in stable server-id
+/// order. Re-queries per `t` delivery — sample to refresh:
+/// `drift(tick ~ t)`.
+val drift: fn(t: Target) -> Result<Array<ServerDrift>, AdminError>;
+
+/// The admin roster: every keyslot's public facts.
+val list_admins: fn(t: Target) -> Result<Array<AdminInfo>, AdminError>;
+
+/// Parse and normalize a fingerprint code an operator typed. The
+/// returned `code` is the canonical grouped form.
+val parse_fingerprint: fn(code: string) -> Result<Fingerprint, `Admin(string)>;
+
+/// The fingerprint's 8x8 identicon as data: which cells are set, and
+/// the (deterministic) color. Rendering is the frontend's job.
+val identicon: fn(fp: Fingerprint) -> Result<{cells: Array<Array<bool>>, color: {r: u8, g: u8, b: u8}}, `Admin(string)>;
