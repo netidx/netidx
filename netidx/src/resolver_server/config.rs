@@ -6,7 +6,7 @@ use self::file::IdMapType;
 use crate::{
     path::Path,
     protocol::resolver::{self, Referral},
-    tls, utils,
+    tls,
 };
 use anyhow::{Context, Result};
 use arcstr::ArcStr;
@@ -143,7 +143,7 @@ pub(crate) fn check_addrs<T: Clone + Into<resolver::Auth>>(
         bail!("empty addrs")
     }
     for (addr, auth) in a {
-        utils::check_addr::<()>(addr.ip(), &[])?;
+        resolver::check_addr::<()>(addr.ip(), &[])?;
         match auth.clone().into() {
             resolver::Auth::Anonymous => (),
             resolver::Auth::Local { .. } if !addr.ip().is_loopback() => {

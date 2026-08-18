@@ -10,12 +10,12 @@ use crate::{
     path::Path,
     protocol::{
         publisher,
-        resolver::{UserInfo, WriteRefusal},
+        resolver::{UserInfo, WriteRefusal, check_addr},
     },
     resolver_client::{ResolverWrite, WriteEvent},
     resolver_server::auth::Permissions,
     tls,
-    utils::{self, ChanId, ChanWrap},
+    utils::{ChanId, ChanWrap},
 };
 use ahash::{AHashMap, AHashSet};
 use anyhow::{Error, Result, anyhow};
@@ -1396,7 +1396,7 @@ impl Publisher {
         slack: usize,
     ) -> Result<Publisher> {
         let (public, private) = bind_cfg.select()?;
-        utils::check_addr(public, &resolver.addrs)?;
+        check_addr(public, &resolver.addrs)?;
         let (addr, listener) = match bind_cfg {
             BindCfg::Exact(addr) => {
                 let l = TcpListener::bind(&addr).await?;

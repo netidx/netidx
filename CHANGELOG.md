@@ -86,8 +86,9 @@
   field, and sees the connection close, exactly as it does today. The
   publisher reports the reason through `Publisher::errors` — e.g.
   `NotPublished | LoopbackAddr` — where before this was a `warn!` on a
-  silent retry loop. `netidx_core::utils::check_addr` returns a typed
-  `AddrError` rather than one of six strings.
+  silent retry loop. `check_addr` moves from `netidx_core::utils` to
+  `netidx_netproto::resolver` and returns the `WriteRefusal` it would be
+  sent as, rather than one of six strings.
 
 - Publishers can find out whether their paths are actually published.
   `Publisher::errors` takes a channel that reports `(Path, PublishErrors)`

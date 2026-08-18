@@ -12,8 +12,9 @@ use poolshark::global::GPooled;
 use smallvec::SmallVec;
 use std::{
     cmp::{Eq, PartialEq},
+    error, fmt,
     hash::{Hash, Hasher},
-    net::SocketAddr,
+    net::{IpAddr, SocketAddr},
     result,
 };
 
@@ -91,18 +92,55 @@ pub enum WriteRefusal {
     Unauthorized,
 }
 
-impl From<netidx_core::utils::AddrError> for WriteRefusal {
-    fn from(e: netidx_core::utils::AddrError) -> Self {
-        use netidx_core::utils::AddrError as A;
-        match e {
-            A::LinkLocal => Self::LinkLocalAddr,
-            A::Broadcast => Self::BroadcastAddr,
-            A::Private => Self::PrivateAddr,
-            A::Unspecified => Self::UnspecifiedAddr,
-            A::Multicast => Self::MulticastAddr,
-            A::Loopback => Self::LoopbackAddr,
-        }
+impl fmt::Display for WriteRefusal {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let s = match self {
+            Self::Unknown => "the resolver refused this publisher, see its log",
+            Self::LinkLocalAddr => "addr is a link local address",
+            Self::BroadcastAddr => "addr is a broadcast address",
+            Self::PrivateAddr => "addr is a private address, and the resolver is not",
+            Self::UnspecifiedAddr => "addr is an unspecified address",
+            Self::MulticastAddr => "addr is a multicast address",
+            Self::LoopbackAddr => "addr is a loopback address and the resolver is not",
+            Self::Unauthorized => "the resolver could not authorize this publisher",
+        };
+        write!(f, "{s}")
     }
+}
+
+impl error::Error for WriteRefusal {}
+
+/// Check that `ip` is an address subscribers told to come back to it could
+/// reach from where `resolvers` are.
+pub fn check_addr<A>(
+    ip: IpAddr,
+    resolvers: &[(SocketAddr, A)],
+) -> result::Result<(), WriteRefusal> {
+    match ip {
+        IpAddr::V4(ip) if ip.is_link_local() => return Err(WriteRefusal::LinkLocalAddr),
+        IpAddr::V4(ip) if ip.is_broadcast() => return Err(WriteRefusal::BroadcastAddr),
+        IpAddr::V4(ip) if ip.is_private() => {
+            let ok = resolvers.iter().all(|(a, _)| match a.ip() {
+                IpAddr::V4(ip) if ip.is_private() || ip.is_loopback() => true,
+                IpAddr::V6(_) => true,
+                _ => false,
+            });
+            if !ok {
+                return Err(WriteRefusal::PrivateAddr);
+            }
+        }
+        _ => (),
+    }
+    if ip.is_unspecified() {
+        return Err(WriteRefusal::UnspecifiedAddr);
+    }
+    if ip.is_multicast() {
+        return Err(WriteRefusal::MulticastAddr);
+    }
+    if ip.is_loopback() && !resolvers.iter().all(|(a, _)| a.ip().is_loopback()) {
+        return Err(WriteRefusal::LoopbackAddr);
+    }
+    Ok(())
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Pack)]

@@ -14,12 +14,10 @@ use std::{
     borrow::Borrow,
     cell::RefCell,
     cmp::{Ord, Ordering, PartialOrd},
-    error, fmt,
     hash::Hash,
     iter::{IntoIterator, Iterator},
-    net::{IpAddr, SocketAddr},
+    net::SocketAddr,
     pin::Pin,
-    result,
     time::Duration,
 };
 
@@ -222,69 +220,6 @@ macro_rules! atomic_id {
             }
         }
     };
-}
-
-/// Why an address can't be given to the resolver as the one subscribers
-/// should come back to.
-///
-/// Typed rather than six strings so that a resolver refusing a publisher can
-/// tell it which rule it broke, instead of dropping the socket and leaving it
-/// to guess.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AddrError {
-    LinkLocal,
-    Broadcast,
-    Private,
-    Unspecified,
-    Multicast,
-    Loopback,
-}
-
-impl fmt::Display for AddrError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let s = match self {
-            Self::LinkLocal => "addr is a link local address",
-            Self::Broadcast => "addr is a broadcast address",
-            Self::Private => "addr is a private address, and the resolver is not",
-            Self::Unspecified => "addr is an unspecified address",
-            Self::Multicast => "addr is a multicast address",
-            Self::Loopback => "addr is a loopback address and the resolver is not",
-        };
-        write!(f, "{s}")
-    }
-}
-
-impl error::Error for AddrError {}
-
-pub fn check_addr<A>(
-    ip: IpAddr,
-    resolvers: &[(SocketAddr, A)],
-) -> result::Result<(), AddrError> {
-    match ip {
-        IpAddr::V4(ip) if ip.is_link_local() => return Err(AddrError::LinkLocal),
-        IpAddr::V4(ip) if ip.is_broadcast() => return Err(AddrError::Broadcast),
-        IpAddr::V4(ip) if ip.is_private() => {
-            let ok = resolvers.iter().all(|(a, _)| match a.ip() {
-                IpAddr::V4(ip) if ip.is_private() || ip.is_loopback() => true,
-                IpAddr::V6(_) => true,
-                _ => false,
-            });
-            if !ok {
-                return Err(AddrError::Private);
-            }
-        }
-        _ => (),
-    }
-    if ip.is_unspecified() {
-        return Err(AddrError::Unspecified);
-    }
-    if ip.is_multicast() {
-        return Err(AddrError::Multicast);
-    }
-    if ip.is_loopback() && !resolvers.iter().all(|(a, _)| a.ip().is_loopback()) {
-        return Err(AddrError::Loopback);
-    }
-    Ok(())
 }
 
 thread_local! {

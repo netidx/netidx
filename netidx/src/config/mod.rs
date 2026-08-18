@@ -1,10 +1,10 @@
 //! Configuration file loading and management.
 use crate::{
     path::Path,
-    protocol::resolver::{Auth, Referral},
+    protocol::resolver::{Auth, Referral, check_addr},
     publisher,
     subscriber::DesiredAuth,
-    tls, utils,
+    tls,
 };
 use anyhow::Result;
 use poolshark::global::GPooled;
@@ -410,7 +410,7 @@ impl Config {
         };
         for (addr, auth) in &cfg.addrs {
             use file::Auth as FAuth;
-            utils::check_addr::<()>(addr.ip(), &[])?;
+            check_addr::<()>(addr.ip(), &[])?;
             match auth {
                 FAuth::Anonymous | FAuth::Krb5(_) => (),
                 FAuth::Tls(name) => match &tls {

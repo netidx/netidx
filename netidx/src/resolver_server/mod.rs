@@ -8,7 +8,7 @@ use crate::{
         resolver::{
             AuthChallenge, AuthRead, AuthWrite, ClientHello, ClientHelloWrite, FromWrite,
             HashMethod, Publisher, PublisherId, ReadyForOwnershipCheck, Secret,
-            ServerHelloWrite, ToRead, ToWrite, WriteRefusal,
+            ServerHelloWrite, ToRead, ToWrite, WriteRefusal, check_addr,
         },
     },
     tls, utils,
@@ -874,11 +874,9 @@ async fn hello_client_write(
     debug!("hello_write client_hello: {:?}", hello);
     // not `?`: the publisher can only be told this over a connection we
     // finish negotiating, and it is the answer it has never been able to get
-    let refused =
-        utils::check_addr(hello.write_addr.ip(), &[(ctx.id, ())]).err().map(|e| {
-            error!("refusing publisher {}: {e}", hello.write_addr);
-            WriteRefusal::from(e)
-        });
+    let refused = check_addr(hello.write_addr.ip(), &[(ctx.id, ())]).err().inspect(|e| {
+        error!("refusing publisher {}: {e}", hello.write_addr);
+    });
     let (con, uifo, publisher, rx_stop) = match hello.auth {
         AuthWrite::Anonymous => {
             write_client_anonymous_auth(&ctx, con, &hello, refused).await?
