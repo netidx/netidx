@@ -77,3 +77,89 @@ val parse_fingerprint: fn(code: string) -> Result<Fingerprint, `Admin(string)>;
 /// The fingerprint's 8x8 identicon as data: which cells are set, and
 /// the (deterministic) color. Rendering is the frontend's job.
 val identicon: fn(fp: Fingerprint) -> Result<{cells: Array<Array<bool>>, color: {r: u8, g: u8, b: u8}}, `Admin(string)>;
+
+/// The confirmed identity of an admin server's CA: what the operator
+/// verifies out of band before anything is trusted.
+type CaIdentity = {
+  fingerprint: Fingerprint,
+  domain: string,
+  roles: Array<string>,
+  server_id: string,
+  ca: bool
+};
+
+/// A netidx admin domain discovered on the local network.
+type AdminDomain = { domain: string, identity: CaIdentity };
+
+/// The presentation descriptor of a question: the CLI flag a script
+/// would pass (the question's stable identity), a short label, and
+/// newcomer-actionable help.
+type FieldInfo = { flag: string, label: string, help: string };
+
+/// The phase a long-running step is in.
+type Stage = [`Discovering, `Enrolling, `WaitingApproval, `Applying, `Done];
+
+/// Which shown-once secret a `OneTimeSecret` event presents. The
+/// payload of `AdminPassword` is the admin's name.
+type OneTimeSecretKind = [`CaRecovery, `AdminPassword(string)];
+
+/// A running interactive admin flow. Inert until the first `events`
+/// observation; dropping every reference cancels it.
+type Ceremony<'r>;
+
+/// One event from a ceremony. Events carrying an `id` are blocking
+/// questions — the flow is parked until `answer` resolves that id (or
+/// cancels). The rest are presentation: verification codes, progress,
+/// notes, warnings, and the terminal `Done`.
+type Event<'r> = [
+  `Text({ id: u64, field: FieldInfo, default: [string, null], required: bool }),
+  `Secret({ id: u64, field: FieldInfo }),
+  `Choice({ id: u64, field: FieldInfo, choices: Array<string>, default: [string, null] }),
+  `Confirm({ id: u64, field: FieldInfo, default: bool }),
+  `SelectAdminDomain({ id: u64, domains: Array<AdminDomain> }),
+  `Announce({ id: u64, title: string, body: string }),
+  `AnnounceIdentity({ id: u64, body: string, fp: Fingerprint }),
+  `ConfirmIdentity({ id: u64, identity: CaIdentity }),
+  `OneTimeSecret({ id: u64, kind: OneTimeSecretKind, password: string }),
+  `VerificationCode({ purpose: string, fp: Fingerprint }),
+  `ClearVerificationCode,
+  `Progress({ stage: Stage, message: string, expected: [duration, null] }),
+  `Note(string),
+  `Warn(string),
+  `Done(Result<'r, AdminError>)
+];
+
+/// The reply to a blocking question. The answer kind must match the
+/// question (`Confirm` answers a `Confirm` or `ConfirmIdentity`, `Ack`
+/// an `Announce`/`AnnounceIdentity`/`OneTimeSecret`, `Domain` a
+/// `SelectAdminDomain`); `Cancel` aborts the whole ceremony.
+type Answer = [
+  `Text([string, null]),
+  `Secret(string),
+  `Choice(string),
+  `Confirm(bool),
+  `Domain([`Discovered(i64), `Manual, `PollMore]),
+  `Ack,
+  `Cancel
+];
+
+/// Open an authenticated remote-admin session: the security gesture
+/// (`ConfirmIdentity`), the admin name, and the password arrive as
+/// events unless provided. `Done` carries the session as a `Target`.
+val connect: fn(
+  ?#admin: [string, null],
+  ?#password: [string, null],
+  ?#ca_dir: [string, null],
+  server: string
+) -> Ceremony<Target>;
+
+/// The ceremony's event stream. Starts the flow on first observation.
+/// Keep the observer OUTSIDE sleeping select arms — an event delivered
+/// while every observer sleeps is missed, not replayed.
+val events: fn(c: Ceremony<'r>) -> Event<'r>;
+
+/// Answer the outstanding question `id`. Errors (as a value) if the id
+/// is stale, the answer kind doesn't match, a required text answer is
+/// null, or a choice isn't one of the offered ones — the question stays
+/// armed, so re-prompt and answer again.
+val answer: fn(#id: u64, c: Ceremony<'r>, a: Answer) -> [null, Error<`Admin(string)>];

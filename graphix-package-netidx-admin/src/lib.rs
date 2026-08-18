@@ -6,11 +6,14 @@
 //! crate is BRIDGING ONLY — types, IO, and the `Answerer` seam; decision
 //! and presentation logic belongs in Graphix (the no-workarounds rule).
 
-use anyhow::Error;
+use anyhow::{Error, Result};
 use arcstr::ArcStr;
-use graphix_compiler::{ExecCtx, Rt, UserEvent, effects::EffectKind, errf};
+use graphix_compiler::{
+    Apply, BuiltIn, Event, ExecCtx, Node, Rt, Scope, TagValue, UserEvent,
+    effects::EffectKind, errf, expr::ExprId, typ::FnType,
+};
 use graphix_package_core::{
-    CachedArgs, CachedArgsAsync, CachedVals, EvalCached, EvalCachedAsync,
+    CachedArgs, CachedArgsAsync, CachedVals, EvalCached, EvalCachedAsync, seam_tick,
 };
 use netidx_admin::ops::{self, AdminTarget};
 use netidx_admin_proto::{
@@ -22,6 +25,7 @@ use netidx_value::{Abstract, ValArray, Value, abstract_type::AbstractWrapper};
 use std::{
     cmp::Ordering,
     hash::{Hash, Hasher},
+    net::SocketAddr,
     path::PathBuf,
     sync::{Arc, LazyLock},
     time::Duration,
@@ -32,7 +36,7 @@ use std::{
 /// Convert an op failure into the package's error union. Typed routing:
 /// [`ops::password_change_required`] becomes its own variant because
 /// frontends must route on it, not on message text.
-fn admin_err(e: Error) -> Value {
+pub(crate) fn admin_err(e: Error) -> Value {
     match ops::password_change_required(&e) {
         Some(p) => errf!("PasswordChangeRequired", "{}", p.admin),
         None => errf!("Admin", "{e:#}"),
@@ -115,9 +119,9 @@ fn get_target(cached: &CachedVals, idx: usize) -> Option<TargetValue> {
 // and payload variants `(tag, payload)` — the graphix variant forms.
 
 #[derive(Debug, Clone, IntoValue, FromValue)]
-struct FingerprintV {
-    code: String,
-    short: String,
+pub(crate) struct FingerprintV {
+    pub(crate) code: String,
+    pub(crate) short: String,
 }
 
 impl From<&Fingerprint> for FingerprintV {
@@ -386,6 +390,103 @@ impl<R: Rt, E: UserEvent> EvalCached<R, E> for IdenticonEv {
 
 type Identicon = CachedArgs<IdenticonEv>;
 
+// ── connect (ceremony) ───────────────────────────────────────────
+
+/// Open an authenticated remote-admin session as a ceremony: the
+/// identity confirmation, admin name, and password arrive as events
+/// unless provided; `Done` carries the `Target`.
+#[derive(Debug)]
+pub(crate) struct Connect {
+    admin: Option<String>,
+    password: Option<String>,
+    ca_dir: Option<String>,
+    out: TagValue,
+}
+
+impl<R: Rt, E: UserEvent> BuiltIn<R, E> for Connect {
+    const EFFECT: EffectKind = EffectKind::Async;
+    const NAME: &str = "netidx_admin_connect";
+
+    fn init<'a, 'b, 'c, 'd>(
+        _ctx: &'a mut ExecCtx<R, E>,
+        _typ: &'a FnType,
+        _resolved: Option<&'d FnType>,
+        _scope: &'b Scope,
+        _from: &'c [Node<R, E>],
+        _top_id: ExprId,
+    ) -> Result<Box<dyn Apply<R, E>>> {
+        Ok(Box::new(Connect {
+            admin: None,
+            password: None,
+            ca_dir: None,
+            out: TagValue::phantom(),
+        }))
+    }
+}
+
+fn opt_str_arg<R: Rt, E: UserEvent>(
+    ctx: &mut ExecCtx<R, E>,
+    node: &mut Node<R, E>,
+    event: &mut Event<E>,
+    into: &mut Option<String>,
+) {
+    if let Some(tv) = seam_tick(node.update(ctx, event)) {
+        *into = match tv.value_cloned() {
+            Value::String(s) => Some(s.to_string()),
+            _ => None,
+        };
+    }
+}
+
+impl<R: Rt, E: UserEvent> Apply<R, E> for Connect {
+    fn update(
+        &mut self,
+        ctx: &mut ExecCtx<R, E>,
+        from: &mut [Node<R, E>],
+        event: &mut Event<E>,
+    ) -> &TagValue {
+        let (admin_n, rest) = from.split_first_mut().unwrap();
+        let (password_n, rest) = rest.split_first_mut().unwrap();
+        let (ca_dir_n, rest) = rest.split_first_mut().unwrap();
+        let (server_n, _) = rest.split_first_mut().unwrap();
+        opt_str_arg(ctx, admin_n, event, &mut self.admin);
+        opt_str_arg(ctx, password_n, event, &mut self.password);
+        opt_str_arg(ctx, ca_dir_n, event, &mut self.ca_dir);
+        let server = match seam_tick(server_n.update(ctx, event)) {
+            Some(tv) => match tv.value_cloned() {
+                Value::String(s) => s,
+                _ => return self.out.ride(),
+            },
+            None => return self.out.ride(),
+        };
+        let addr: SocketAddr = match server.parse() {
+            Ok(a) => a,
+            Err(e) => {
+                return self
+                    .out
+                    .set(TagValue::fired(errf!("Admin", "bad server address: {e}")));
+            }
+        };
+        let admin = self.admin.clone();
+        let password = self.password.clone().map(netidx_admin_proto::Secret);
+        let ca_dir = self.ca_dir.clone().map(PathBuf::from);
+        let op: ceremony::BoxOp = Box::new(move |ans| {
+            Box::pin(async move {
+                let session =
+                    ops::open_admin_session(ans, Some(addr), ca_dir, admin, password)
+                        .await?;
+                Ok(TARGET_WRAPPER
+                    .wrap(TargetValue(Arc::new(AdminTarget::Remote { session }))))
+            })
+        });
+        self.out.set(TagValue::fired(ceremony::start_ceremony(ctx, op)))
+    }
+
+    fn sleep(&mut self, _ctx: &mut ExecCtx<R, E>) {}
+
+    fn reset_replay(&mut self, _ctx: &mut ExecCtx<R, E>) {}
+}
+
 // ── package registration ─────────────────────────────────────────
 
 graphix_derive::defpackage! {
@@ -395,8 +496,13 @@ graphix_derive::defpackage! {
         ListAdmins,
         ParseFingerprint,
         Identicon,
+        Connect,
+        ceremony::Events,
+        ceremony::Answer,
     ],
 }
+
+mod ceremony;
 
 #[cfg(test)]
 mod test;

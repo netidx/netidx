@@ -15,8 +15,10 @@ categories = ["network-programming"]
 [dependencies]
 anyhow = { workspace = true }
 arcstr = { workspace = true }
+async-trait = { workspace = true }
 bytes = { workspace = true }
 compact_str = { workspace = true }
+futures = { workspace = true }
 graphix-compiler = { workspace = true }
 graphix-derive = { workspace = true }
 graphix-package = { workspace = true }

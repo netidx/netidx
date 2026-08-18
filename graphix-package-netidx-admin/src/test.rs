@@ -58,3 +58,20 @@ run!(
     |v: Result<&Value>| { matches!(v, Ok(Value::Error(_))) };
     FuseExpect::None
 );
+
+const CONNECT_REFUSED: &str = r#"
+{
+  let c = netidx_admin::connect("127.0.0.1:1");
+  select netidx_admin::events(c) {
+    `Done(r) => r,
+    _ => never()
+  }
+}
+"#;
+
+run!(
+    connect_refused,
+    CONNECT_REFUSED,
+    |v: Result<&Value>| { matches!(v, Ok(Value::Error(_))) };
+    FuseExpect::None
+);

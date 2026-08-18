@@ -61,3 +61,12 @@ committed-error merge again (the known refusal-message problem —
 `grow::parsing` solved this for depth refusals via the thread-local;
 reserved-word refusals need the same treatment or a keyword check with
 its own error). **Disposition: graphix work item — diagnostics.**
+
+## 2026-08-18 — parameterized abstract types cross the builtin boundary (positive)
+
+`type Ceremony<'r>;` + `val events: fn(c: Ceremony<'r>) -> Event<'r>`
+typechecks and runs through `defpackage!` on the first try — the
+`connect_refused` fixture drives `Ceremony<Target>` through `events`
+into a `select` and extracts `Done`'s `Result<Target, AdminError>`
+payload on both engines. The design doc's open question 2 is closed:
+no per-ceremony concrete event types needed.
