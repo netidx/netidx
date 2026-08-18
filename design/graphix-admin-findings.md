@@ -36,3 +36,28 @@ admin TUI will be thousands. Compiler/typechecker behavior at that
 size is a known unknown with a bad history (the GUI wedge).
 **Disposition: continuous measurement via the milestone table above;
 any wall is its own entry.**
+
+## 2026-08-18 — reserved type keywords cannot be field names
+
+The very first real data model hit it: `Progress.duration` (the field
+is literally named `duration` in the Rust struct) fails to parse in the
+`.gxi` — primitive-type names (`duration`, `string`, `i64`, `bool`,
+`datetime`, …) are reserved words in every identifier position (`let`,
+lambda params, struct fields, field access). The reservation is
+consistent, so this is a language-design question, not an
+inconsistency: field-name position (`{ x: … }`, `.x`) is grammatically
+unambiguous, and mirrors of external data will keep wanting `string`/
+`duration`/`bool` as field names. **Disposition: design question for
+Eric — relax keywords in field positions, or keep the reservation.
+Interim: the package renames the event field to `expected`.**
+
+## 2026-08-18 — reserved-word parse errors are unactionable
+
+The failure above reported ``Unexpected `(` — Expected whitespaces,
+`,` or `]``` pointing at the variant's paren, lines of grammar away
+from the offending `duration:`. Nothing names the real problem
+("`duration` is a reserved word") or its position. The combine
+committed-error merge again (the known refusal-message problem —
+`grow::parsing` solved this for depth refusals via the thread-local;
+reserved-word refusals need the same treatment or a keyword check with
+its own error). **Disposition: graphix work item — diagnostics.**
