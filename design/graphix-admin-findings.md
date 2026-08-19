@@ -107,3 +107,17 @@ reservation is untouched. The select-arm parser needed zero changes
 (the `typ() .. as` attempt already backtracks). Control keywords and
 literals stay reserved as bindings and as shorthand. 2048-case hunt
 clean, 32k-case hunt running.
+
+## 2026-08-18 — the hunt found the one poisoned keyword: `bytes`
+
+Eric's "let the regression test find anything we've missed" paid off
+in one 32k-case run: `let bytes: T = v` is genuinely ambiguous —
+`bytes:` is the only literal prefix whose payload (base64) overlaps
+the identifier alphabet and admits short/empty payloads, so the
+annotated-bind reading collides with a refutable literal-pattern let.
+Every other primitive's payload can't look like a type. Resolution
+(graphix): `bytes` retreats to field-only — bindable nowhere, still a
+legal field name (fields never meet the literal grammar). Pinned;
+8k-case re-hunt clean. Method note for the campaign: the shrunk
+witnesses all landed on the SAME word in one run — generator-driven
+keyword mixing is doing exactly what it was asked to.
