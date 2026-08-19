@@ -39,7 +39,7 @@ use std::{
     fmt,
     hash::{Hash, Hasher},
     sync::{
-        Arc, LazyLock,
+        Arc, LazyLock, Weak,
         atomic::{AtomicU64, Ordering as AtomicOrdering},
     },
     time::Duration,
@@ -125,15 +125,15 @@ enum OneTimeSecretKindV {
 
 #[derive(Debug, IntoValue)]
 enum EventV {
-    Text { id: u64, field: FieldInfoV, default: Option<String>, required: bool },
-    Secret { id: u64, field: FieldInfoV },
-    Choice { id: u64, field: FieldInfoV, choices: Vec<String>, default: Option<String> },
-    Confirm { id: u64, field: FieldInfoV, default: bool },
-    SelectAdminDomain { id: u64, domains: Vec<AdminDomainV> },
-    Announce { id: u64, title: String, body: String },
-    AnnounceIdentity { id: u64, body: String, fp: FingerprintV },
-    ConfirmIdentity { id: u64, identity: CaIdentityV },
-    OneTimeSecret { id: u64, kind: OneTimeSecretKindV, password: String },
+    Text { id: Value, field: FieldInfoV, default: Option<String>, required: bool },
+    Secret { id: Value, field: FieldInfoV },
+    Choice { id: Value, field: FieldInfoV, choices: Vec<String>, default: Option<String> },
+    Confirm { id: Value, field: FieldInfoV, default: bool },
+    SelectAdminDomain { id: Value, domains: Vec<AdminDomainV> },
+    Announce { id: Value, title: String, body: String },
+    AnnounceIdentity { id: Value, body: String, fp: FingerprintV },
+    ConfirmIdentity { id: Value, identity: CaIdentityV },
+    OneTimeSecret { id: Value, kind: OneTimeSecretKindV, password: String },
     VerificationCode { purpose: String, fp: FingerprintV },
     ClearVerificationCode,
     Progress { stage: StageV, message: String, duration: Option<Duration> },
@@ -233,11 +233,118 @@ fn parse_answer(v: &Value) -> Result<ParsedAnswer> {
     }
 }
 
+// ── question ids ─────────────────────────────────────────────────
+
+/// The opaque `QuestionId`: only the interface can mint one, so an
+/// answer can never name a question that was never asked. It carries
+/// its ceremony (weakly — an id must not keep a cancelled op alive),
+/// which is why `answer` takes no ceremony argument: the id IS the
+/// route, and two ceremonies' questions can never be confused however
+/// their sequence numbers line up.
+#[derive(Clone)]
+pub(crate) struct QuestionIdValue {
+    shared: Weak<CeremonyShared>,
+    seq: u64,
+}
+
+impl fmt::Debug for QuestionIdValue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("QuestionId").field("seq", &self.seq).finish()
+    }
+}
+
+impl PartialEq for QuestionIdValue {
+    fn eq(&self, other: &Self) -> bool {
+        Weak::ptr_eq(&self.shared, &other.shared) && self.seq == other.seq
+    }
+}
+
+impl Eq for QuestionIdValue {}
+
+impl PartialOrd for QuestionIdValue {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for QuestionIdValue {
+    fn cmp(&self, other: &Self) -> Ordering {
+        (Weak::as_ptr(&self.shared), self.seq)
+            .cmp(&(Weak::as_ptr(&other.shared), other.seq))
+    }
+}
+
+impl Hash for QuestionIdValue {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        Weak::as_ptr(&self.shared).hash(state);
+        self.seq.hash(state);
+    }
+}
+
+graphix_package_core::impl_no_pack!(QuestionIdValue);
+
+static QUESTION_ID_WRAPPER: LazyLock<AbstractWrapper<QuestionIdValue>> =
+    LazyLock::new(|| {
+        let id = uuid::Uuid::from_bytes([
+            0x9c, 0x2e, 0x51, 0x77, 0xa3, 0x08, 0x4d, 0x2b, 0xb1, 0x6a, 0xf4, 0x5d, 0x08,
+            0x91, 0x27, 0x3e,
+        ]);
+        Abstract::register::<QuestionIdValue>(id)
+            .expect("failed to register QuestionIdValue")
+    });
+
+/// Resolve one answer against the question it names. The error text is
+/// operator-facing (it comes back as the `answer` builtin's value).
+fn deliver_answer(qid: &QuestionIdValue, parsed: ParsedAnswer) -> Result<()> {
+    let shared = match qid.shared.upgrade() {
+        Some(s) => s,
+        None => bail!("the ceremony is gone"),
+    };
+    let mut pending = shared.pending.lock();
+    match &*pending {
+        None => bail!("no question is outstanding"),
+        Some(p) if p.seq != qid.seq => {
+            bail!("stale answer: question {} is outstanding", p.seq)
+        }
+        Some(p) => match &parsed {
+            ParsedAnswer::Cancel => (),
+            ParsedAnswer::Payload(kind, payload) => {
+                if *kind != p.kind {
+                    bail!("the outstanding question takes a {:?} answer", p.kind)
+                }
+                match payload {
+                    AnswerPayload::Text(None) if p.required => {
+                        bail!("an answer is required")
+                    }
+                    AnswerPayload::Choice(s) => {
+                        if let Some(choices) = &p.choices {
+                            if !choices.iter().any(|c| c == s) {
+                                bail!("\"{s}\" is not one of the choices")
+                            }
+                        }
+                    }
+                    _ => (),
+                }
+            }
+        },
+    }
+    let p = pending.take().unwrap();
+    match parsed {
+        // dropping the reply cancels the op: its ask errors and the
+        // ceremony finishes with `Done(Err)`
+        ParsedAnswer::Cancel => (),
+        ParsedAnswer::Payload(_, payload) => {
+            let _ = p.reply.send(payload);
+        }
+    }
+    Ok(())
+}
+
 // ── ceremony state ───────────────────────────────────────────────
 
 #[derive(Debug)]
 struct Pending {
-    id: u64,
+    seq: u64,
     kind: AnswerKind,
     /// For `Choice` questions: the legal answers, enforced at `answer`.
     choices: Option<Vec<String>>,
@@ -332,12 +439,14 @@ impl GxAnswerer {
         kind: AnswerKind,
         choices: Option<Vec<String>>,
         required: bool,
-        build: impl FnOnce(u64) -> EventV,
+        build: impl FnOnce(Value) -> EventV,
     ) -> Result<AnswerPayload> {
-        let id = self.shared.next_id.fetch_add(1, AtomicOrdering::Relaxed);
+        let seq = self.shared.next_id.fetch_add(1, AtomicOrdering::Relaxed);
         let (reply, rx) = oneshot::channel();
         *self.shared.pending.lock() =
-            Some(Pending { id, kind, choices, required, reply });
+            Some(Pending { seq, kind, choices, required, reply });
+        let id = QUESTION_ID_WRAPPER
+            .wrap(QuestionIdValue { shared: Arc::downgrade(&self.shared), seq });
         self.emit(build(id));
         rx.await.map_err(|_| anyhow!("the operator cancelled"))
     }
@@ -683,6 +792,13 @@ impl<R: Rt, E: UserEvent> Apply<R, E> for Events {
 
 // ── answer ───────────────────────────────────────────────────────
 
+fn get_question_id(cached: &CachedVals, idx: usize) -> Option<QuestionIdValue> {
+    match cached.0.get(idx)?.as_ref()? {
+        Value::Abstract(a) => a.downcast_ref::<QuestionIdValue>().cloned(),
+        _ => None,
+    }
+}
+
 #[derive(Debug, Default)]
 pub(crate) struct AnswerEv;
 
@@ -691,62 +807,16 @@ impl<R: Rt, E: UserEvent> EvalCached<R, E> for AnswerEv {
     const NAME: &str = "netidx_admin_answer";
 
     fn eval(&mut self, _ctx: &mut ExecCtx<R, E>, cached: &CachedVals) -> Option<Value> {
-        let id = cached.get::<u64>(0)?;
-        let c = get_ceremony(cached, 1)?;
-        let a = cached.0.get(2)?.as_ref()?;
+        let qid = get_question_id(cached, 0)?;
+        let a = cached.0.get(1)?.as_ref()?;
         let parsed = match parse_answer(a) {
             Ok(p) => p,
             Err(e) => return Some(errf!("Admin", "{e:#}")),
         };
-        let mut pending = c.shared.pending.lock();
-        match &*pending {
-            None => return Some(errf!("Admin", "no question is outstanding")),
-            Some(p) if p.id != id => {
-                return Some(errf!(
-                    "Admin",
-                    "answer for question {id} but {} is outstanding",
-                    p.id
-                ));
-            }
-            Some(p) => match &parsed {
-                ParsedAnswer::Cancel => (),
-                ParsedAnswer::Payload(kind, payload) => {
-                    if *kind != p.kind {
-                        return Some(errf!(
-                            "Admin",
-                            "the outstanding question takes a {:?} answer",
-                            p.kind
-                        ));
-                    }
-                    match payload {
-                        AnswerPayload::Text(None) if p.required => {
-                            return Some(errf!("Admin", "an answer is required"));
-                        }
-                        AnswerPayload::Choice(s) => {
-                            if let Some(choices) = &p.choices {
-                                if !choices.iter().any(|c| c == s) {
-                                    return Some(errf!(
-                                        "Admin",
-                                        "\"{s}\" is not one of the choices"
-                                    ));
-                                }
-                            }
-                        }
-                        _ => (),
-                    }
-                }
-            },
-        }
-        let p = pending.take().unwrap();
-        match parsed {
-            // dropping the reply cancels the op: its ask errors and the
-            // ceremony finishes with `Done(Err)`
-            ParsedAnswer::Cancel => (),
-            ParsedAnswer::Payload(_, payload) => {
-                let _ = p.reply.send(payload);
-            }
-        }
-        Some(Value::Null)
+        Some(match deliver_answer(&qid, parsed) {
+            Ok(()) => Value::Null,
+            Err(e) => errf!("Admin", "{e:#}"),
+        })
     }
 }
 
@@ -795,5 +865,66 @@ mod test {
         assert!(parse_answer(&Value::from("Bogus")).is_err());
         assert!(parse_answer(&tag1("Secret", Value::Null)).is_err());
         assert!(parse_answer(&tag1("Confirm", Value::I64(1))).is_err());
+    }
+
+    fn extract_id(ev: &Value) -> QuestionIdValue {
+        let payload = match ev {
+            Value::Array(a) if a.len() == 2 => &a[1],
+            v => panic!("not a question event: {v}"),
+        };
+        let pairs = match payload {
+            Value::Array(a) => a,
+            v => panic!("not a struct payload: {v}"),
+        };
+        for p in pairs.iter() {
+            if let Value::Array(kv) = p
+                && kv[0] == Value::from("id")
+                && let Value::Abstract(a) = &kv[1]
+            {
+                return a.downcast_ref::<QuestionIdValue>().cloned().unwrap();
+            }
+        }
+        panic!("no id in {payload}")
+    }
+
+    /// The full blocking round trip, no daemon required: ask parks on
+    /// the oneshot, the event carries a minted opaque id, a wrong-kind
+    /// answer is refused with the question still armed, the right one
+    /// resolves the ask, and the id is stale afterwards.
+    #[tokio::test]
+    async fn ask_answer_round_trip() {
+        let (utx, mut urx) = tmpsc::unbounded_channel();
+        let shared = Arc::new(CeremonyShared::default());
+        let mut ans =
+            GxAnswerer { tx: utx, bind_id: BindId::new(), shared: Arc::clone(&shared) };
+        let asked =
+            tokio::spawn(async move { ans.confirm(Field::AdminHere, None, false).await });
+        let (_, ev) = urx.recv().await.unwrap();
+        let qid = extract_id(&ev);
+        let wrong = parse_answer(&tag1("Text", Value::Null)).unwrap();
+        assert!(deliver_answer(&qid, wrong).is_err());
+        let right = parse_answer(&tag1("Confirm", Value::Bool(true))).unwrap();
+        deliver_answer(&qid, right).unwrap();
+        assert!(asked.await.unwrap().unwrap());
+        let stale = parse_answer(&tag1("Confirm", Value::Bool(false))).unwrap();
+        assert!(deliver_answer(&qid, stale).is_err());
+    }
+
+    /// Cancel drops the reply: the parked ask unwinds as an error, which
+    /// a real ceremony surfaces as `Done(Err)`.
+    #[tokio::test]
+    async fn cancel_aborts_the_ask() {
+        let (utx, mut urx) = tmpsc::unbounded_channel();
+        let shared = Arc::new(CeremonyShared::default());
+        let mut ans =
+            GxAnswerer { tx: utx, bind_id: BindId::new(), shared: Arc::clone(&shared) };
+        let asked =
+            tokio::spawn(
+                async move { ans.text(Field::AdminName, None, None, true).await },
+            );
+        let (_, ev) = urx.recv().await.unwrap();
+        let qid = extract_id(&ev);
+        deliver_answer(&qid, ParsedAnswer::Cancel).unwrap();
+        assert!(asked.await.unwrap().is_err());
     }
 }

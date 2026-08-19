@@ -107,20 +107,26 @@ type OneTimeSecretKind = [`CaRecovery, `AdminPassword(string)];
 /// observation; dropping every reference cancels it.
 type Ceremony<'r>;
 
+/// The identity of one blocking question. Abstract — only an `Event`
+/// can mint one, so an answer can never name a question that was never
+/// asked, and two ceremonies' questions can never be confused. It does
+/// not keep a cancelled ceremony alive.
+type QuestionId;
+
 /// One event from a ceremony. Events carrying an `id` are blocking
 /// questions — the flow is parked until `answer` resolves that id (or
 /// cancels). The rest are presentation: verification codes, progress,
 /// notes, warnings, and the terminal `Done`.
 type Event<'r> = [
-  `Text({ id: u64, field: FieldInfo, default: [string, null], required: bool }),
-  `Secret({ id: u64, field: FieldInfo }),
-  `Choice({ id: u64, field: FieldInfo, choices: Array<string>, default: [string, null] }),
-  `Confirm({ id: u64, field: FieldInfo, default: bool }),
-  `SelectAdminDomain({ id: u64, domains: Array<AdminDomain> }),
-  `Announce({ id: u64, title: string, body: string }),
-  `AnnounceIdentity({ id: u64, body: string, fp: Fingerprint }),
-  `ConfirmIdentity({ id: u64, identity: CaIdentity }),
-  `OneTimeSecret({ id: u64, kind: OneTimeSecretKind, password: string }),
+  `Text({ id: QuestionId, field: FieldInfo, default: [string, null], required: bool }),
+  `Secret({ id: QuestionId, field: FieldInfo }),
+  `Choice({ id: QuestionId, field: FieldInfo, choices: Array<string>, default: [string, null] }),
+  `Confirm({ id: QuestionId, field: FieldInfo, default: bool }),
+  `SelectAdminDomain({ id: QuestionId, domains: Array<AdminDomain> }),
+  `Announce({ id: QuestionId, title: string, body: string }),
+  `AnnounceIdentity({ id: QuestionId, body: string, fp: Fingerprint }),
+  `ConfirmIdentity({ id: QuestionId, identity: CaIdentity }),
+  `OneTimeSecret({ id: QuestionId, kind: OneTimeSecretKind, password: string }),
   `VerificationCode({ purpose: string, fp: Fingerprint }),
   `ClearVerificationCode,
   `Progress({ stage: Stage, message: string, duration: [duration, null] }),
@@ -158,8 +164,9 @@ val connect: fn(
 /// while every observer sleeps is missed, not replayed.
 val events: fn(c: Ceremony<'r>) -> Event<'r>;
 
-/// Answer the outstanding question `id`. Errors (as a value) if the id
-/// is stale, the answer kind doesn't match, a required text answer is
-/// null, or a choice isn't one of the offered ones — the question stays
-/// armed, so re-prompt and answer again.
-val answer: fn(#id: u64, c: Ceremony<'r>, a: Answer) -> [null, Error<`Admin(string)>];
+/// Answer the outstanding question `id`. The id routes to its own
+/// ceremony, so there is no ceremony argument. Errors (as a value) if
+/// the id is stale, the answer kind doesn't match, a required text
+/// answer is null, or a choice isn't one of the offered ones — the
+/// question stays armed, so re-prompt and answer again.
+val answer: fn(id: QuestionId, a: Answer) -> [null, Error<`Admin(string)>];

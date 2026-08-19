@@ -5,4 +5,4 @@ let parse_fingerprint = |code: string| -> Result<Fingerprint, `Admin(string)> 'n
 let identicon = |fp: Fingerprint| -> Result<{cells: Array<Array<bool>>, color: {r: u8, g: u8, b: u8}}, `Admin(string)> 'netidx_admin_identicon;
 let connect = |#admin: [string, null] = null, #password: [string, null] = null, #ca_dir: [string, null] = null, server: string| -> Ceremony<Target> 'netidx_admin_connect;
 let events = |c: Ceremony<'r>| -> Event<'r> 'netidx_admin_events;
-let answer = |#id: u64, c: Ceremony<'r>, a: Answer| -> [null, Error<`Admin(string)>] 'netidx_admin_answer
+let answer = |id: QuestionId, a: Answer| -> [null, Error<`Admin(string)>] 'netidx_admin_answer
