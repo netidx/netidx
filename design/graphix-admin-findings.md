@@ -166,8 +166,14 @@ fell out of writing it:
    types as a one-field exact struct. The annotated form
    (`S as {x, ..}`) and whole-payload bind (`` `Secret(q) => q.id ``)
    both work; the annotation is redundant ceremony the TUI would pay
-   at every event dissection. **Graphix work item: seed the partial
-   pattern's struct type from the arm's scrutinee type.**
+   at every event dissection. **FIXED in graphix (601cde69, same day —
+   Eric: both worth fixing): select's typecheck completes inferred
+   partial predicates from the scrutinee at any nesting depth and
+   realigns the compiled binder's field indexes (which were latently
+   wrong — `y` in a completed `` `A({y, ..}) `` read slot 0 before).
+   A partial matching several union members refuses with "annotate the
+   member you mean". The e2e's payload-bind form stays (it reads
+   fine), but `` `Secret({id, ..}) `` now works.**
 
 2. **An explicit type predicate on an ABSTRACT type is a
    typechecker-accepted dead arm**: `` select r { Target as t => .. } ``
@@ -175,8 +181,10 @@ fell out of writing it:
    claim a value it can't verify, so the arm NEVER matches and the
    wildcard silently wins — the exact dead-arm class the typechecker
    normally refuses. The designed dissector for `[T, Error]` unions is
-   `?`/`$` (and it reads better). **Design question for Eric: refuse
-   explicit abstract predicates at compile time (my lean — the trap is
-   silent), or make carrier-abstracts verifiable by linking the
-   graphix abstract to its Rust registration uuid.** Pinned by
-   `abstract_type_predicate_is_dead_at_runtime` (flips on either fix).
+   `?`/`$` (and it reads better). **FIXED in graphix (601cde69):
+   refused at compile time with the `?`/`$` guidance — Eric weighed
+   match-by-id and refusal; id-matching loses (hidden non-Abstract
+   reps have no id, and shared carriers like `Ceremony<A>` vs
+   `Ceremony<B>` would claim wrong parameterizations — the halfway
+   reading jul17a killed). The pin flipped to
+   `abstract_type_predicate_refused_at_compile`.**
