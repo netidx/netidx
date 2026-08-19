@@ -121,3 +121,22 @@ legal field name (fields never meet the literal grammar). Pinned;
 8k-case re-hunt clean. Method note for the campaign: the shrunk
 witnesses all landed on the SAME word in one run — generator-driven
 keyword mixing is doing exactly what it was asked to.
+
+## 2026-08-18 — the ops surface is in; the missing piece is a live harness
+
+Stage 3 (6a5e79d5): the whole Remote-panel vocabulary — queue, revoke,
+delegation, servers, roster, id-map, discovery — 26 vals in the two
+shapes the ratatui TUI proved (ceremonies-over-Target with the
+pinned-glyph answerer; plain async builtins for AdminTarget ops).
+Observation while looking for integration coverage: NO frontend has
+any — netidx-admin's e2e tests cover templates/resolvers, the
+admin_server tests drive handlers directly with no listener, and the
+ratatui TUI tests fake at the PanelRow level. The interactive flows
+(connect's identity gesture, the queue Q/A, session cache) are
+manually tested everywhere. An in-process admin-domain harness (CA +
+`admin_server::runtime::serve` on a loopback port, bootstrapped by
+driving `plan::ca_setup` with a scripted answerer) would serve
+netidx-admin itself, the ratatui TUI, AND the graphix package — the
+package's ceremony machinery would then get a REAL interactive
+round trip (identity confirm → password → approve with id-map-groups
+question). **Disposition: proposed as the next work item.**
