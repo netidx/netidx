@@ -98,3 +98,26 @@ graphix_package_core::run_with_tempdir! {
     },
     expect_error
 }
+
+// PINS A GRAPHIX TRAP (findings 2026-08-18): an explicit type
+// predicate on an ABSTRACT type typechecks but matches NOTHING at
+// runtime (`is_a` refuses to claim what it can't verify), so the arm
+// is guaranteed dead and the wildcard wins. The `$`/`?` operators are
+// the designed dissectors for [T, Error] unions. This pin flips when
+// graphix either refuses the predicate at compile time or makes it
+// verifiable.
+graphix_package_core::run_with_tempdir! {
+    name: abstract_type_predicate_is_dead_at_runtime,
+    code: "select netidx_admin::local(#cfg_path: \"{}\", true) {{ netidx_admin::Target as t => \"target\", _ => \"other\" }}",
+    setup: |dir| {
+        let p = dir.path().join("admin-server.json");
+        std::fs::write(&p, "{{}}").unwrap();
+        p
+    },
+    expect: |v: ::netidx::subscriber::Value| -> ::anyhow::Result<()> {
+        match v {
+            ::netidx::subscriber::Value::String(s) if &*s == "other" => Ok(()),
+            v => panic!("expected the documented dead-arm behavior, got: {v:?}"),
+        }
+    }
+}

@@ -135,5 +135,10 @@ pub mod version_stamp;
 #[cfg(unix)]
 pub use admin_server::{AUTORENEW_ADMIN, load_roots, serve};
 
+/// The in-process admin-domain harness for integration tests, shared
+/// by this crate's tests, the TUI's, and the graphix package's.
+#[cfg(all(unix, feature = "testing"))]
+pub mod testing;
+
 pub(crate) use netidx_admin_proto as admin_proto;
 pub(crate) use netidx_admin_proto::fingerprint;

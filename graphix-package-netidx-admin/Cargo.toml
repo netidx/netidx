@@ -44,5 +44,7 @@ graphix-ast-pack = { workspace = true }
 
 [dev-dependencies]
 env_logger = { workspace = true }
+graphix-rt = { workspace = true }
 netidx = { path = "../netidx", version = "0.32.0", default-features = false }
+netidx-admin = { path = "../netidx-admin", version = "0.32.0", features = ["testing"] }
 tempfile = { workspace = true }

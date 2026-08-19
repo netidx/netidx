@@ -140,3 +140,43 @@ netidx-admin itself, the ratatui TUI, AND the graphix package — the
 package's ceremony machinery would then get a REAL interactive
 round trip (identity confirm → password → approve with id-map-groups
 question). **Disposition: proposed as the next work item.**
+
+## 2026-08-18 — the live harness exists; the first live graphix run found two more
+
+`netidx_admin::testing` (feature `testing`, unix): `TestAdminDomain`
+founds a REAL CA + admin server by driving `create_vaulted_ca` with a
+rule-based `SetupAnswerer` (the same founding ceremony `ca init`
+runs), serves it on loopback with mDNS off, one domain per process.
+`tests/admin_domain.rs` is the admin plane's first live integration
+test in ANY frontend: roster, queue, delegations, servers, the
+session-cache semantics (a password session is a CREDENTIAL HOLDER —
+verification happens at `cache_session`, which is also why the graphix
+`connect` now calls it: verify-at-connect + the cached token is what
+keeps every later op quiet), wrong-password refusal at the right
+layer, and PasswordChangeRequired routing. The package's `e2e.rs`
+then drives the full ceremony chain FROM GRAPHIX against the live
+domain: ConfirmIdentity answered via `answer(q.id, `Confirm(true))`,
+the password question answered, `Done(target)`, a roster query, and
+a quiet remote ceremony over the cached session. Two graphix findings
+fell out of writing it:
+
+1. **Partial struct patterns don't infer from a known scrutinee**:
+   `` select ev { `Secret({id, ..}) => .. } `` refuses ("will never
+   match") even though the payload type is fully known — the pattern
+   types as a one-field exact struct. The annotated form
+   (`S as {x, ..}`) and whole-payload bind (`` `Secret(q) => q.id ``)
+   both work; the annotation is redundant ceremony the TUI would pay
+   at every event dissection. **Graphix work item: seed the partial
+   pattern's struct type from the arm's scrutinee type.**
+
+2. **An explicit type predicate on an ABSTRACT type is a
+   typechecker-accepted dead arm**: `` select r { Target as t => .. } ``
+   compiles, but `is_a` (correctly, per the jul17a ruling) refuses to
+   claim a value it can't verify, so the arm NEVER matches and the
+   wildcard silently wins — the exact dead-arm class the typechecker
+   normally refuses. The designed dissector for `[T, Error]` unions is
+   `?`/`$` (and it reads better). **Design question for Eric: refuse
+   explicit abstract predicates at compile time (my lean — the trap is
+   silent), or make carrier-abstracts verifiable by linking the
+   graphix abstract to its Rust registration uuid.** Pinned by
+   `abstract_type_predicate_is_dead_at_runtime` (flips on either fix).

@@ -8,6 +8,7 @@
 
 use anyhow::{Error, Result};
 use arcstr::ArcStr;
+use compact_str::format_compact;
 use graphix_compiler::{
     Apply, BuiltIn, Event, ExecCtx, Node, Rt, Scope, TagValue, UserEvent,
     effects::EffectKind, errf, expr::ExprId, typ::FnType,
@@ -15,7 +16,10 @@ use graphix_compiler::{
 use graphix_package_core::{
     CachedArgs, CachedArgsAsync, CachedVals, EvalCached, EvalCachedAsync, seam_tick,
 };
-use netidx_admin::ops::{self as aops, AdminTarget};
+use netidx_admin::{
+    answer::Answerer as _,
+    ops::{self as aops, AdminTarget},
+};
 use netidx_admin_proto::{
     fingerprint::Fingerprint,
     policy::{AdminInfo, SlotKind},
@@ -455,6 +459,24 @@ impl<R: Rt, E: UserEvent> Apply<R, E> for Connect {
                 let session =
                     aops::open_admin_session(ans, Some(addr), ca_dir, admin, password)
                         .await?;
+                // Exchange the password for a bearer token — which is also
+                // where the password is VERIFIED (a password session is a
+                // credential holder; the server checks on first use) and
+                // where PasswordChangeRequired surfaces. The cached token
+                // is what keeps every later op on this target quiet.
+                match aops::cache_session(&session, aops::Retention::ProcessLifetime)
+                    .await
+                {
+                    Ok(Some(logged)) => {
+                        if let Some(why) = logged.unsealed {
+                            ans.note(&format_compact!(
+                                "{why}; this login lasts until the process exits"
+                            ));
+                        }
+                    }
+                    Ok(None) => (),
+                    Err(e) => return Err(e),
+                }
                 Ok(TARGET_WRAPPER
                     .wrap(TargetValue(Arc::new(AdminTarget::Remote { session }))))
             })
@@ -511,5 +533,7 @@ graphix_derive::defpackage! {
 mod ceremony;
 mod ops;
 
+#[cfg(all(test, unix))]
+mod e2e;
 #[cfg(test)]
 mod test;
