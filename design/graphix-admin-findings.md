@@ -232,3 +232,31 @@ Three graphix findings fell out, all fixed there same day:
    type as `Question`. The variant-rebuild idiom is fine at package
    scale (write once); noting in case a keymap-heavy TUI makes the
    per-use cost real.
+
+## 2026-08-19 (later) — text entry, and the silent-write callable bug
+
+The connect flow needs text and secret entry; the tui package had no
+editor widget at all (the Rust TUI hand-rolls ~1.4k lines of line
+editing in answer.rs). Per the no-workarounds rule this went into
+graphix-package-tui, not the app: **`tui::line_edit`** (d0c4fb46), a
+pure-graphix module — `state`/`handle`/`view` with cursor movement,
+boundary-correct deletes, and `#mask` for secrets. The reverse-video
+cursor exposed `Modifier` as a two-variant stub; extended to
+ratatui's full set.
+
+Writing line_edit's harness test then uncovered the best find of the
+campaign so far: **every `*st <- v` write reached through an
+embedder-compiled callable was silently dropped** (fixed, 9f9e01d0).
+The dispatch path every GUI/TUI handler takes creates callee
+instances lazily at their first real event, and a handler's select
+arms sleep until then — by which time the `&state` reference value
+(delivered once, at the callable's init) only exists in the standing
+store, which ConnectDeref never consulted. No error, no log: typing
+did nothing. The identical program driven without a callable worked,
+which is why nothing in the existing corpus ever caught it — run!
+fixtures and the fuzzer never dispatch through compile_callable.
+Pinned at the right layer (graphix-tests lib_tests/callable.rs,
+verified red on the unfixed compiler). The write-side fix mirrors
+Deref's standing read, which had been fixed for the READ side long
+ago — the asymmetry comment in Deref::update was already pointing at
+this hole.
