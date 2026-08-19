@@ -90,3 +90,20 @@ dispatches crossterm events into `handle_event` (the live path), and
 watches named bindings; the overlay input-capture tests drive a real
 modal with it. What remains for the TUI-app lab is packaging that
 harness for programs outside the tui crate (it is `pub(crate)`).
+
+## 2026-08-18 — binding relaxation completes the field fix
+
+Eric's follow-up ruling after probing the shorthand refusal: type-name
+keywords are legal BINDING names too (graphix f2690c29) — `let
+duration`, params, labeled args, pattern binds, tvar names — so
+`{duration}` shorthand and `let {duration, ..} = x` destructuring now
+work, which matters because users will immediately destructure the
+keyword fields the first fix enabled. Two facts surfaced during
+adjudication: bare type patterns (`select v { i64 => .. }`) were NEVER
+legal — `as` is the type-test marker — so a relaxed bare `duration`
+pattern binds without shadowing anything; and `let true = 5` parses as
+a refutable LITERAL-pattern let, not a binding, so the literal words'
+reservation is untouched. The select-arm parser needed zero changes
+(the `typ() .. as` attempt already backtracks). Control keywords and
+literals stay reserved as bindings and as shorthand. 2048-case hunt
+clean, 32k-case hunt running.
