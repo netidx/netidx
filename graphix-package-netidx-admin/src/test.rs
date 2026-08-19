@@ -75,3 +75,26 @@ run!(
     |v: Result<&Value>| { matches!(v, Ok(Value::Error(_))) };
     FuseExpect::None
 );
+
+// mDNS browse fires and produces a value (an array, or an error where
+// the network stack forbids mDNS) — the wiring test, not a discovery
+// assertion.
+run!(
+    discover_produces,
+    r#"netidx_admin::discover(#timeout: duration:0.25s, true)"#,
+    |v: Result<&Value>| { matches!(v, Ok(Value::Array(_)) | Ok(Value::Error(_))) };
+    FuseExpect::None
+);
+
+// A remote-plane op minted against a Local target must refuse at the
+// mint site with a value, not a ceremony.
+graphix_package_core::run_with_tempdir! {
+    name: remote_op_on_local_target_errors,
+    code: "netidx_admin::list_queue(netidx_admin::local(#cfg_path: \"{}\", true)$)",
+    setup: |dir| {
+        let p = dir.path().join("admin-server.json");
+        std::fs::write(&p, "{{}}").unwrap();
+        p
+    },
+    expect_error
+}

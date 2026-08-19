@@ -427,6 +427,10 @@ pub(crate) struct GxAnswerer {
     tx: tmpsc::UnboundedSender<(BindId, Value)>,
     bind_id: BindId,
     shared: Arc<CeremonyShared>,
+    /// A pre-confirmed CA fingerprint: `confirm_identity` auto-accepts
+    /// a match instead of asking, so post-connect ops don't re-run the
+    /// security gesture — the ratatui `TuiAnswerer::with_glyph` rule.
+    accept_glyph: Option<netidx_admin_proto::fingerprint::Fingerprint>,
 }
 
 impl GxAnswerer {
@@ -591,6 +595,9 @@ impl Answerer for GxAnswerer {
     }
 
     async fn confirm_identity(&mut self, identity: &CaIdentity) -> Result<bool> {
+        if let Some(expected) = &self.accept_glyph {
+            return Ok(&identity.fingerprint == expected);
+        }
         let identity = CaIdentityV::from(identity);
         let r = self
             .ask(AnswerKind::Confirm, None, true, |id| EventV::ConfirmIdentity {
@@ -687,6 +694,7 @@ async fn forward(
 /// `Ceremony` value.
 pub(crate) fn start_ceremony<R: Rt, E: UserEvent>(
     ctx: &mut ExecCtx<R, E>,
+    accept_glyph: Option<netidx_admin_proto::fingerprint::Fingerprint>,
     op: BoxOp,
 ) -> Value {
     let bind_id = BindId::new();
@@ -696,7 +704,8 @@ pub(crate) fn start_ceremony<R: Rt, E: UserEvent>(
     tokio::spawn(forward(urx, btx));
     let (cancel_tx, mut cancel_rx) = oneshot::channel::<()>();
     let shared = Arc::new(CeremonyShared::default());
-    let mut ans = GxAnswerer { tx: utx, bind_id, shared: Arc::clone(&shared) };
+    let mut ans =
+        GxAnswerer { tx: utx, bind_id, shared: Arc::clone(&shared), accept_glyph };
     *shared.start.lock() = Some(Box::new(move || {
         tokio::spawn(async move {
             let r = tokio::select! {
@@ -895,8 +904,12 @@ mod test {
     async fn ask_answer_round_trip() {
         let (utx, mut urx) = tmpsc::unbounded_channel();
         let shared = Arc::new(CeremonyShared::default());
-        let mut ans =
-            GxAnswerer { tx: utx, bind_id: BindId::new(), shared: Arc::clone(&shared) };
+        let mut ans = GxAnswerer {
+            tx: utx,
+            bind_id: BindId::new(),
+            shared: Arc::clone(&shared),
+            accept_glyph: None,
+        };
         let asked =
             tokio::spawn(async move { ans.confirm(Field::AdminHere, None, false).await });
         let (_, ev) = urx.recv().await.unwrap();
@@ -916,8 +929,12 @@ mod test {
     async fn cancel_aborts_the_ask() {
         let (utx, mut urx) = tmpsc::unbounded_channel();
         let shared = Arc::new(CeremonyShared::default());
-        let mut ans =
-            GxAnswerer { tx: utx, bind_id: BindId::new(), shared: Arc::clone(&shared) };
+        let mut ans = GxAnswerer {
+            tx: utx,
+            bind_id: BindId::new(),
+            shared: Arc::clone(&shared),
+            accept_glyph: None,
+        };
         let asked =
             tokio::spawn(
                 async move { ans.text(Field::AdminName, None, None, true).await },

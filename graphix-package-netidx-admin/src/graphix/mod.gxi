@@ -36,12 +36,17 @@ type ServerDrift = {
 /// authenticate a scoped role admin (`Role`).
 type SlotKind = [`Signing, `Role];
 
-/// What the admin server will do on an admin's behalf.
+/// What the admin server will do on an admin's behalf. Roles are
+/// named `Ca`, `Resolver`, or `IdMap`.
 type Policy = {
   allowed_san: Array<string>,
   max_validity: duration,
   id_map_groups: Array<string>,
-  server_enroll_scopes: Array<string>
+  server_enroll_scopes: Array<string>,
+  server_enroll_roles: Array<string>,
+  perms_edit_scopes: Array<string>,
+  may_manage_admins: bool,
+  service_control_scopes: Array<string>
 };
 
 /// One admin keyslot's public facts, from the roster.
@@ -170,3 +175,251 @@ val events: fn(c: Ceremony<'r>) -> Event<'r>;
 /// answer is null, or a choice isn't one of the offered ones — the
 /// question stays armed, so re-prompt and answer again.
 val answer: fn(id: QuestionId, a: Answer) -> [null, Error<`Admin(string)>];
+
+/// One admin server's push/propagation result. A null error means it
+/// was updated.
+type PeerResult = { server: string, addr: string, error: [string, null] };
+
+/// A pending enrollment-queue entry, keyed by its code — recomputed
+/// locally from the CSR, never trusted from the wire. A null code means
+/// the queued CSR doesn't parse; it can only be denied.
+type QueueItem = {
+  code: [Fingerprint, null],
+  kind: string,
+  requested_name: string,
+  requested_validity: duration,
+  age_secs: u64,
+  peer: string,
+  verified_renewal: bool,
+  enroll_listen: [string, null],
+  requested_roles: Array<string>,
+  cluster_base: [string, null],
+  replaces_serial: [u64, null]
+};
+
+/// The outcome of approving one request.
+type ApproveOutcome = {
+  requested_name: string,
+  enroll_listen: [string, null],
+  id_map_groups: Array<string>,
+  warnings: Array<string>
+};
+
+/// One verified renewal's result from the code-free batch.
+type RenewalResult = { requested_name: string, error: [string, null] };
+
+/// One issued certificate, from the CA's records.
+type IssuedEntry = {
+  serial: u64,
+  name: string,
+  spki_fp: string,
+  not_after_unix: u64,
+  revoked: bool
+};
+
+/// The outcome of a revocation.
+type RevokeOutcome = {
+  revoked: Array<IssuedEntry>,
+  warnings: Array<string>,
+  operation_id: [string, null],
+  peers: Array<PeerResult>
+};
+
+/// A pending delegation request from a child resolver hierarchy.
+type PendingDelegation = {
+  code: Fingerprint,
+  proposed_path: string,
+  parent_base: string,
+  child_base: string,
+  parent: Array<string>,
+  child: Array<string>,
+  approved: bool,
+  age_secs: u64,
+  peer: string
+};
+
+/// The outcome of approving a delegation.
+type DelegationDecision = { proposed_path: string, peers: Array<PeerResult> };
+
+/// One registered admin server.
+type ServerInfo = {
+  id: string,
+  addr: string,
+  roles: Array<string>,
+  state: string,
+  resolver: [string, null],
+  cluster_base: [string, null],
+  cluster_state: [string, null],
+  ca: bool,
+  read_gate: string
+};
+
+/// The outcome of removing a server from the admin domain.
+type RemoveServerOutcome = {
+  version: u64,
+  operation_id: [string, null],
+  revoked: u64,
+  removed: bool,
+  affected_clusters: Array<string>,
+  peers: Array<PeerResult>,
+  crl_peers: Array<PeerResult>,
+  gated: [PeerResult, null]
+};
+
+/// The outcome of a CA-wide reconcile push.
+type ReconcileOutcome = { operation: string, peers: Array<PeerResult> };
+
+/// One identity in the id-map.
+type Identity = { name: string, primary_group: string, groups: Array<string> };
+
+/// The id-map as the CA holds it.
+type IdMap = {
+  default_group: [string, null],
+  groups: Array<string>,
+  identities: Array<Identity>
+};
+
+/// A recorded CA state edit: the version it produced and whether it
+/// changed anything (asking for something already true is not an error).
+type RecordedEdit = { version: u64, changed: bool };
+
+/// A netidx admin server discovered on the local network via mDNS. A
+/// display hint only — nothing security-relevant is decided from it.
+type Discovered = {
+  addrs: Array<string>,
+  port: u16,
+  domain: string,
+  roles: Array<string>,
+  fp_short: string
+};
+
+/// The pending enrollment queue, each row keyed by its code. Requires
+/// a connected (remote) target; re-list per `t` delivery.
+val list_queue: fn(t: Target) -> Ceremony<Array<QueueItem>>;
+
+/// Approve the queued request whose recomputed code matches. Passing
+/// `#groups` skips the id-map-groups question; a server enrollment or
+/// `#no_id_map` forces empty groups.
+val approve: fn(
+  ?#groups: [Array<string>, null],
+  ?#no_id_map: [bool, null],
+  #code: string,
+  t: Target
+) -> Ceremony<ApproveOutcome>;
+
+/// Approve every verified renewal — code-free by construction (a
+/// verified renewal is cryptographic proof of possession).
+val approve_renewals: fn(t: Target) -> Ceremony<Array<RenewalResult>>;
+
+/// Deny the queued request whose code matches; returns the denied name.
+val deny: fn(?#reason: [string, null], #code: string, t: Target) -> Ceremony<string>;
+
+/// The CA's issued certificates.
+val issued: fn(
+  ?#include_revoked: [bool, null],
+  ?#name_filter: [string, null],
+  t: Target
+) -> Ceremony<Array<IssuedEntry>>;
+
+/// Revoke by serial or name. `selector` is a serial number or an
+/// identity name; a name that matches several certs with different
+/// keys needs `#glyph` to assert which.
+val revoke: fn(
+  ?#glyph: [string, null],
+  ?#reason: [string, null],
+  selector: string,
+  t: Target
+) -> Ceremony<RevokeOutcome>;
+
+/// Pending delegation requests from child resolver hierarchies.
+val list_pending_delegations: fn(t: Target) -> Ceremony<Array<PendingDelegation>>;
+
+/// Approve the pending delegation whose code matches.
+val approve_delegation: fn(#code: string, t: Target) -> Ceremony<DelegationDecision>;
+
+/// Deny the pending delegation whose code matches.
+val deny_delegation: fn(
+  ?#reason: [string, null],
+  #code: string,
+  t: Target
+) -> Ceremony<PendingDelegation>;
+
+/// Every registered admin server.
+val list_servers: fn(t: Target) -> Ceremony<Array<ServerInfo>>;
+
+/// Remove a server from the admin domain by its id (revokes its certs
+/// and pushes the removal domain-wide).
+val remove_server: fn(id: string, t: Target) -> Ceremony<RemoveServerOutcome>;
+
+/// Push the CA's state to every registered server.
+val reconcile_ca: fn(t: Target) -> Ceremony<ReconcileOutcome>;
+
+/// Change the authenticated admin's own password. With `#new_password`
+/// null the ceremony asks for it (and its confirmation).
+val change_password: fn(?#new_password: [string, null], t: Target) -> Ceremony<null>;
+
+/// Resolver cluster base paths known to the CA.
+val list_resolver_clusters: fn(t: Target) -> Result<Array<string>, AdminError>;
+
+/// The id-map as the CA holds it.
+val show_id_map: fn(t: Target) -> Result<IdMap, AdminError>;
+
+/// Create a group.
+val id_map_add_group: fn(name: string, t: Target) -> Result<RecordedEdit, AdminError>;
+
+/// Remove a group.
+val id_map_remove_group: fn(name: string, t: Target) -> Result<RecordedEdit, AdminError>;
+
+/// Register an identity with a primary group (and optional extra
+/// groups).
+val id_map_add_user: fn(
+  ?#groups: [Array<string>, null],
+  san: string,
+  primary_group: string,
+  t: Target
+) -> Result<RecordedEdit, AdminError>;
+
+/// Remove an identity.
+val id_map_remove_user: fn(san: string, t: Target) -> Result<RecordedEdit, AdminError>;
+
+/// Add an identity to a group.
+val id_map_add_member: fn(
+  san: string,
+  group: string,
+  t: Target
+) -> Result<RecordedEdit, AdminError>;
+
+/// Remove an identity from a group.
+val id_map_remove_member: fn(
+  san: string,
+  group: string,
+  t: Target
+) -> Result<RecordedEdit, AdminError>;
+
+/// Mint a role admin with the given policy. Returns the ONE-TIME
+/// password — shown once, never persisted; convey it to its owner.
+val add_role_admin: fn(
+  name: string,
+  policy: Policy,
+  t: Target
+) -> Result<string, AdminError>;
+
+/// Reset an admin's password. Returns the ONE-TIME replacement password.
+val reset_password: fn(name: string, t: Target) -> Result<string, AdminError>;
+
+/// Replace an admin's policy.
+val set_admin_policy: fn(
+  name: string,
+  policy: Policy,
+  t: Target
+) -> Result<null, AdminError>;
+
+/// Remove an admin's keyslot.
+val remove_admin: fn(name: string, t: Target) -> Result<null, AdminError>;
+
+/// Browse the local network for admin servers (mDNS). One shot per
+/// `trigger` delivery; `#timeout` defaults to 2 seconds.
+val discover: fn(
+  ?#timeout: [duration, null],
+  trigger: Any
+) -> Result<Array<Discovered>, AdminError>;

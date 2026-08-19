@@ -5,4 +5,30 @@ let parse_fingerprint = |code: string| -> Result<Fingerprint, `Admin(string)> 'n
 let identicon = |fp: Fingerprint| -> Result<{cells: Array<Array<bool>>, color: {r: u8, g: u8, b: u8}}, `Admin(string)> 'netidx_admin_identicon;
 let connect = |#admin: [string, null] = null, #password: [string, null] = null, #ca_dir: [string, null] = null, server: string| -> Ceremony<Target> 'netidx_admin_connect;
 let events = |c: Ceremony<'r>| -> Event<'r> 'netidx_admin_events;
-let answer = |id: QuestionId, a: Answer| -> [null, Error<`Admin(string)>] 'netidx_admin_answer
+let answer = |id: QuestionId, a: Answer| -> [null, Error<`Admin(string)>] 'netidx_admin_answer;
+let list_queue = |t: Target| -> Ceremony<Array<QueueItem>> 'netidx_admin_list_queue;
+let approve = |#groups: [Array<string>, null] = null, #no_id_map: [bool, null] = null, #code: string, t: Target| -> Ceremony<ApproveOutcome> 'netidx_admin_approve;
+let approve_renewals = |t: Target| -> Ceremony<Array<RenewalResult>> 'netidx_admin_approve_renewals;
+let deny = |#reason: [string, null] = null, #code: string, t: Target| -> Ceremony<string> 'netidx_admin_deny;
+let issued = |#include_revoked: [bool, null] = null, #name_filter: [string, null] = null, t: Target| -> Ceremony<Array<IssuedEntry>> 'netidx_admin_issued;
+let revoke = |#glyph: [string, null] = null, #reason: [string, null] = null, selector: string, t: Target| -> Ceremony<RevokeOutcome> 'netidx_admin_revoke;
+let list_pending_delegations = |t: Target| -> Ceremony<Array<PendingDelegation>> 'netidx_admin_list_pending_delegations;
+let approve_delegation = |#code: string, t: Target| -> Ceremony<DelegationDecision> 'netidx_admin_approve_delegation;
+let deny_delegation = |#reason: [string, null] = null, #code: string, t: Target| -> Ceremony<PendingDelegation> 'netidx_admin_deny_delegation;
+let list_servers = |t: Target| -> Ceremony<Array<ServerInfo>> 'netidx_admin_list_servers;
+let remove_server = |id: string, t: Target| -> Ceremony<RemoveServerOutcome> 'netidx_admin_remove_server;
+let reconcile_ca = |t: Target| -> Ceremony<ReconcileOutcome> 'netidx_admin_reconcile_ca;
+let change_password = |#new_password: [string, null] = null, t: Target| -> Ceremony<null> 'netidx_admin_change_password;
+let list_resolver_clusters = |t: Target| -> Result<Array<string>, AdminError> 'netidx_admin_list_resolver_clusters;
+let show_id_map = |t: Target| -> Result<IdMap, AdminError> 'netidx_admin_show_id_map;
+let id_map_add_group = |name: string, t: Target| -> Result<RecordedEdit, AdminError> 'netidx_admin_id_map_add_group;
+let id_map_remove_group = |name: string, t: Target| -> Result<RecordedEdit, AdminError> 'netidx_admin_id_map_remove_group;
+let id_map_add_user = |#groups: [Array<string>, null] = null, san: string, primary_group: string, t: Target| -> Result<RecordedEdit, AdminError> 'netidx_admin_id_map_add_user;
+let id_map_remove_user = |san: string, t: Target| -> Result<RecordedEdit, AdminError> 'netidx_admin_id_map_remove_user;
+let id_map_add_member = |san: string, group: string, t: Target| -> Result<RecordedEdit, AdminError> 'netidx_admin_id_map_add_member;
+let id_map_remove_member = |san: string, group: string, t: Target| -> Result<RecordedEdit, AdminError> 'netidx_admin_id_map_remove_member;
+let add_role_admin = |name: string, policy: Policy, t: Target| -> Result<string, AdminError> 'netidx_admin_add_role_admin;
+let reset_password = |name: string, t: Target| -> Result<string, AdminError> 'netidx_admin_reset_password;
+let set_admin_policy = |name: string, policy: Policy, t: Target| -> Result<null, AdminError> 'netidx_admin_set_admin_policy;
+let remove_admin = |name: string, t: Target| -> Result<null, AdminError> 'netidx_admin_remove_admin;
+let discover = |#timeout: [duration, null] = null, trigger: Any| -> Result<Array<Discovered>, AdminError> 'netidx_admin_discover

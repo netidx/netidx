@@ -15,10 +15,10 @@ use graphix_compiler::{
 use graphix_package_core::{
     CachedArgs, CachedArgsAsync, CachedVals, EvalCached, EvalCachedAsync, seam_tick,
 };
-use netidx_admin::ops::{self, AdminTarget};
+use netidx_admin::ops::{self as aops, AdminTarget};
 use netidx_admin_proto::{
     fingerprint::Fingerprint,
-    policy::{AdminInfo, Policy, SlotKind},
+    policy::{AdminInfo, SlotKind},
 };
 use netidx_derive::{FromValue, IntoValue};
 use netidx_value::{Abstract, ValArray, Value, abstract_type::AbstractWrapper};
@@ -28,16 +28,15 @@ use std::{
     net::SocketAddr,
     path::PathBuf,
     sync::{Arc, LazyLock},
-    time::Duration,
 };
 
 // ── errors ───────────────────────────────────────────────────────
 
 /// Convert an op failure into the package's error union. Typed routing:
-/// [`ops::password_change_required`] becomes its own variant because
+/// [`aops::password_change_required`] becomes its own variant because
 /// frontends must route on it, not on message text.
 pub(crate) fn admin_err(e: Error) -> Value {
-    match ops::password_change_required(&e) {
+    match aops::password_change_required(&e) {
         Some(p) => errf!("PasswordChangeRequired", "{}", p.admin),
         None => errf!("Admin", "{e:#}"),
     }
@@ -48,9 +47,9 @@ pub(crate) fn admin_err(e: Error) -> Value {
 /// The opaque `Target` value: which admin server an operation talks to,
 /// shared by pointer identity like every graphix opaque handle.
 #[derive(Clone)]
-pub(crate) struct TargetValue(Arc<AdminTarget>);
+pub(crate) struct TargetValue(pub(crate) Arc<AdminTarget>);
 
-/// Manual because [`AdminTarget`] holds an [`ops::AdminSession`] whose
+/// Manual because [`AdminTarget`] holds an [`aops::AdminSession`] whose
 /// credential must never reach a debug rendering.
 impl std::fmt::Debug for TargetValue {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -104,7 +103,7 @@ static TARGET_WRAPPER: LazyLock<AbstractWrapper<TargetValue>> = LazyLock::new(||
     Abstract::register::<TargetValue>(id).expect("failed to register TargetValue")
 });
 
-fn get_target(cached: &CachedVals, idx: usize) -> Option<TargetValue> {
+pub(crate) fn get_target(cached: &CachedVals, idx: usize) -> Option<TargetValue> {
     match cached.0.get(idx)?.as_ref()? {
         Value::Abstract(a) => a.downcast_ref::<TargetValue>().cloned(),
         _ => None,
@@ -138,9 +137,9 @@ enum AgreementV {
     Ahead { reported: u64, ca: u64 },
 }
 
-impl From<ops::drift::Agreement> for AgreementV {
-    fn from(a: ops::drift::Agreement) -> Self {
-        use ops::drift::Agreement as A;
+impl From<aops::drift::Agreement> for AgreementV {
+    fn from(a: aops::drift::Agreement) -> Self {
+        use aops::drift::Agreement as A;
         match a {
             A::Current { version } => AgreementV::Current { version },
             A::Behind { reported, want } => AgreementV::Behind { reported, want },
@@ -160,8 +159,8 @@ struct ServerDriftV {
     config_drift: bool,
 }
 
-impl From<ops::drift::ServerDrift> for ServerDriftV {
-    fn from(d: ops::drift::ServerDrift) -> Self {
+impl From<aops::drift::ServerDrift> for ServerDriftV {
+    fn from(d: aops::drift::ServerDrift) -> Self {
         ServerDriftV {
             server: d.server.to_string(),
             addr: d.addr.to_string(),
@@ -180,30 +179,11 @@ enum SlotKindV {
 }
 
 #[derive(Debug, Clone, IntoValue)]
-struct PolicyV {
-    allowed_san: Vec<String>,
-    max_validity: Duration,
-    id_map_groups: Vec<String>,
-    server_enroll_scopes: Vec<String>,
-}
-
-impl From<Policy> for PolicyV {
-    fn from(p: Policy) -> Self {
-        PolicyV {
-            allowed_san: p.allowed_san,
-            max_validity: p.max_validity,
-            id_map_groups: p.id_map_groups,
-            server_enroll_scopes: p.server_enroll_scopes,
-        }
-    }
-}
-
-#[derive(Debug, Clone, IntoValue)]
 struct AdminInfoV {
     slot_id: String,
     admin: String,
     kind: SlotKindV,
-    policy: PolicyV,
+    policy: ops::PolicyV,
     must_change: bool,
 }
 
@@ -222,7 +202,7 @@ impl From<AdminInfo> for AdminInfoV {
     }
 }
 
-fn rows_value<T, V: Into<Value> + From<T>>(rows: Vec<T>) -> Value {
+pub(crate) fn rows_value<T, V: Into<Value> + From<T>>(rows: Vec<T>) -> Value {
     Value::Array(ValArray::from_iter_exact(rows.into_iter().map(|r| V::from(r).into())))
 }
 
@@ -292,7 +272,7 @@ impl EvalCachedAsync for DriftEv {
 
     fn eval(t: Self::Args) -> impl Future<Output = Value> + Send {
         async move {
-            match ops::drift::drift(&t.0).await {
+            match aops::drift::drift(&t.0).await {
                 Ok(rows) => rows_value::<_, ServerDriftV>(rows),
                 Err(e) => admin_err(e),
             }
@@ -318,7 +298,7 @@ impl EvalCachedAsync for ListAdminsEv {
 
     fn eval(t: Self::Args) -> impl Future<Output = Value> + Send {
         async move {
-            match ops::roster::list_admins(&t.0).await {
+            match aops::roster::list_admins(&t.0).await {
                 Ok(rows) => rows_value::<_, AdminInfoV>(rows),
                 Err(e) => admin_err(e),
             }
@@ -473,13 +453,13 @@ impl<R: Rt, E: UserEvent> Apply<R, E> for Connect {
         let op: ceremony::BoxOp = Box::new(move |ans| {
             Box::pin(async move {
                 let session =
-                    ops::open_admin_session(ans, Some(addr), ca_dir, admin, password)
+                    aops::open_admin_session(ans, Some(addr), ca_dir, admin, password)
                         .await?;
                 Ok(TARGET_WRAPPER
                     .wrap(TargetValue(Arc::new(AdminTarget::Remote { session }))))
             })
         });
-        self.out.set(TagValue::fired(ceremony::start_ceremony(ctx, op)))
+        self.out.set(TagValue::fired(ceremony::start_ceremony(ctx, None, op)))
     }
 
     fn sleep(&mut self, _ctx: &mut ExecCtx<R, E>) {}
@@ -499,10 +479,37 @@ graphix_derive::defpackage! {
         Connect,
         ceremony::Events,
         ceremony::Answer,
+        ops::ListQueue,
+        ops::ApproveReq,
+        ops::ApproveRenewals,
+        ops::Deny,
+        ops::Issued,
+        ops::Revoke,
+        ops::ListPendingDelegations,
+        ops::ApproveDelegation,
+        ops::DenyDelegation,
+        ops::ListServers,
+        ops::RemoveServer,
+        ops::ReconcileCa,
+        ops::ChangePassword,
+        ops::ListResolverClusters,
+        ops::ShowIdMap,
+        ops::IdMapAddGroup,
+        ops::IdMapRemoveGroup,
+        ops::IdMapAddUser,
+        ops::IdMapRemoveUser,
+        ops::IdMapAddMember,
+        ops::IdMapRemoveMember,
+        ops::AddRoleAdmin,
+        ops::ResetPassword,
+        ops::SetAdminPolicy,
+        ops::RemoveAdmin,
+        ops::Discover,
     ],
 }
 
 mod ceremony;
+mod ops;
 
 #[cfg(test)]
 mod test;
