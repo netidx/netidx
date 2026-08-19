@@ -6,6 +6,29 @@ let identicon = |fp: Fingerprint| -> Result<{cells: Array<Array<bool>>, color: {
 let connect = |#admin: [string, null] = null, #password: [string, null] = null, #ca_dir: [string, null] = null, server: string| -> Ceremony<Target> 'netidx_admin_connect;
 let events = |c: Ceremony<'r>| -> Event<'r> 'netidx_admin_events;
 let answer = |id: QuestionId, a: Answer| -> [null, Error<`Admin(string)>] 'netidx_admin_answer;
+
+let questions = |c: Ceremony<'r>| -> Question select events(c) {
+  `Done(_) => never(),
+  `Text(q) => `Text(q),
+  `Secret(q) => `Secret(q),
+  `Choice(q) => `Choice(q),
+  `Confirm(q) => `Confirm(q),
+  `SelectAdminDomain(q) => `SelectAdminDomain(q),
+  `Announce(q) => `Announce(q),
+  `AnnounceIdentity(q) => `AnnounceIdentity(q),
+  `ConfirmIdentity(q) => `ConfirmIdentity(q),
+  `OneTimeSecret(q) => `OneTimeSecret(q),
+  `VerificationCode(q) => `VerificationCode(q),
+  `ClearVerificationCode => `ClearVerificationCode,
+  `Progress(q) => `Progress(q),
+  `Note(s) => `Note(s),
+  `Warn(s) => `Warn(s)
+};
+
+let result = |c: Ceremony<'r>| -> Result<'r, AdminError> select events(c) {
+  `Done(r) => r,
+  _ => never()
+};
 let list_queue = |t: Target| -> Ceremony<Array<QueueItem>> 'netidx_admin_list_queue;
 let approve = |#groups: [Array<string>, null] = null, #no_id_map: [bool, null] = null, #code: string, t: Target| -> Ceremony<ApproveOutcome> 'netidx_admin_approve;
 let approve_renewals = |t: Target| -> Ceremony<Array<RenewalResult>> 'netidx_admin_approve_renewals;

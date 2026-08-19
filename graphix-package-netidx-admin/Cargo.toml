@@ -24,6 +24,7 @@ graphix-compiler = { workspace = true }
 graphix-derive = { workspace = true }
 graphix-package = { workspace = true }
 graphix-package-core = { workspace = true }
+graphix-package-tui = { workspace = true }
 graphix-rt = { workspace = true }
 netidx-admin = { path = "../netidx-admin", version = "0.32.0" }
 netidx-admin-proto = { path = "../netidx-admin-proto", version = "0.32.0" }

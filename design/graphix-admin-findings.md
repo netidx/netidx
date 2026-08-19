@@ -188,3 +188,47 @@ fell out of writing it:
    `Ceremony<B>` would claim wrong parameterizations — the halfway
    reading jul17a killed). The pin flipped to
    `abstract_type_predicate_refused_at_compile`.**
+
+## 2026-08-19 — the Question/result split, and what depending on tui found
+
+Slice D1 groundwork: the TUI needs ONE modal question pump serving
+every ceremony, but `Event<'r>` differs per ceremony only in
+`` `Done(Result<'r, _>) ``. Select does no union subtraction (a
+fall-through arm keeps the full scrutinee type, verified), so the
+split lives in the package instead — `Event<'r>` is now
+`[Question, `Done(Result<'r, AdminError>)]` where `Question` is the
+`'r`-free 14-variant union, with graphix-level accessors
+`questions(c)` (variant-rebuild strip, written once in mod.gx) and
+`result(c)`. Every frontend wants this seam; the strict CLI's
+scripted answerer would consume it too.
+
+Three graphix findings fell out, all fixed there same day:
+
+1. **Under-declared stdlib package deps** (88a2be92): the admin
+   package is the first external consumer of graphix-package-tui, and
+   registration immediately failed — tui's packed browser calls
+   `str::dirname` but declared str only as a dev-dependency, and http
+   declared no array dep at all despite rest.gx using array::concat.
+   Nothing caught this because the shell registers the whole stdlib.
+   Audited all packed sources; those two were the only gaps.
+
+2. **Set-contains refused a set's own members as residue** (f89df949):
+   the `result` accessor's shape — a select whose declared union
+   return mixes a typed arm with `never()` —
+
+   ```graphix
+   let result = |c: Ceremony<'r>| -> Result<'r, AdminError>
+     select events(c) { `Done(r) => r, _ => never() };
+   ```
+
+   failed to typecheck: the bare-tvar residue arm covered rhs members
+   only with individual non-bare lhs members, so a member equal to
+   the whole lhs set (or the lhs's own `'r` cell) landed in the
+   residue and the occurs check refused `'r := ['r, ...]`. Both
+   faces now covered reflexively; monotone fix, all gates green.
+
+3. **No union subtraction in select** (logged, not requested): the
+   direct form `select ev { `Done(_) => never(), q => q }` cannot
+   type as `Question`. The variant-rebuild idiom is fine at package
+   scale (write once); noting in case a keymap-heavy TUI makes the
+   per-use cost real.

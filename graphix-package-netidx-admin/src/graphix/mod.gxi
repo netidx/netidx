@@ -118,11 +118,12 @@ type Ceremony<'r>;
 /// not keep a cancelled ceremony alive.
 type QuestionId;
 
-/// One event from a ceremony. Events carrying an `id` are blocking
-/// questions — the flow is parked until `answer` resolves that id (or
-/// cancels). The rest are presentation: verification codes, progress,
-/// notes, warnings, and the terminal `Done`.
-type Event<'r> = [
+/// A ceremony event that is not the terminal `Done` — uniformly typed
+/// whatever the ceremony computes, so one modal pump can serve every
+/// action. Events carrying an `id` are blocking questions — the flow
+/// is parked until `answer` resolves that id (or cancels). The rest
+/// are presentation: verification codes, progress, notes, warnings.
+type Question = [
   `Text({ id: QuestionId, field: FieldInfo, default: [string, null], required: bool }),
   `Secret({ id: QuestionId, field: FieldInfo }),
   `Choice({ id: QuestionId, field: FieldInfo, choices: Array<string>, default: [string, null] }),
@@ -136,9 +137,12 @@ type Event<'r> = [
   `ClearVerificationCode,
   `Progress({ stage: Stage, message: string, duration: [duration, null] }),
   `Note(string),
-  `Warn(string),
-  `Done(Result<'r, AdminError>)
+  `Warn(string)
 ];
+
+/// One event from a ceremony: a `Question`, or the terminal `Done`
+/// carrying the ceremony's result.
+type Event<'r> = [Question, `Done(Result<'r, AdminError>)];
 
 /// The reply to a blocking question. The answer kind must match the
 /// question (`Confirm` answers a `Confirm` or `ConfirmIdentity`, `Ack`
@@ -168,6 +172,15 @@ val connect: fn(
 /// Keep the observer OUTSIDE sleeping select arms — an event delivered
 /// while every observer sleeps is missed, not replayed.
 val events: fn(c: Ceremony<'r>) -> Event<'r>;
+
+/// The ceremony's questions and presentation events, without the
+/// terminal `Done` — feed these to a shared question pump and read the
+/// outcome from `result`. The same observation rules as `events`.
+val questions: fn(c: Ceremony<'r>) -> Question;
+
+/// The ceremony's result: fires exactly once, when the flow finishes.
+/// Observing it starts the flow, like `events`.
+val result: fn(c: Ceremony<'r>) -> Result<'r, AdminError>;
 
 /// Answer the outstanding question `id`. The id routes to its own
 /// ceremony, so there is no ceremony argument. Errors (as a value) if
