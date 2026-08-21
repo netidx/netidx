@@ -356,4 +356,11 @@ item — either instance/consumer type resolution honors the defining
 module's `use`s and private types (the env_independent_typerefs
 carried-cell design suggests seeding the body annotations' TypeRef
 cells at def compile), or the def-site refuses what the use-site
-can't resolve. The silent asymmetry is the bug.**
+can't resolve. The silent asymmetry is the bug. UPDATE 2026-08-22:
+Eric ruled this the last straw for the open-style module system —
+the fix is a full transition to a Rust-2018-style use system
+(explicit imports, self/super/package roots, renames, wildcards,
+position-independent mod, and one materialized per-module namespace
+table that every resolution consults). Design:
+graphix design/module_system.md; the three faces above become the
+red→green regression fixtures of its P3.**
