@@ -1,0 +1,364 @@
+use tui::{block, input_handler, layout, line_edit, list, paragraph, text};
+
+let glyph = |fp: Fingerprint| -> Array<tui::Line> select identicon(fp)$ {
+  { cells, color } => {
+    let on = style(
+      #fg: `Rgb({
+        r: cast<i64>(color.r)$,
+        g: cast<i64>(color.g)$,
+        b: cast<i64>(color.b)$
+      }),
+      #bg: `Black
+    );
+    let off = style(#bg: `Black);
+    let border = line(#style: off, "                    ");
+    let rows = array::map(cells, |row| line(array::concat(
+      [span(#style: off, "  ")],
+      array::map(row, |c| select c {
+        true => span(#style: on, "██"),
+        false => span(#style: off, "  ")
+      }),
+      [span(#style: off, "  ")]
+    )));
+    array::concat([border], rows, [border])
+  }
+};
+
+let fingerprint_lines = |fp: Fingerprint| -> Array<tui::Line> {
+  let groups = str::split(#pat: " ", fp.code);
+  let chunks = array::fold(groups, [], |acc: Array<Array<string>>, g| select acc {
+    [init.., last] => select array::len(last) {
+      n if n < 4 => array::push(init, array::push(last, g)),
+      _ => array::push(acc, [g])
+    },
+    _ => [[g]]
+  });
+  array::map(chunks, |c| line(
+    #style: style(#add_modifier: [`Bold]),
+    #alignment: `Center,
+    str::join(#sep: " ", c)
+  ))
+};
+
+let qid = |b: Blocking| -> QuestionId select b {
+  `Text({ id, .. }) => id,
+  `Secret({ id, .. }) => id,
+  `Choice({ id, .. }) => id,
+  `Confirm({ id, .. }) => id,
+  `SelectAdminDomain({ id, .. }) => id,
+  `Announce({ id, .. }) => id,
+  `AnnounceIdentity({ id, .. }) => id,
+  `ConfirmIdentity({ id, .. }) => id,
+  `OneTimeSecret({ id, .. }) => id
+};
+
+let pump = |q: Question| -> Pump {
+  let hint = style(#fg: `DarkGray);
+  let selstyle = style(#add_modifier: [`Reversed]);
+  // ── presentation channels ──
+  let notes: Array<string> = [];
+  let progress: [{ stage: Stage, message: string, duration: [duration, null] }, null] = null;
+  let code: [{ purpose: string, fp: Fingerprint }, null] = null;
+  // ── the outstanding blocking question and its per-modal state ──
+  let active: [Blocking, null] = null;
+  let ed = line_edit::state("");
+  let sel = 0;
+  let yes = false;
+  let err: [string, null] = null;
+  select q {
+    `Text(t) => {
+      active <- `Text(t);
+      ed <- line_edit::state(select t.default { null as _ => "", s => s });
+      err <- t ~ null
+    },
+    `Secret(s) => {
+      active <- `Secret(s);
+      ed <- line_edit::state(s ~ "");
+      err <- s ~ null
+    },
+    `Choice(c) => {
+      active <- `Choice(c);
+      sel <- select c.default {
+        null as _ => 0,
+        d => select array::find_map(array::enumerate(c.choices), |(i, x)| select x {
+          v if v == d => i,
+          _ => null
+        }) {
+          null as _ => 0,
+          i => i
+        }
+      };
+      err <- c ~ null
+    },
+    `Confirm(c) => {
+      active <- `Confirm(c);
+      yes <- c.default;
+      err <- c ~ null
+    },
+    `SelectAdminDomain(d) => {
+      active <- `SelectAdminDomain(d);
+      sel <- d ~ 0;
+      err <- d ~ null
+    },
+    `Announce(a) => { active <- `Announce(a); err <- a ~ null },
+    `AnnounceIdentity(a) => { active <- `AnnounceIdentity(a); err <- a ~ null },
+    `ConfirmIdentity(i) => { active <- `ConfirmIdentity(i); err <- i ~ null },
+    `OneTimeSecret(o) => { active <- `OneTimeSecret(o); err <- o ~ null },
+    `VerificationCode(v) => code <- v,
+    v@ `ClearVerificationCode => code <- v ~ null,
+    `Progress(p) => progress <- p,
+    `Note(s) => notes <- array::window(#n: 100, s ~ notes, s),
+    `Warn(s) => notes <- array::window(#n: 100, s ~ notes, "⚠ [s]")
+  };
+  // ── what Enter would submit for the current modal ──
+  let composed: [{ id: QuestionId, a: Answer }, `Required, null] = select active {
+    null as _ => null,
+    `Text({ id, required, .. }) => select ed.value {
+      "" if required => `Required,
+      "" => { id, a: `Text(null) },
+      v => { id, a: `Text(v) }
+    },
+    `Secret({ id, .. }) => { id, a: `Secret(ed.value) },
+    `Choice({ id, choices, .. }) => { id, a: `Choice(choices[sel]$) },
+    `Confirm({ id, .. }) => { id, a: `Confirm(yes) },
+    `SelectAdminDomain({ id, domains }) => {
+      let n = array::len(domains);
+      select sel {
+        s if s == n => { id, a: `Domain(`PollMore) },
+        s if s == n + 1 => { id, a: `Domain(`Manual) },
+        s => { id, a: `Domain(`Discovered(s)) }
+      }
+    },
+    `Announce({ id, .. }) => { id, a: `Ack },
+    `AnnounceIdentity({ id, .. }) => { id, a: `Ack },
+    `ConfirmIdentity({ id, .. }) => { id, a: `Confirm(true) },
+    `OneTimeSecret({ id, .. }) => { id, a: `Ack }
+  };
+  // ── submit: answer the question, close on success, show refusals ──
+  let submit: [{ id: QuestionId, a: Answer }, null] = null;
+  select submit {
+    null as _ => never(),
+    { id, a } => {
+      catch(e) select (e.0).error { `Admin(m) => err <- m };
+      let sent = answer(id, a)?;
+      active <- sent ~ null
+    }
+  };
+  let enter = |t: Any| -> null {
+    select t ~ composed {
+      null as _ => never(),
+      `Required => err <- t ~ "a value is required",
+      c => submit <- c
+    };
+    null
+  };
+  let cancel = |t: Any| -> null {
+    select active {
+      null as _ => never(),
+      b => submit <- t ~ { id: qid(b), a: `Cancel }
+    };
+    null
+  };
+  let confirm_answer = |t: Any, v: bool| -> null {
+    select active {
+      null as _ => never(),
+      b => submit <- t ~ { id: qid(b), a: `Confirm(v) }
+    };
+    null
+  };
+  // ── per-kind key handling ──
+  let text_keys = |ev: tui::input_handler::Event, k: tui::input_handler::KeyEvent|
+    -> [`Stop, `Continue] select k.code {
+      kk@ `Enter => { enter(kk); `Stop },
+      kk@ `Esc => { cancel(kk); `Stop },
+      _ => line_edit::handle(&ed, ev)
+    };
+  let list_keys = |k: tui::input_handler::KeyEvent, last: i64|
+    -> [`Stop, `Continue] select k.code {
+      kk@ `Up => { sel <- max(0, (kk ~ sel) - 1); `Stop },
+      kk@ `Char("k") => { sel <- max(0, (kk ~ sel) - 1); `Stop },
+      kk@ `Down => { sel <- min(last, (kk ~ sel) + 1); `Stop },
+      kk@ `Char("j") => { sel <- min(last, (kk ~ sel) + 1); `Stop },
+      kk@ `Enter => { enter(kk); `Stop },
+      kk@ `Esc => { cancel(kk); `Stop },
+      _ => `Continue
+    };
+  let confirm_keys = |k: tui::input_handler::KeyEvent| -> [`Stop, `Continue] select k.code {
+    kk@ `Left => { yes <- kk ~ !yes; `Stop },
+    kk@ `Right => { yes <- kk ~ !yes; `Stop },
+    kk@ `Tab => { yes <- kk ~ !yes; `Stop },
+    kk@ `Char("y") => { confirm_answer(kk, true); `Stop },
+    kk@ `Char("n") => { confirm_answer(kk, false); `Stop },
+    kk@ `Enter => { enter(kk); `Stop },
+    kk@ `Esc => { cancel(kk); `Stop },
+    _ => `Continue
+  };
+  let ack_keys = |k: tui::input_handler::KeyEvent| -> [`Stop, `Continue] select k.code {
+    kk@ `Enter => { enter(kk); `Stop },
+    kk@ `Char(" ") => { enter(kk); `Stop },
+    kk@ `Esc => { cancel(kk); `Stop },
+    _ => `Continue
+  };
+  let identity_keys = |k: tui::input_handler::KeyEvent| -> [`Stop, `Continue] select k.code {
+    kk@ `Char("a") => { confirm_answer(kk, true); `Stop },
+    kk@ `Enter => { confirm_answer(kk, true); `Stop },
+    kk@ `Char("r") => { confirm_answer(kk, false); `Stop },
+    kk@ `Char("n") => { confirm_answer(kk, false); `Stop },
+    kk@ `Esc => { confirm_answer(kk, false); `Stop },
+    _ => `Continue
+  };
+  let handle = |e: tui::input_handler::Event| -> [`Stop, `Continue] select e {
+    ev@ `Key(k) => select k.kind {
+      `Press => select active {
+        null as _ => `Continue,
+        `Text(_) => text_keys(ev, k),
+        `Secret(_) => text_keys(ev, k),
+        `Choice({ choices, .. }) => list_keys(k, array::len(choices) - 1),
+        `Confirm(_) => confirm_keys(k),
+        `SelectAdminDomain({ domains, .. }) => list_keys(k, array::len(domains) + 1),
+        `Announce(_) => ack_keys(k),
+        `AnnounceIdentity(_) => ack_keys(k),
+        `ConfirmIdentity(_) => identity_keys(k),
+        `OneTimeSecret(_) => ack_keys(k)
+      },
+      _ => `Continue
+    },
+    _ => `Continue
+  };
+  // ── the modal views ──
+  let err_lines: Array<tui::Line> = select err {
+    null as _ => [],
+    m => [line(#style: style(#fg: `Red), m)]
+  };
+  let text_modal = |field: FieldInfo, mask: [string, null]| -> tui::Tui block(
+    #border: &`All,
+    #title: &line(field.label),
+    #title_bottom: &line(#style: hint, " Enter submit · Esc cancel "),
+    &layout(#direction: &`Vertical, &[
+      child(#constraint: `Min(1), paragraph(#style: &hint, &field.help)),
+      child(#constraint: `Length(1), text(&[line_edit::view(#mask: mask, &ed)])),
+      child(#constraint: `Length(1), text(&err_lines))
+    ])
+  );
+  let choice_modal = |field: FieldInfo, choices: Array<string>| -> tui::Tui block(
+    #border: &`All,
+    #title: &line(field.label),
+    #title_bottom: &line(#style: hint, " ↑/↓ move · Enter select · Esc cancel "),
+    &layout(#direction: &`Vertical, &[
+      child(#constraint: `Min(1), paragraph(#style: &hint, &field.help)),
+      child(#constraint: `Length(array::len(choices)),
+        list(#highlight_style: &selstyle, #selected: &sel,
+          &array::map(choices, |c| line(c))))
+    ])
+  );
+  let confirm_modal = |field: FieldInfo| -> tui::Tui {
+    let buttons: Array<tui::Line> = select yes {
+      true => [line("\[Yes\]   No ")],
+      false => [line(" Yes   \[No\]")]
+    };
+    block(
+      #border: &`All,
+      #title: &line(field.label),
+      #title_bottom: &line(#style: hint, " ←/→ toggle · y/n · Enter confirm · Esc cancel "),
+      &layout(#direction: &`Vertical, &[
+        child(#constraint: `Min(1), paragraph(#style: &hint, &field.help)),
+        child(#constraint: `Length(1), text(#alignment: &`Center, &buttons))
+      ])
+    )
+  };
+  let domain_modal = |domains: Array<AdminDomain>| -> tui::Tui {
+    let items = array::push(
+      array::map(domains, |d| line(d.domain)),
+      line("Search again for more admin domains"),
+      line("Enter an address manually…")
+    );
+    let side: Array<tui::Line> = select sel {
+      s if s < array::len(domains) => {
+        let fp = (domains[s]$).identity.fingerprint;
+        array::concat(glyph(fp), fingerprint_lines(fp))
+      },
+      s if s == array::len(domains) => [line(#style: hint, "Browse the network again.")],
+      _ => [line(#style: hint, "Type an admin-server address (host:port).")]
+    };
+    block(
+      #border: &`All,
+      #title: &line("Select an admin domain"),
+      #title_bottom: &line(#style: hint, " ↑/↓ move · Enter select · Esc cancel "),
+      &layout(#direction: &`Horizontal, &[
+        child(#constraint: `Min(20),
+          list(#highlight_style: &selstyle, #selected: &sel, &items)),
+        child(#constraint: `Length(26), paragraph(#trim: &false, &side))
+      ])
+    )
+  };
+  let announce_modal = |title: string, body: string| -> tui::Tui block(
+    #border: &`All,
+    #title: &line(title),
+    #title_bottom: &line(#style: hint, " Enter continue · Esc cancel "),
+    &paragraph(&body)
+  );
+  let announce_identity_modal = |body: string, fp: Fingerprint| -> tui::Tui block(
+    #border: &`All,
+    #title: &line("Verify this identity"),
+    #title_bottom: &line(#style: hint, " Enter continue · Esc cancel "),
+    &layout(#direction: &`Vertical, &[
+      child(#constraint: `Min(2), paragraph(#style: &hint, &body)),
+      child(#constraint: `Length(13),
+        paragraph(#alignment: &`Center, #trim: &false,
+          &array::concat(glyph(fp), fingerprint_lines(fp))))
+    ])
+  );
+  let confirm_identity_modal = |identity: CaIdentity| -> tui::Tui block(
+    #border: &`All,
+    #title: &line("Confirm the CA's identity"),
+    #title_bottom: &line(#style: hint, " a accept · r reject "),
+    &layout(#direction: &`Vertical, &[
+      child(#constraint: `Length(2), paragraph(#style: &hint,
+        &"Verify OUT OF BAND that this is [identity.domain]'s CA glyph and fingerprint.")),
+      child(#constraint: `Min(13),
+        paragraph(#alignment: &`Center, #trim: &false,
+          &array::concat(glyph(identity.fingerprint), fingerprint_lines(identity.fingerprint))))
+    ])
+  );
+  let secret_modal = |kind: OneTimeSecretKind, password: string| -> tui::Tui {
+    let title = select kind {
+      `CaRecovery => "CA recovery password — shown ONCE",
+      `AdminPassword(name) => "One-time password for [name]"
+    };
+    block(
+      #border: &`All,
+      #title: &line(title),
+      #title_bottom: &line(#style: hint, " Enter acknowledge "),
+      &layout(#direction: &`Vertical, &[
+        child(#constraint: `Length(2), paragraph(#style: &hint,
+          &"Record this now; it is never shown again.")),
+        child(#constraint: `Length(1), text(#alignment: &`Center,
+          &[line(#style: style(#add_modifier: [`Bold]), password)]))
+      ])
+    )
+  };
+  let modal: [tui::Tui, null] = select active {
+    null as _ => null,
+    `Text({ field, .. }) => text_modal(field, null),
+    `Secret({ field, .. }) => text_modal(field, "•"),
+    `Choice({ field, choices, .. }) => choice_modal(field, choices),
+    `Confirm({ field, .. }) => confirm_modal(field),
+    `SelectAdminDomain({ domains, .. }) => domain_modal(domains),
+    `Announce({ title, body, .. }) => announce_modal(title, body),
+    `AnnounceIdentity({ body, fp, .. }) => announce_identity_modal(body, fp),
+    `ConfirmIdentity({ identity, .. }) => confirm_identity_modal(identity),
+    `OneTimeSecret({ kind, password, .. }) => secret_modal(kind, password)
+  };
+  let layers: Array<tui::overlay::Layer> = select modal {
+    null as _ => [],
+    w => [layer(#width: &`Percentage(70), #height: &`Percentage(70),
+      input_handler(#handle: &handle, &w))]
+  };
+  {
+    layers,
+    notes,
+    progress,
+    code,
+    busy: select active { null as _ => false, _ => true }
+  }
+}

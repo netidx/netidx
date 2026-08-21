@@ -24,6 +24,8 @@ graphix-compiler = { workspace = true }
 graphix-derive = { workspace = true }
 graphix-package = { workspace = true }
 graphix-package-core = { workspace = true }
+graphix-package-array = { workspace = true }
+graphix-package-str = { workspace = true }
 graphix-package-tui = { workspace = true }
 graphix-rt = { workspace = true }
 netidx-admin = { path = "../netidx-admin", version = "0.32.0" }
@@ -44,8 +46,10 @@ uuid = { workspace = true }
 graphix-ast-pack = { workspace = true }
 
 [dev-dependencies]
+crossterm = { workspace = true }
 env_logger = { workspace = true }
 graphix-rt = { workspace = true }
+graphix-package-tui = { workspace = true, features = ["testing"] }
 netidx = { path = "../netidx", version = "0.32.0", default-features = false }
 netidx-admin = { path = "../netidx-admin", version = "0.32.0", features = ["testing"] }
 tempfile = { workspace = true }

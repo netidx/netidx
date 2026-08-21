@@ -537,3 +537,5 @@ mod ops;
 mod e2e;
 #[cfg(test)]
 mod test;
+#[cfg(all(test, unix))]
+mod tui_test;

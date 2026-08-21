@@ -10,6 +10,7 @@ Compile-time milestones (log at every ~1k lines of `.gx`):
 
 | date | .gx lines | `--check` time | notes |
 |------|-----------|----------------|-------|
+| 2026-08-21 | 909 | reg 417ms / pump-callsite 593ms | DEV build (unoptimized). Registration = all stdlib + package packed-AST decode + typecheck; the 593ms is ONE `pump(...)` call site's per-callsite instance elaboration of the ~300-line pump body. No wall yet; watch the per-callsite number as the app main grows. |
 
 ---
 
@@ -260,3 +261,83 @@ verified red on the unfixed compiler). The write-side fix mirrors
 Deref's standing read, which had been fixed for the READ side long
 ago — the asymmetry comment in Deref::update was already pointing at
 this hole.
+
+## 2026-08-21 — the question pump: 378 lines in, the first live TUI round trip
+
+Phase D's first real slice: `netidx_admin::tui` (the package's first
+submodule directory) with the shared modal question pump — all 14
+`Question` kinds as self-answering modals (line_edit text/secret,
+choice/domain lists, confirm toggles, identity gestures with the
+identicon rendered from `identicon()`'s cells), `answer` refusals
+re-prompting in place, presentation events accumulating in
+notes/progress/code channels. `tui/mod.gx` (~360 lines) is the largest
+single `.gx` file written to date. The lab loop worked as designed:
+`TuiTestHarness` (now public — graphix 8cc305b7, prerequisite 3 closed)
+drives a REAL `connect` ceremony against `TestAdminDomain` from key
+events to `Done(target)`: identity modal → `a` → masked password entry
+→ Enter → modal closes, result lands. The reactive idioms the design
+hoped for all held up: one `select q` observer feeding modal state, a
+reactively-precomputed `composed` answer sampled by Enter, connects
+from key-handler lambdas, `&`-refs keeping keystroke updates out of
+the widget tree. Three graphix findings below fell out; the rest of
+the friction was self-inflicted documented gotchas (`///` in a `.gx`,
+unescaped `[` in string literals).
+
+## 2026-08-21 — reserved-word diagnostics at package scale (3rd instance)
+
+`let ok = answer(id, a)?` — `ok` is a reserved literal word — inside a
+select arm inside the 378-line file reported ``Unexpected ` ` `` at the
+ENCLOSING `select` statement's head, four lines above the offender,
+with "can't use keyword as a function or variable name" buried among
+four merged Unexpecteds and an Expected list of statement keywords.
+Same signature for an unescaped-`[` interpolation error (reported at
+the `select` head two lines above the string). Diagnosing took a
+ten-step bisection against a standalone graphix binary; at admin-TUI
+scale every such error costs that. Strengthens the open 2026-08-18
+diagnostics finding: the refusal reason AND the offending position
+both need to survive the combine merge. **Disposition: graphix work
+item (diagnostics), still open.**
+
+## 2026-08-21 — slice patterns carry no exhaustiveness credit
+
+`select acc { [] => .., [init.., last] => .. }` over `Array<T>` is
+refused ("missing match cases") even though empty + nonempty is
+exhaustive — slice patterns contribute nothing to the coverage union,
+so every array select needs a `_` or bind catch-all (the whole corpus
+already obeys this; the CLAUDE.md quick-ref's 4-arm slice example
+would not compile). The message is its own finding: "type mismatch
+\[\] does not contain Array<...>" — the `[]` is the empty SET TYPE
+(the union of zero pattern types) rendered as if it were an empty
+array pattern. **Disposition: logged; interim = bind-catch-all idiom
+(consciously accepted). Worth a ruling: minimal length-coverage for
+slice patterns (`[]` + a rest-pattern of min length 1 covers), or at
+least a readable refusal.**
+
+## 2026-08-21 — type names resolve differently at def-site and use-site
+
+The wall of the day, three faces, one root: TYPE-name resolution
+after the defining module's compile does not see the module's `use`
+aliases (value names are fine):
+
+1. An interface type whose DEFINITION uses a gxi `use` alias
+   (`Pump.layers: Array<overlay::Layer>` under `use tui::overlay`)
+   registers fine but fails "undefined type overlay::Layer in
+   netidx_admin::tui" the moment a CONSUMER touches the field.
+2. A module-private `.gx`-only type (`Blocking`) used in a public
+   lambda's body annotations fails "undefined type Blocking" at the
+   consumer's per-callsite instance elaboration — private types
+   don't survive into the instance's resolution env.
+3. A bare use-imported type name in a body annotation (`Array<Line>`
+   under `use tui`) fails the same way at instance elaboration.
+
+In every case the def-site compile ACCEPTED the spelling, so the
+package author learns about it only when the first consumer breaks —
+the worst possible place. Interim (consciously accepted, logged
+first): the tui module fully qualifies every type annotation
+(`tui::Line`, `tui::Tui`, `tui::input_handler::Event`, ...) and
+`Blocking` moved into the interface. **Disposition: graphix work
+item — either instance/consumer type resolution honors the defining
+module's `use`s and private types (the env_independent_typerefs
+carried-cell design suggests seeding the body annotations' TypeRef
+cells at def compile), or the def-site refuses what the use-site
+can't resolve. The silent asymmetry is the bug.**

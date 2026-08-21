@@ -1,0 +1,48 @@
+use tui;
+use tui::overlay;
+
+/// A fingerprint's 8x8 identicon as styled lines — the glyph on its
+/// black tile, ready to render in a paragraph. The visual half of the
+/// out-of-band verification gesture.
+val glyph: fn(fp: Fingerprint) -> Array<tui::Line>;
+
+/// The fingerprint's grouped code, four groups per bold centered
+/// line — the textual half of the verification gesture, paired with
+/// the glyph.
+val fingerprint_lines: fn(fp: Fingerprint) -> Array<tui::Line>;
+
+/// The nine blocking question shapes — the subset of `Question` the
+/// pump can have open as a modal. The presentation events never land
+/// here.
+type Blocking = [
+  `Text({ id: QuestionId, field: FieldInfo, default: [string, null], required: bool }),
+  `Secret({ id: QuestionId, field: FieldInfo }),
+  `Choice({ id: QuestionId, field: FieldInfo, choices: Array<string>, default: [string, null] }),
+  `Confirm({ id: QuestionId, field: FieldInfo, default: bool }),
+  `SelectAdminDomain({ id: QuestionId, domains: Array<AdminDomain> }),
+  `Announce({ id: QuestionId, title: string, body: string }),
+  `AnnounceIdentity({ id: QuestionId, body: string, fp: Fingerprint }),
+  `ConfirmIdentity({ id: QuestionId, identity: CaIdentity }),
+  `OneTimeSecret({ id: QuestionId, kind: OneTimeSecretKind, password: string })
+];
+
+/// What the question pump holds for the app: the overlay layers of
+/// the outstanding modal (empty when no question is up), the rolling
+/// note/warning log, the latest progress report, the standing
+/// verification code, and whether a blocking question is up.
+type Pump = {
+  layers: Array<tui::overlay::Layer>,
+  notes: Array<string>,
+  progress: [{ stage: Stage, message: string, duration: [duration, null] }, null],
+  code: [{ purpose: string, fp: Fingerprint }, null],
+  busy: bool
+};
+
+/// The shared modal question pump: ONE pump serves every ceremony the
+/// app runs. Feed it the (merged) `questions` of the app's ceremonies
+/// and wire `layers` into the app's `overlay` — each blocking question
+/// renders as a modal that answers itself from key events (Enter
+/// submits, Esc cancels, `a`/`r` accept or reject an identity), and
+/// presentation events accumulate in `notes`/`progress`/`code`. Read
+/// each ceremony's outcome from `result`.
+val pump: fn(q: Question) -> Pump;

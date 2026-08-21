@@ -436,3 +436,5 @@ val discover: fn(
   ?#timeout: [duration, null],
   trigger: Any
 ) -> Result<Array<Discovered>, AdminError>;
+
+mod tui;
