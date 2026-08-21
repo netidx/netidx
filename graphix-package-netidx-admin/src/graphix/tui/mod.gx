@@ -27,11 +27,11 @@ let glyph = |fp: Fingerprint| -> Array<tui::Line> select identicon(fp)$ {
 let fingerprint_lines = |fp: Fingerprint| -> Array<tui::Line> {
   let groups = str::split(#pat: " ", fp.code);
   let chunks = array::fold(groups, [], |acc: Array<Array<string>>, g| select acc {
+    [] => [[g]],
     [init.., last] => select array::len(last) {
       n if n < 4 => array::push(init, array::push(last, g)),
       _ => array::push(acc, [g])
-    },
-    _ => [[g]]
+    }
   });
   array::map(chunks, |c| line(
     #style: style(#add_modifier: [`Bold]),

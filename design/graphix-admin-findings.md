@@ -308,10 +308,21 @@ already obeys this; the CLAUDE.md quick-ref's 4-arm slice example
 would not compile). The message is its own finding: "type mismatch
 \[\] does not contain Array<...>" — the `[]` is the empty SET TYPE
 (the union of zero pattern types) rendered as if it were an empty
-array pattern. **Disposition: logged; interim = bind-catch-all idiom
-(consciously accepted). Worth a ruling: minimal length-coverage for
-slice patterns (`[]` + a rest-pattern of min length 1 covers), or at
-least a readable refusal.**
+array pattern. **Disposition: FIXED in graphix (2026-08-22, Eric:
+"slice patterns should contribute to exhaustiveness"): unguarded
+slice arms whose element patterns match anything pool their LENGTH
+claims (exact `[a, b]` = its length; head/tail rest forms = a
+minimum), and a pool whose lengths cover ℕ covers each scrutinee
+array member that EVERY pool arm's type predicate contains — runtime
+dispatch is type-gated per arm, so a differently-typed slice arm is
+a hole, not coverage. Guarded arms and refutable-element arms claim
+nothing, and the refusal now names the failure: the first uncovered
+length, the missing rest form, or why an arm was excluded. Dead-arm
+analysis deliberately unchanged (slice arms still subtract nothing),
+so existing slice+wildcard code keeps compiling. The empty-coverage
+message reads "no unguarded arm irrefutably covers T" instead of
+"\[\] does not contain T". The package's fold is back to the natural
+`[] / [init.., last]` spelling.**
 
 ## 2026-08-21 — type names resolve differently at def-site and use-site
 
