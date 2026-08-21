@@ -318,8 +318,13 @@ dispatch is type-gated per arm, so a differently-typed slice arm is
 a hole, not coverage. Guarded arms and refutable-element arms claim
 nothing, and the refusal now names the failure: the first uncovered
 length, the missing rest form, or why an arm was excluded. Dead-arm
-analysis deliberately unchanged (slice arms still subtract nothing),
-so existing slice+wildcard code keeps compiling. The empty-coverage
+analysis is length-precise too (Eric's follow-up: no dead arms left
+behind while there is no installed base) — a slice arm whose whole
+range is matched by earlier covering arms is refused, a member whose
+lengths complete subtracts from the residual so a trailing wildcard
+behind a full ladder dies, and the bool literal pair now subtracts
+as well; the whole existing corpus survives because real-world
+slice+wildcard selects are partial ladders. The empty-coverage
 message reads "no unguarded arm irrefutably covers T" instead of
 "\[\] does not contain T". The package's fold is back to the natural
 `[] / [init.., last]` spelling.**
