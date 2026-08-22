@@ -364,3 +364,15 @@ position-independent mod, and one materialized per-module namespace
 table that every resolution consults). Design:
 graphix design/module_system.md; the three faces above become the
 red→green regression fixtures of its P3.**
+
+**FIXED 2026-08-22 (graphix branch `module-system`): the use system
+landed — resolution consults the defining module's namespace table
+(a global registry keyed by scope path, exempt from lexical
+restore), so instance elaboration sees the def module's imports and
+private types. All three faces are green fixtures
+(`finding1_sig_alias`, `finding1_private_type_in_body`,
+`finding1_imported_body_annotation` in graphix-tests, and they
+fuse). This package migrated the same day: the tui module's parent
+types arrive by `use super::{…}`, tui-root helpers by
+`use tui::{line, span, style}`, widget modules by the
+`use tui::<w>::{self, *}` idiom; all 19 package tests pass.**

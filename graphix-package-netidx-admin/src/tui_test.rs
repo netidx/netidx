@@ -40,10 +40,8 @@ async fn pump_drives_a_live_connect() -> Result<()> {
     let d = TestAdminDomain::start().await?;
     let prog = format!(
         r#"
-use tui;
-use tui::overlay;
-use tui::paragraph;
-use netidx_admin;
+use tui::overlay::{{self, *}};
+use tui::paragraph::{{self, *}};
 
 let c = netidx_admin::connect(#admin: "{admin}", "{listen}");
 let p = netidx_admin::tui::pump(netidx_admin::questions(c));

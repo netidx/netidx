@@ -1,4 +1,10 @@
-use tui::{block, input_handler, layout, line_edit, list, paragraph, text};
+use tui::block::{self, *};
+use tui::input_handler::{self, *};
+use tui::layout::{self, *};
+use tui::line_edit::{self, *};
+use tui::list::{self, *};
+use tui::paragraph::{self, *};
+use tui::text::{self, *};
 
 let glyph = |fp: Fingerprint| -> Array<tui::Line> select identicon(fp)$ {
   { cells, color } => {

@@ -1,5 +1,9 @@
-use tui;
-use tui::overlay;
+use super::{
+    AdminDomain, Answer, answer, CaIdentity, FieldInfo, Fingerprint, identicon,
+    OneTimeSecretKind, Question, QuestionId, Stage
+};
+use tui::{line, span, style};
+use tui::overlay::{self, layer, Layer};
 
 /// A fingerprint's 8x8 identicon as styled lines — the glyph on its
 /// black tile, ready to render in a paragraph. The visual half of the
