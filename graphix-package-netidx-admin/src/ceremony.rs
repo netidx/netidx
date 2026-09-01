@@ -818,6 +818,9 @@ impl<R: Rt, E: UserEvent> EvalCached<R, E> for AnswerEv {
     fn eval(&mut self, _ctx: &mut ExecCtx<R, E>, cached: &CachedVals) -> Option<Value> {
         let qid = get_question_id(cached, 0)?;
         let a = cached.0.get(1)?.as_ref()?;
+        if std::env::var_os("GXDBG_ANSWER").is_some() {
+            eprintln!("ANSWER seq={} a={a}", qid.seq);
+        }
         let parsed = match parse_answer(a) {
             Ok(p) => p,
             Err(e) => return Some(errf!("Admin", "{e:#}")),

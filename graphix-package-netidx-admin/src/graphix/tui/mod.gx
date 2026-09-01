@@ -181,18 +181,14 @@ let pump = |q: Question| -> Pump {
     };
   let list_keys = |k: tui::input_handler::KeyEvent, last: i64|
     -> [`Stop, `Continue] select k.code {
-      kk@ `Up => { sel <- max(0, (kk ~ sel) - 1); `Stop },
-      kk@ `Char("k") => { sel <- max(0, (kk ~ sel) - 1); `Stop },
-      kk@ `Down => { sel <- min(last, (kk ~ sel) + 1); `Stop },
-      kk@ `Char("j") => { sel <- min(last, (kk ~ sel) + 1); `Stop },
+      `Up | `Char("k") => { sel <- max(0, (k ~ sel) - 1); `Stop },
+      `Down | `Char("j") => { sel <- min(k ~ last, (k ~ sel) + 1); `Stop },
       kk@ `Enter => { enter(kk); `Stop },
       kk@ `Esc => { cancel(kk); `Stop },
       _ => `Continue
     };
   let confirm_keys = |k: tui::input_handler::KeyEvent| -> [`Stop, `Continue] select k.code {
-    kk@ `Left => { yes <- kk ~ !yes; `Stop },
-    kk@ `Right => { yes <- kk ~ !yes; `Stop },
-    kk@ `Tab => { yes <- kk ~ !yes; `Stop },
+    `Left | `Right | `Tab => { yes <- k ~ !yes; `Stop },
     kk@ `Char("y") => { confirm_answer(kk, true); `Stop },
     kk@ `Char("n") => { confirm_answer(kk, false); `Stop },
     kk@ `Enter => { enter(kk); `Stop },
@@ -200,17 +196,13 @@ let pump = |q: Question| -> Pump {
     _ => `Continue
   };
   let ack_keys = |k: tui::input_handler::KeyEvent| -> [`Stop, `Continue] select k.code {
-    kk@ `Enter => { enter(kk); `Stop },
-    kk@ `Char(" ") => { enter(kk); `Stop },
+    `Enter | `Char(" ") => { enter(k); `Stop },
     kk@ `Esc => { cancel(kk); `Stop },
     _ => `Continue
   };
   let identity_keys = |k: tui::input_handler::KeyEvent| -> [`Stop, `Continue] select k.code {
-    kk@ `Char("a") => { confirm_answer(kk, true); `Stop },
-    kk@ `Enter => { confirm_answer(kk, true); `Stop },
-    kk@ `Char("r") => { confirm_answer(kk, false); `Stop },
-    kk@ `Char("n") => { confirm_answer(kk, false); `Stop },
-    kk@ `Esc => { confirm_answer(kk, false); `Stop },
+    `Char("a") | `Enter => { confirm_answer(k, true); `Stop },
+    `Char("r") | `Char("n") | `Esc => { confirm_answer(k, false); `Stop },
     _ => `Continue
   };
   let handle = |e: tui::input_handler::Event| -> [`Stop, `Continue] select e {

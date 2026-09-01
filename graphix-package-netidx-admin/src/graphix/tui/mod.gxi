@@ -50,3 +50,5 @@ type Pump = {
 /// presentation events accumulate in `notes`/`progress`/`code`. Read
 /// each ceremony's outcome from `result`.
 val pump: fn(q: Question) -> Pump;
+
+mod remote;

@@ -11,6 +11,7 @@ Compile-time milestones (log at every ~1k lines of `.gx`):
 | date | .gx lines | `--check` time | notes |
 |------|-----------|----------------|-------|
 | 2026-08-21 | 909 | reg 417ms / pump-callsite 593ms | DEV build (unoptimized). Registration = all stdlib + package packed-AST decode + typecheck; the 593ms is ONE `pump(...)` call site's per-callsite instance elaboration of the ~300-line pump body. No wall yet; watch the per-callsite number as the app main grows. |
+| 2026-08-31 | 1799 | reg 1.13s / app-main 2.68s | DEV build. The app-main number is the pump+remote composition (`milestone_timing`, now a permanent ignored test): two instance elaborations of the ~700-line remote body + pump. 2x the lines, ~4.5x the elaboration cost — no wall, but the growth is super-linear; re-measure at 3k. |
 
 ---
 
@@ -376,3 +377,212 @@ fuse). This package migrated the same day: the tui module's parent
 types arrive by `use super::{…}`, tui-root helpers by
 `use tui::{line, span, style}`, widget modules by the
 `use tui::<w>::{self, *}` idiom; all 19 package tests pass.**
+
+## 2026-08-31 — the abstract-predicate pin flipped again (nominal), and the nameless diagnostic
+
+Resuming Phase D against a week of graphix landings (module system,
+nominal abstract types, traits, List, or-patterns): the baseline run
+was 18/19, the one failure our own
+`abstract_type_predicate_refused_at_compile` pin. Not a regression —
+the rule CHANGED under it: nominal abstract types (graphix
+2026-08-22) made `Target as t` a legal exact tag test (`AbstractId`
+comparison), so the 08-18 compile refusal this pin asserted was
+deliberately deleted. Verified both faces against current graphix:
+over `[Target, i64]` the predicate compiles and dispatches nominally;
+over disjoint `42` it is refused as a dead arm. The pin is now
+`abstract_type_predicate_is_nominal` (both faces).
+
+The dead-arm refusal had its own wart: it printed ``pattern abstract
+will never match i64`` — `Type::Abstract` carries only the
+path-derived id, so Display had no name to print. At admin-TUI scale
+every abstract-typed select would pay that. **Disposition: FIXED in
+graphix (same day): a process-global `AbstractId → name` registry
+filled at `AbstractId::of` (every mint goes through it, packed decode
+included since registration re-typechecks), consulted by `Type`'s
+Display — the refusal now reads ``pattern Target will never match
+i64``, and parameterized abstracts print `Name<params>` instead of
+`<abstract#id>`.**
+
+## 2026-08-31 — or-pattern @-captures refuse the keymap idiom Rust accepts
+
+First real consumer of or-patterns (landed yesterday), exactly where
+the design doc predicted: keymaps. The natural rewrite of the pump's
+duplicated arms —
+
+```graphix
+kk@ `Up | kk@ `Char("k") => { sel <- max(0, (kk ~ sel) - 1); `Stop }
+```
+
+— is refused: "or-pattern alternatives must bind kk at exactly equal
+types (first alternative: `Up, here: `Char(string))". The message is
+excellent (names the bind and both types). But the refusal itself is
+stricter than the orthodoxy it aims for: in Rust `x @ A(_) | x @ B(_)`
+is LEGAL, because Rust bindings don't narrow — the binding gets the
+scrutinee's (enum) type. Graphix narrows the capture to its
+alternative's variant singleton, so "exactly equal types" refuses the
+form orthodox Rust code writes. Even the or-patterns design doc's own
+syntax example (``t@ `D(_) | t@ `E(_) => f(t)``) is ill-typed by its
+own rule. The idiom that works — and what the TUI now uses — is
+sampling an OUTER binding as the trigger (`k ~ sel`, the handler's
+own parameter), so no capture is needed:
+
+```graphix
+`Up | `Char("k") => { sel <- max(0, (k ~ sel) - 1); `Stop }
+```
+
+**Disposition: language-design question filed for Eric — should an
+@-capture in an or-arm type as the UNION of its per-alternative
+types (the exact type of what it can capture, of which Rust's rule is
+the degenerate case)? Same-binds equality would then govern only
+structural payload binds. Interim: the outer-binding idiom, which
+reads fine; the design doc example needs fixing either way.**
+
+## 2026-08-31 — the change-password routing gap (package API, not graphix)
+
+Porting the remote tab surfaced a hole in the package's layer 2, not
+in graphix: `AdminError.PasswordChangeRequired` exists so frontends
+can route to the change-password flow, but when `connect`'s ceremony
+fails with it there is no `Target` in hand — and `change_password`
+takes one. The Rust TUI routes with the verified connection it built
+internally; the graphix `connect` ceremony consumed the name and
+password through the answerer, so the frontend holds nothing to
+reconnect with. The package needs a from-scratch change-password
+ceremony (`#server`, optional `#admin`, asking old/new passwords via
+the answerer — the same flow the strict CLI necessarily has).
+**Disposition: package work item (Rust bridging layer, permitted),
+next slice. The remote tab shows the error as a toast until then.**
+
+## 2026-08-31 — the panel screens: variant-of-union coverage, and the rectangle hole behind it
+
+The remote tab's screen type is the natural nested state machine —
+`Screen = [`Connect, `Menu, `Panel(PanelKind)]` with `PanelKind` a
+5-member union — and the natural per-panel select over it refused:
+
+```graphix
+select screen {
+  `Connect => ..., `Menu => ...,
+  `Panel(`Queue) => ..., /* … all five … */ `Panel(`Certs) => ...
+}
+```
+
+"missing match cases: [.., `Panel(`Certs), .., `Panel(`Servers)] does
+not contain [`Connect, `Menu, `Panel(PanelKind)]" — five arms jointly
+exhaust the member, but coverage asked each scrutinee member to be
+covered by a SINGLE arm predicate; only slice length-ladders and the
+bool pair had pooling. Adjudicating the fix surfaced a second, worse
+bug sitting exactly opposite: `Type::union`'s Variant×Variant arm
+merged same-tag variants COMPONENT-WISE at any arity, so the coverage
+union of `` `P(`A,`X) `` and `` `P(`B,`Y) `` arms was the RECTANGLE
+`` `P([`A,`B],[`X,`Y]) `` — and a select whose arms cover only the
+diagonal compiled cleanly on main, leaving `` `P(`A,`Y) `` to fall
+through every arm at runtime. (The panel case refused rather than
+mis-accepting only because set-CHAINED unions skip the pairwise merge
+— the two bugs masked each other's territory.)
+
+**Disposition: both FIXED in graphix (same day):**
+
+1. `contains` gained the distribution law: after the single-member
+   and prim walks refuse, a set covers a product-headed rhs member
+   (variant/tuple/struct) when same-shaped members cover every
+   argument position but one in full and their pooled remaining
+   position covers it — sound by rectangularity, run as a pure probe
+   over a cell-free scrutinee side (commits nothing; strictly
+   monotone). `[`P(A), `P(B)] ⊇ `P([A, B])` now holds everywhere
+   contains is asked, not just in select.
+2. `union`'s variant merge now requires at most ONE differing
+   position (`union_identical` per slot) — the exact-merge condition;
+   a diagonal pair stays a two-member set, and the diagonal select is
+   refused as non-exhaustive.
+
+Pins: `select_variant_union_payload_exhausts`,
+`select_variant_union_rect_exhausts` (both fuse — the JIT handles the
+nested-variant arms natively), `select_tuple_union_member_exhausts`,
+and the negative `select_variant_union_diagonal_rejected`. The remote
+tab's panel selects compile as written.
+
+## 2026-08-31 — finding 1's true residual: the instance body typechecked under the caller's env
+
+The remote tab's first full test run failed "undefined type Toast" at
+per-callsite instance elaboration — Toast being a module-private type
+used as a UNION MEMBER (`[Toast, null]`) in a body annotation, its
+struct connected from a nested handler lambda. Minimized to 12 lines:
+bare private annotations (`let y: P = x`) survive, `[P, null]` dies.
+The mechanism, root-caused with a new `GXDBG_TYPEREF=1` probe: the
+def gate's probe walks answer `[P, null] ⊇ null` WITHOUT expanding
+`P`, so no def-time walk cell-fills that ref (bare annotations get
+filled, which is the only reason the 08-22 module-system fix's
+fixtures passed) — and the instance body's typecheck0/1 ran under the
+CALLER's env, where the defining module's private typedefs are gone.
+Every un-filled body ref resolved against the wrong world; worse, one
+that happened to resolve there could silently mean a DIFFERENT type.
+
+**Disposition: FIXED in graphix (same day): `GXLambda` snapshots the
+def-side env its body was compiled under (it was already restored for
+the body COMPILE — the init's `with_restored`) and now restores it
+around the body's `typecheck0`/`typecheck1` drives too; args stay
+caller-side. `TypeRef::with_scope` additionally carries an
+already-filled resolution into the re-scoped cell (filled = the
+name's final target, env-independent by design). Pinned red→green as
+`finding1_private_type_union_member` (it fuses). The remote tab's
+`Toast`/`Act`/`Screen`/`PanelKind` private types stand as written.**
+
+## 2026-08-31 — the phantom event replay: the wake-forced init view re-raised past events
+
+The find of the campaign so far, and the remote tab's blocker: any
+ceremony flow with two consecutive modal questions broke, because
+answering the first left its Enter STANDING in the handler's params,
+and when the next question woke a fresh select arm, the arm's call
+sites materialized under the wake-forced init view — which delivered
+those standing values as FIRED. The phantom Enter routed into the
+freshly opened Secret modal's `enter` and submitted it with an empty
+password ("login refused" with no password modal ever rendered).
+`GXDBG_CS` showed the smoking gun (`text_keys … argfired=true` with no
+key dispatched), and the same uncommanded dispatch was latent in the
+EXISTING pump test — its standing 'a' just routed to a harmless
+fallback, which is why the first live round trip never caught it.
+Minimized to 30 lines of pure graphix at the callable layer.
+
+**Disposition: FIXED in graphix (Eric's ruling: present-but-stale).**
+Three seams, each found by running the live ceremonies against the
+previous fix:
+
+1. `Ref`/`Deref` standing reads upgrade to fresh only under a GENUINE
+   init view — the wake-forced view (`event.wake_init`) reads stale.
+   Things born at init (constants, first productions) still fire;
+   things REPLAYED into a woken subtree never do.
+2. A present scrutinee with NO retained selection still routes: the
+   select chain runs on a depth-0 first consult with STALE wake binds
+   (selection is a value question; the guard-flip wake keeps its
+   aug03 FIRED — a guard's fire is a genuine event).
+3. `ByRef` seeds its cell from a present-but-stale child as a
+   standing STALE entry (the fired-only gate left a woken modal's
+   `&handle` cell empty and the tui input_handler never received its
+   callable — the identity modal ate every key).
+
+Pinned red→green at the callable layer
+(`arm_wake_delivers_standing_args_stale`); the full workspace suite,
+the 452-program findings corpus, and both live-domain TUI tests are
+green. The remote tab now drives connect → menu → queue → roster end
+to end under the harness. A semantics change of this depth needs a
+fuzz soak before it counts as landed.
+
+## 2026-08-31 — test-side: the AdminName default pre-seeds the modal
+
+The harness typed the admin name into a field already holding the
+question's DEFAULT (the OS username) — submitting "ericroot". Correct
+pump behavior (defaults are the point); the test now clears the field
+first. Worth remembering for scripted drivers: a Text modal's editor
+starts at the default, cursor at end.
+
+## 2026-08-31 — @-captures union across or-alternatives (ruled, built)
+
+Closing the morning's or-pattern question: Eric ruled the capture
+types as the UNION of the alternatives' narrowed types — Graphix
+narrows captures where Rust binds at the enum type, so the
+exactly-equal rule refused the keymap idiom
+``kk@ `Up | kk@ `Char("k")`` that orthodox Rust accepts. Built in
+graphix same day (a reused capture leaf widens the shared binding;
+payload binds keep exact equality; the shape fuses). The pump's
+keymaps keep the outer-binding sampling they were refactored to —
+both idioms are now legal, and new code can use whichever reads
+better.

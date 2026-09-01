@@ -1,0 +1,864 @@
+use package::{
+  AdminError, AdminInfo, IssuedEntry, PendingDelegation, QueueItem, ServerInfo,
+  SlotKind, Target, approve, approve_delegation, approve_renewals, connect,
+  deny, deny_delegation, issued, list_admins, list_pending_delegations,
+  list_queue, list_servers, questions, reconcile_ca, remove_admin,
+  remove_server, reset_password, result, revoke
+};
+use tui::{line, style};
+use tui::block::{self, *};
+use tui::input_handler::{self, *};
+use tui::layout::{self, *};
+use tui::line_edit::{self, *};
+use tui::list::{self, *};
+use tui::overlay::{self, layer, Layer};
+use tui::paragraph::{self, *};
+use tui::table::{self, *};
+use tui::text::{self, *};
+
+type PanelKind = [`Queue, `Delegations, `Roster, `Servers, `Certs];
+
+type Screen = [`Connect, `Menu, `Panel(PanelKind)];
+
+type Act = [
+  `Approve(string),
+  `Deny(string),
+  `Renewals,
+  `ApproveDelegation(string),
+  `DenyDelegation(string),
+  `Revoke(string),
+  `ResetPassword(string),
+  `RemoveAdmin(string),
+  `RemoveServer(string),
+  `Reconcile
+];
+
+type MenuEntry = { kind: PanelKind, title: string, desc: string, keys: string };
+
+type Toast = { title: string, lines: Array<string>, error: bool };
+
+let panels: Array<MenuEntry> = [
+  {
+    kind: `Queue,
+    title: "Enrollment Queue",
+    desc: "Review and approve certificate-enrollment requests from nodes joining the admin domain.",
+    keys: " a approve · d deny · R renewals · r refresh · Esc back "
+  },
+  {
+    kind: `Delegations,
+    title: "Delegation Requests",
+    desc: "Review and approve requests from resolvers asking to attach under this resolver cluster.",
+    keys: " a approve · d deny · r refresh · Esc back "
+  },
+  {
+    kind: `Roster,
+    title: "Admin Roster",
+    desc: "The admin domain's admins and their scopes.",
+    keys: " p reset-password · d remove · r refresh · Esc back "
+  },
+  {
+    kind: `Servers,
+    title: "Admin Servers",
+    desc: "Every CA-authoritative server identity — reconcile CA state, or permanently remove a dead node.",
+    keys: " c reconcile CA · x remove · r refresh · Esc back "
+  },
+  {
+    kind: `Certs,
+    title: "Issued Certificates",
+    desc: "Certificates this CA has issued — revoke one to bar the holder from the admin domain.",
+    keys: " x revoke · r refresh · Esc back "
+  }
+];
+
+let admin_text = |a: AdminError| -> string select a {
+  `Admin(m) => m,
+  `PasswordChangeRequired(name) =>
+    "[name]'s password was reset and must be changed before anything else",
+  `Unsupported(m) => "unsupported on this platform: [m]"
+};
+
+let fmt_age = |secs: u64| -> string select secs {
+  s if s < u64:60 => "[s]s",
+  s if s < u64:3600 => "[s / u64:60]m",
+  s => "[s / u64:3600]h[(s % u64:3600) / u64:60]m"
+};
+
+let fmt_slot = |k: SlotKind| -> string select k {
+  `Signing => "signing",
+  `Role => "role"
+};
+
+let opt_len = |o: [Array<'a>, null]| -> i64 select o {
+  null as _ => 0,
+  a => array::len(a)
+};
+
+let remote = |#q: &Question, #server: string = ""| -> Remote {
+  let hint = style(#fg: `DarkGray);
+  let selstyle = style(#add_modifier: [`Reversed]);
+  let bold = style(#add_modifier: [`Bold]);
+  // ── connection state ──
+  let target: Target = never();
+  let screen: Screen = `Connect;
+  let ed = line_edit::state(server);
+  let connect_to: string = never();
+  let connected_to = "";
+  let conn_err: [string, null] = null;
+  conn_err <- connect_to ~ null;
+  let connect_c = connect(connect_to);
+  *q <- questions(connect_c);
+  {
+    catch(e) conn_err <- admin_text((e.0).error);
+    let t = result(connect_c)?;
+    target <- t;
+    connected_to <- t ~ connect_to;
+    screen <- t ~ `Menu
+  };
+  // ── shared ui state ──
+  let menu_sel = 0;
+  let row_sel = 0;
+  let toast: [Toast, null] = null;
+  let confirm: [{ message: string, action: Act }, null] = null;
+  let fail = |title: string, a: AdminError| -> null {
+    toast <- { title, lines: [admin_text(a)], error: true };
+    null
+  };
+  // ── panel loads: each (re)load starts a fresh list ceremony ──
+  let load: PanelKind = never();
+  let queue_c = select load {
+    x@ `Queue => list_queue(x ~ target),
+    _ => never()
+  };
+  let deleg_c = select load {
+    x@ `Delegations => list_pending_delegations(x ~ target),
+    _ => never()
+  };
+  let servers_c = select load {
+    x@ `Servers => list_servers(x ~ target),
+    _ => never()
+  };
+  let certs_c = select load {
+    x@ `Certs => issued(x ~ target),
+    _ => never()
+  };
+  let roster_r = select load {
+    x@ `Roster => list_admins(x ~ target),
+    _ => never()
+  };
+  *q <- questions(queue_c);
+  *q <- questions(deleg_c);
+  *q <- questions(servers_c);
+  *q <- questions(certs_c);
+  let queue_rows: [Array<QueueItem>, null] = null;
+  {
+    catch(e) fail("Loading the queue failed", (e.0).error);
+    queue_rows <- result(queue_c)?
+  };
+  let deleg_rows: [Array<PendingDelegation>, null] = null;
+  {
+    catch(e) fail("Loading delegations failed", (e.0).error);
+    deleg_rows <- result(deleg_c)?
+  };
+  let server_rows: [Array<ServerInfo>, null] = null;
+  {
+    catch(e) fail("Loading servers failed", (e.0).error);
+    server_rows <- result(servers_c)?
+  };
+  let cert_rows: [Array<IssuedEntry>, null] = null;
+  {
+    catch(e) fail("Loading certificates failed", (e.0).error);
+    cert_rows <- result(certs_c)?
+  };
+  let roster_rows: [Array<AdminInfo>, null] = null;
+  {
+    catch(e) fail("Loading the roster failed", (e.0).error);
+    roster_rows <- roster_r?
+  };
+  // ── the selected row's action key, per panel ──
+  let queue_code: [string, null] = select queue_rows {
+    null as _ => null,
+    rows => select array::len(rows) {
+      0 => null,
+      n => select (rows[min(row_sel, n - 1)]$).code {
+        null as _ => null,
+        c => c.code
+      }
+    }
+  };
+  let deleg_code: [string, null] = select deleg_rows {
+    null as _ => null,
+    rows => select array::len(rows) {
+      0 => null,
+      n => ((rows[min(row_sel, n - 1)]$).code).code
+    }
+  };
+  let roster_name: [string, null] = select roster_rows {
+    null as _ => null,
+    rows => select array::len(rows) {
+      0 => null,
+      n => {
+        let a = rows[min(row_sel, n - 1)]$;
+        select a.kind {
+          `Signing => null,
+          `Role => a.admin
+        }
+      }
+    }
+  };
+  let server_id: [string, null] = select server_rows {
+    null as _ => null,
+    rows => select array::len(rows) {
+      0 => null,
+      n => {
+        let s = rows[min(row_sel, n - 1)]$;
+        select s.ca {
+          true => null,
+          false => s.id
+        }
+      }
+    }
+  };
+  let cert_serial: [string, null] = select cert_rows {
+    null as _ => null,
+    rows => select array::len(rows) {
+      0 => null,
+      n => "[(rows[min(row_sel, n - 1)]$).serial]"
+    }
+  };
+  // ── action dispatch: each run event starts the op's ceremony ──
+  let run: Act = never();
+  let approve_c = select run {
+    `Approve(code) => approve(#code: code, code ~ target),
+    _ => never()
+  };
+  let deny_c = select run {
+    `Deny(code) => deny(#code: code, code ~ target),
+    _ => never()
+  };
+  let renewals_c = select run {
+    x@ `Renewals => approve_renewals(x ~ target),
+    _ => never()
+  };
+  let apdel_c = select run {
+    `ApproveDelegation(code) => approve_delegation(#code: code, code ~ target),
+    _ => never()
+  };
+  let dendel_c = select run {
+    `DenyDelegation(code) => deny_delegation(#code: code, code ~ target),
+    _ => never()
+  };
+  let revoke_c = select run {
+    `Revoke(serial) => revoke(serial, serial ~ target),
+    _ => never()
+  };
+  let resetpw_r = select run {
+    `ResetPassword(name) => reset_password(name, name ~ target),
+    _ => never()
+  };
+  let rmadmin_r = select run {
+    `RemoveAdmin(name) => remove_admin(name, name ~ target),
+    _ => never()
+  };
+  let rmserver_c = select run {
+    `RemoveServer(id) => remove_server(id, id ~ target),
+    _ => never()
+  };
+  let reconcile_c = select run {
+    x@ `Reconcile => reconcile_ca(x ~ target),
+    _ => never()
+  };
+  *q <- questions(approve_c);
+  *q <- questions(deny_c);
+  *q <- questions(renewals_c);
+  *q <- questions(apdel_c);
+  *q <- questions(dendel_c);
+  *q <- questions(revoke_c);
+  *q <- questions(rmserver_c);
+  *q <- questions(reconcile_c);
+  // ── action outcomes: toast the summary, then refresh the panel ──
+  {
+    catch(e) fail("Approve failed", (e.0).error);
+    let r = result(approve_c)?;
+    let groups = str::join(#sep: ", ", r.id_map_groups);
+    toast <- {
+      title: "Approved",
+      lines: array::concat(
+        ["[r.requested_name] approved", "id-map groups: [groups]"],
+        r.warnings
+      ),
+      error: false
+    };
+    load <- r ~ `Queue
+  };
+  {
+    catch(e) fail("Deny failed", (e.0).error);
+    let name = result(deny_c)?;
+    toast <- { title: "Denied", lines: ["Denied [name]"], error: false };
+    load <- name ~ `Queue
+  };
+  {
+    catch(e) fail("Approving renewals failed", (e.0).error);
+    let rs = result(renewals_c)?;
+    toast <- {
+      title: "Renewals",
+      lines: select array::len(rs) {
+        0 => ["No verified renewals were pending"],
+        _ => array::map(rs, |r| select r.error {
+          null as _ => "renewed [r.requested_name]",
+          e => "failed [r.requested_name]: [e]"
+        })
+      },
+      error: false
+    };
+    load <- rs ~ `Queue
+  };
+  {
+    catch(e) fail("Approving the delegation failed", (e.0).error);
+    let r = result(apdel_c)?;
+    let lines = array::map(r.peers, |p| select p.error {
+      null as _ => "updated [p.server]",
+      e => "failed [p.server]: [e]"
+    });
+    toast <- {
+      title: "Delegation approved",
+      lines: array::concat(["[r.proposed_path] approved"], lines),
+      error: false
+    };
+    load <- r ~ `Delegations
+  };
+  {
+    catch(e) fail("Denying the delegation failed", (e.0).error);
+    let r = result(dendel_c)?;
+    toast <- {
+      title: "Delegation denied",
+      lines: ["Denied [r.proposed_path]"],
+      error: false
+    };
+    load <- r ~ `Delegations
+  };
+  {
+    catch(e) fail("Revoke failed", (e.0).error);
+    let r = result(revoke_c)?;
+    let lines = array::map(r.revoked, |c| "revoked serial [c.serial] ([c.name])");
+    toast <- {
+      title: "Revoked",
+      lines: array::concat(lines, r.warnings),
+      error: false
+    };
+    load <- r ~ `Certs
+  };
+  {
+    catch(e) fail("Password reset failed", (e.0).error);
+    let pw = resetpw_r?;
+    toast <- {
+      title: "One-time password",
+      lines: ["Record this now; it is never shown again:", pw],
+      error: false
+    };
+    load <- pw ~ `Roster
+  };
+  {
+    catch(e) fail("Removing the admin failed", (e.0).error);
+    let r = rmadmin_r?;
+    toast <- r ~ {
+      title: "Admin removed",
+      lines: ["The keyslot was removed"],
+      error: false
+    };
+    load <- r ~ `Roster
+  };
+  {
+    catch(e) fail("Removing the server failed", (e.0).error);
+    let r = result(rmserver_c)?;
+    let lines = array::map(r.peers, |p| select p.error {
+      null as _ => "updated [p.server]",
+      e => "failed [p.server]: [e]"
+    });
+    toast <- {
+      title: "Server removed",
+      lines: array::concat(["revoked [r.revoked] certificates"], lines),
+      error: false
+    };
+    load <- r ~ `Servers
+  };
+  {
+    catch(e) fail("Reconcile failed", (e.0).error);
+    let r = result(reconcile_c)?;
+    let lines = array::map(r.peers, |p| select p.error {
+      null as _ => "updated [p.server]",
+      e => "failed [p.server]: [e]"
+    });
+    toast <- { title: "Reconciled", lines, error: false };
+    load <- r ~ `Servers
+  };
+  // ── key handling ──
+  let panel_last: i64 = select screen {
+    `Connect => 0,
+    `Menu => 0,
+    `Panel(`Queue) => max(0, opt_len(queue_rows) - 1),
+    `Panel(`Delegations) => max(0, opt_len(deleg_rows) - 1),
+    `Panel(`Roster) => max(0, opt_len(roster_rows) - 1),
+    `Panel(`Servers) => max(0, opt_len(server_rows) - 1),
+    `Panel(`Certs) => max(0, opt_len(cert_rows) - 1)
+  };
+  let connect_keys = |ev: Event, k: KeyEvent| -> [`Stop, `Continue] select k.code {
+    kk@ `Enter => {
+      select kk ~ ed.value {
+        "" => never(),
+        v => connect_to <- v
+      };
+      `Stop
+    },
+    _ => line_edit::handle(&ed, ev)
+  };
+  let menu_keys = |k: KeyEvent| -> [`Stop, `Continue] select k.code {
+    `Up | `Char("k") => { menu_sel <- max(0, (k ~ menu_sel) - 1); `Stop },
+    `Down | `Char("j") => {
+      menu_sel <- min(array::len(panels) - 1, (k ~ menu_sel) + 1);
+      `Stop
+    },
+    kk@ `Enter => {
+      let p = (panels[kk ~ menu_sel]$).kind;
+      screen <- `Panel(p);
+      load <- p;
+      row_sel <- p ~ 0;
+      `Stop
+    },
+    kk@ `Esc => { screen <- kk ~ `Connect; `Stop },
+    _ => `Continue
+  };
+  let queue_keys = |k: KeyEvent| -> [`Stop, `Continue] select k.code {
+    kk@ `Char("a") => {
+      select kk ~ queue_code {
+        null as _ => never(),
+        code => confirm <- {
+          message: "Approve this enrollment?\n\nVerify this glyph and code match the screenshot the enrollee sent you, out of band:\n\n[code]",
+          action: `Approve(code)
+        }
+      };
+      `Stop
+    },
+    kk@ `Char("d") => {
+      select kk ~ queue_code {
+        null as _ => never(),
+        code => run <- `Deny(code)
+      };
+      `Stop
+    },
+    kk@ `Char("R") => { run <- kk ~ `Renewals; `Stop },
+    _ => `Continue
+  };
+  let deleg_keys = |k: KeyEvent| -> [`Stop, `Continue] select k.code {
+    kk@ `Char("a") => {
+      select kk ~ deleg_code {
+        null as _ => never(),
+        code => confirm <- {
+          message: "Approve or reconcile this delegation?\n\nVerify this glyph and code match the screenshot the child resolver's operator sent you, out of band:\n\n[code]",
+          action: `ApproveDelegation(code)
+        }
+      };
+      `Stop
+    },
+    kk@ `Char("d") => {
+      select kk ~ deleg_code {
+        null as _ => never(),
+        code => run <- `DenyDelegation(code)
+      };
+      `Stop
+    },
+    _ => `Continue
+  };
+  let roster_keys = |k: KeyEvent| -> [`Stop, `Continue] select k.code {
+    kk@ `Char("p") => {
+      select kk ~ roster_name {
+        null as _ => never(),
+        name => confirm <- {
+          message: "Reset [name]'s password? The password they have stops working immediately and every session they hold is closed. You will get a one-time password to give them.",
+          action: `ResetPassword(name)
+        }
+      };
+      `Stop
+    },
+    kk@ `Char("d") => {
+      select kk ~ roster_name {
+        null as _ => never(),
+        name => confirm <- {
+          message: "Remove admin [name]? Their password will no longer authenticate to this CA.",
+          action: `RemoveAdmin(name)
+        }
+      };
+      `Stop
+    },
+    _ => `Continue
+  };
+  let server_keys = |k: KeyEvent| -> [`Stop, `Continue] select k.code {
+    kk@ `Char("c") => { run <- kk ~ `Reconcile; `Stop },
+    kk@ `Char("x") => {
+      select kk ~ server_id {
+        null as _ => never(),
+        id => confirm <- {
+          message: "Permanently remove server [id]? Its certificates are revoked and the removal is pushed domain-wide.",
+          action: `RemoveServer(id)
+        }
+      };
+      `Stop
+    },
+    _ => `Continue
+  };
+  let cert_keys = |k: KeyEvent| -> [`Stop, `Continue] select k.code {
+    kk@ `Char("x") => {
+      select kk ~ cert_serial {
+        null as _ => never(),
+        serial => confirm <- {
+          message: "Revoke certificate serial [serial]? This is irreversible — the admin domain re-signs its CRL and the holder can no longer authenticate.",
+          action: `Revoke(serial)
+        }
+      };
+      `Stop
+    },
+    _ => `Continue
+  };
+  let panel_keys = |k: KeyEvent, p: PanelKind| -> [`Stop, `Continue] select k.code {
+    kk@ `Esc => { screen <- kk ~ `Menu; `Stop },
+    kk@ `Char("r") => { load <- kk ~ p; `Stop },
+    `Up | `Char("k") => { row_sel <- max(0, (k ~ row_sel) - 1); `Stop },
+    `Down | `Char("j") => {
+      row_sel <- min(k ~ panel_last, (k ~ row_sel) + 1);
+      `Stop
+    },
+    _ => select p {
+      `Queue => queue_keys(k),
+      `Delegations => deleg_keys(k),
+      `Roster => roster_keys(k),
+      `Servers => server_keys(k),
+      `Certs => cert_keys(k)
+    }
+  };
+  let handle = |e: Event| -> [`Stop, `Continue] select e {
+    ev@ `Key(k) => select k.kind {
+      `Press => select screen {
+        `Connect => connect_keys(ev, k),
+        `Menu => menu_keys(k),
+        `Panel(p) => panel_keys(k, p)
+      },
+      _ => `Continue
+    },
+    _ => `Continue
+  };
+  // ── the confirm and toast modals ──
+  let confirm_handle = |e: Event| -> [`Stop, `Continue] select e {
+    `Key(k) => select k.kind {
+      `Press => select k.code {
+        kk@ `Char("y") => {
+          select kk ~ confirm {
+            null as _ => never(),
+            c => {
+              run <- c.action;
+              confirm <- c ~ null
+            }
+          };
+          `Stop
+        },
+        kk@ `Enter => {
+          select kk ~ confirm {
+            null as _ => never(),
+            c => {
+              run <- c.action;
+              confirm <- c ~ null
+            }
+          };
+          `Stop
+        },
+        kk@ `Char("n") => { confirm <- kk ~ null; `Stop },
+        kk@ `Esc => { confirm <- kk ~ null; `Stop },
+        _ => `Stop
+      },
+      _ => `Stop
+    },
+    _ => `Stop
+  };
+  let toast_handle = |e: Event| -> [`Stop, `Continue] select e {
+    `Key(k) => select k.kind {
+      `Press => select k.code {
+        kk@ `Enter => { toast <- kk ~ null; `Stop },
+        kk@ `Esc => { toast <- kk ~ null; `Stop },
+        kk@ `Char(" ") => { toast <- kk ~ null; `Stop },
+        _ => `Stop
+      },
+      _ => `Stop
+    },
+    _ => `Stop
+  };
+  let confirm_widget = select confirm {
+    null as _ => paragraph(&""),
+    c => block(
+      #border: &`All,
+      #title: &line("Confirm"),
+      #title_bottom: &line(#style: hint, " y confirm · n cancel "),
+      &paragraph(#trim: &false, &c.message)
+    )
+  };
+  let toast_widget = select toast {
+    null as _ => paragraph(&""),
+    t => {
+      let body = str::join(#sep: "\n", t.lines);
+      let tstyle = select t.error {
+        true => style(#fg: `Red),
+        false => style(#fg: `Green)
+      };
+      block(
+        #border: &`All,
+        #title: &line(#style: tstyle, t.title),
+        #title_bottom: &line(#style: hint, " Enter dismiss "),
+        &paragraph(#trim: &false, &body)
+      )
+    }
+  };
+  let layers: Array<Layer> = {
+    let cl: Array<Layer> = select confirm {
+      null as _ => [],
+      _ => [layer(#width: &`Percentage(60), #height: &`Percentage(50),
+        input_handler(#handle: &confirm_handle, &confirm_widget))]
+    };
+    let tl: Array<Layer> = select toast {
+      null as _ => [],
+      _ => [layer(#width: &`Percentage(60), #height: &`Percentage(50),
+        input_handler(#handle: &toast_handle, &toast_widget))]
+    };
+    array::concat(cl, tl)
+  };
+  // ── views ──
+  let conn_err_lines: Array<tui::Line> = select conn_err {
+    null as _ => [],
+    m => [line(#style: style(#fg: `Red), m)]
+  };
+  let connect_view = block(
+    #border: &`All,
+    #title: &line("Connect to an admin domain"),
+    #title_bottom: &line(#style: hint, " Enter connect "),
+    &layout(#direction: &`Vertical, &[
+      child(#constraint: `Length(2),
+        paragraph(#style: &hint, &"Enter the admin server's address (host:port).")),
+      child(#constraint: `Length(1), text(&[line_edit::view(&ed)])),
+      child(#constraint: `Length(1), text(&conn_err_lines))
+    ])
+  );
+  let menu_view = {
+    let items = array::map(panels, |p| line(p.title));
+    let desc: Array<tui::Line> = [line(#style: hint, (panels[menu_sel]$).desc)];
+    block(
+      #border: &`All,
+      #title: &line("Admin domain — [connected_to]"),
+      #title_bottom: &line(#style: hint, " ↑/↓ move · Enter open · Esc disconnect "),
+      &layout(#direction: &`Vertical, &[
+        child(#constraint: `Length(array::len(panels)),
+          list(#highlight_style: &selstyle, #selected: &menu_sel, &items)),
+        child(#constraint: `Min(1), paragraph(#trim: &false, &desc))
+      ])
+    )
+  };
+  let queue_trs: Array<&Row> = select queue_rows {
+    null as _ => [],
+    rows => array::map(rows, |i| {
+      let name = select i.enroll_listen {
+        null as _ => i.requested_name,
+        l => "admin-server enrollment @ [l]"
+      };
+      let mark = select i.verified_renewal {
+        true => "renewal ",
+        false => ""
+      };
+      let code_s = select i.code {
+        null as _ => "unparseable — deny only",
+        c => c.short
+      };
+      &row([
+        cell(line("[mark][name]")),
+        cell(line(i.kind)),
+        cell(line(code_s)),
+        cell(line(fmt_age(i.age_secs))),
+        cell(line(i.peer))
+      ])
+    })
+  };
+  let queue_view = table(
+    #header: &row(#style: bold, [
+      cell(line("Name")), cell(line("Kind")), cell(line("Code")),
+      cell(line("Age")), cell(line("From"))
+    ]),
+    #row_highlight_style: &selstyle,
+    #selected: &row_sel,
+    #widths: &[`Percentage(40), `Length(10), `Length(24), `Length(8), `Percentage(25)],
+    &queue_trs
+  );
+  let deleg_trs: Array<&Row> = select deleg_rows {
+    null as _ => [],
+    rows => array::map(rows, |i| {
+      let state = select i.approved {
+        true => "approved — a reconciles",
+        false => "pending"
+      };
+      &row([
+        cell(line(i.proposed_path)),
+        cell(line(state)),
+        cell(line((i.code).short)),
+        cell(line(fmt_age(i.age_secs))),
+        cell(line(i.peer))
+      ])
+    })
+  };
+  let deleg_view = table(
+    #header: &row(#style: bold, [
+      cell(line("Path")), cell(line("State")), cell(line("Code")),
+      cell(line("Age")), cell(line("From"))
+    ]),
+    #row_highlight_style: &selstyle,
+    #selected: &row_sel,
+    #widths: &[`Percentage(35), `Length(24), `Length(24), `Length(8), `Percentage(20)],
+    &deleg_trs
+  );
+  let roster_trs: Array<&Row> = select roster_rows {
+    null as _ => [],
+    rows => array::map(rows, |a| {
+      let chg = select a.must_change {
+        true => "must change password",
+        false => ""
+      };
+      &row([
+        cell(line(a.admin)),
+        cell(line(fmt_slot(a.kind))),
+        cell(line(a.slot_id)),
+        cell(line(chg))
+      ])
+    })
+  };
+  let roster_detail: Array<tui::Line> = select roster_rows {
+    null as _ => [],
+    rows => select array::len(rows) {
+      0 => [],
+      n => {
+        let p = (rows[min(row_sel, n - 1)]$).policy;
+        let san = str::join(#sep: ", ", p.allowed_san);
+        let groups = str::join(#sep: ", ", p.id_map_groups);
+        let enroll = str::join(#sep: ", ", p.server_enroll_scopes);
+        let perms = str::join(#sep: ", ", p.perms_edit_scopes);
+        let manage = select p.may_manage_admins {
+          true => "yes",
+          false => "no"
+        };
+        [
+          line(#style: hint, "allowed SAN: [san]"),
+          line(#style: hint, "id-map groups: [groups]"),
+          line(#style: hint, "server enroll scopes: [enroll]"),
+          line(#style: hint, "perms edit scopes: [perms]"),
+          line(#style: hint, "may manage admins: [manage] · max validity [p.max_validity]")
+        ]
+      }
+    }
+  };
+  let roster_view = layout(#direction: &`Vertical, &[
+    child(#constraint: `Min(3), table(
+      #header: &row(#style: bold, [
+        cell(line("Admin")), cell(line("Kind")), cell(line("Slot")),
+        cell(line(""))
+      ]),
+      #row_highlight_style: &selstyle,
+      #selected: &row_sel,
+      #widths: &[`Percentage(30), `Length(8), `Percentage(30), `Length(20)],
+      &roster_trs
+    )),
+    child(#constraint: `Length(5), paragraph(#trim: &false, &roster_detail))
+  ]);
+  let server_trs: Array<&Row> = select server_rows {
+    null as _ => [],
+    rows => array::map(rows, |s| {
+      let cluster = select s.cluster_base {
+        null as _ => "(none)",
+        c => c
+      };
+      let roles = str::join(#sep: ", ", s.roles);
+      let tag = select s.ca {
+        true => "[s.state], CA",
+        false => s.state
+      };
+      &row([
+        cell(line(cluster)),
+        cell(line(s.id)),
+        cell(line(s.addr)),
+        cell(line(roles)),
+        cell(line(tag))
+      ])
+    })
+  };
+  let servers_view = table(
+    #header: &row(#style: bold, [
+      cell(line("Cluster")), cell(line("Id")), cell(line("Address")),
+      cell(line("Roles")), cell(line("State"))
+    ]),
+    #row_highlight_style: &selstyle,
+    #selected: &row_sel,
+    #widths: &[`Percentage(20), `Percentage(25), `Length(22), `Length(20), `Percentage(15)],
+    &server_trs
+  );
+  let cert_trs: Array<&Row> = select cert_rows {
+    null as _ => [],
+    rows => array::map(rows, |c| {
+      let state = select c.revoked {
+        true => "revoked",
+        false => ""
+      };
+      let expiry = "[cast<datetime>(c.not_after_unix)$]";
+      &row([
+        cell(line("[c.serial]")),
+        cell(line(c.name)),
+        cell(line(expiry)),
+        cell(line(state))
+      ])
+    })
+  };
+  let certs_view = table(
+    #header: &row(#style: bold, [
+      cell(line("Serial")), cell(line("Name")), cell(line("Expires")),
+      cell(line(""))
+    ]),
+    #row_highlight_style: &selstyle,
+    #selected: &row_sel,
+    #widths: &[`Length(10), `Percentage(40), `Length(22), `Length(10)],
+    &cert_trs
+  );
+  let panel_view = |p: PanelKind, w: tui::Tui| -> tui::Tui {
+    let m = panels[0]$;
+    let entry = select array::find(panels, |e| e.kind == p) {
+      null as _ => m,
+      e => e
+    };
+    block(#border: &`All, #title: &line(entry.title), &w)
+  };
+  let body: tui::Tui = select screen {
+    `Connect => connect_view,
+    `Menu => menu_view,
+    `Panel(`Queue) => panel_view(`Queue, queue_view),
+    `Panel(`Delegations) => panel_view(`Delegations, deleg_view),
+    `Panel(`Roster) => panel_view(`Roster, roster_view),
+    `Panel(`Servers) => panel_view(`Servers, servers_view),
+    `Panel(`Certs) => panel_view(`Certs, certs_view)
+  };
+  let status: tui::Line = select screen {
+    `Connect => line(#style: hint, " type an address · Enter connect "),
+    `Menu => line(#style: hint, " ↑/↓ move · Enter open · Esc disconnect "),
+    `Panel(p) => {
+      let m = panels[0]$;
+      let entry = select array::find(panels, |e| e.kind == p) {
+        null as _ => m,
+        e => e
+      };
+      line(#style: hint, entry.keys)
+    }
+  };
+  {
+    view: body,
+    handle,
+    status,
+    layers
+  }
+}

@@ -1,0 +1,22 @@
+use package::Question;
+use tui::overlay::{self, Layer};
+
+/// The admin-domain tab: the connect screen, the panel menu, and the
+/// panels themselves (enrollment queue, delegations, roster, servers,
+/// issued certificates), each a table over the ops surface with its
+/// actions dispatched as ceremonies.
+type Remote = {
+  view: tui::Tui,
+  handle: fn(e: tui::input_handler::Event) -> [`Stop, `Continue],
+  status: tui::Line,
+  layers: Array<Layer>
+};
+
+/// Build the admin-domain tab. `#q` is the app's question bus: every
+/// ceremony the tab starts feeds its questions there (wire the bus to
+/// ONE shared `pump` and compose `Remote.layers` UNDER the pump's —
+/// the pump's modals must stay on top). `#server` pre-fills the
+/// connect screen's address input. Compose with `handle`'s
+/// input_handler INSIDE the overlay wrapping the base view — outside
+/// it, the base consumes keys before an open modal layer sees them.
+val remote: fn(#q: &Question, ?#server: string) -> Remote;
