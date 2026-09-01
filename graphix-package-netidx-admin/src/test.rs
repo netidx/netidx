@@ -99,26 +99,66 @@ graphix_package_core::run_with_tempdir! {
     expect_error
 }
 
-// An explicit type predicate on an ABSTRACT type is REFUSED at
-// compile time (graphix, 2026-08-18 — this pin's original form
-// documented the pre-fix trap: the pattern typechecked but the arm
-// was dead at runtime). `$`/`?` are the dissectors for [T, Error].
+// An explicit type predicate on an ABSTRACT type is a nominal tag
+// test since graphix's nominal-abstract-types work (2026-08-22): over
+// a scrutinee that can hold the type it compiles and dispatches
+// exactly by AbstractId; over a disjoint scrutinee it is a dead arm,
+// refused with the type's NAME (graphix 2026-08-31 — the id→name
+// diagnostic registry; it printed the word "abstract" before). This
+// pin's two earlier forms tracked the pre-nominal semantics: first
+// the silent dead arm, then the wholesale compile refusal.
 #[tokio::test]
-async fn abstract_type_predicate_refused_at_compile() -> anyhow::Result<()> {
+async fn abstract_type_predicate_is_nominal() -> anyhow::Result<()> {
     let (tx, _rx) = tokio::sync::mpsc::channel(10);
     let ctx = graphix_package_core::testing::init(tx, &crate::TEST_REGISTER).await?;
     let e = ctx
         .rt
-        .compile(arcstr::literal!(
-            "select 42 { netidx_admin::Target as t => 0, _ => 1 }"
-        ))
+        .compile(arcstr::literal!("select 42 { netidx_admin::Target as t => 0, _ => 1 }"))
         .await;
     match e {
-        Ok(_) => panic!("an abstract type predicate compiled"),
+        Ok(_) => panic!("an abstract predicate matched a disjoint scrutinee"),
         Err(e) => {
             let msg = format!("{e:#}");
-            assert!(msg.contains("representation is hidden"), "wrong error: {msg}");
+            assert!(
+                msg.contains("pattern Target will never match"),
+                "wrong error: {msg}"
+            );
         }
     }
+    ctx.rt
+        .compile(arcstr::literal!(
+            "|v: [netidx_admin::Target, i64]| -> i64 select v { \
+             netidx_admin::Target as _ => 0, i64 as _ => 1 }"
+        ))
+        .await
+        .map(|_| ())
+        .map_err(|e| anyhow::anyhow!("the nominal tag test failed to compile: {e:#}"))
+}
+
+/// Milestone timing per the findings-log discipline: registration
+/// (all stdlib + this package's packed-AST decode + typecheck) and
+/// the compile of a pump+remote composition (the app-main-shaped
+/// call site). Run by hand at every ~1k lines of `.gx`:
+/// `cargo test -p graphix-package-netidx-admin milestone_timing -- --ignored --nocapture`
+#[tokio::test]
+#[ignore = "milestone timing, run by hand"]
+async fn milestone_timing() -> anyhow::Result<()> {
+    let (tx, _rx) = tokio::sync::mpsc::channel(10);
+    let t0 = std::time::Instant::now();
+    let ctx = graphix_package_core::testing::init(tx, &crate::TEST_REGISTER).await?;
+    let reg = t0.elapsed();
+    let prog = arcstr::literal!(
+        r#"
+let q: netidx_admin::Question = never();
+let r = netidx_admin::tui::remote::remote(#q: &q, #server: "127.0.0.1:1");
+let p = netidx_admin::tui::pump(q);
+let layers = array::concat(r.layers, p.layers);
+(r.view, p.busy, layers)
+"#
+    );
+    let t1 = std::time::Instant::now();
+    ctx.rt.compile(prog).await?;
+    let compile = t1.elapsed();
+    eprintln!("milestone: registration {reg:?}, app-main compile {compile:?}");
     Ok(())
 }
