@@ -1,0 +1,486 @@
+use package::{
+  AdminError, LocalUnit, ServiceOp, UnitDef, UnitEnvironment, UnitRestart,
+  UnitState, UnitTrigger, control_units, install_unit, list_units, remove_unit,
+  unit_template
+};
+use super::{Confirm, Toast, admin_text, confirm_layers, toast_layers};
+use tui::{line, span, style};
+use tui::block::{self, *};
+use tui::form::{self, *};
+use tui::input_handler::{self, *};
+use tui::layout::{self, *};
+use tui::list::{self, *};
+use tui::overlay::{self, layer, Layer};
+use tui::paragraph::{self, *};
+use tui::text::{self, *};
+
+type Act = [
+  `Control({ unit: string, op: ServiceOp }),
+  `Delete(string),
+  `Install({ name: string, def: UnitDef })
+];
+
+type EnvVar = { name: string, value: string };
+
+let hint = style(#fg: `DarkGray);
+let good = style(#fg: `Green);
+let warn = style(#fg: `Yellow);
+let bad = style(#fg: `Red);
+let selstyle = style(#add_modifier: [`Reversed]);
+
+let opt_len = |o: [Array<'a>, null]| -> i64 select o {
+  null as _ => 0,
+  xs => array::len(xs)
+};
+
+let fmt_op = |op: ServiceOp| -> string select op {
+  `Start => "Started",
+  `Stop => "Stopped",
+  `Restart => "Restarted",
+  `Status => "Services"
+};
+
+// a unit's state as a word, and how to color it: the supervisor's
+// report when it has one, else what the mismatch means
+let state_word = |s: [UnitState, null], defined: bool| -> (string, tui::Style) select s {
+  `Running(_) => ("running", good),
+  `Stopped => ("stopped", warn),
+  `Died => ("died", bad),
+  `NotStarted => ("not started", hint),
+  null as _ => select defined {
+    true => ("not loaded (press r)", warn),
+    false => ("removed (press r)", hint)
+  }
+};
+
+let fmt_trigger = |t: UnitTrigger| -> string select t {
+  `OnStart => "OnStart",
+  `OnAccess(paths) => {
+    let ps = str::join(#sep: ", ", paths);
+    "OnAccess([ps])"
+  }
+};
+
+let fmt_restart = |r: UnitRestart| -> string select r {
+  `No => "no",
+  `Yes => "yes",
+  `RateLimited(s) => "rate-limited ([s]s)"
+};
+
+let fmt_vars = |vs: Array<EnvVar>| -> string
+  str::join(#sep: ", ", array::map(vs, |v: EnvVar| "[v.name]=[v.value]"));
+
+let fmt_env = |e: UnitEnvironment| -> string select e {
+  `Inherit(vs) => fmt_vars(vs),
+  `Replace(vs) => {
+    let p = fmt_vars(vs);
+    "replace: [p]"
+  }
+};
+
+let opt_text = |o: [string, null]| -> string select o {
+  null as _ => "",
+  s => s
+};
+
+let opt_num = |o: [u32, null]| -> string select o {
+  null as _ => "",
+  n => "[n]"
+};
+
+let def_fields = |d: UnitDef| -> Array<Field> [
+  { label: "executable", value: d.exe },
+  { label: "arguments", value: str::join(#sep: " ", d.args) },
+  { label: "trigger", value: fmt_trigger(d.trigger) },
+  { label: "restart", value: fmt_restart(d.restart) },
+  { label: "working directory", value: opt_text(d.working_directory) },
+  { label: "uid", value: opt_num(d.uid) },
+  { label: "gid", value: opt_num(d.gid) },
+  { label: "stdin", value: opt_text(d.stdin) },
+  { label: "stdout", value: opt_text(d.stdout) },
+  { label: "stderr", value: opt_text(d.stderr) },
+  { label: "environment", value: fmt_env(d.environment) }
+];
+
+// ── reading a definition back from the form's text ──
+let words = |s: string| -> Array<string>
+  array::filter(str::split(#pat: " ", s), |w: string| w != "");
+
+let csv = |s: string| -> Array<string>
+  array::filter_map(str::split(#pat: ",", s), |p: string| -> [string, null] select str::trim(p) {
+    "" => null,
+    t => t
+  });
+
+let opt_of = |s: string| -> [string, null] select str::trim(s) {
+  "" => null,
+  t => t
+};
+
+let parse_trigger = |s: string| -> [UnitTrigger, `Bad(string)] select str::trim(s) {
+  "" => `OnStart,
+  "OnStart" => `OnStart,
+  t => select str::strip_prefix(#pfx: "OnAccess(", t) {
+    null as _ => `Bad("the trigger must be OnStart or OnAccess(/path, /path)"),
+    rest => select str::strip_suffix(#sfx: ")", rest) {
+      null as _ => `Bad("the trigger must be OnStart or OnAccess(/path, /path)"),
+      inner => select csv(inner) {
+        [] => `Bad("OnAccess needs at least one path"),
+        paths => `OnAccess(paths)
+      }
+    }
+  }
+};
+
+let parse_restart = |s: string| -> [UnitRestart, `Bad(string)] select str::trim(s) {
+  "" => `RateLimited(1.0),
+  "no" => `No,
+  "yes" => `Yes,
+  t => select re::captures(#pat: r#"^rate-limited\s*[:(]?\s*([0-9.]+)\s*s?\)?$"#, t)$ {
+    [] => `Bad("restart must be no, yes, or rate-limited:<seconds>"),
+    [m, ..] => select m[1]$ {
+      null as _ => `Bad("restart must be no, yes, or rate-limited:<seconds>"),
+      n => {
+        let secs = cast<f64>(n);
+        select is_err(secs) {
+          true => `Bad("rate-limited needs a number of seconds"),
+          false => `RateLimited(secs$)
+        }
+      }
+    }
+  }
+};
+
+let parse_id = |what: string, s: string| -> [u32, null, `Bad(string)] select str::trim(s) {
+  "" => null,
+  t => {
+    let n = cast<u32>(t);
+    select is_err(n) {
+      true => `Bad("[what] must be a number"),
+      false => n$
+    }
+  }
+};
+
+let parse_env = |s: string| -> [UnitEnvironment, `Bad(string)] {
+  let (replace, body) = select str::strip_prefix(#pfx: "replace:", str::trim(s)) {
+    null as _ => (false, str::trim(s)),
+    rest => (true, rest)
+  };
+  let none: [`Vars(Array<EnvVar>), `Bad(string)] = `Vars([]);
+  let parsed = array::fold(csv(body), none, |acc: [`Vars(Array<EnvVar>), `Bad(string)], p: string| select acc {
+    `Bad(m) => `Bad(m),
+    `Vars(vs) => select str::split_once(#pat: "=", p) {
+      null as _ => `Bad("environment entries are NAME=VALUE, comma-separated"),
+      (name, value) => `Vars(array::push(vs, { name: str::trim(name), value: str::trim(value) }))
+    }
+  });
+  select parsed {
+    `Bad(m) => `Bad(m),
+    `Vars(vs) => select replace {
+      true => `Replace(vs),
+      false => `Inherit(vs)
+    }
+  }
+};
+
+let read_def = |v: Array<string>| -> [UnitDef, `Bad(string)] select str::trim(v[0]$) {
+  "" => `Bad("an executable is required"),
+  exe => select parse_trigger(v[2]$) {
+    `Bad(m) => `Bad(m),
+    trigger => select parse_restart(v[3]$) {
+      `Bad(m) => `Bad(m),
+      restart => select parse_id("uid", v[5]$) {
+        `Bad(m) => `Bad(m),
+        uid => select parse_id("gid", v[6]$) {
+          `Bad(m) => `Bad(m),
+          gid => select parse_env(v[10]$) {
+            `Bad(m) => `Bad(m),
+            environment => {
+              exe,
+              args: words(v[1]$),
+              trigger,
+              restart,
+              working_directory: opt_of(v[4]$),
+              uid,
+              gid,
+              stdin: opt_of(v[7]$),
+              stdout: opt_of(v[8]$),
+              stderr: opt_of(v[9]$),
+              environment
+            }
+          }
+        }
+      }
+    }
+  }
+};
+
+let services = |#units_dir: string, #on_close: fn(e: Any) -> null, open: Any| -> Services {
+  let toast: [Toast, null] = null;
+  let confirm: [Confirm<Act>, null] = null;
+  let fail = |title: string, a: AdminError| -> null {
+    toast <- { title, lines: [admin_text(a)], error: true };
+    null
+  };
+  // ── the rows: what is defined and what runs, re-listed after every
+  // action and on demand ──
+  let load: Any = open;
+  let rows: [Array<LocalUnit>, null] = null;
+  {
+    catch(e) fail("Listing the units failed", (e.0).error);
+    rows <- list_units(#units_dir: units_dir, load)?
+  };
+  let sel = 0;
+  let last = max(0, opt_len(rows) - 1);
+  let selected: [LocalUnit, null] = select rows {
+    null as _ => null,
+    [] => null,
+    xs => xs[min(sel, array::len(xs) - 1)]$
+  };
+  let run: Act = never();
+  // ── the unit form: create seeds the template, edit the unit's own
+  // definition ──
+  let template = unit_template(open);
+  let form_open = false;
+  let form_title = "";
+  let form_fields: Array<Field> = never();
+  let creating = false;
+  let bad_unit = |m: string| -> null {
+    toast <- { title: "Bad unit", lines: [m], error: true };
+    null
+  };
+  let unit_form = form(
+    #title: form_title,
+    #help: "arguments are space-separated · trigger is OnStart or OnAccess(/path, /path) · restart is no, yes or rate-limited:<seconds> · environment is NAME=VALUE entries, comma-separated, prefixed replace: to discard the inherited one · an empty field is unset",
+    #on_submit: |v: Array<string>| -> null {
+      select v ~ creating {
+        true => select str::trim(v[0]$) {
+          "" => bad_unit(v ~ "a unit name is required"),
+          name => select read_def(v[1..]$) {
+            `Bad(m) => bad_unit(m),
+            def => { run <- `Install({ name, def }); form_open <- def ~ false }
+          }
+        },
+        false => select v ~ selected {
+          null as _ => never(),
+          u => select read_def(v) {
+            `Bad(m) => bad_unit(m),
+            def => { run <- `Install({ name: u.name, def }); form_open <- def ~ false }
+          }
+        }
+      };
+      null
+    },
+    #on_cancel: |e: Any| -> null { form_open <- e ~ false; null },
+    form_fields
+  );
+  // ── keys ──
+  let control = |t: Any, op: ServiceOp| -> null {
+    select t ~ selected {
+      null as _ => never(),
+      u => run <- `Control({ unit: u.name, op })
+    };
+    null
+  };
+  let handle = |e: Event| -> [`Stop, `Continue] select e {
+    `Key(k) => select k.kind {
+      `Press => select k.code {
+        `Up | `Char("k") => { sel <- max(0, (k ~ sel) - 1); `Stop },
+        `Down | `Char("j") => { sel <- min(k ~ last, (k ~ sel) + 1); `Stop },
+        kk@ `Char("s") => { control(kk, `Start); `Stop },
+        kk@ `Char("t") => {
+          select kk ~ selected {
+            null as _ => never(),
+            u => confirm <- {
+              message: "Stop unit [u.name]? It stays down until started.",
+              action: `Control({ unit: u.name, op: `Stop })
+            }
+          };
+          `Stop
+        },
+        kk@ `Char("R") => { control(kk, `Restart); `Stop },
+        kk@ `Char("c") => {
+          form_title <- kk ~ "New unit";
+          creating <- kk ~ true;
+          form_fields <- array::push_front(def_fields(kk ~ template), { label: "name", value: "" });
+          form_open <- kk ~ true;
+          `Stop
+        },
+        kk@ `Char("e") => {
+          select kk ~ selected {
+            null as _ => never(),
+            u => select u.definition {
+              null as _ => toast <- {
+                title: "No definition",
+                lines: ["[u.name] is reported by the supervisor with no definition file to edit."],
+                error: true
+              },
+              d => {
+                form_title <- "Edit [u.name]";
+                creating <- d ~ false;
+                form_fields <- def_fields(d);
+                form_open <- d ~ true
+              }
+            }
+          };
+          `Stop
+        },
+        kk@ `Char("d") => {
+          select kk ~ selected {
+            null as _ => never(),
+            u => confirm <- {
+              message: "Delete unit [u.name]? This removes its definition file and reloads the supervisor.",
+              action: `Delete(u.name)
+            }
+          };
+          `Stop
+        },
+        kk@ `Char("r") => { load <- kk; `Stop },
+        kk@ `Esc => { on_close(kk); `Stop },
+        _ => `Continue
+      },
+      _ => `Continue
+    },
+    _ => `Continue
+  };
+  // ── the actions and their outcomes ──
+  let control_r = select run {
+    `Control(c) => control_units(#units_dir: units_dir, #unit: c.unit, c.op),
+    _ => never()
+  };
+  let install_r = select run {
+    `Install(i) => install_unit(#units_dir: units_dir, #name: i.name, i.def),
+    _ => never()
+  };
+  let remove_r = select run {
+    `Delete(name) => remove_unit(#units_dir: units_dir, name),
+    _ => never()
+  };
+  let reload_text = |reloaded: bool| -> string select reloaded {
+    true => "The supervisor re-read its units.",
+    false => "No supervisor was listening; it reads the units when it starts."
+  };
+  {
+    catch(e) fail("Service control failed", (e.0).error);
+    let states = control_r?;
+    let verb = select run {
+      `Control(c) => fmt_op(c.op),
+      _ => "Services"
+    };
+    toast <- {
+      title: states ~ verb,
+      lines: array::map(states, |u: LocalUnit| {
+        let (word, _) = state_word(u.state, true);
+        "[u.name]: [word]"
+      }),
+      error: false
+    };
+    load <- states
+  };
+  {
+    catch(e) fail("Saving the unit failed", (e.0).error);
+    let reloaded = install_r?;
+    let name = reloaded ~ select run {
+      `Install(i) => i.name,
+      _ => ""
+    };
+    toast <- { title: "Unit saved", lines: ["Saved unit [name].", reload_text(reloaded)], error: false };
+    load <- reloaded
+  };
+  {
+    catch(e) fail("Deleting the unit failed", (e.0).error);
+    let reloaded = remove_r?;
+    let name = reloaded ~ select run {
+      `Delete(n) => n,
+      _ => ""
+    };
+    toast <- { title: "Unit deleted", lines: ["Deleted unit [name].", reload_text(reloaded)], error: false };
+    load <- reloaded
+  };
+  // ── the view: the names beside the selected unit's status and
+  // definition ──
+  let names: Array<tui::Line> = select rows {
+    null as _ => [line(#style: hint, "listing…")],
+    [] => [line(#style: hint, "(no units)")],
+    xs => array::map(xs, |u: LocalUnit| line(u.name))
+  };
+  let status_lines: Array<tui::Line> = select selected {
+    null as _ => [line(#style: hint, "No unit selected.")],
+    u => {
+      let defined = select u.definition {
+        null as _ => false,
+        _ => true
+      };
+      let (word, st) = state_word(u.state, defined);
+      let pid = select u.state {
+        `Running(p) => select p {
+          null as _ => "—",
+          n => "[n]"
+        },
+        _ => "—"
+      };
+      [
+        line([span(#style: hint, "status: "), span(#style: st, word)]),
+        line([span(#style: hint, "pid:    "), span(pid)])
+      ]
+    }
+  };
+  let kv = |k: string, v: string| -> tui::Line line([span(#style: hint, k), span(v)]);
+  let opt_line = |k: string, o: [string, null]| -> Array<tui::Line> select o {
+    null as _ => [],
+    v => [kv(k, v)]
+  };
+  let detail: Array<tui::Line> = select selected {
+    null as _ => [line(#style: hint, "No unit selected.")],
+    u => select u.definition {
+      null as _ => [line(#style: hint, "Reported by the supervisor with no definition file — press r to refresh.")],
+      d => array::concat(
+        [
+          kv("exe:     ", d.exe),
+          kv("args:    ", str::join(#sep: " ", d.args)),
+          kv("trigger: ", fmt_trigger(d.trigger)),
+          kv("restart: ", fmt_restart(d.restart))
+        ],
+        opt_line("cwd:     ", d.working_directory),
+        opt_line("uid:     ", select d.uid { null as _ => null, n => "[n]" }),
+        opt_line("gid:     ", select d.gid { null as _ => null, n => "[n]" }),
+        opt_line("stdin:   ", d.stdin),
+        opt_line("stdout:  ", d.stdout),
+        opt_line("stderr:  ", d.stderr),
+        opt_line("env:     ", select fmt_env(d.environment) { "" => null, e => e })
+      )
+    }
+  };
+  let view = layout(#direction: &`Horizontal, &[
+    child(#constraint: `Length(28), block(
+      #border: &`All,
+      #title: &line("Services"),
+      &list(#highlight_style: &selstyle, #selected: &sel, &names))),
+    child(#constraint: `Min(0), layout(#direction: &`Vertical, &[
+      child(#constraint: `Length(4), block(
+        #border: &`All,
+        #title: &line("Status"),
+        &paragraph(#trim: &false, &status_lines))),
+      child(#constraint: `Min(0), block(
+        #border: &`All,
+        #title: &line("Definition"),
+        &paragraph(#trim: &false, &detail)))
+    ]))
+  ]);
+  let layers: Array<Layer> = array::concat(
+    select form_open {
+      false => [],
+      true => [layer(#width: &`Percentage(80), #height: &`Percentage(90),
+        input_handler(#handle: &unit_form.handle, &unit_form.view))]
+    },
+    confirm_layers(#on_confirm: |a: Act| -> null { run <- a; null }, &confirm),
+    toast_layers(&toast)
+  );
+  {
+    view,
+    handle,
+    status: line(#style: hint, " s start · t stop · R restart · c create · e edit · d delete · r refresh · Esc back "),
+    layers
+  }
+}

@@ -1,0 +1,23 @@
+use tui::overlay::Layer;
+
+/// The local services surface: its view and status line, the key
+/// handler, and its modal layers (the unit form, confirmations,
+/// toasts).
+type Services = {
+  view: tui::Tui,
+  handle: fn(e: tui::input_handler::Event) -> [`Stop, `Continue],
+  status: tui::Line,
+  layers: Array<Layer>
+};
+
+/// This host's activation units over the supervisor's control socket
+/// and unit directory `#units_dir` — never through an admin server: a
+/// unit is an arbitrary command line, so defining one is running code
+/// on this box, and this surface is the only place that does. The
+/// unit names beside the selected unit's run state and definition;
+/// `s`/`t`/`R` start, stop (confirmed) and restart it; `c` creates a
+/// unit through a form seeded from the template, `e` edits the
+/// selected one's definition in the same form, `d` deletes it
+/// (confirmed); `r` re-lists; Esc calls `#on_close`. Lists on `open`
+/// and after every action.
+val services: fn(#units_dir: string, #on_close: fn(e: Any) -> null, open: Any) -> Services;

@@ -605,3 +605,91 @@ async fn local_tab_detects_a_ca_install_and_opens_its_roster() -> Result<()> {
     .await?;
     Ok(())
 }
+
+/// The Local tab's Services surface over the fixture root's activation
+/// directory, with no supervisor running: the empty list, a unit
+/// created through the form (the name plus the template's fields),
+/// listed as not loaded, then deleted after a confirmation.
+#[tokio::test(flavor = "multi_thread")]
+async fn services_surface_creates_and_deletes_a_unit() -> Result<()> {
+    use netidx_admin::provenance::{AdminDomainIdentity, InstallRecord, InstallRole};
+    let d = TestAdminDomain::start().await?;
+    let record = InstallRecord::new(
+        InstallRole::Ca,
+        "/",
+        "tls",
+        Some(AdminDomainIdentity::new(&d.domain, &d.fingerprint)),
+        Some(d.listen),
+    );
+    let path = netidx_admin::paths::user_install_record()?;
+    std::fs::write(&path, serde_json::to_vec_pretty(&record)?)?;
+    let _guard = InstallRecordGuard(path);
+    // the unit directory the surface manages: the user one, which
+    // exists on a host that runs a supervisor
+    let units_dir = netidx_admin::paths::user_activation_dir()?;
+    std::fs::create_dir_all(&units_dir)?;
+    let prog = "let result = netidx_admin::tui::app::app()";
+    let mut h =
+        TuiTestHarness::with_register(prog, crate::TEST_REGISTER, 120, 40).await?;
+    wait_render(&mut h, Duration::from_secs(60), "the action list", |lines| {
+        lines.iter().any(|l| l.contains("CA ("))
+            && lines.iter().any(|l| l.contains("Services"))
+    })
+    .await?;
+    let n = rows_below_status(&h.render_lines()?, "Services")?;
+    for _ in 0..n {
+        h.dispatch_event(key(KeyCode::Down)).await?;
+    }
+    h.dispatch_event(key(KeyCode::Enter)).await?;
+    wait_render(&mut h, Duration::from_secs(60), "the empty services list", |lines| {
+        lines.iter().any(|l| l.contains("(no units)"))
+    })
+    .await?;
+    // create: the form opens on the name field, seeded from the template
+    h.dispatch_event(key(KeyCode::Char('c'))).await?;
+    wait_render(&mut h, Duration::from_secs(10), "the unit form", |lines| {
+        lines.iter().any(|l| l.contains("New unit"))
+            && lines.iter().any(|l| l.contains("/path/to/executable"))
+    })
+    .await?;
+    type_text(&mut h, "myunit").await?;
+    h.dispatch_event(key(KeyCode::Enter)).await?;
+    wait_render(&mut h, Duration::from_secs(60), "the saved toast", |lines| {
+        lines.iter().any(|l| l.contains("Unit saved"))
+    })
+    .await?;
+    assert!(units_dir.join("myunit.unit").is_file(), "the unit file was not written");
+    h.dispatch_event(key(KeyCode::Enter)).await?;
+    // listed, with no supervisor to load it
+    wait_render(&mut h, Duration::from_secs(60), "the unit in the list", |lines| {
+        lines.iter().any(|l| l.contains("myunit"))
+            && lines.iter().any(|l| l.contains("not loaded"))
+            && lines.iter().any(|l| l.contains("/path/to/executable"))
+    })
+    .await?;
+    // delete, confirmed
+    h.dispatch_event(key(KeyCode::Char('d'))).await?;
+    wait_render(&mut h, Duration::from_secs(10), "the delete confirmation", |lines| {
+        lines.iter().any(|l| l.contains("Delete unit"))
+    })
+    .await?;
+    h.dispatch_event(key(KeyCode::Char('y'))).await?;
+    wait_render(&mut h, Duration::from_secs(60), "the deleted toast", |lines| {
+        lines.iter().any(|l| l.contains("Unit deleted"))
+    })
+    .await?;
+    assert!(!units_dir.join("myunit.unit").exists(), "the unit file was not removed");
+    h.dispatch_event(key(KeyCode::Enter)).await?;
+    wait_render(&mut h, Duration::from_secs(60), "the empty list again", |lines| {
+        lines.iter().any(|l| l.contains("(no units)"))
+    })
+    .await?;
+    // Esc backs out to the action list
+    h.dispatch_event(key(KeyCode::Esc)).await?;
+    wait_render(&mut h, Duration::from_secs(10), "the action list again", |lines| {
+        lines.iter().any(|l| l.contains("CA ("))
+            && !lines.iter().any(|l| l.contains("(no units)"))
+    })
+    .await?;
+    Ok(())
+}

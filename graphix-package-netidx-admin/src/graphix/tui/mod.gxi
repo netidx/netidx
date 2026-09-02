@@ -75,5 +75,6 @@ val pump: fn(q: Question) -> Pump;
 mod landing;
 mod panels;
 mod remote;
+mod services;
 mod local;
 mod app;

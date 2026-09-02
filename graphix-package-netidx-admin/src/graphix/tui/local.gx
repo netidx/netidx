@@ -10,6 +10,7 @@ use super::{
   toast_layers
 };
 use super::panels::{self, CloseReason, Entry};
+use super::services;
 use tui::{line, span, style};
 use tui::block::{self, *};
 use tui::input_handler::{self, *};
@@ -50,7 +51,7 @@ type Act = [
 
 type Item = { label: string, act: Act, desc: string };
 
-type Screen = [`Home, `Admin];
+type Screen = [`Home, `Admin, `Services];
 
 let role_title = |r: InstallRole| -> string select r {
   `Ca => "CA",
@@ -425,6 +426,17 @@ let local = |#q: &Question| -> Local {
     #on_close: |why: CloseReason| -> null { screen <- why ~ `Home; null },
     admin_target
   );
+  // ── this host's services, over its activation supervisor ──
+  let svc_dir: string = select units {
+    null as _ => never(),
+    d => d
+  };
+  let svc_open: Any = never();
+  let svc = services::services(
+    #units_dir: svc_dir,
+    #on_close: |e: Any| -> null { screen <- e ~ `Home; null },
+    svc_open
+  );
   // ── the lifecycle ceremonies ──
   let renew_c = select run {
     x@ `Renew => renew(x),
@@ -642,7 +654,7 @@ let local = |#q: &Question| -> Local {
   };
   select run {
     x@ `Status => show_status <- x ~ true,
-    x@ `Services => toast <- x ~ not_yet("Services", "netidx admin service …"),
+    x@ `Services => { svc_open <- x; screen <- x ~ `Services },
     x@ `Uninstall => toast <- x ~ not_yet("Uninstall", "netidx admin uninstall"),
     `Join(dry) => toast <- dry ~ not_yet("Join an admin domain", "netidx admin workstation join"),
     x@ `AddParent => toast <- x ~ not_yet("Add a parent", "netidx admin resolver add-parent"),
@@ -840,6 +852,7 @@ let local = |#q: &Question| -> Local {
     ev@ `Key(k) => select k.kind {
       `Press => select screen {
         `Admin => pan.handle(ev),
+        `Services => svc.handle(ev),
         `Home => select k ~ fresh {
           true => fresh_keys(k),
           false => home_keys(k)
@@ -851,6 +864,7 @@ let local = |#q: &Question| -> Local {
   };
   let view: tui::Tui = select screen {
     `Admin => pan.view,
+    `Services => svc.view,
     `Home => select fresh {
       true => fresh_view,
       false => home_view
@@ -858,6 +872,7 @@ let local = |#q: &Question| -> Local {
   };
   let status: tui::Line = select screen {
     `Admin => pan.status,
+    `Services => svc.status,
     `Home => select fresh {
       true => line(#style: hint, " ↑/↓ choose · Enter install "),
       false => line(#style: hint, " Enter run · U update · r renew · u uninstall · R re-detect ")
@@ -866,6 +881,7 @@ let local = |#q: &Question| -> Local {
   let layers: Array<Layer> = array::concat(
     select screen {
       `Admin => pan.layers,
+      `Services => svc.layers,
       `Home => []
     },
     welcome_layers,

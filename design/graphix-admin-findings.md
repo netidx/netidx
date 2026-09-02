@@ -12,7 +12,7 @@ Compile-time milestones (log at every ~1k lines of `.gx`):
 |------|-----------|----------------|-------|
 | 2026-08-21 | 909 | reg 417ms / pump-callsite 593ms | DEV build (unoptimized). Registration = all stdlib + package packed-AST decode + typecheck; the 593ms is ONE `pump(...)` call site's per-callsite instance elaboration of the ~300-line pump body. No wall yet; watch the per-callsite number as the app main grows. |
 | 2026-08-31 | 1799 | reg 1.13s / app-main 2.68s | DEV build. The app-main number is the pump+remote composition (`milestone_timing`, now a permanent ignored test): two instance elaborations of the ~700-line remote body + pump. 2x the lines, ~4.5x the elaboration cost — no wall, but the growth is super-linear; re-measure at 3k. |
-| 2026-09-02 | 3333 | reg 1.16s / app-main 7.91s | DEV build. `milestone_timing` now compiles `app::app` — both tabs under one pump, which elaborates the 1.5k-line panels body TWICE (once per tab). 1.85x the lines, ~3x the elaboration cost: still super-linear, no wall. Under load (six fixture tests + a concurrent gate build) a first render took over 60s and a landing test timed out; alone it passes in 29s. |
+| 2026-09-02 | 3840 | reg 0.94s / app-main 5.12s | DEV build, quiet box. `milestone_timing` now compiles `app::app` — both tabs and the services surface under one pump, which elaborates the 1.5k-line panels body TWICE (once per tab). A 3333-line reading taken while the harness suite ran beside it said 7.9s: measure alone. 2.1x the lines, ~1.9x the elaboration cost — linear this time; no wall. Under load (six fixture tests + a concurrent gate build) a first render took over 60s and a landing test timed out; alone it passes in 29s. |
 
 ---
 
@@ -65,8 +65,11 @@ Graphix, language and compiler:
     remote tab's menu and pick handlers (`screen <- \`ServerPick`
     worked only when another key had deselected the arm in between).
     Fixed in the port by sampling; the idiom joins item 7's list. A
-    lint is the language-side answer: a `<-` inside a select arm
-    whose right-hand side depends on none of the arm's fired inputs.
+    grep for the shape then found three more (the roster form's
+    close after a submit, its bad-validity toast, the manual
+    connect's glyph reset) — fixed the same way. A lint is the
+    language-side answer: a `<-` inside a select arm whose right-hand
+    side depends on none of the arm's fired inputs.
 14. **Bool literal coverage does not reach into payload or tuple
     positions** (09-02): `` `Join(false) `` + `` `Join(true) `` do not
     cover `` `Join(bool) ``, and `(true, true)`/`(true, false)`/
@@ -84,23 +87,27 @@ Graphix, language and compiler:
 
 Book:
 
-7. **The `#[native]` chapter** (the performance model), plus the four
+7. **The `#[native]` chapter** (the performance model), plus the
    idioms this campaign named: a pure builtin without a fast fn is a
    node-walk boundary by rule; annotate a `let x: T = select …` whose
    other arms are `never()`; a component's event outputs are
    callbacks, never struct fields (a struct re-fires whole); sample
-   every free read in a handler arm with the event.
+   every free read AND every write's right-hand side in a handler arm
+   with the event; a fold's accumulator type comes from its seed
+   alone, so a seed that is one member of a union accumulator must be
+   annotated (`let none: [\`Vars(..), \`Bad(string)] = \`Vars([])`).
 
 Port scope (not Graphix findings; here so nothing is forgotten):
 
-15. **The Local tab's deferred surfaces** (09-02): the local Services
-    surface (list/control/create/edit/delete over the activation
-    supervisor — its editor needs phase E's `$EDITOR` handoff), and
-    the Uninstall / Join / Add-a-Parent / Install / Restore actions
-    (phase 4's install ceremonies and phase 5's privileged handoff).
-    Each shows a toast naming the CLI command until it lands. The
-    externally-signed CA's first install prints the service-install
-    command for the same reason (phase E).
+15. **The Local tab's deferred actions** (09-02): Uninstall / Join /
+    Add-a-Parent / Install / Restore (phase 4's install ceremonies and
+    phase 5's privileged handoff). Each shows a toast naming the CLI
+    command until it lands. The externally-signed CA's first install
+    prints the service-install command for the same reason (phase E).
+    ~~The local Services surface~~ landed the same evening
+    (`tui::services`): list, control, and unit create / edit / delete
+    through an in-TUI form over every field of the unit file — the
+    perms decision applied again, so no `$EDITOR` is needed here.
 
 Test side and package:
 
@@ -122,7 +129,8 @@ the phantom event replay (08-31); the change-password route and the
 ceremony `Trigger`, `sys::time::diff` and the time fast fns, duration
 literal units and format, the sibling-pattern-bind phantom and the
 `compile_callable` pipeline, the fixture's lock race, session-cache
-leak and gesture predictor, `tui::exit` (09-02).
+leak and gesture predictor, `tui::exit`, the payload-pattern
+residual (09-02).
 
 ## 2026-08-18 — no modal/overlay widget in graphix-package-tui
 
@@ -1021,3 +1029,36 @@ installs; `R` re-detects); and `tui::app`, the two tabs under one
 pump with `Tab`/`q` as global keys behind the tab's own. Pinned by
 the harness test over a CA install record in the fixture's root.
 Deferred: ledger 15.
+
+## 2026-09-02 — a variant arm with a payload never narrowed the arms after it
+
+The unit form's parsers wanted `select parse_trigger(s) { \`Bad(m) =>
+\`Bad(m), trigger => … }` with `trigger` at the trigger type alone —
+the shape `select opt { null as _ => "", s => s }` already has. Four
+witnesses showed the residual never lost the `\`Bad` member after a
+`\`Bad(m)` or `\`Bad(_)` arm, over a primitive union and a named one
+alike; only `null as _` and a bare variant narrowed. The cause was in
+`Type::diff`: subtracting a variant, tuple or struct required exact
+structural equality of the payloads, and an arm's predicate carries
+its binds' CELLS (`\`Bad('m)`, bound to `string` by then but never
+`==` to it), while an ignored payload carries `Any`. **Disposition:
+fixed in graphix — the composite arms of `diff_int` compare payloads
+through `resolve_tvars`, with `Any` on the pattern side covering
+anything; pinned by `variant_payload_arm_narrows` and
+`variant_ignored_payload_arm_narrows` (both fuse).**
+
+## 2026-09-02 — the Services surface: a form over the unit file, not an editor
+
+The Rust surface opens `$EDITOR` on the unit's JSON with a validator
+loop. The perms panel's decision (09-02, morning) was an in-TUI form
+instead, and it holds here: `UnitDef` crosses the boundary as a
+structured value (trigger, restart and environment as variants, every
+optional field nullable), the form shows one line per field with the
+CLI's own spellings (`OnAccess(/a, /b)`, `rate-limited:5`,
+`NAME=VALUE, …` with a `replace:` prefix), and Graphix parses them
+back — the Rust side converts value to `Unit` and nothing else. The
+package's `install_unit` runs the same cross-unit trigger-conflict
+check the editor loop did, before the write. Pinned by
+`services_surface_creates_and_deletes_a_unit` (no supervisor: the
+unit lists as not loaded, which is the state the Rust surface named
+for it).

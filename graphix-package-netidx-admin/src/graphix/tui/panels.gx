@@ -318,12 +318,12 @@ let panels = |
     #on_submit: |v: Array<string>| -> null {
       select v ~ policy_target {
         `Add => select read_policy(v[1..]$) {
-          `BadValidity => toast <- bad_validity,
-          p => { run <- `AddAdmin({ name: v[0]$, policy: p }); policy_open <- false }
+          `BadValidity => toast <- v ~ bad_validity,
+          p => { run <- `AddAdmin({ name: v[0]$, policy: p }); policy_open <- p ~ false }
         },
         `Edit(name) => select read_policy(v) {
-          `BadValidity => toast <- bad_validity,
-          p => { run <- `SetPolicy({ name, policy: p }); policy_open <- false }
+          `BadValidity => toast <- v ~ bad_validity,
+          p => { run <- `SetPolicy({ name, policy: p }); policy_open <- p ~ false }
         }
       };
       null

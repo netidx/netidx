@@ -661,6 +661,68 @@ val units_dir: fn(trigger: Any) -> [string, null];
 /// config, or null when it runs none. Re-reads per `trigger`.
 val local_resolver_base: fn(trigger: Any) -> [string, null];
 
+/// What starts an activation unit: the supervisor coming up, or a
+/// subscription to any of these paths.
+type UnitTrigger = [`OnStart, `OnAccess(Array<string>)];
+
+/// What the supervisor does when the unit's process exits: nothing,
+/// restart at once, or restart no more often than once per that many
+/// seconds.
+type UnitRestart = [`No, `Yes, `RateLimited(f64)];
+
+/// The child's environment: the supervisor's with these overrides, or
+/// exactly these.
+type UnitEnvironment = [
+  `Inherit(Array<{ name: string, value: string }>),
+  `Replace(Array<{ name: string, value: string }>)
+];
+
+/// An activation unit's definition — every field of its `.unit` file.
+type UnitDef = {
+  exe: string,
+  args: Array<string>,
+  trigger: UnitTrigger,
+  restart: UnitRestart,
+  working_directory: [string, null],
+  uid: [u32, null],
+  gid: [u32, null],
+  stdin: [string, null],
+  stdout: [string, null],
+  stderr: [string, null],
+  environment: UnitEnvironment
+};
+
+/// One activation unit on this host: its definition on disk and the
+/// state its supervisor reports — either side null when only the
+/// other knows the unit (a definition the supervisor has not loaded,
+/// a unit it reports with no file behind it, or no supervisor at all).
+type LocalUnit = {
+  name: string,
+  state: [UnitState, null],
+  definition: [UnitDef, null]
+};
+
+/// Every unit this host's unit directory defines or its supervisor
+/// runs. Re-lists per `trigger`.
+val list_units: fn(#units_dir: string, trigger: Any) -> Result<Array<LocalUnit>, AdminError>;
+
+/// Apply `op` to one unit (`#unit`) or every unit (null) through this
+/// host's supervisor; the result is what it reports for them
+/// afterwards (definitions null). Errors when no supervisor answers.
+val control_units: fn(#units_dir: string, #unit: [string, null], op: ServiceOp) -> Result<Array<LocalUnit>, AdminError>;
+
+/// Write (create or replace) the unit `#name` after checking the
+/// whole set for trigger conflicts, and tell a running supervisor to
+/// re-read the directory; true when one was listening.
+val install_unit: fn(#units_dir: string, #name: string, def: UnitDef) -> Result<bool, AdminError>;
+
+/// Remove the unit `name` and reload; true when a supervisor was
+/// listening.
+val remove_unit: fn(#units_dir: string, name: string) -> Result<bool, AdminError>;
+
+/// The starter definition a create flow seeds its form with.
+val unit_template: fn(trigger: Any) -> UnitDef;
+
 /// What one renewal pass did: a one-line summary (null when nothing
 /// was due), the certificates renewed, those awaiting an admin's
 /// approval, and those that failed with why.

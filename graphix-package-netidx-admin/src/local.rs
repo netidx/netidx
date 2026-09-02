@@ -16,7 +16,12 @@ use graphix_compiler::{
     effects::Effect, errf, expr::ExprId, typ::FnType,
 };
 use graphix_package_core::{CachedArgsAsync, CachedVals, EvalCachedAsync};
+use netidx_activation::control::{ControlOp, UnitState};
 use netidx_admin::{
+    activation::{
+        self, ActivationDir, Environment, ProcessCfg, Restart, Trigger as UnitTrigger,
+        Unit,
+    },
     answer::{Answerer, Field},
     install_bundle::{BundleScope, Component},
     paths,
@@ -30,6 +35,7 @@ use netidx_admin::{
 use netidx_derive::{FromValue, IntoValue};
 use netidx_value::{FromValue, ValArray, Value};
 use std::{
+    collections::BTreeMap,
     fmt::Debug,
     marker::PhantomData,
     path::{Path, PathBuf},
@@ -429,6 +435,318 @@ impl EvalCachedAsync for LocalResolverBaseEv {
 }
 
 pub(crate) type LocalResolverBase = CachedArgsAsync<LocalResolverBaseEv>;
+
+// ── this host's activation units ─────────────────────────────────
+
+#[derive(Debug, Clone, FromValue, IntoValue)]
+enum UnitTriggerV {
+    OnStart,
+    OnAccess(Vec<String>),
+}
+
+#[derive(Debug, Clone, FromValue, IntoValue)]
+enum UnitRestartV {
+    No,
+    Yes,
+    RateLimited(f64),
+}
+
+#[derive(Debug, Clone, FromValue, IntoValue)]
+struct EnvVarV {
+    name: String,
+    value: String,
+}
+
+#[derive(Debug, Clone, FromValue, IntoValue)]
+enum UnitEnvironmentV {
+    Inherit(Vec<EnvVarV>),
+    Replace(Vec<EnvVarV>),
+}
+
+/// A unit's definition as the form edits it — every field of the
+/// on-disk unit, none of them a rendered string.
+#[derive(Debug, Clone, FromValue, IntoValue)]
+struct UnitDefV {
+    exe: String,
+    args: Vec<String>,
+    trigger: UnitTriggerV,
+    restart: UnitRestartV,
+    working_directory: Option<String>,
+    uid: Option<u32>,
+    gid: Option<u32>,
+    stdin: Option<String>,
+    stdout: Option<String>,
+    stderr: Option<String>,
+    environment: UnitEnvironmentV,
+}
+
+fn env_vars(m: BTreeMap<String, String>) -> Vec<EnvVarV> {
+    m.into_iter().map(|(name, value)| EnvVarV { name, value }).collect()
+}
+
+fn env_map(vs: Vec<EnvVarV>) -> BTreeMap<String, String> {
+    vs.into_iter().map(|v| (v.name, v.value)).collect()
+}
+
+impl From<Unit> for UnitDefV {
+    fn from(u: Unit) -> Self {
+        let p = u.process;
+        UnitDefV {
+            exe: p.exe,
+            args: p.args,
+            trigger: match u.trigger {
+                UnitTrigger::OnStart => UnitTriggerV::OnStart,
+                UnitTrigger::OnAccess(paths) => {
+                    UnitTriggerV::OnAccess(paths.iter().map(|p| p.to_string()).collect())
+                }
+            },
+            restart: match p.restart {
+                Restart::No => UnitRestartV::No,
+                Restart::Yes => UnitRestartV::Yes,
+                Restart::RateLimited(s) => UnitRestartV::RateLimited(s),
+            },
+            working_directory: p.working_directory.map(|d| d.display().to_string()),
+            uid: p.uid,
+            gid: p.gid,
+            stdin: p.stdin.map(|d| d.display().to_string()),
+            stdout: p.stdout.map(|d| d.display().to_string()),
+            stderr: p.stderr.map(|d| d.display().to_string()),
+            environment: match p.environment {
+                Environment::Inherit(m) => UnitEnvironmentV::Inherit(env_vars(m)),
+                Environment::Replace(m) => UnitEnvironmentV::Replace(env_vars(m)),
+            },
+        }
+    }
+}
+
+impl TryFrom<UnitDefV> for Unit {
+    type Error = anyhow::Error;
+
+    fn try_from(d: UnitDefV) -> Result<Unit> {
+        let trigger = match d.trigger {
+            UnitTriggerV::OnStart => UnitTrigger::OnStart,
+            UnitTriggerV::OnAccess(paths) => UnitTrigger::OnAccess(
+                paths.into_iter().map(netidx::path::Path::from).collect(),
+            ),
+        };
+        let restart = match d.restart {
+            UnitRestartV::No => Restart::No,
+            UnitRestartV::Yes => Restart::Yes,
+            UnitRestartV::RateLimited(s) => {
+                if !s.is_finite() || s <= 0.0 {
+                    bail!("rate-limit seconds must be finite and positive, got {s}");
+                }
+                Restart::RateLimited(s)
+            }
+        };
+        if d.exe.trim().is_empty() {
+            bail!("a unit needs an executable");
+        }
+        let process = ProcessCfg {
+            exe: d.exe,
+            args: d.args,
+            working_directory: d.working_directory.map(PathBuf::from),
+            uid: d.uid,
+            gid: d.gid,
+            restart,
+            stdin: d.stdin.map(PathBuf::from),
+            stdout: d.stdout.map(PathBuf::from),
+            stderr: d.stderr.map(PathBuf::from),
+            environment: match d.environment {
+                UnitEnvironmentV::Inherit(vs) => Environment::Inherit(env_map(vs)),
+                UnitEnvironmentV::Replace(vs) => Environment::Replace(env_map(vs)),
+            },
+        };
+        Ok(Unit { trigger, process })
+    }
+}
+
+#[derive(Debug, Clone, IntoValue)]
+enum LocalUnitStateV {
+    NotStarted,
+    Running(Option<u32>),
+    Stopped,
+    Died,
+}
+
+impl From<UnitState> for LocalUnitStateV {
+    fn from(s: UnitState) -> Self {
+        match s {
+            UnitState::NotStarted => LocalUnitStateV::NotStarted,
+            UnitState::Running { pid } => LocalUnitStateV::Running(pid),
+            UnitState::Stopped => LocalUnitStateV::Stopped,
+            UnitState::Died => LocalUnitStateV::Died,
+        }
+    }
+}
+
+/// One unit on this host: what is on disk and what the supervisor
+/// reports, either side absent when only the other knows it.
+#[derive(Debug, Clone, IntoValue)]
+struct LocalUnitV {
+    name: String,
+    state: Option<LocalUnitStateV>,
+    definition: Option<UnitDefV>,
+}
+
+async fn local_units(units_dir: &Path) -> Result<Value> {
+    let rows = activation::list_with_state(units_dir).await?;
+    Ok(Value::Array(ValArray::from_iter_exact(rows.into_iter().map(|u| {
+        Value::from(LocalUnitV {
+            name: u.name,
+            state: u.state.map(LocalUnitStateV::from),
+            definition: u.unit.map(UnitDefV::from),
+        })
+    }))))
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct ListUnitsEv;
+
+impl EvalCachedAsync for ListUnitsEv {
+    type Args = PathBuf;
+
+    const NAME: &str = "netidx_admin_list_units";
+
+    fn prepare_args(&mut self, cached: &CachedVals) -> Option<Self::Args> {
+        let dir = PathBuf::from(cached.get::<String>(0)?);
+        cached.0.get(1)?.as_ref()?;
+        Some(dir)
+    }
+
+    fn eval(dir: Self::Args) -> impl Future<Output = Value> + Send {
+        async move { local_units(&dir).await.unwrap_or_else(admin_err) }
+    }
+}
+
+pub(crate) type ListUnits = CachedArgsAsync<ListUnitsEv>;
+
+#[derive(Debug, Clone, FromValue)]
+enum LocalOpV {
+    Start,
+    Stop,
+    Restart,
+    Status,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct ControlUnitsEv;
+
+impl EvalCachedAsync for ControlUnitsEv {
+    type Args = (PathBuf, Option<String>, ControlOp);
+
+    const NAME: &str = "netidx_admin_control_units";
+
+    fn prepare_args(&mut self, cached: &CachedVals) -> Option<Self::Args> {
+        let dir = PathBuf::from(cached.get::<String>(0)?);
+        let unit = opt_string(cached.0.get(1)?.as_ref()).ok()?;
+        let op = match LocalOpV::from_value(cached.0.get(2)?.clone()?).ok()? {
+            LocalOpV::Start => ControlOp::Start,
+            LocalOpV::Stop => ControlOp::Stop,
+            LocalOpV::Restart => ControlOp::Restart,
+            LocalOpV::Status => ControlOp::Status,
+        };
+        Some((dir, unit, op))
+    }
+
+    fn eval((dir, unit, op): Self::Args) -> impl Future<Output = Value> + Send {
+        async move {
+            match activation::control_local(&dir, op, unit.into_iter().collect()).await {
+                Ok(states) => {
+                    Value::Array(ValArray::from_iter_exact(states.into_iter().map(|u| {
+                        Value::from(LocalUnitV {
+                            name: u.unit,
+                            state: Some(u.state.into()),
+                            definition: None,
+                        })
+                    })))
+                }
+                Err(e) => admin_err(e),
+            }
+        }
+    }
+}
+
+pub(crate) type ControlUnits = CachedArgsAsync<ControlUnitsEv>;
+
+#[derive(Debug, Default)]
+pub(crate) struct InstallUnitEv;
+
+impl EvalCachedAsync for InstallUnitEv {
+    type Args = (PathBuf, String, Result<Unit>);
+
+    const NAME: &str = "netidx_admin_install_unit";
+
+    fn prepare_args(&mut self, cached: &CachedVals) -> Option<Self::Args> {
+        let dir = PathBuf::from(cached.get::<String>(0)?);
+        let name = cached.get::<String>(1)?;
+        let def = UnitDefV::from_value(cached.0.get(2)?.clone()?).ok()?;
+        Some((dir, name, Unit::try_from(def)))
+    }
+
+    fn eval((dir, name, unit): Self::Args) -> impl Future<Output = Value> + Send {
+        async move {
+            let installed = async {
+                let unit = unit?;
+                ActivationDir::open(Some(&dir))?.install(&name, &unit).await
+            }
+            .await;
+            match installed {
+                Ok(reloaded) => Value::Bool(reloaded),
+                Err(e) => admin_err(e),
+            }
+        }
+    }
+}
+
+pub(crate) type InstallUnit = CachedArgsAsync<InstallUnitEv>;
+
+#[derive(Debug, Default)]
+pub(crate) struct RemoveUnitEv;
+
+impl EvalCachedAsync for RemoveUnitEv {
+    type Args = (PathBuf, String);
+
+    const NAME: &str = "netidx_admin_remove_unit";
+
+    fn prepare_args(&mut self, cached: &CachedVals) -> Option<Self::Args> {
+        let dir = PathBuf::from(cached.get::<String>(0)?);
+        Some((dir, cached.get::<String>(1)?))
+    }
+
+    fn eval((dir, name): Self::Args) -> impl Future<Output = Value> + Send {
+        async move {
+            let removed =
+                async { ActivationDir::open(Some(&dir))?.uninstall(&name).await }.await;
+            match removed {
+                Ok(reloaded) => Value::Bool(reloaded),
+                Err(e) => admin_err(e),
+            }
+        }
+    }
+}
+
+pub(crate) type RemoveUnit = CachedArgsAsync<RemoveUnitEv>;
+
+#[derive(Debug, Default)]
+pub(crate) struct UnitTemplateEv;
+
+impl EvalCachedAsync for UnitTemplateEv {
+    type Args = ();
+
+    const NAME: &str = "netidx_admin_unit_template";
+
+    fn prepare_args(&mut self, cached: &CachedVals) -> Option<Self::Args> {
+        cached.0.first()?.as_ref()?;
+        Some(())
+    }
+
+    fn eval(_: Self::Args) -> impl Future<Output = Value> + Send {
+        async move { UnitDefV::from(activation::template_unit()).into() }
+    }
+}
+
+pub(crate) type UnitTemplate = CachedArgsAsync<UnitTemplateEv>;
 
 // ── the local-ceremony builtin family ────────────────────────────
 

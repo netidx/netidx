@@ -3,9 +3,9 @@
 Status: **Designed** (package layers 1–2, placement, phasing) /
 **Sketched** (ceremony protocol details, TUI module structure).
 Port state (2026-09-02): phases A–C done; D — the remote tab complete,
-the Local tab's first slice landed (detection, status, the in-process
-lifecycle actions, the local admin panels through `tui::panels`, the
-app shell `tui::app`); the local Services surface and the install /
+the Local tab landed (detection, status, the in-process lifecycle
+actions, the local admin panels through `tui::panels`, the Services
+surface `tui::services`, the app shell `tui::app`); the install /
 uninstall / join / restore actions wait on phases 4–5. The running
 state lives in the findings log's ledger.
 

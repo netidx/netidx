@@ -90,7 +90,7 @@ let remote = |#q: &Question, #server: string = ""| -> Remote {
       select kk ~ ed.value {
         "" => never(),
         v => {
-          connect_glyph <- null;
+          connect_glyph <- v ~ null;
           connect_to <- v
         }
       };
