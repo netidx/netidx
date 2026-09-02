@@ -325,8 +325,8 @@ let local = |#q: &Question| -> Local {
   let screen: Screen = `Home;
   let confirm: [Confirm<Act>, null] = null;
   // an action the operator chose: confirmed first when destructive
-  let chosen: Act = never();
-  let run: Act = never();
+  let chosen = never<Act>();
+  let run = never<Act>();
   select chosen {
     a => select confirm_text(a) {
       null as _ => run <- a,
@@ -401,7 +401,7 @@ let local = |#q: &Question| -> Local {
   };
   // ── the local admin server's panels: the roster, and this host's
   // own permissions ──
-  let admin_req: { cfg: string, panel: [`Roster, `Perms] } = never();
+  let admin_req = never<{ cfg: string, panel: [`Roster, `Perms] }>();
   admin_req <- select run {
     x@ `Admins => select x ~ lca {
       null as _ => never(),
@@ -419,8 +419,8 @@ let local = |#q: &Question| -> Local {
     },
     _ => never()
   };
-  let admin_target: Target = never();
-  let admin_entry: Entry = never();
+  let admin_target = never<Target>();
+  let admin_entry = never<Entry>();
   {
     catch(e) fail("Opening this host's admin server failed", (e.0).error);
     let t = local_target(#cfg_path: admin_req.cfg, admin_req)?;
@@ -445,7 +445,7 @@ let local = |#q: &Question| -> Local {
     null as _ => never(),
     d => d
   };
-  let svc_open: Any = never();
+  let svc_open = never<Any>();
   let svc = services::services(
     #units_dir: svc_dir,
     #on_close: |e: Any| -> null { screen <- e ~ `Home; null },
@@ -663,7 +663,7 @@ let local = |#q: &Question| -> Local {
   // ── navigation, and the questions a teardown asks first ──
   let ca_ask = false;
   let ca_sel = 0;
-  let parent_root: string = never();
+  let parent_root = never<string>();
   let parent_open = false;
   let parent_sel = 0;
   select run {
@@ -682,13 +682,13 @@ let local = |#q: &Question| -> Local {
   // ── the OS service a role needs afterwards: registered here at user
   // scope; at system scope the invocation runs privileged on the
   // released terminal and the service manager's state judges it ──
-  let svc_req: { scope: Scope, name: [string, null], for_user: [string, null] } = never();
+  let svc_req = never<{ scope: Scope, name: [string, null], for_user: [string, null] }>();
   let svc_r = install_service(#scope: svc_req.scope, #name: svc_req.name, #for_user: svc_req.for_user, svc_req);
-  let svc_ok: string = never();
+  let svc_ok = never<string>();
   // a privileged step: what it is, the netidx invocation, and what
   // follows its exit
   type Then = [`VerifyService({ name: string, for_user: string }), `UninstallAgain(bool), `Nothing];
-  let priv_req: { what: string, argv: Array<string>, then: Then } = never();
+  let priv_req = never<{ what: string, argv: Array<string>, then: Then }>();
   {
     catch(e) fail("Registering the OS service failed", (e.0).error);
     select svc_r? {
@@ -704,7 +704,7 @@ let local = |#q: &Question| -> Local {
   let priv_cmd = escalate_command(priv_req.argv, priv_req);
   // the display is suspended while the child owns the terminal
   let suspended = false;
-  let priv_exit: i64 = never();
+  let priv_exit = never<i64>();
   {
     catch(e) {
       select (e.0).error {
@@ -730,7 +730,7 @@ let local = |#q: &Question| -> Local {
       c => c
     }
   };
-  let verify_req: { name: string, for_user: string, code: i64 } = never();
+  let verify_req = never<{ name: string, for_user: string, code: i64 }>();
   select priv_exit ~ priv_req.then {
     `VerifyService({ name, for_user }) => verify_req <- { name, for_user, code: priv_exit },
     `UninstallAgain(remove_ca) => run <- `UninstallWith(remove_ca),
@@ -1002,7 +1002,7 @@ let local = |#q: &Question| -> Local {
     cs => cs
   };
   let parent_pick: [Array<string>, null] = null;
-  let parent_fields: Array<Field> = never();
+  let parent_fields = never<Array<Field>>();
   let parent_form_open = false;
   let parent_form = form(
     #title: "Add a parent",

@@ -238,13 +238,13 @@ let services = |#units_dir: string, #on_close: fn(e: Any) -> null, open: Any| ->
     [] => null,
     xs => xs[min(sel, array::len(xs) - 1)]$
   };
-  let run: Act = never();
+  let run = never<Act>();
   // ── the unit form: create seeds the template, edit the unit's own
   // definition ──
   let template = unit_template(open);
   let form_open = false;
   let form_title = "";
-  let form_fields: Array<Field> = never();
+  let form_fields = never<Array<Field>>();
   let creating = false;
   let bad_unit = |m: string| -> null {
     toast <- { title: "Bad unit", lines: [m], error: true };

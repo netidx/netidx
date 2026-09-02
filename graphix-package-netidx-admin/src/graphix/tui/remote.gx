@@ -17,13 +17,13 @@ let remote = |#q: &Question, #server: string = ""| -> Remote {
   let hint = style(#fg: `DarkGray);
   let selstyle = style(#add_modifier: [`Reversed]);
   // ── connection state ──
-  let target: Target = never();
+  let target = never<Target>();
   let screen: Screen = select server {
     "" => `Landing,
     _ => `Connect
   };
   let ed = line_edit::state(server);
-  let connect_to: string = never();
+  let connect_to = never<string>();
   // a domain the landing screen verified against its saved fingerprint
   // connects without the gesture
   let connect_glyph: [Fingerprint, null] = null;
@@ -54,7 +54,7 @@ let remote = |#q: &Question, #server: string = ""| -> Remote {
   };
   // a reset password authorizes nothing but its own replacement: the
   // CA refuses the session and names the admin, and that routes here
-  let must_change: string = never();
+  let must_change = never<string>();
   {
     catch(e) select (e.0).error {
       `PasswordChangeRequired(name) => must_change <- name,

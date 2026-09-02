@@ -10,7 +10,7 @@ use tui::text::{self, *};
 let app = |#server: string = ""| -> tui::Tui {
   let hint = style(#fg: `DarkGray);
   let selstyle = style(#add_modifier: [`Reversed]);
-  let q: Question = never();
+  let q = never<Question>();
   let p = pump(q);
   let loc = local::local(#q: &q);
   let rem = remote::remote(#q: &q, #server: server);

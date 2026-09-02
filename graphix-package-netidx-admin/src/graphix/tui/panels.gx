@@ -289,9 +289,9 @@ let panels = |
   };
   let gate_for: [ServerInfo, null] = null;
   let gate_sel = 0;
-  let perm_fields: Array<Field> = never();
+  let perm_fields = never<Array<Field>>();
   let perm_open = false;
-  let run: Act = never();
+  let run = never<Act>();
   let perm_form = form(
     #title: "Permission entry",
     #help: "Bits are a permission string such as swlpd; an empty entity is anonymous.",
@@ -303,7 +303,7 @@ let panels = |
     #on_cancel: |e: Any| -> null { perm_open <- e ~ false; null },
     perm_fields
   );
-  let policy_fields_in: Array<Field> = never();
+  let policy_fields_in = never<Array<Field>>();
   let policy_title = "";
   let policy_open = false;
   let policy_target: [`Add, `Edit(string)] = `Add;
@@ -337,7 +337,7 @@ let panels = |
     null
   };
   // ── panel loads: each (re)load starts a fresh list ceremony ──
-  let load: PanelKind = never();
+  let load = never<PanelKind>();
   load <- select entry {
     `Roster => `Roster,
     `Perms(_) => `Perms,
@@ -370,7 +370,7 @@ let panels = |
     },
     _ => never()
   };
-  let perms_r: Result<Array<PermEntry>, AdminError> = select load {
+  let perms_r = select load {
     x@ `Perms => select x ~ perms_at {
       null as _ => never(),
       at => show_perms(#at: at, x ~ target)
@@ -378,12 +378,12 @@ let panels = |
     _ => never()
   };
   // ── the pick screens' lists ──
-  let pick: [`Servers, `Clusters] = never();
+  let pick = never<[`Servers, `Clusters]>();
   let svc_servers_c = select pick {
     x@ `Servers => list_service_servers(x ~ target),
     _ => never()
   };
-  let clusters_r: Result<Array<string>, AdminError> = select pick {
+  let clusters_r = select pick {
     x@ `Clusters => list_resolver_clusters(x ~ target),
     _ => never()
   };
@@ -576,22 +576,22 @@ let panels = |
     `Gate(a) => set_read_gate(#server: a.server, a.gate, a ~ target),
     _ => never()
   };
-  let setperm_r: Result<RecordedEdit, AdminError> = select run {
+  let setperm_r = select run {
     `SetPerm(e) => select e ~ perms_at {
       null as _ => never(),
       at => set_perm(#at: at, #path: e.path, #entity: e.entity, #bits: e.bits, e ~ target)
     },
     _ => never()
   };
-  let addadmin_r: Result<string, AdminError> = select run {
+  let addadmin_r = select run {
     `AddAdmin(a) => add_role_admin(a.name, a.policy, a ~ target),
     _ => never()
   };
-  let setpolicy_r: Result<null, AdminError> = select run {
+  let setpolicy_r = select run {
     `SetPolicy(a) => set_admin_policy(a.name, a.policy, a ~ target),
     _ => never()
   };
-  let rmperm_r: Result<RecordedEdit, AdminError> = select run {
+  let rmperm_r = select run {
     `RemovePerm(e) => select e ~ perms_at {
       null as _ => never(),
       at => remove_perm(#at: at, #path: e.path, #entity: e.entity, e ~ target)

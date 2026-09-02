@@ -45,10 +45,14 @@ Graphix, language and compiler:
    wants its own note at the refusal site. RETRACTED: the "no module name" facet — the package build
    script does name the file ("packing graphix AST blob: parsing
    …/landing.gx"); my log filter had dropped that line.
-2. **`never()` arms leave a select's type open** (09-02): annotate the
-   binding is the documented answer; whether `never()` should type as
-   an absorbed bottom instead of a fresh variable is a ruling not yet
-   asked for. Book line either way.
+2. ~~**`never()` arms leave a select's type open** (09-02).~~ FIXED
+   09-03: Eric ruled `never` an absorbed bottom and a compiler
+   intrinsic — `never()` / `never<T>(args…)` is syntax (the `<T>`
+   optional, bare = bottom). Nested never() arms now absorb without
+   annotation; `let x = never<T>();` replaces `let x: T = never();`.
+   The port's six `_r: Result<…>` annotations and twenty typed
+   never-lets are rewritten. Book: the select chapter's "Arms That
+   Never Fire".
 3. **Lint: a connect whose target is read unsampled in the same select
    arm** (09-02, the accidental counter — three sightings in one
    afternoon, one reached the harness at 100% CPU). Proposed.
@@ -1220,3 +1224,13 @@ them the same night:
   combine's merged expectation when the failure lies on that line or
   before it. The "no module name" facet was my own log filter and is
   retracted.
+- **2**, `never` as syntax (09-03): a builtin call's return cell
+  bound to bottom only at static resolution, after the select had
+  unioned its arms in the first typecheck pass, so a nested select
+  of never() arms + one call typed as `['_a: _, '_b: _, string]`.
+  `ExprKind::Never { typ, args }` types at compile — bottom, or the
+  spelled `T` — and the arms absorb; the core builtin is deleted and
+  `never` reserved. The companion `union_int` change derefs a bound
+  cell to its binding (no discriminating witness found; kept as
+  correct). Pins: graphix `lang/select.rs` `never_arms_absorb`/
+  `never_typed`/`never_args_live`, parser `never_parses`.
