@@ -49,11 +49,12 @@ Graphix, language and compiler:
    traits v2 (a trait parameter for the right operand, an associated
    Output). Datetime/duration stays in `sys::time` until then.
 6. ~~**Terminal suspend/resume** for the `sudo`/`su` handoff
-   (08-18).~~ Built 09-02 night (phase E): `tui::run_in_terminal`
-   in graphix, `netidx_admin::privileged` in the library, and the
-   Local tab's privileged step for system-scope service registration
-   (after an install, a restore, an external-CA install) and the
-   elevated half of a teardown. The `$EDITOR` half was never needed
+   (08-18).~~ Built 09-02 night (phase E): `tui::suspend`/`tui::resume`
+   in graphix (the child runs through `sys::process` with inherited
+   stdio), `netidx_admin::privileged` in the library, and the Local
+   tab's privileged step for system-scope service registration (after
+   an install, a restore, an external-CA install) and the elevated
+   half of a teardown. The `$EDITOR` half was never needed
    (every editor became an in-TUI form). NEEDS LAB VALIDATION on a
    real terminal with sudo and with su — the harness is headless and
    pins only the no-display error.
@@ -1122,16 +1123,29 @@ netidx's escalation policy. So the decision moved INTO THE CHILD:
 <become-root script> netidx-privileged <su form> <exe> <args…>` — the
 script execs directly as root, under sudo when the operator may (a
 cached credential first, else one prompt), else under `su -c` with
-the same command quoted for a shell — and the tui package's one new
-capability is generic: `tui::run_in_terminal(#args, #note, program)`
-suspends the display (drops the crossterm reader so its thread cannot
-fight the child for stdin, as the ratatui TUI does), runs the program
-with inherited stdio, re-inits the terminal with a full repaint, and
-returns the exit code. The runner's control (stop signal + suspend
-channel) is one libstate entry; the suspend receiver is parked there
-until a display takes it and handed back when it ends, so a headless
-harness gets an honest "no terminal display is running" error instead
-of a hang.
+the same command quoted for a shell — and the tui package's new
+capability is only the terminal handoff: `tui::suspend(trigger)`
+drops the crossterm reader (so its thread cannot fight the child for
+stdin, as the ratatui TUI does), restores the terminal and answers
+with a suspension; the program runs the child through
+`sys::process::spawn` with inherited stdio and `wait`s for it — one
+process implementation in the system, with its options — and
+`tui::resume(status ~ s)` re-inits the terminal with a full repaint
+(dropping the suspension resumes too). The first cut ran the child
+inside the tui runner with `std::process` and was replaced the same
+night on Eric's question ("does it use Graphix's process module?"):
+the runner had duplicated the process module. The replacement
+exposed the one real subtlety: while suspended the runner must keep
+applying graph updates to the widget tree (without drawing) — the
+program's dataflow has to observe the child's exit to call resume,
+and a runner blocked in its select arm would back up the display
+channel, stall the shell loop and deadlock. So the suspension is
+runner state: draws pause while it holds one, and the resume signal
+is another select branch. The runner's control (stop signal +
+suspend channel) is one libstate entry; the suspend receiver is
+parked there until a display takes it and handed back when it ends,
+so a headless harness gets an honest "no terminal display is
+running" error instead of a hang.
 
 On the package side `install_service` returns `` `Registered(line) ``
 or `` `Privileged({ what, argv, name, for_user }) ``,
@@ -1141,7 +1155,8 @@ state — only a running service is success, whatever the child's exit
 code said (the ratatui rule, now in the library as
 `system_service_outcome`; its tests moved with it). The Local tab
 chains: install / restore / external-CA install → service needed →
-privileged run → verify → toast, and a staged restore finishes itself
+suspend → `sys::process::spawn`/`wait` → resume → verify → toast (a
+handler on every failure after the suspend resumes the display), and a staged restore finishes itself
 once the service is verified; a teardown's `Escalate` runs the
 elevated half and, when it covered only the system service, runs
 the user-scope pass afterwards. **Disposition: built; lab validation

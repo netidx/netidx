@@ -710,16 +710,40 @@ let local = |#q: &Question| -> Local {
     refresh <- svc_ok
   };
   let priv_cmd = escalate_command(priv_req.argv, priv_req);
-  let priv_note = "Administrator privileges are needed to [priv_req.what].";
+  // the display's suspension while the child owns the terminal; cleared
+  // by resume, on success and on every failure after the suspend
+  let sus: [tui::Suspension, null] = null;
+  let resume_now = |t: Any| -> null {
+    select t ~ sus {
+      null as _ => never(),
+      s => { tui::resume(s); sus <- s ~ null }
+    };
+    null
+  };
   let priv_exit: i64 = never();
   {
-    catch(e) select (e.0).error {
-      `TerminalError(m) => toast <- { title: "The privileged step could not run", lines: [m], error: true },
-      a => fail("The privileged step could not start", a)
+    catch(e) {
+      select (e.0).error {
+        `TerminalError(m) => toast <- { title: "The privileged step could not run", lines: [m], error: true },
+        `ProcessError(m) => toast <- { title: "The privileged step could not run", lines: [m], error: true },
+        a => fail("The privileged step could not start", a)
+      };
+      resume_now(e)
     };
     let cmd = priv_cmd?;
-    let code = tui::run_in_terminal(#args: cmd.args, #note: priv_note, cmd.program)?;
-    priv_exit <- code
+    sus <- tui::suspend(cmd)?;
+    let s = select sus {
+      null as _ => never(),
+      s => s
+    };
+    println(s ~ "\nAdministrator privileges are needed to [priv_req.what].");
+    let child = sys::process::spawn(sys::process::options(#args: cmd.args, s ~ cmd.program))?;
+    let status = sys::process::wait(child.proc)?;
+    resume_now(status);
+    priv_exit <- select status.code {
+      null as _ => -1,
+      c => c
+    }
   };
   let verify_req: { name: string, for_user: string, code: i64 } = never();
   select priv_exit ~ priv_req.then {
