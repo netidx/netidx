@@ -46,6 +46,13 @@ Graphix, language and compiler:
    Output). Datetime/duration stays in `sys::time` until then.
 6. **Terminal suspend/resume** for `sudo`/`$EDITOR` handoff (08-18):
    the phase E prerequisite; composes with `sys::process` Inherit.
+12. ~~**A reference into a value** (09-02, `&vals[i]`): readable and
+    unwritable, so no `&State` widget API could reach a state held in
+    a collection — `tui::form` grew a pure `step` and an
+    array-rebuilding twin around it.~~ FIXED in graphix the same day
+    (place references, `design/place_references.md`): `&a[i]`, `&s.f`,
+    `&t.0`, `&m{k}` and chains are places; the form edits through
+    `line_edit::handle(&vals[i], e)`.
 11. **A select over `[fn(..), null]` reports the bind arm dead** (09-02):
     `select on_cancel { null as _ => never(), f => f(e) }` is refused
     with "pattern '_: fn(e: Any) -> null will never match fn(e: Any) ->
@@ -896,3 +903,14 @@ function member) against the member and does not accept a function
 type as matching itself. **Disposition: graphix work item (ledger 11);
 the form's cancel callback is required for now, which is a fine API
 anyway.**
+
+## 2026-09-02 — place references: `&vals[i]` is a place now
+
+Eric's ruling on the form finding above: a language hole that has
+already shaped a stdlib API is a now change. Built in graphix the same
+evening (`design/place_references.md`): a reference whose expression
+is an accessor chain over a variable is the root binding plus a path;
+reads apply the path, writes patch the root at delivery (so sibling
+writes in one cycle both land), a dynamic key moves the reference. The
+form's focused editor is `line_edit::handle(&vals[i], e)` again;
+`step` stays as the pure API. Ledger 12, closed.
