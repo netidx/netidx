@@ -280,3 +280,63 @@ async fn remote_tab_routes_a_reset_password() -> Result<()> {
     .await?;
     Ok(())
 }
+
+/// The services, perms and read-gate flows against a domain whose only
+/// server is the CA: the server pick and the cluster pick run their
+/// ceremonies and land on their empty-list states, and `g` on the CA's
+/// row refuses a read gate for a server that runs no resolver.
+#[tokio::test(flavor = "multi_thread")]
+async fn remote_tab_opens_the_services_and_perms_screens() -> Result<()> {
+    let d = TestAdminDomain::start().await?;
+    let prog = remote_tab_program(&d.listen.to_string());
+    let mut h =
+        TuiTestHarness::with_register(&prog, crate::TEST_REGISTER, 100, 30).await?;
+    connect_via_modals(&mut h, &d, &d.admin, &d.password).await?;
+    wait_render(&mut h, Duration::from_secs(60), "the panel menu", |lines| {
+        lines.iter().any(|l| l.contains("Services"))
+    })
+    .await?;
+    // Services is the sixth entry: its server pick lists nothing here
+    for _ in 0..5 {
+        h.dispatch_event(key(KeyCode::Char('j'))).await?;
+    }
+    h.dispatch_event(key(KeyCode::Enter)).await?;
+    wait_render(&mut h, Duration::from_secs(60), "the empty server pick", |lines| {
+        lines.iter().any(|l| l.contains("Pick an admin server"))
+            && lines
+                .iter()
+                .any(|l| l.contains("no registered admin server runs a resolver"))
+    })
+    .await?;
+    h.dispatch_event(key(KeyCode::Esc)).await?;
+    // Permissions is the seventh: no active resolver cluster to pick
+    h.dispatch_event(key(KeyCode::Char('j'))).await?;
+    h.dispatch_event(key(KeyCode::Enter)).await?;
+    wait_render(&mut h, Duration::from_secs(60), "the empty cluster pick", |lines| {
+        lines.iter().any(|l| l.contains("Pick a resolver cluster"))
+            && lines.iter().any(|l| l.contains("no active resolver cluster"))
+    })
+    .await?;
+    h.dispatch_event(key(KeyCode::Esc)).await?;
+    // Servers (fourth): the CA row has no read gate, and `g` says so
+    for _ in 0..3 {
+        h.dispatch_event(key(KeyCode::Char('k'))).await?;
+    }
+    h.dispatch_event(key(KeyCode::Enter)).await?;
+    wait_render(&mut h, Duration::from_secs(60), "the servers panel", |lines| {
+        lines.iter().any(|l| l.contains("Gate"))
+            && lines.iter().any(|l| l.contains("no resolver, so no read gate"))
+    })
+    .await?;
+    h.dispatch_event(key(KeyCode::Char('g'))).await?;
+    wait_render(&mut h, Duration::from_secs(60), "the no-gate toast", |lines| {
+        lines.iter().any(|l| l.contains("No read gate"))
+    })
+    .await?;
+    h.dispatch_event(key(KeyCode::Enter)).await?;
+    wait_render(&mut h, Duration::from_secs(60), "the toast dismissed", |lines| {
+        !lines.iter().any(|l| l.contains("No read gate"))
+    })
+    .await?;
+    Ok(())
+}

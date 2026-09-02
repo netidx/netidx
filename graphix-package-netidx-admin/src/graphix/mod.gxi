@@ -270,7 +270,14 @@ type PendingDelegation = {
 /// The outcome of approving a delegation.
 type DelegationDecision = { proposed_path: string, peers: Array<PeerResult> };
 
-/// One registered admin server.
+/// A resolver member's read gate as it reports it: answering read
+/// clients, refusing them until an admin opens the gate, or refusing
+/// them until an instant (a member that joined a serving cluster
+/// waits for publishers to find it).
+type ReadGate = [`Open, `Shut, `Until(datetime)];
+
+/// One registered admin server. `read_gate` is null for a server that
+/// runs no resolver or has not reported yet.
 type ServerInfo = {
   id: string,
   addr: string,
@@ -280,7 +287,7 @@ type ServerInfo = {
   cluster_base: [string, null],
   cluster_state: [string, null],
   ca: bool,
-  read_gate: string
+  read_gate: [ReadGate, null]
 };
 
 /// The outcome of removing a server from the admin domain.
@@ -382,6 +389,77 @@ val remove_server: fn(id: string, t: Target) -> Ceremony<RemoveServerOutcome>;
 
 /// Push the CA's state to every registered server.
 val reconcile_ca: fn(t: Target) -> Ceremony<ReconcileOutcome>;
+
+/// Open or shut one resolver member's read gate. `ShutFor` shuts it
+/// now and opens it that long from now. The ceremony warns (a `Warn`
+/// event) about what the change risks, given the member's current gate.
+val set_read_gate: fn(
+  #server: string,
+  gate: [ReadGate, `ShutFor(duration)],
+  t: Target
+) -> Ceremony<null>;
+
+/// One admin server whose activation units the operator can control:
+/// its id (what a control op targets), its address, its resolver
+/// cluster's base path (the authorization scope), and its roles.
+type ServiceServer = { id: string, addr: string, base: string, roles: Array<string> };
+
+/// A unit's run state as its supervisor reports it.
+type UnitState = [`NotStarted, `Running([u32, null]), `Stopped, `Died];
+
+/// The display fields of a unit's definition.
+type ServiceUnitDef = { exe: string, args: Array<string>, trigger: string, restart: string };
+
+/// One activation unit on a server, with its definition when the
+/// supervisor has one on disk for it.
+type ServiceUnit = {
+  unit: string,
+  state: UnitState,
+  definition: [ServiceUnitDef, null]
+};
+
+/// A service-control operation. `Status` changes nothing and lists.
+type ServiceOp = [`Start, `Stop, `Restart, `Status];
+
+/// Every registered admin server running a resolver, from the CA's
+/// map — the pick list for service control.
+val list_service_servers: fn(t: Target) -> Ceremony<Array<ServiceServer>>;
+
+/// Apply `#op` to `#units` (empty: every unit) on the admin server
+/// `#server`, and return that server's per-unit states. The CA
+/// enforces the caller's service-control scopes.
+val service_control: fn(
+  #units: Array<string>,
+  #op: ServiceOp,
+  #server: string,
+  t: Target
+) -> Ceremony<Array<ServiceUnit>>;
+
+/// One permission entry: the entity's permission bits at a path.
+type PermEntry = { path: string, entity: string, bits: string };
+
+/// The permissions of the resolver cluster mounted at `#at`, one entry
+/// per (path, entity), sorted.
+val show_perms: fn(#at: string, t: Target) -> Result<Array<PermEntry>, AdminError>;
+
+/// Set (insert or replace) an entity's permission bits at a path in
+/// the cluster mounted at `#at`.
+val set_perm: fn(
+  #at: string,
+  #path: string,
+  #entity: string,
+  #bits: string,
+  t: Target
+) -> Result<RecordedEdit, AdminError>;
+
+/// Remove an entity's entry at a path. An entry that was already
+/// absent is reported (`changed: false`), not refused.
+val remove_perm: fn(
+  #at: string,
+  #path: string,
+  #entity: string,
+  t: Target
+) -> Result<RecordedEdit, AdminError>;
 
 /// Change the authenticated admin's own password. With `#new_password`
 /// null the ceremony asks for it (and its confirmation). The credential

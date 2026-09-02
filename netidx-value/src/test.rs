@@ -644,3 +644,34 @@ fn valerror_is_pointer_sized_and_stops_at_shared_arcs() {
         .join()
         .expect("shared deep error drop overflowed the stack");
 }
+
+/// Duration literals take every unit from nanoseconds to years, and a
+/// duration prints in the largest unit that measures it exactly — so
+/// each form here round-trips through the parser and the printer.
+#[test]
+fn duration_units_round_trip() {
+    let secs = |s: f64| Value::Duration(Arc::new(Duration::from_secs_f64(s)));
+    for (text, want, printed) in [
+        ("duration:250.ns", 250e-9, "250.ns"),
+        ("duration:7.us", 7e-6, "7.us"),
+        ("duration:500.ms", 0.5, "500.ms"),
+        ("duration:1.5s", 1.5, "1.5s"),
+        ("duration:90.s", 90., "90.s"),
+        ("duration:30.m", 1800., "30.m"),
+        ("duration:1800.s", 1800., "30.m"),
+        ("duration:2.h", 7200., "2.h"),
+        ("duration:1.5h", 5400., "90.m"),
+        ("duration:3.d", 259200., "3.d"),
+        ("duration:1.M", 2630016., "1.M"),
+        ("duration:2.y", 63115200., "2.y"),
+        ("duration:0.s", 0., "0.s"),
+    ] {
+        let v: Value = text.parse().unwrap_or_else(|e| panic!("{text}: {e}"));
+        assert_eq!(v, secs(want), "{text}");
+        let typed = format!("{}", v);
+        assert_eq!(typed, format!("duration:{printed}"), "{text} printed");
+        let back: Value = typed.parse().unwrap();
+        assert_eq!(back, v, "{text} round trip");
+    }
+    assert!("duration:3.w".parse::<Value>().is_err());
+}

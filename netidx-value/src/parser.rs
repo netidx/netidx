@@ -496,22 +496,65 @@ where
             .map(|d| Value::DateTime(Arc::new(d))),
         constant("duration")
             .with(flt::<_, f64>().and(choice((
-                string("ns"),
-                string("us"),
-                string("ms"),
+                attempt(string("ns")),
+                attempt(string("us")),
+                attempt(string("ms")),
                 string("s"),
+                string("m"),
+                string("h"),
+                string("d"),
+                string("M"),
+                string("y"),
             ))))
-            .map(|(n, suffix)| {
-                let d = match suffix {
-                    "ns" => Duration::from_secs_f64(n / 1e9),
-                    "us" => Duration::from_secs_f64(n / 1e6),
-                    "ms" => Duration::from_secs_f64(n / 1e3),
-                    "s" => Duration::from_secs_f64(n),
-                    _ => unreachable!(),
-                };
-                Value::Duration(Arc::new(d))
-            }),
+            .map(|(n, suffix)| Value::Duration(Arc::new(duration_of(n, suffix)))),
     )))
+}
+
+/// The seconds in a minute, hour, day, month and year — a month is
+/// 30.44 days and a year 365.25 days, humantime's conventions.
+const DURATION_UNITS: [(&str, f64); 5] =
+    [("y", 31_557_600.), ("M", 2_630_016.), ("d", 86_400.), ("h", 3_600.), ("m", 60.)];
+
+/// `n` of the duration literal unit `suffix`.
+pub fn duration_of(n: f64, suffix: &str) -> Duration {
+    match suffix {
+        "ns" => Duration::from_secs_f64(n / 1e9),
+        "us" => Duration::from_secs_f64(n / 1e6),
+        "ms" => Duration::from_secs_f64(n / 1e3),
+        "s" => Duration::from_secs_f64(n),
+        unit => match DURATION_UNITS.iter().find(|(u, _)| *u == unit) {
+            Some((_, secs)) => Duration::from_secs_f64(n * secs),
+            None => unreachable!("duration unit {unit}"),
+        },
+    }
+}
+
+/// How a duration prints: the count and the largest literal unit that
+/// measures it exactly — whole years down to whole minutes, else whole
+/// seconds, else whole milliseconds, microseconds or nanoseconds below a
+/// second — and fractional seconds when nothing does. Every form parses
+/// back to the same duration.
+pub fn duration_display(d: Duration) -> (f64, &'static str) {
+    let secs = d.as_secs_f64();
+    if secs >= 1. && secs.fract() == 0. {
+        for (unit, len) in DURATION_UNITS {
+            if secs >= len && secs % len == 0. {
+                return (secs / len, unit);
+            }
+        }
+        (secs, "s")
+    } else if secs > 0. && secs < 1. {
+        let ns = d.subsec_nanos() as f64;
+        if ns % 1e6 == 0. {
+            (ns / 1e6, "ms")
+        } else if ns % 1e3 == 0. {
+            (ns / 1e3, "us")
+        } else {
+            (ns, "ns")
+        }
+    } else {
+        (secs, "s")
+    }
 }
 
 parser! {

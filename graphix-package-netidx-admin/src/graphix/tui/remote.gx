@@ -1,10 +1,12 @@
 use package::{
-  AdminError, AdminInfo, Fingerprint, IssuedEntry, PendingDelegation, QueueItem,
-  ServerInfo, SlotKind, Target, approve, approve_delegation, approve_renewals,
+  AdminError, AdminInfo, Fingerprint, IssuedEntry, PendingDelegation, PermEntry,
+  QueueItem, ReadGate, RecordedEdit, ServerInfo, ServiceOp, ServiceServer, ServiceUnit,
+  SlotKind, Target, UnitState, approve, approve_delegation, approve_renewals,
   change_password, change_password_at, connect, deny, deny_delegation, info,
-  issued, list_admins, list_pending_delegations, list_queue, list_servers,
-  questions, reconcile_ca, remove_admin, remove_server, reset_password, result,
-  revoke
+  issued, list_admins, list_pending_delegations, list_queue,
+  list_resolver_clusters, list_servers, list_service_servers, questions,
+  reconcile_ca, remove_admin, remove_perm, remove_server, reset_password,
+  result, revoke, service_control, set_perm, set_read_gate, show_perms
 };
 use tui::{line, style};
 use tui::block::{self, *};
@@ -17,9 +19,11 @@ use tui::paragraph::{self, *};
 use tui::table::{self, *};
 use tui::text::{self, *};
 
-type PanelKind = [`Queue, `Delegations, `Roster, `Servers, `Certs];
+type PanelKind = [`Queue, `Delegations, `Roster, `Servers, `Certs, `Services, `Perms];
 
-type Screen = [`Connect, `Menu, `Panel(PanelKind)];
+type Screen = [`Connect, `Menu, `Panel(PanelKind), `ServerPick, `ClusterPick];
+
+type GateReq = [ReadGate, `ShutFor(duration)];
 
 type Act = [
   `Approve(string),
@@ -32,7 +36,11 @@ type Act = [
   `ChangeOwnPassword,
   `RemoveAdmin(string),
   `RemoveServer(string),
-  `Reconcile
+  `Reconcile,
+  `Service({ server: string, unit: string, op: ServiceOp }),
+  `Gate({ server: string, gate: GateReq }),
+  `SetPerm({ path: string, entity: string, bits: string }),
+  `RemovePerm({ path: string, entity: string })
 ];
 
 type MenuEntry = { kind: PanelKind, title: string, desc: string, keys: string };
@@ -62,14 +70,35 @@ let panels: Array<MenuEntry> = [
     kind: `Servers,
     title: "Admin Servers",
     desc: "Every CA-authoritative server identity — reconcile CA state, or permanently remove a dead node.",
-    keys: " c reconcile CA · x remove · r refresh · Esc back "
+    keys: " g read gate · c reconcile CA · x remove · r refresh · Esc back "
   },
   {
     kind: `Certs,
     title: "Issued Certificates",
     desc: "Certificates this CA has issued — revoke one to bar the holder from the admin domain.",
     keys: " x revoke · r refresh · Esc back "
+  },
+  {
+    kind: `Services,
+    title: "Services",
+    desc: "Start, stop, or restart the activation units of one admin server's resolver.",
+    keys: " s start · t stop · R restart · r refresh · Esc back "
+  },
+  {
+    kind: `Perms,
+    title: "Permissions",
+    desc: "View and edit the permissions of a resolver cluster's namespace.",
+    keys: " a add · e edit · d remove · r refresh · Esc back "
   }
+];
+
+let gate_choices: Array<{ label: string, gate: GateReq }> = [
+  { label: "Open — answer read clients", gate: `Open },
+  { label: "Shut — until someone opens the gate again", gate: `Shut },
+  { label: "Shut for 5 minutes", gate: `ShutFor(duration:300.s) },
+  { label: "Shut for 30 minutes", gate: `ShutFor(duration:1800.s) },
+  { label: "Shut for 2 hours", gate: `ShutFor(duration:7200.s) },
+  { label: "Shut for 8 hours", gate: `ShutFor(duration:28800.s) }
 ];
 
 let admin_text = |a: AdminError| -> string select a {
@@ -88,6 +117,56 @@ let fmt_age = |secs: u64| -> string select secs {
 let fmt_slot = |k: SlotKind| -> string select k {
   `Signing => "signing",
   `Role => "role"
+};
+
+let fmt_dur = |d: duration| -> string fmt_age(cast<u64>(d)$);
+
+let gate_label = |g: [ReadGate, null], now: datetime| -> string select g {
+  null as _ => "-",
+  `Open => "open",
+  `Shut => "shut",
+  `Until(t) if t > now => "shut [fmt_dur(sys::time::diff(t, now))]",
+  `Until(_) => "open (expired)"
+};
+
+let gate_detail = |g: [ReadGate, null]| -> string select g {
+  null as _ => "no resolver, so no read gate",
+  `Open => "open — answering read clients",
+  `Shut => "shut — refusing read clients until opened",
+  `Until(t) => "shut — refusing read clients until [t]"
+};
+
+// what a gate change risks, or null when it changes nothing worth a stop
+let gate_warning = |s: ServerInfo, gate: GateReq, now: datetime| -> [string, null] {
+  let who = "[s.id] at [s.addr]";
+  select (gate, s.read_gate) {
+    (`Open, `Until(t)) if t > now =>
+      "Start [who] answering read clients [fmt_dur(sys::time::diff(t, now))] early?\n\nIt is waiting for publishers to find it. Anything that has not been republished yet will look absent to subscribers resolving through it.",
+    (`Open, `Shut) =>
+      "Start [who] answering read clients?\n\nIt will answer from whatever it holds now. If it was taken out of service, that may be a stale picture of the namespace.",
+    (`Open, _) => null,
+    (`Shut, _) =>
+      "Stop [who] answering read clients?\n\nSubscribers stop resolving through it until someone opens the gate again. Publishers keep writing to it, so its records stay fresh — it just stops answering.",
+    (`ShutFor(d), _) =>
+      "Stop [who] answering read clients for [fmt_dur(d)]?\n\nSubscribers stop resolving through it until then. Publishers keep writing to it, so its records stay fresh — it just stops answering.",
+    (`Until(t), _) =>
+      "Stop [who] answering read clients until [t]?\n\nSubscribers stop resolving through it until then. Publishers keep writing to it, so its records stay fresh — it just stops answering."
+  }
+};
+
+let fmt_unit_state = |st: UnitState| -> string select st {
+  `NotStarted => "not started",
+  `Running(null) => "running",
+  `Running(pid) => "running (pid [pid])",
+  `Stopped => "stopped",
+  `Died => "died"
+};
+
+let fmt_service_op = |op: ServiceOp| -> string select op {
+  `Start => "Started",
+  `Stop => "Stopped",
+  `Restart => "Restarted",
+  `Status => "Listed"
 };
 
 let opt_len = |o: [Array<'a>, null]| -> i64 select o {
@@ -132,6 +211,16 @@ let remote = |#q: &Question, #server: string = ""| -> Remote {
   let menu_sel = 0;
   let row_sel = 0;
   let toast: [Toast, null] = null;
+  let pick_sel = 0;
+  let service_server: [ServiceServer, null] = null;
+  let perms_at: [string, null] = null;
+  let gate_for: [ServerInfo, null] = null;
+  let gate_sel = 0;
+  let perm_form: [`Add, `Edit, null] = null;
+  let pf_path = line_edit::state("");
+  let pf_entity = line_edit::state("");
+  let pf_bits = line_edit::state("");
+  let pf_focus = 0;
   let chpw_at_c = change_password_at(
     #admin: must_change,
     #glyph: must_change ~ glyph,
@@ -174,10 +263,36 @@ let remote = |#q: &Question, #server: string = ""| -> Remote {
     x@ `Roster => list_admins(x ~ target),
     _ => never()
   };
+  let units_c = select load {
+    x@ `Services => select x ~ service_server {
+      null as _ => never(),
+      s => service_control(#units: [], #op: `Status, #server: s.id, x ~ target)
+    },
+    _ => never()
+  };
+  let perms_r: Result<Array<PermEntry>, AdminError> = select load {
+    x@ `Perms => select x ~ perms_at {
+      null as _ => never(),
+      at => show_perms(#at: at, x ~ target)
+    },
+    _ => never()
+  };
+  // ── the pick screens' lists ──
+  let pick: [`Servers, `Clusters] = never();
+  let svc_servers_c = select pick {
+    x@ `Servers => list_service_servers(x ~ target),
+    _ => never()
+  };
+  let clusters_r: Result<Array<string>, AdminError> = select pick {
+    x@ `Clusters => list_resolver_clusters(x ~ target),
+    _ => never()
+  };
   *q <- questions(queue_c);
   *q <- questions(deleg_c);
   *q <- questions(servers_c);
   *q <- questions(certs_c);
+  *q <- questions(units_c);
+  *q <- questions(svc_servers_c);
   let queue_rows: [Array<QueueItem>, null] = null;
   {
     catch(e) fail("Loading the queue failed", (e.0).error);
@@ -203,6 +318,29 @@ let remote = |#q: &Question, #server: string = ""| -> Remote {
     catch(e) fail("Loading the roster failed", (e.0).error);
     roster_rows <- roster_r?
   };
+  let unit_rows: [Array<ServiceUnit>, null] = null;
+  {
+    catch(e) fail("Listing the services failed", (e.0).error);
+    unit_rows <- result(units_c)?
+  };
+  let perm_rows: [Array<PermEntry>, null] = null;
+  {
+    catch(e) fail("Loading the permissions failed", (e.0).error);
+    perm_rows <- perms_r?
+  };
+  let svc_servers: [Array<ServiceServer>, null] = null;
+  {
+    catch(e) fail("Listing the resolver servers failed", (e.0).error);
+    svc_servers <- result(svc_servers_c)?
+  };
+  let clusters: [Array<string>, null] = null;
+  {
+    catch(e) fail("Listing the resolver clusters failed", (e.0).error);
+    clusters <- clusters_r?
+  };
+  // the servers table's clock: "shut for another 29m" is relative to
+  // when the rows arrived
+  let now = sys::time::now(server_rows);
   // ── the selected row's action key, per panel ──
   let queue_code: [string, null] = select queue_rows {
     null as _ => null,
@@ -245,6 +383,30 @@ let remote = |#q: &Question, #server: string = ""| -> Remote {
           false => s.id
         }
       }
+    }
+  };
+  let server_sel: [ServerInfo, null] = select server_rows {
+    null as _ => null,
+    rows => select array::len(rows) {
+      0 => null,
+      n => rows[min(row_sel, n - 1)]$
+    }
+  };
+  let unit_sel: [{ server: string, unit: string }, null] = select service_server {
+    null as _ => null,
+    s => select unit_rows {
+      null as _ => null,
+      rows => select array::len(rows) {
+        0 => null,
+        n => { server: s.id, unit: (rows[min(row_sel, n - 1)]$).unit }
+      }
+    }
+  };
+  let perm_sel: [PermEntry, null] = select perm_rows {
+    null as _ => null,
+    rows => select array::len(rows) {
+      0 => null,
+      n => rows[min(row_sel, n - 1)]$
     }
   };
   let cert_serial: [string, null] = select cert_rows {
@@ -300,6 +462,28 @@ let remote = |#q: &Question, #server: string = ""| -> Remote {
     x@ `Reconcile => reconcile_ca(x ~ target),
     _ => never()
   };
+  let svc_c = select run {
+    `Service(a) => service_control(#units: [a.unit], #op: a.op, #server: a.server, a ~ target),
+    _ => never()
+  };
+  let gate_c = select run {
+    `Gate(a) => set_read_gate(#server: a.server, a.gate, a ~ target),
+    _ => never()
+  };
+  let setperm_r: Result<RecordedEdit, AdminError> = select run {
+    `SetPerm(e) => select e ~ perms_at {
+      null as _ => never(),
+      at => set_perm(#at: at, #path: e.path, #entity: e.entity, #bits: e.bits, e ~ target)
+    },
+    _ => never()
+  };
+  let rmperm_r: Result<RecordedEdit, AdminError> = select run {
+    `RemovePerm(e) => select e ~ perms_at {
+      null as _ => never(),
+      at => remove_perm(#at: at, #path: e.path, #entity: e.entity, e ~ target)
+    },
+    _ => never()
+  };
   *q <- questions(approve_c);
   *q <- questions(deny_c);
   *q <- questions(renewals_c);
@@ -309,6 +493,8 @@ let remote = |#q: &Question, #server: string = ""| -> Remote {
   *q <- questions(chpw_c);
   *q <- questions(rmserver_c);
   *q <- questions(reconcile_c);
+  *q <- questions(svc_c);
+  *q <- questions(gate_c);
   // ── action outcomes: toast the summary, then refresh the panel ──
   {
     catch(e) fail("Approve failed", (e.0).error);
@@ -435,6 +621,47 @@ let remote = |#q: &Question, #server: string = ""| -> Remote {
     toast <- { title: "Reconciled", lines, error: false };
     load <- r ~ `Servers
   };
+  {
+    catch(e) fail("Service control failed", (e.0).error);
+    let units = result(svc_c)?;
+    let verb = select run { `Service(a) => fmt_service_op(a.op), _ => "Applied" };
+    toast <- {
+      title: units ~ verb,
+      lines: array::map(units, |u| "[u.unit]: [fmt_unit_state(u.state)]"),
+      error: false
+    };
+    load <- units ~ `Services
+  };
+  {
+    catch(e) fail("Setting the read gate failed", (e.0).error);
+    let r = result(gate_c)?;
+    toast <- r ~ {
+      title: "Read gate set",
+      lines: ["The member applies it at its next register; the Servers panel shows what it reports."],
+      error: false
+    };
+    load <- r ~ `Servers
+  };
+  {
+    catch(e) fail("Recording the permission failed", (e.0).error);
+    let r = setperm_r?;
+    let what = select r.changed {
+      true => "Recorded as version [r.version]. Every member of the cluster converges within a poll interval.",
+      false => "Already so — nothing changed (version [r.version])."
+    };
+    toast <- { title: "Permissions updated", lines: [what], error: false };
+    load <- r ~ `Perms
+  };
+  {
+    catch(e) fail("Removing the permission failed", (e.0).error);
+    let r = rmperm_r?;
+    let what = select r.changed {
+      true => "Removed; recorded as version [r.version].",
+      false => "There was no such entry (version [r.version])."
+    };
+    toast <- { title: "Permissions updated", lines: [what], error: false };
+    load <- r ~ `Perms
+  };
   // ── key handling ──
   let panel_last: i64 = select screen {
     `Connect => 0,
@@ -443,7 +670,16 @@ let remote = |#q: &Question, #server: string = ""| -> Remote {
     `Panel(`Delegations) => max(0, opt_len(deleg_rows) - 1),
     `Panel(`Roster) => max(0, opt_len(roster_rows) - 1),
     `Panel(`Servers) => max(0, opt_len(server_rows) - 1),
-    `Panel(`Certs) => max(0, opt_len(cert_rows) - 1)
+    `Panel(`Certs) => max(0, opt_len(cert_rows) - 1),
+    `Panel(`Services) => max(0, opt_len(unit_rows) - 1),
+    `Panel(`Perms) => max(0, opt_len(perm_rows) - 1),
+    `ServerPick => 0,
+    `ClusterPick => 0
+  };
+  let pick_last: i64 = select screen {
+    `ServerPick => max(0, opt_len(svc_servers) - 1),
+    `ClusterPick => max(0, opt_len(clusters) - 1),
+    _ => 0
   };
   let connect_keys = |ev: Event, k: KeyEvent| -> [`Stop, `Continue] select k.code {
     kk@ `Enter => {
@@ -463,12 +699,52 @@ let remote = |#q: &Question, #server: string = ""| -> Remote {
     },
     kk@ `Enter => {
       let p = (panels[kk ~ menu_sel]$).kind;
-      screen <- `Panel(p);
-      load <- p;
+      select p {
+        `Services => { screen <- `ServerPick; pick <- `Servers },
+        `Perms => { screen <- `ClusterPick; pick <- `Clusters },
+        _ => { screen <- `Panel(p); load <- p }
+      };
       row_sel <- p ~ 0;
+      pick_sel <- p ~ 0;
       `Stop
     },
     kk@ `Esc => { screen <- kk ~ `Connect; `Stop },
+    _ => `Continue
+  };
+  let pick_keys = |k: KeyEvent| -> [`Stop, `Continue] select k.code {
+    `Up | `Char("k") => { pick_sel <- max(0, (k ~ pick_sel) - 1); `Stop },
+    `Down | `Char("j") => { pick_sel <- min(k ~ pick_last, (k ~ pick_sel) + 1); `Stop },
+    kk@ `Esc => { screen <- kk ~ `Menu; `Stop },
+    kk@ `Enter => {
+      let i = kk ~ pick_sel;
+      select kk ~ (screen, svc_servers, clusters) {
+        (`ServerPick, rows, _) => select rows {
+          null as _ => never(),
+          rows => select array::len(rows) {
+            0 => never(),
+            n => {
+              service_server <- rows[min(i, n - 1)]$;
+              screen <- `Panel(`Services);
+              load <- `Services
+            }
+          }
+        },
+        (`ClusterPick, _, bases) => select bases {
+          null as _ => never(),
+          bases => select array::len(bases) {
+            0 => never(),
+            n => {
+              perms_at <- bases[min(i, n - 1)]$;
+              screen <- `Panel(`Perms);
+              load <- `Perms
+            }
+          }
+        },
+        _ => never()
+      };
+      row_sel <- kk ~ 0;
+      `Stop
+    },
     _ => `Continue
   };
   let queue_keys = |k: KeyEvent| -> [`Stop, `Continue] select k.code {
@@ -538,6 +814,20 @@ let remote = |#q: &Question, #server: string = ""| -> Remote {
   };
   let server_keys = |k: KeyEvent| -> [`Stop, `Continue] select k.code {
     kk@ `Char("c") => { run <- kk ~ `Reconcile; `Stop },
+    kk@ `Char("g") => {
+      select kk ~ server_sel {
+        null as _ => never(),
+        s => select s.resolver {
+          null as _ => toast <- {
+            title: "No read gate",
+            lines: ["[s.id] runs no resolver, so it has no read gate to set."],
+            error: true
+          },
+          _ => { gate_for <- s; gate_sel <- 0 }
+        }
+      };
+      `Stop
+    },
     kk@ `Char("x") => {
       select kk ~ server_id {
         null as _ => never(),
@@ -563,6 +853,53 @@ let remote = |#q: &Question, #server: string = ""| -> Remote {
     },
     _ => `Continue
   };
+  let service_act = |kk: Any, op: ServiceOp| -> null {
+    select kk ~ unit_sel {
+      null as _ => never(),
+      u => run <- `Service({ server: u.server, unit: u.unit, op })
+    };
+    null
+  };
+  let services_keys = |k: KeyEvent| -> [`Stop, `Continue] select k.code {
+    kk@ `Char("s") => { service_act(kk, `Start); `Stop },
+    kk@ `Char("t") => { service_act(kk, `Stop); `Stop },
+    kk@ `Char("R") => { service_act(kk, `Restart); `Stop },
+    _ => `Continue
+  };
+  let perms_keys = |k: KeyEvent| -> [`Stop, `Continue] select k.code {
+    kk@ `Char("a") => {
+      pf_path <- line_edit::state(kk ~ "/");
+      pf_entity <- line_edit::state(kk ~ "");
+      pf_bits <- line_edit::state(kk ~ "");
+      pf_focus <- kk ~ 0;
+      perm_form <- kk ~ `Add;
+      `Stop
+    },
+    kk@ `Char("e") => {
+      select kk ~ perm_sel {
+        null as _ => never(),
+        r => {
+          pf_path <- line_edit::state(r.path);
+          pf_entity <- line_edit::state(r.entity);
+          pf_bits <- line_edit::state(r.bits);
+          pf_focus <- r ~ 2;
+          perm_form <- r ~ `Edit
+        }
+      };
+      `Stop
+    },
+    kk@ `Char("d") => {
+      select kk ~ perm_sel {
+        null as _ => never(),
+        r => confirm <- {
+          message: "Remove [r.entity]'s permissions at [r.path]?",
+          action: `RemovePerm({ path: r.path, entity: r.entity })
+        }
+      };
+      `Stop
+    },
+    _ => `Continue
+  };
   let panel_keys = |k: KeyEvent, p: PanelKind| -> [`Stop, `Continue] select k.code {
     kk@ `Esc => { screen <- kk ~ `Menu; `Stop },
     kk@ `Char("r") => { load <- kk ~ p; `Stop },
@@ -576,7 +913,9 @@ let remote = |#q: &Question, #server: string = ""| -> Remote {
       `Delegations => deleg_keys(k),
       `Roster => roster_keys(k),
       `Servers => server_keys(k),
-      `Certs => cert_keys(k)
+      `Certs => cert_keys(k),
+      `Services => services_keys(k),
+      `Perms => perms_keys(k)
     }
   };
   let handle = |e: Event| -> [`Stop, `Continue] select e {
@@ -584,11 +923,63 @@ let remote = |#q: &Question, #server: string = ""| -> Remote {
       `Press => select screen {
         `Connect => connect_keys(ev, k),
         `Menu => menu_keys(k),
-        `Panel(p) => panel_keys(k, p)
+        `Panel(p) => panel_keys(k, p),
+        `ServerPick => pick_keys(k),
+        `ClusterPick => pick_keys(k)
       },
       _ => `Continue
     },
     _ => `Continue
+  };
+  // ── the read-gate chooser and the permission form ──
+  let gate_handle = |e: Event| -> [`Stop, `Continue] select e {
+    `Key(k) => select k.kind {
+      `Press => select k.code {
+        `Up | `Char("k") => { gate_sel <- max(0, (k ~ gate_sel) - 1); `Stop },
+        `Down | `Char("j") => {
+          gate_sel <- min(array::len(gate_choices) - 1, (k ~ gate_sel) + 1);
+          `Stop
+        },
+        kk@ `Enter => {
+          let g = (gate_choices[kk ~ gate_sel]$).gate;
+          let at = kk ~ now;
+          select kk ~ gate_for {
+            null as _ => never(),
+            s => select gate_warning(s, g, at) {
+              null as _ => run <- `Gate({ server: s.id, gate: g }),
+              w => confirm <- { message: w, action: `Gate({ server: s.id, gate: g }) }
+            }
+          };
+          gate_for <- kk ~ null;
+          `Stop
+        },
+        kk@ `Esc => { gate_for <- kk ~ null; `Stop },
+        _ => `Stop
+      },
+      _ => `Stop
+    },
+    _ => `Stop
+  };
+  let perm_form_handle = |e: Event| -> [`Stop, `Continue] select e {
+    ev@ `Key(k) => select k.kind {
+      `Press => select k.code {
+        `Tab | `Down => { pf_focus <- (k ~ pf_focus + 1) % 3; `Stop },
+        `BackTab | `Up => { pf_focus <- (k ~ pf_focus + 2) % 3; `Stop },
+        kk@ `Enter => {
+          run <- kk ~ `SetPerm({ path: pf_path.value, entity: pf_entity.value, bits: pf_bits.value });
+          perm_form <- kk ~ null;
+          `Stop
+        },
+        kk@ `Esc => { perm_form <- kk ~ null; `Stop },
+        _ => select pf_focus {
+          0 => line_edit::handle(&pf_path, ev),
+          1 => line_edit::handle(&pf_entity, ev),
+          _ => line_edit::handle(&pf_bits, ev)
+        }
+      },
+      _ => `Stop
+    },
+    _ => `Stop
   };
   // ── the confirm and toast modals ──
   let confirm_handle = |e: Event| -> [`Stop, `Continue] select e {
@@ -659,7 +1050,63 @@ let remote = |#q: &Question, #server: string = ""| -> Remote {
       )
     }
   };
+  let gate_widget = select gate_for {
+    null as _ => paragraph(&""),
+    s => {
+      let items = array::map(gate_choices, |c| line(c.label));
+      let detail: Array<tui::Line> = [
+        line(#style: hint, "server: [s.id] at [s.addr]"),
+        line(#style: hint, "now: [gate_detail(s.read_gate)]")
+      ];
+      block(
+        #border: &`All,
+        #title: &line("Read gate"),
+        #title_bottom: &line(#style: hint, " ↑/↓ move · Enter choose · Esc back "),
+        &layout(#direction: &`Vertical, &[
+          child(#constraint: `Length(2), paragraph(#trim: &false, &detail)),
+          child(#constraint: `Min(1),
+            list(#highlight_style: &selstyle, #selected: &gate_sel, &items))
+        ])
+      )
+    }
+  };
+  let perm_form_widget = select perm_form {
+    null as _ => paragraph(&""),
+    mode => {
+      let title = select mode {
+        `Add => "Add a permission entry",
+        `Edit => "Edit permission bits"
+      };
+      let field = |label: string, i: i64, st: &line_edit::State| -> tui::Tui
+        layout(#direction: &`Horizontal, &[
+          child(#constraint: `Length(9), text(&[line(#style: hint, "[label]:")])),
+          child(#constraint: `Min(1), text(&[line_edit::view(#focused: pf_focus == i, st)]))
+        ]);
+      block(
+        #border: &`All,
+        #title: &line(title),
+        #title_bottom: &line(#style: hint, " Tab next field · Enter record · Esc cancel "),
+        &layout(#direction: &`Vertical, &[
+          child(#constraint: `Length(2), paragraph(#style: &hint,
+            &"Bits are a permission string such as swlpd; an empty entity is anonymous.")),
+          child(#constraint: `Length(1), field("path", 0, &pf_path)),
+          child(#constraint: `Length(1), field("entity", 1, &pf_entity)),
+          child(#constraint: `Length(1), field("bits", 2, &pf_bits))
+        ])
+      )
+    }
+  };
   let layers: Array<Layer> = {
+    let gl: Array<Layer> = select gate_for {
+      null as _ => [],
+      _ => [layer(#width: &`Percentage(60), #height: &`Percentage(50),
+        input_handler(#handle: &gate_handle, &gate_widget))]
+    };
+    let pl: Array<Layer> = select perm_form {
+      null as _ => [],
+      _ => [layer(#width: &`Percentage(60), #height: &`Percentage(40),
+        input_handler(#handle: &perm_form_handle, &perm_form_widget))]
+    };
     let cl: Array<Layer> = select confirm {
       null as _ => [],
       _ => [layer(#width: &`Percentage(60), #height: &`Percentage(50),
@@ -670,7 +1117,7 @@ let remote = |#q: &Question, #server: string = ""| -> Remote {
       _ => [layer(#width: &`Percentage(60), #height: &`Percentage(50),
         input_handler(#handle: &toast_handle, &toast_widget))]
     };
-    array::concat(cl, tl)
+    array::concat(gl, pl, cl, tl)
   };
   // ── views ──
   let conn_err_lines: Array<tui::Line> = select conn_err {
@@ -835,20 +1282,28 @@ let remote = |#q: &Question, #server: string = ""| -> Remote {
         cell(line(s.id)),
         cell(line(s.addr)),
         cell(line(roles)),
-        cell(line(tag))
+        cell(line(tag)),
+        cell(line(gate_label(s.read_gate, now)))
       ])
     })
   };
-  let servers_view = table(
-    #header: &row(#style: bold, [
-      cell(line("Cluster")), cell(line("Id")), cell(line("Address")),
-      cell(line("Roles")), cell(line("State"))
-    ]),
-    #row_highlight_style: &selstyle,
-    #selected: &row_sel,
-    #widths: &[`Percentage(20), `Percentage(25), `Length(22), `Length(20), `Percentage(15)],
-    &server_trs
-  );
+  let server_detail: Array<tui::Line> = select server_sel {
+    null as _ => [],
+    s => [line(#style: hint, "read gate: [gate_detail(s.read_gate)]")]
+  };
+  let servers_view = layout(#direction: &`Vertical, &[
+    child(#constraint: `Min(3), table(
+      #header: &row(#style: bold, [
+        cell(line("Cluster")), cell(line("Id")), cell(line("Address")),
+        cell(line("Roles")), cell(line("State")), cell(line("Gate"))
+      ]),
+      #row_highlight_style: &selstyle,
+      #selected: &row_sel,
+      #widths: &[`Percentage(18), `Percentage(24), `Length(22), `Length(18), `Percentage(12), `Length(14)],
+      &server_trs
+    )),
+    child(#constraint: `Length(1), text(&server_detail))
+  ]);
   let cert_trs: Array<&Row> = select cert_rows {
     null as _ => [],
     rows => array::map(rows, |c| {
@@ -875,6 +1330,101 @@ let remote = |#q: &Question, #server: string = ""| -> Remote {
     #widths: &[`Length(10), `Percentage(40), `Length(22), `Length(10)],
     &cert_trs
   );
+  let unit_trs: Array<&Row> = select unit_rows {
+    null as _ => [],
+    rows => array::map(rows, |u| {
+      let (exe, trigger, restart) = select u.definition {
+        null as _ => ("(no definition on disk)", "", ""),
+        d => (str::join(#sep: " ", array::push_front(d.args, d.exe)), d.trigger, d.restart)
+      };
+      &row([
+        cell(line(u.unit)),
+        cell(line(fmt_unit_state(u.state))),
+        cell(line(exe)),
+        cell(line(trigger)),
+        cell(line(restart))
+      ])
+    })
+  };
+  let services_view = {
+    let header: Array<tui::Line> = select service_server {
+      null as _ => [],
+      s => [line(#style: bold, "Services @ [s.addr] ([s.id]) · [s.base]")]
+    };
+    layout(#direction: &`Vertical, &[
+      child(#constraint: `Length(1), text(&header)),
+      child(#constraint: `Min(3), table(
+        #header: &row(#style: bold, [
+          cell(line("Unit")), cell(line("State")), cell(line("Command")),
+          cell(line("Trigger")), cell(line("Restart"))
+        ]),
+        #row_highlight_style: &selstyle,
+        #selected: &row_sel,
+        #widths: &[`Percentage(20), `Length(20), `Percentage(40), `Length(12), `Length(10)],
+        &unit_trs
+      ))
+    ])
+  };
+  let perm_trs: Array<&Row> = select perm_rows {
+    null as _ => [],
+    rows => array::map(rows, |e| {
+      let entity = select e.entity {
+        "" => "(anonymous)",
+        n => n
+      };
+      &row([cell(line(e.path)), cell(line(entity)), cell(line(e.bits))])
+    })
+  };
+  let perms_view = {
+    let header: Array<tui::Line> = select perms_at {
+      null as _ => [],
+      at => [line(#style: bold, "Permissions of the cluster at [at]")]
+    };
+    let body: Array<tui::Line> = select perm_rows {
+      null as _ => [],
+      [] => [line(#style: hint, "(no permissions set)")],
+      _ => []
+    };
+    layout(#direction: &`Vertical, &[
+      child(#constraint: `Length(1), text(&header)),
+      child(#constraint: `Length(1), text(&body)),
+      child(#constraint: `Min(3), table(
+        #header: &row(#style: bold, [
+          cell(line("Path")), cell(line("Entity")), cell(line("Bits"))
+        ]),
+        #row_highlight_style: &selstyle,
+        #selected: &row_sel,
+        #widths: &[`Percentage(50), `Percentage(35), `Length(10)],
+        &perm_trs
+      ))
+    ])
+  };
+  let server_pick_view = {
+    let items: Array<tui::Line> = select svc_servers {
+      null as _ => [line(#style: hint, "listing the admin domain's resolver servers…")],
+      [] => [line(#style: hint, "no registered admin server runs a resolver")],
+      rows => array::map(rows, |s| line("[s.addr]  [s.id]  [s.base]"))
+    };
+    block(
+      #border: &`All,
+      #title: &line("Pick an admin server"),
+      #title_bottom: &line(#style: hint, " ↑/↓ move · Enter open · Esc back "),
+      &list(#highlight_style: &selstyle, #selected: &pick_sel, &items)
+    )
+  };
+  let cluster_pick_view = {
+    let items: Array<tui::Line> = select clusters {
+      null as _ => [line(#style: hint, "listing the admin domain's resolver clusters…")],
+      [] => [line(#style: hint, "no active resolver cluster")],
+      bases => array::map(bases, |b| line(b))
+    };
+    block(
+      #border: &`All,
+      #title: &line("Pick a resolver cluster"),
+      #title_bottom: &line(#style: hint, " ↑/↓ move · Enter open · Esc back "),
+      &list(#highlight_style: &selstyle, #selected: &pick_sel, &items)
+    )
+  };
   let panel_view = |p: PanelKind, w: tui::Tui| -> tui::Tui {
     let m = panels[0]$;
     let entry = select array::find(panels, |e| e.kind == p) {
@@ -890,11 +1440,17 @@ let remote = |#q: &Question, #server: string = ""| -> Remote {
     `Panel(`Delegations) => panel_view(`Delegations, deleg_view),
     `Panel(`Roster) => panel_view(`Roster, roster_view),
     `Panel(`Servers) => panel_view(`Servers, servers_view),
-    `Panel(`Certs) => panel_view(`Certs, certs_view)
+    `Panel(`Certs) => panel_view(`Certs, certs_view),
+    `Panel(`Services) => panel_view(`Services, services_view),
+    `Panel(`Perms) => panel_view(`Perms, perms_view),
+    `ServerPick => server_pick_view,
+    `ClusterPick => cluster_pick_view
   };
   let status: tui::Line = select screen {
     `Connect => line(#style: hint, " type an address · Enter connect "),
     `Menu => line(#style: hint, " ↑/↓ move · Enter open · Esc disconnect "),
+    `ServerPick => line(#style: hint, " ↑/↓ move · Enter open · Esc back "),
+    `ClusterPick => line(#style: hint, " ↑/↓ move · Enter open · Esc back "),
     `Panel(p) => {
       let m = panels[0]$;
       let entry = select array::find(panels, |e| e.kind == p) {

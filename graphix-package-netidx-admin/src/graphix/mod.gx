@@ -43,6 +43,12 @@ let deny_delegation = |#reason: [string, null] = null, #code: string, t: Target|
 let list_servers = |t: Target| -> Ceremony<Array<ServerInfo>> 'netidx_admin_list_servers;
 let remove_server = |id: string, t: Target| -> Ceremony<RemoveServerOutcome> 'netidx_admin_remove_server;
 let reconcile_ca = |t: Target| -> Ceremony<ReconcileOutcome> 'netidx_admin_reconcile_ca;
+let set_read_gate = |#server: string, gate: [ReadGate, `ShutFor(duration)], t: Target| -> Ceremony<null> 'netidx_admin_set_read_gate;
+let list_service_servers = |t: Target| -> Ceremony<Array<ServiceServer>> 'netidx_admin_list_service_servers;
+let service_control = |#units: Array<string>, #op: ServiceOp, #server: string, t: Target| -> Ceremony<Array<ServiceUnit>> 'netidx_admin_service_control;
+let show_perms = |#at: string, t: Target| -> Result<Array<PermEntry>, AdminError> 'netidx_admin_show_perms;
+let set_perm = |#at: string, #path: string, #entity: string, #bits: string, t: Target| -> Result<RecordedEdit, AdminError> 'netidx_admin_set_perm;
+let remove_perm = |#at: string, #path: string, #entity: string, t: Target| -> Result<RecordedEdit, AdminError> 'netidx_admin_remove_perm;
 let change_password = |#new_password: [string, null] = null, t: Target| -> Ceremony<null> 'netidx_admin_change_password;
 let list_resolver_clusters = |t: Target| -> Result<Array<string>, AdminError> 'netidx_admin_list_resolver_clusters;
 let show_id_map = |t: Target| -> Result<IdMap, AdminError> 'netidx_admin_show_id_map;

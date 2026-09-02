@@ -138,8 +138,12 @@ impl Value {
             Value::Decimal(v) => write!(f, "{}", DecimalFmt(**v)),
             Value::DateTime(v) => write!(f, "{}", v),
             Value::Duration(v) => {
-                let v = v.as_secs_f64();
-                if v.fract() == 0. { write!(f, "{}.s", v) } else { write!(f, "{}s", v) }
+                let (n, unit) = parser::duration_display(**v);
+                if n.fract() == 0. {
+                    write!(f, "{n}.{unit}")
+                } else {
+                    write!(f, "{n}{unit}")
+                }
             }
             Value::String(s) => write!(f, "\"{}\"", parser::VAL_ESC.escape(s)),
             Value::Bytes(b) => write!(f, "{}", BASE64.encode(b)),
@@ -300,11 +304,11 @@ impl Value {
                 }
                 Value::Duration(v) => {
                     let pfx = if types { "duration:" } else { "" };
-                    let v = v.as_secs_f64();
-                    if v.fract() == 0. {
-                        write!(f, r#"{}{}.s"#, pfx, v)
+                    let (n, unit) = parser::duration_display(**v);
+                    if n.fract() == 0. {
+                        write!(f, "{pfx}{n}.{unit}")
                     } else {
-                        write!(f, r#"{}{}s"#, pfx, v)
+                        write!(f, "{pfx}{n}{unit}")
                     }
                 }
                 Value::String(s) => {

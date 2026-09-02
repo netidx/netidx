@@ -656,3 +656,52 @@ whether a connect asks the gesture at all depends on whether the
 domain's cert is the user CA dir's (`resolve_identity` verifies against
 the local CA silently), which the fixture now reports as
 `gesture_expected` so the TUI tests branch on it instead of assuming.
+
+## 2026-09-02 — "shut for another 29m": datetime − datetime, and what durations look like
+
+The servers panel's read-gate column wants "how long until this member
+answers again" — `until − now`. `datetime - datetime` is refused by the
+typechecker ("Number does not contain datetime"), and that is the
+2026-07-12 ruling working as designed: arithmetic is
+`fn('a: Number, 'a) -> 'a` and datetime/duration arithmetic lives in
+`sys::time` functions. But `sys::time` had `add`/`sub` (datetime ±
+duration), `add_dur`/`sub_dur`, `scale` — and no datetime − datetime,
+the one every elapsed/remaining computation needs. Three more things
+surfaced on the same probe: the five `sys::time` functions were pure
+`Sync` builtins without fast fns (missed by the 09-02 fastcall sweep —
+their fixtures were annotated `None`, which is why nothing flagged it);
+duration literals accept only `ns`/`us`/`ms`/`s`, so `duration:3.h` is
+an opaque "Unexpected `(`" parse error two tokens away; and a duration
+interpolates as `1800.s`, so a TUI formats its own "30m".
+
+**Disposition: `sys::time::diff(later, earlier) -> duration` added
+(saturating at zero — durations are unsigned), the five time functions
+given fast fns, their fixtures flipped to `Jit` plus two `diff` pins
+(graphix). The literal units and the duration format are consciously
+accepted for this slice (the panel writes seconds and formats in
+graphix) and noted for the parser: minute/hour units would read
+better, and an unknown unit deserves a diagnostic that names it. Eric
+raised the real question — arithmetic as traits, like `Eq`/`Ord` — and
+the answer is "after traits v2": `datetime - datetime -> duration` is
+heterogeneous, which needs trait type parameters and an associated
+`Output`, neither of which traits v1 has; a homogeneous `Arith` trait
+would cover only duration + duration.**
+
+## 2026-09-02 — `never()` arms leave a select's type open (third sighting, an idiom to name)
+
+The perms panel's `let r = setperm_r?; r.changed` was refused with
+"expected struct not `['_a, '_b, {changed, version}]`": `setperm_r` is
+a `select run { `SetPerm(e) => … set_perm(…), _ => never() }` with a
+nested `null as _ => never()`, `never()` is `fn() -> 'a`, and by the
+free-member rule a select's type is the union of its arms with free
+members kept free — so the value carries two unbound members and a
+field access cannot pick the struct. The three earlier result selects
+in the same file (`roster_r`, `resetpw_r`, `rmadmin_r`) never touched
+a field, which is the only reason they compiled. **Disposition: the
+documented answer — annotate the binding (`let setperm_r:
+Result<RecordedEdit, AdminError> = select …`) — applied to the four
+result selects; consciously accepted, and worth a line in the book's
+select chapter: a `never()` arm needs the binding annotated when the
+value's shape is used downstream.** The alternative, `never()` typed as
+an absorbed bottom rather than a fresh variable, is a typing ruling for
+another day.

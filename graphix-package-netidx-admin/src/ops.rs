@@ -25,12 +25,14 @@ use graphix_compiler::{
     effects::EffectKind, errf, expr::ExprId, typ::FnType,
 };
 use graphix_package_core::{CachedArgsAsync, CachedVals, EvalCachedAsync};
+use netidx::resolver_server::config::ReadGate;
 use netidx_admin::{
     discovery,
     ops::{self, AdminTarget, RecordedEdit},
 };
 use netidx_admin_proto::{
-    AdminServerId, PeerResult, Role, Secret, fingerprint::Fingerprint, policy::Policy,
+    AdminServerId, PeerResult, Role, Secret, ServiceUnit, ServiceUnitDef,
+    fingerprint::Fingerprint, policy::Policy,
 };
 use netidx_derive::{FromValue, IntoValue};
 use netidx_value::{FromValue, Value};
@@ -230,7 +232,151 @@ struct ServerInfoV {
     cluster_base: Option<String>,
     cluster_state: Option<String>,
     ca: bool,
-    read_gate: String,
+    read_gate: Option<ReadGateV>,
+}
+
+/// A read gate as a server reports it.
+#[derive(Debug, Clone, IntoValue)]
+enum ReadGateV {
+    Open,
+    Shut,
+    Until(chrono::DateTime<chrono::Utc>),
+}
+
+impl From<ReadGate> for ReadGateV {
+    fn from(g: ReadGate) -> Self {
+        match g {
+            ReadGate::No => ReadGateV::Open,
+            ReadGate::Yes => ReadGateV::Shut,
+            ReadGate::Until(t) => ReadGateV::Until(t),
+        }
+    }
+}
+
+/// A gate to set: the reported forms, or shut for a while from now.
+#[derive(Debug, Clone, FromValue)]
+enum GateRequestV {
+    Open,
+    Shut,
+    Until(chrono::DateTime<chrono::Utc>),
+    ShutFor(Duration),
+}
+
+impl TryFrom<GateRequestV> for ReadGate {
+    type Error = anyhow::Error;
+
+    fn try_from(g: GateRequestV) -> Result<ReadGate> {
+        Ok(match g {
+            GateRequestV::Open => ReadGate::No,
+            GateRequestV::Shut => ReadGate::Yes,
+            GateRequestV::Until(t) => ReadGate::Until(t),
+            GateRequestV::ShutFor(d) => ops::servers::read_gate_for(d)?,
+        })
+    }
+}
+
+#[derive(Debug, Clone, IntoValue)]
+struct ServiceServerV {
+    id: String,
+    addr: String,
+    base: String,
+    roles: Vec<String>,
+}
+
+impl From<ops::service::ServiceServer> for ServiceServerV {
+    fn from(s: ops::service::ServiceServer) -> Self {
+        ServiceServerV {
+            id: s.id.to_string(),
+            addr: s.addr.to_string(),
+            base: s.base,
+            roles: roles_value(s.roles),
+        }
+    }
+}
+
+#[derive(Debug, Clone, IntoValue)]
+enum UnitStateV {
+    NotStarted,
+    Running(Option<u32>),
+    Stopped,
+    Died,
+}
+
+#[derive(Debug, Clone, IntoValue)]
+struct ServiceUnitDefV {
+    exe: String,
+    args: Vec<String>,
+    trigger: String,
+    restart: String,
+}
+
+#[derive(Debug, Clone, IntoValue)]
+struct ServiceUnitV {
+    unit: String,
+    state: UnitStateV,
+    definition: Option<ServiceUnitDefV>,
+}
+
+impl From<ServiceUnit> for ServiceUnitV {
+    fn from(u: ServiceUnit) -> Self {
+        use netidx_activation::control::UnitState as S;
+        ServiceUnitV {
+            unit: u.unit,
+            state: match u.state {
+                S::NotStarted => UnitStateV::NotStarted,
+                S::Running { pid } => UnitStateV::Running(pid),
+                S::Stopped => UnitStateV::Stopped,
+                S::Died => UnitStateV::Died,
+            },
+            definition: u.definition.map(
+                |ServiceUnitDef { exe, args, trigger, restart }| ServiceUnitDefV {
+                    exe,
+                    args,
+                    trigger,
+                    restart,
+                },
+            ),
+        }
+    }
+}
+
+#[derive(Debug, Clone, FromValue)]
+enum ServiceOpV {
+    Start,
+    Stop,
+    Restart,
+    Status,
+}
+
+impl From<ServiceOpV> for netidx_activation::control::ControlOp {
+    fn from(op: ServiceOpV) -> Self {
+        use netidx_activation::control::ControlOp as C;
+        match op {
+            ServiceOpV::Start => C::Start,
+            ServiceOpV::Stop => C::Stop,
+            ServiceOpV::Restart => C::Restart,
+            ServiceOpV::Status => C::Status,
+        }
+    }
+}
+
+#[derive(Debug, Clone, IntoValue)]
+struct PermEntryV {
+    path: String,
+    entity: String,
+    bits: String,
+}
+
+fn perm_entries(p: &netidx::resolver_server::config::PMap) -> Value {
+    let mut rows: Vec<PermEntryV> = netidx_admin::perms::iter(p)
+        .map(|(path, entity, bits)| PermEntryV {
+            path: path.to_string(),
+            entity: entity.to_string(),
+            bits: bits.to_string(),
+        })
+        .collect();
+    rows.sort_by(|a, b| (&a.path, &a.entity).cmp(&(&b.path, &b.entity)));
+    rows_value::<_, PermEntryV>(rows)
 }
 
 impl From<ops::servers::ServerInfo> for ServerInfoV {
@@ -244,7 +390,7 @@ impl From<ops::servers::ServerInfo> for ServerInfoV {
             cluster_base: s.cluster_base.clone(),
             cluster_state: s.cluster_state.map(|c| format!("{c:?}")),
             ca: s.ca,
-            read_gate: ops::servers::read_gate_label(s.read_gate),
+            read_gate: s.read_gate.map(ReadGateV::from),
         }
     }
 }
@@ -417,6 +563,12 @@ pub(crate) fn opt_glyph(v: Option<&Value>) -> Result<Option<Fingerprint>> {
             Ok(Some(Fingerprint::parse_text(&fp.code)?))
         }
     }
+}
+
+/// An admin server's immutable id, as `ServerInfo.id` shows it.
+fn server_id(v: Option<&Value>) -> Result<AdminServerId> {
+    let id = req_string(v, "the server id")?;
+    Ok(AdminServerId(id.parse().map_err(|e| anyhow!("bad server id: {e}"))?))
 }
 
 /// The trailing `Target` arg of a ceremony.
@@ -815,8 +967,7 @@ impl RemoteOp for RemoveServerOp {
     const NCFG: usize = 1;
 
     fn op(cfg: &[Option<Value>], conn: ConnInfo) -> Result<BoxOp> {
-        let id = req_string(cfg[0].as_ref(), "the server id")?;
-        let id = AdminServerId(id.parse().map_err(|e| anyhow!("bad server id: {e}"))?);
+        let id = server_id(cfg[0].as_ref())?;
         Ok(Box::new(move |ans| {
             Box::pin(async move {
                 let out = ops::servers::remove_server(
@@ -829,6 +980,83 @@ impl RemoteOp for RemoveServerOp {
                 )
                 .await?;
                 Ok(RemoveServerOutcomeV::from(out).into())
+            })
+        }))
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct ListServiceServersOp;
+
+impl RemoteOp for ListServiceServersOp {
+    const NAME: &'static str = "netidx_admin_list_service_servers";
+    const NCFG: usize = 0;
+
+    fn op(_cfg: &[Option<Value>], conn: ConnInfo) -> Result<BoxOp> {
+        Ok(Box::new(move |ans| {
+            Box::pin(async move {
+                let rows =
+                    ops::service::list_service_servers(ans, conn.server, None).await?;
+                Ok(rows_value::<_, ServiceServerV>(rows))
+            })
+        }))
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct ServiceControlOp;
+
+impl RemoteOp for ServiceControlOp {
+    const NAME: &'static str = "netidx_admin_service_control";
+    const NCFG: usize = 3;
+
+    fn op(cfg: &[Option<Value>], conn: ConnInfo) -> Result<BoxOp> {
+        let units = string_list(cfg[0].as_ref())?;
+        let op = ServiceOpV::from_value(cfg[1].clone().unwrap_or(Value::Null))?;
+        let server = server_id(cfg[2].as_ref())?;
+        Ok(Box::new(move |ans| {
+            Box::pin(async move {
+                let units = ops::service::control_remote(
+                    ans,
+                    conn.server,
+                    None,
+                    Some(conn.admin),
+                    None,
+                    server,
+                    units,
+                    op.into(),
+                )
+                .await?;
+                Ok(rows_value::<_, ServiceUnitV>(units))
+            })
+        }))
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct SetReadGateOp;
+
+impl RemoteOp for SetReadGateOp {
+    const NAME: &'static str = "netidx_admin_set_read_gate";
+    const NCFG: usize = 2;
+
+    fn op(cfg: &[Option<Value>], conn: ConnInfo) -> Result<BoxOp> {
+        let server = server_id(cfg[0].as_ref())?;
+        let gate = GateRequestV::from_value(cfg[1].clone().unwrap_or(Value::Null))?;
+        let gate = ReadGate::try_from(gate)?;
+        Ok(Box::new(move |ans| {
+            Box::pin(async move {
+                ops::service::set_read_gate(
+                    ans,
+                    Some(conn.server),
+                    None,
+                    Some(conn.admin),
+                    None,
+                    server,
+                    gate,
+                )
+                .await?;
+                Ok(Value::Null)
             })
         }))
     }
@@ -862,6 +1090,9 @@ impl RemoteOp for ReconcileCaOp {
     }
 }
 
+pub(crate) type ListServiceServers = RemoteCeremony<ListServiceServersOp>;
+pub(crate) type ServiceControl = RemoteCeremony<ServiceControlOp>;
+pub(crate) type SetReadGate = RemoteCeremony<SetReadGateOp>;
 pub(crate) type ListQueue = RemoteCeremony<ListQueueOp>;
 pub(crate) type ApproveReq = RemoteCeremony<ApproveOp>;
 pub(crate) type ApproveRenewals = RemoteCeremony<ApproveRenewalsOp>;
@@ -975,6 +1206,48 @@ target_op!(
     |t: TargetValue, _: ()| async move {
         let rows = ops::perms::list_resolver_clusters(&t.0).await?;
         Ok::<_, anyhow::Error>(Value::from(rows))
+    }
+);
+
+target_op!(
+    ShowPermsEv,
+    "netidx_admin_show_perms",
+    String,
+    |c: &CachedVals| c.get::<String>(0),
+    |t: TargetValue, at: String| async move {
+        let p = ops::perms::show_perms(&t.0, &at).await?;
+        Ok::<_, anyhow::Error>(perm_entries(&p))
+    }
+);
+
+target_op!(
+    SetPermEv,
+    "netidx_admin_set_perm",
+    (String, String, String, String),
+    |c: &CachedVals| Some((
+        c.get::<String>(0)?,
+        c.get::<String>(1)?,
+        c.get::<String>(2)?,
+        c.get::<String>(3)?
+    )),
+    |t: TargetValue, (at, path, entity, bits): (String, String, String, String)| async move {
+        let e = ops::perms::set_entry(&t.0, &at, &path, &entity, &bits).await?;
+        Ok::<_, anyhow::Error>(RecordedEditV::from(e).into())
+    }
+);
+
+target_op!(
+    RemovePermEv,
+    "netidx_admin_remove_perm",
+    (String, String, String),
+    |c: &CachedVals| Some((
+        c.get::<String>(0)?,
+        c.get::<String>(1)?,
+        c.get::<String>(2)?
+    )),
+    |t: TargetValue, (at, path, entity): (String, String, String)| async move {
+        let e = ops::perms::remove_entry(&t.0, &at, &path, &entity).await?;
+        Ok::<_, anyhow::Error>(RecordedEditV::from(e).into())
     }
 );
 
@@ -1105,6 +1378,9 @@ target_op!(
 );
 
 pub(crate) type ListResolverClusters = CachedArgsAsync<ListResolverClustersEv>;
+pub(crate) type ShowPerms = CachedArgsAsync<ShowPermsEv>;
+pub(crate) type SetPerm = CachedArgsAsync<SetPermEv>;
+pub(crate) type RemovePerm = CachedArgsAsync<RemovePermEv>;
 pub(crate) type ShowIdMap = CachedArgsAsync<ShowIdMapEv>;
 pub(crate) type IdMapAddGroup = CachedArgsAsync<IdMapAddGroupEv>;
 pub(crate) type IdMapRemoveGroup = CachedArgsAsync<IdMapRemoveGroupEv>;
