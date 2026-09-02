@@ -31,10 +31,18 @@ Graphix, language and compiler:
    its reason and position (`grow::note_reason`), and the parse's
    failure reports it when the failure lies on that line or before
    it — "note: at line: 2, column: 5: `ok` is a reserved word and
-   cannot be used as a name" under combine's "Unexpected `l`". Still
-   open: the unescaped `[` in a string, the bare `Error` predicate,
-   the unknown duration unit — each wants its own note at the refusal
-   site. RETRACTED: the "no module name" facet — the package build
+   cannot be used as a name" under combine's "Unexpected `l`" (the
+   note names only words that never begin a construct — a statement
+   parser probes `select`/`let`/`mod` as names routinely). The bare
+   `Error` predicate is CLOSED by ruling (Eric, 09-02): `Error` is a
+   constructor and takes its parameter; `Error<Any> as e` is the
+   spelling for "any error" and works on both engines; a bare
+   constructor stays a parse error. `Error<_>` is a trap of a
+   different kind — `_` in type position is bottom, the type of
+   `never()`, so `Error<_>` is uninhabited and the arm is dead; the
+   dead-arm message now says so and names `Error<Any>`. Still open:
+   the unescaped `[` in a string and the unknown duration unit — each
+   wants its own note at the refusal site. RETRACTED: the "no module name" facet — the package build
    script does name the file ("packing graphix AST blob: parsing
    …/landing.gx"); my log filter had dropped that line.
 2. **`never()` arms leave a select's type open** (09-02): annotate the
