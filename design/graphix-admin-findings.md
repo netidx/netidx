@@ -705,3 +705,13 @@ select chapter: a `never()` arm needs the binding annotated when the
 value's shape is used downstream.** The alternative, `never()` typed as
 an absorbed bottom rather than a fresh variable, is a typing ruling for
 another day.
+
+## 2026-09-02 — milestone: ~2.5k lines of .gx
+
+`milestone_timing` (debug build, like every earlier reading):
+registration 0.79s, app-main compile 2.27s at 2,522 lines of package
+graphix (`remote.gx` 1,467) — down from 1.13s / 2.68s at 1,799 lines
+on 08-31, so the super-linear growth seen then did not continue; the
+fastcall sweep and strict fusion landed in between. Real performance
+measurement (release builds, the actual binary) waits for the finished
+port (Eric, 2026-09-02).
