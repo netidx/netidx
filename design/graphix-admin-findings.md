@@ -49,9 +49,9 @@ Graphix, language and compiler:
    traits v2 (a trait parameter for the right operand, an associated
    Output). Datetime/duration stays in `sys::time` until then.
 6. ~~**Terminal suspend/resume** for the `sudo`/`su` handoff
-   (08-18).~~ Built 09-02 night (phase E): `tui::suspend`/`tui::resume`
-   in graphix (the child runs through `sys::process` with inherited
-   stdio), `netidx_admin::privileged` in the library, and the Local
+   (08-18).~~ Built 09-02 night (phase E): `tui::suspend(suspended:
+   bool)` in graphix — a level; the child runs through `sys::process`
+   with inherited stdio — `netidx_admin::privileged` in the library, and the Local
    tab's privileged step for system-scope service registration (after
    an install, a restore, an external-CA install) and the elevated
    half of a teardown. The `$EDITOR` half was never needed
@@ -1124,17 +1124,23 @@ netidx's escalation policy. So the decision moved INTO THE CHILD:
 script execs directly as root, under sudo when the operator may (a
 cached credential first, else one prompt), else under `su -c` with
 the same command quoted for a shell — and the tui package's new
-capability is only the terminal handoff: `tui::suspend(trigger)`
-drops the crossterm reader (so its thread cannot fight the child for
-stdin, as the ratatui TUI does), restores the terminal and answers
-with a suspension; the program runs the child through
-`sys::process::spawn` with inherited stdio and `wait`s for it — one
-process implementation in the system, with its options — and
-`tui::resume(status ~ s)` re-inits the terminal with a full repaint
-(dropping the suspension resumes too). The first cut ran the child
-inside the tui runner with `std::process` and was replaced the same
-night on Eric's question ("does it use Graphix's process module?"):
-the runner had duplicated the process module. The replacement
+capability is only the terminal handoff, and a LEVEL: `tui::suspend(
+suspended: bool)` — while the input is true the display has dropped
+its crossterm reader (so its thread cannot fight the child for stdin,
+as the ratatui TUI does) and restored the terminal; when it goes
+false the display re-inits with a full repaint. The result is the
+display's actual state, so the program spawns its child through
+`sys::process::spawn` with inherited stdio on the release, `wait`s,
+and clears the level with the exit — one process implementation in
+the system, with its options. Two earlier cuts died the same night:
+`run_in_terminal`, which ran the child inside the tui runner with
+`std::process` (Eric: "does it use Graphix's process module?" — the
+runner had duplicated it), and a suspend/resume token pair (Eric:
+"would the api be nicer as `suspend(trigger: bool)`?" — a level is
+the dataflow-native shape: no token to thread, no resume call, no
+resume-on-drop backstop, and every failure path collapses to
+`suspended <- e ~ false`). The site holds the resume signal between
+the edges, and its own drop resumes. The replacement
 exposed the one real subtlety: while suspended the runner must keep
 applying graph updates to the widget tree (without drawing) — the
 program's dataflow has to observe the child's exit to call resume,
@@ -1155,8 +1161,9 @@ state — only a running service is success, whatever the child's exit
 code said (the ratatui rule, now in the library as
 `system_service_outcome`; its tests moved with it). The Local tab
 chains: install / restore / external-CA install → service needed →
-suspend → `sys::process::spawn`/`wait` → resume → verify → toast (a
-handler on every failure after the suspend resumes the display), and a staged restore finishes itself
+`suspended <- true` → `sys::process::spawn`/`wait` on the release →
+`suspended <- false` → verify → toast (the failure handler clears the
+level), and a staged restore finishes itself
 once the service is verified; a teardown's `Escalate` runs the
 elevated half and, when it covered only the system service, runs
 the user-scope pass afterwards. **Disposition: built; lab validation
