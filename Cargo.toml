@@ -51,6 +51,7 @@ graphix-package-core = { version = "0.9.0", path = "../graphix/stdlib/graphix-pa
 graphix-package-array = { version = "0.9.0", path = "../graphix/stdlib/graphix-package-array" }
 graphix-package-str = { version = "0.9.0", path = "../graphix/stdlib/graphix-package-str" }
 graphix-package-json = { version = "0.9.0", path = "../graphix/stdlib/graphix-package-json" }
+graphix-package-re = { version = "0.9.0", path = "../graphix/stdlib/graphix-package-re" }
 graphix-package-tui = { version = "0.9.0", path = "../graphix/stdlib/graphix-package-tui" }
 graphix-derive = { version = "0.9.0", path = "../graphix/graphix-derive" }
 graphix-ast-pack = { version = "0.9.0", path = "../graphix/graphix-ast-pack" }

@@ -27,6 +27,7 @@ graphix-package-core = { workspace = true }
 graphix-package-array = { workspace = true }
 graphix-package-str = { workspace = true }
 graphix-package-json = { workspace = true }
+graphix-package-re = { workspace = true }
 graphix-package-tui = { workspace = true }
 graphix-rt = { workspace = true }
 chrono = { workspace = true }

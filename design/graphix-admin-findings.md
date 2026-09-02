@@ -46,15 +46,21 @@ Graphix, language and compiler:
    Output). Datetime/duration stays in `sys::time` until then.
 6. **Terminal suspend/resume** for `sudo`/`$EDITOR` handoff (08-18):
    the phase E prerequisite; composes with `sys::process` Inherit.
+11. **A select over `[fn(..), null]` reports the bind arm dead** (09-02):
+    `select on_cancel { null as _ => never(), f => f(e) }` is refused
+    with "pattern '_: fn(e: Any) -> null will never match fn(e: Any) ->
+    null, unused match cases" — the dead-arm check does not accept a
+    function member as matching its own type. Worked around by making
+    the callback required; an optional callback is a natural API.
 
 Book:
 
 7. **The `#[native]` chapter** (the performance model), plus the four
    idioms this campaign named: a pure builtin without a fast fn is a
    node-walk boundary by rule; annotate a `let x: T = select …` whose
-   other arms are `never()`; a component's event outputs are nullable
-   value fields, never `never()` fields; sample every free read in a
-   handler arm with the event.
+   other arms are `never()`; a component's event outputs are
+   callbacks, never struct fields (a struct re-fires whole); sample
+   every free read in a handler arm with the event.
 
 Test side and package:
 
@@ -821,11 +827,15 @@ manual: Any }` with `connect` and `manual` bound to `never()` until a
 key set them — and rendered blank: a struct literal produces only
 when every field has a value, so the component was bottom until its
 first Enter. The remote tab's own struct never hit this because its
-fields are all present from the start. **Disposition: the idiom —
-outputs a component raises later are nullable values (`[Connect,
-null]`, a bool) or `&` out-params, never bare `never()` fields.
-Accepted as bottom-propagation working as ruled; belongs in the book's
-component chapter next to "sample free reads with the event".**
+fields are all present from the start. **Disposition (revised the same evening): outputs a component raises
+are CALLBACKS (`#on_connect`, `#on_submit`), the tui widgets' own
+`#on_press` convention — never fields of the returned struct, nullable
+or not. A struct re-fires as a whole, so a request stored in a field
+re-delivers on every re-render: the landing's `connect` field would
+have restarted the ceremony on each poll, and a form's `submitted`
+field would have re-submitted on reopen. Bottom-propagation working
+as ruled; belongs in the book's component chapter next to "sample
+free reads with the event".**
 
 ## 2026-09-02 — the landing screen's phantom Enter: sibling pattern binds, and an unchecked call site
 
@@ -855,3 +865,34 @@ Eric's principle stands: nothing skips typechecking. And a lesson for
 the test side: the fixture's gesture predictor was wrong within the
 hour — the harness now waits for whichever of the gesture and the next
 question appears.
+
+## 2026-09-02 — a form over a field list: the line editor's reference API cannot serve an array
+
+The roster's policy editor is nine fields. The perms form got by with
+three named `line_edit::State` bindings and a focus index, because
+`line_edit::handle(&st, e)` edits THROUGH a reference and a `let` is
+the only thing a reference can name — an editor held in an array has
+no reference, so a generic form over N fields was not expressible.
+**Disposition: fixed in graphix (tui package): `line_edit::step` is
+the editor's transition as a pure function, `handle` is `step`
+through the reference, and a `tui::form` widget (labelled fields,
+Tab focus, Enter submits the texts, Esc cancels — both as values on
+the returned struct) serves the perms form and the policy editor
+alike.** The idiom for a stateful sub-component that must be
+re-openable: its inputs are a `let` the opener sets (`policy_fields_in
+<- …`), so the component re-instantiates from fresh arguments, and
+its outcome fields reset on each new input (`submitted <- fields ~
+null`) — a value sampled by `<-` from a component call would freeze
+its first state.
+
+## 2026-09-02 — a select over an optional callback: the bind arm is "dead"
+
+`tui::form` wanted an optional `#on_cancel: [fn(e: Any) -> null,
+null]` and `select on_cancel { null as _ => never(), f => f(kk) }`.
+The typechecker refuses the second arm: "pattern '_: fn(e: Any) ->
+null will never match fn(e: Any) -> null, unused match cases" — the
+dead-arm check compares the bind's cell (already unified with the
+function member) against the member and does not accept a function
+type as matching itself. **Disposition: graphix work item (ledger 11);
+the form's cancel callback is required for now, which is a fine API
+anyway.**

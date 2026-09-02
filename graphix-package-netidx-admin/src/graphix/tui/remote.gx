@@ -1,16 +1,18 @@
 use package::{
   AdminError, AdminInfo, Fingerprint, IssuedEntry, PendingDelegation, PermEntry,
-  QueueItem, ReadGate, RecordedEdit, ServerInfo, ServiceOp, ServiceServer, ServiceUnit,
-  SlotKind, Target, UnitState, approve, approve_delegation, approve_renewals,
-  change_password, change_password_at, connect, deny, deny_delegation, info,
-  issued, list_admins, list_pending_delegations, list_queue,
-  list_resolver_clusters, list_servers, list_service_servers, questions,
-  reconcile_ca, remove_admin, remove_perm, remove_server, reset_password,
-  result, revoke, service_control, set_perm, set_read_gate, show_perms
+  Policy, QueueItem, ReadGate, RecordedEdit, ServerInfo, ServiceOp, ServiceServer,
+  ServiceUnit, SlotKind, Target, UnitState, add_role_admin, approve,
+  approve_delegation, approve_renewals, change_password, change_password_at,
+  connect, deny, deny_delegation, info, issued, list_admins,
+  list_pending_delegations, list_queue, list_resolver_clusters, list_servers,
+  list_service_servers, questions, reconcile_ca, remove_admin, remove_perm,
+  remove_server, reset_password, result, revoke, service_control,
+  set_admin_policy, set_perm, set_read_gate, show_perms
 };
 use super::landing::{self, Connected};
 use tui::{line, style};
 use tui::block::{self, *};
+use tui::form::{self, *};
 use tui::input_handler::{self, *};
 use tui::layout::{self, *};
 use tui::line_edit::{self, *};
@@ -41,7 +43,9 @@ type Act = [
   `Service({ server: string, unit: string, op: ServiceOp }),
   `Gate({ server: string, gate: GateReq }),
   `SetPerm({ path: string, entity: string, bits: string }),
-  `RemovePerm({ path: string, entity: string })
+  `RemovePerm({ path: string, entity: string }),
+  `AddAdmin({ name: string, policy: Policy }),
+  `SetPolicy({ name: string, policy: Policy })
 ];
 
 type MenuEntry = { kind: PanelKind, title: string, desc: string, keys: string };
@@ -65,7 +69,7 @@ let panels: Array<MenuEntry> = [
     kind: `Roster,
     title: "Admin Roster",
     desc: "The admin domain's admins and their scopes.",
-    keys: " c change my password · p reset-password · d remove · r refresh · Esc back "
+    keys: " a add · e edit policy · c change my password · p reset-password · d remove · r refresh · Esc back "
   },
   {
     kind: `Servers,
@@ -155,6 +159,94 @@ let gate_warning = |s: ServerInfo, gate: GateReq, now: datetime| -> [string, nul
   }
 };
 
+// comma-separated text ⇄ a list, blanks dropped
+let csv = |s: string| -> Array<string> array::filter_map(str::split(#pat: ",", s), |p: string| -> [string, null]
+  select str::trim(p) {
+    "" => null,
+    t => t
+  });
+
+let list_text = |xs: Array<string>| -> string str::join(#sep: ", ", xs);
+
+// "7d", "12h", "30m", "90s", "2w", "1y" — a count and a unit letter
+let parse_duration = |s: string| -> [duration, null] {
+  let t = str::trim(s);
+  select re::captures(#pat: r"^([0-9]+(?:\.[0-9]+)?)\s*([a-zA-Z]*)$", t)$ {
+    [] => null,
+    [m, ..] => {
+      let n = cast<f64>(m[1]$)$;
+      let factor: [f64, null] = select m[2]$ {
+        null as _ => 1.0,
+        "" => 1.0,
+        "s" => 1.0,
+        "m" => 60.0,
+        "h" => 3600.0,
+        "d" => 86400.0,
+        "w" => 604800.0,
+        "y" => 31557600.0,
+        _ => null
+      };
+      select factor {
+        null as _ => null,
+        f => sys::time::scale(duration:1.s, n * f)$
+      }
+    }
+  }
+};
+
+// a duration as the largest whole unit it measures
+let dur_text = |d: duration| -> string {
+  let secs = cast<i64>(d)$;
+  select secs {
+    n if n % 86400 == 0 && n > 0 => "[n / 86400]d",
+    n if n % 3600 == 0 && n > 0 => "[n / 3600]h",
+    n if n % 60 == 0 && n > 0 => "[n / 60]m",
+    n => "[n]s"
+  }
+};
+
+let yes_no = |s: string| -> bool select str::to_lower(str::trim(s)) {
+  "y" | "yes" | "true" => true,
+  _ => false
+};
+
+let policy_fields = |p: Policy| -> Array<Field> [
+  { label: "allowed SAN", value: list_text(p.allowed_san) },
+  { label: "max validity", value: dur_text(p.max_validity) },
+  { label: "id-map groups", value: list_text(p.id_map_groups) },
+  { label: "enroll scopes", value: list_text(p.server_enroll_scopes) },
+  { label: "enroll roles", value: list_text(p.server_enroll_roles) },
+  { label: "perms scopes", value: list_text(p.perms_edit_scopes) },
+  { label: "manage admins", value: select p.may_manage_admins { true => "yes", false => "no" } },
+  { label: "service scopes", value: list_text(p.service_control_scopes) }
+];
+
+let empty_policy: Policy = {
+  allowed_san: [],
+  max_validity: duration:604800.s,
+  id_map_groups: [],
+  server_enroll_scopes: [],
+  server_enroll_roles: [],
+  perms_edit_scopes: [],
+  may_manage_admins: false,
+  service_control_scopes: []
+};
+
+// the eight policy fields, in `policy_fields` order, back to a policy
+let read_policy = |v: Array<string>| -> [Policy, `BadValidity] select parse_duration(v[1]$) {
+  null as _ => `BadValidity,
+  d => {
+    allowed_san: csv(v[0]$),
+    max_validity: d,
+    id_map_groups: csv(v[2]$),
+    server_enroll_scopes: csv(v[3]$),
+    server_enroll_roles: csv(v[4]$),
+    perms_edit_scopes: csv(v[5]$),
+    may_manage_admins: yes_no(v[6]$),
+    service_control_scopes: csv(v[7]$)
+  }
+};
+
 let fmt_unit_state = |st: UnitState| -> string select st {
   `NotStarted => "not started",
   `Running(null) => "running",
@@ -196,19 +288,17 @@ let remote = |#q: &Question, #server: string = ""| -> Remote {
   *q <- questions(connect_c);
   // ── the landing screen: known admin domains ──
   let connected: [Connected, null] = null;
-  let land = landing::landing(#q: q, #connected: &connected);
-  select land.connect {
-    null as _ => never(),
-    c => {
+  let land = landing::landing(
+    #q: q,
+    #connected: &connected,
+    #on_connect: |c: landing::Connect| -> null {
       connect_glyph <- c.glyph;
       connect_to <- c.server;
-      screen <- c ~ `Connect
-    }
-  };
-  select land.manual {
-    true => screen <- `Connect,
-    false => never()
-  };
+      screen <- c ~ `Connect;
+      null
+    },
+    #on_manual: |e: Any| -> null { screen <- e ~ `Connect; null }
+  );
   // the CA fingerprint the operator confirmed during this connect, so
   // a follow-on ceremony against the same server skips the gesture
   let glyph: [Fingerprint, null] = null;
@@ -243,11 +333,48 @@ let remote = |#q: &Question, #server: string = ""| -> Remote {
   let perms_at: [string, null] = null;
   let gate_for: [ServerInfo, null] = null;
   let gate_sel = 0;
-  let perm_form: [`Add, `Edit, null] = null;
-  let pf_path = line_edit::state("");
-  let pf_entity = line_edit::state("");
-  let pf_bits = line_edit::state("");
-  let pf_focus = 0;
+  let perm_fields: Array<Field> = never();
+  let perm_open = false;
+  let run: Act = never();
+  let perm_form = form(
+    #title: "Permission entry",
+    #help: "Bits are a permission string such as swlpd; an empty entity is anonymous.",
+    #on_submit: |v: Array<string>| -> null {
+      run <- `SetPerm({ path: v[0]$, entity: v[1]$, bits: v[2]$ });
+      perm_open <- v ~ false;
+      null
+    },
+    #on_cancel: |e: Any| -> null { perm_open <- e ~ false; null },
+    perm_fields
+  );
+  let policy_fields_in: Array<Field> = never();
+  let policy_title = "";
+  let policy_open = false;
+  let policy_target: [`Add, `Edit(string)] = `Add;
+  let bad_validity: Toast = {
+    title: "Bad validity",
+    lines: ["Write the validity as a count and a unit, such as 7d or 12h."],
+    error: true
+  };
+  let policy_form = form(
+    #title: policy_title,
+    #help: "Lists are comma-separated; validity is a count and a unit (7d, 12h, 30m); roles are Ca, Resolver, IdMap.",
+    #on_submit: |v: Array<string>| -> null {
+      select v ~ policy_target {
+        `Add => select read_policy(v[1..]$) {
+          `BadValidity => toast <- bad_validity,
+          p => { run <- `AddAdmin({ name: v[0]$, policy: p }); policy_open <- false }
+        },
+        `Edit(name) => select read_policy(v) {
+          `BadValidity => toast <- bad_validity,
+          p => { run <- `SetPolicy({ name, policy: p }); policy_open <- false }
+        }
+      };
+      null
+    },
+    #on_cancel: |e: Any| -> null { policy_open <- e ~ false; null },
+    policy_fields_in
+  );
   let chpw_at_c = change_password_at(
     #admin: must_change,
     #glyph: must_change ~ glyph,
@@ -429,6 +556,13 @@ let remote = |#q: &Question, #server: string = ""| -> Remote {
       }
     }
   };
+  let roster_sel: [AdminInfo, null] = select roster_rows {
+    null as _ => null,
+    rows => select array::len(rows) {
+      0 => null,
+      n => rows[min(row_sel, n - 1)]$
+    }
+  };
   let perm_sel: [PermEntry, null] = select perm_rows {
     null as _ => null,
     rows => select array::len(rows) {
@@ -444,7 +578,6 @@ let remote = |#q: &Question, #server: string = ""| -> Remote {
     }
   };
   // ── action dispatch: each run event starts the op's ceremony ──
-  let run: Act = never();
   let approve_c = select run {
     `Approve(code) => approve(#code: code, code ~ target),
     _ => never()
@@ -502,6 +635,14 @@ let remote = |#q: &Question, #server: string = ""| -> Remote {
       null as _ => never(),
       at => set_perm(#at: at, #path: e.path, #entity: e.entity, #bits: e.bits, e ~ target)
     },
+    _ => never()
+  };
+  let addadmin_r: Result<string, AdminError> = select run {
+    `AddAdmin(a) => add_role_admin(a.name, a.policy, a ~ target),
+    _ => never()
+  };
+  let setpolicy_r: Result<null, AdminError> = select run {
+    `SetPolicy(a) => set_admin_policy(a.name, a.policy, a ~ target),
     _ => never()
   };
   let rmperm_r: Result<RecordedEdit, AdminError> = select run {
@@ -680,6 +821,22 @@ let remote = |#q: &Question, #server: string = ""| -> Remote {
     load <- r ~ `Perms
   };
   {
+    catch(e) fail("Adding the admin failed", (e.0).error);
+    let pw = addadmin_r?;
+    toast <- {
+      title: "One-time password",
+      lines: ["Record this now; it is never shown again:", pw],
+      error: false
+    };
+    load <- pw ~ `Roster
+  };
+  {
+    catch(e) fail("Setting the policy failed", (e.0).error);
+    let r = setpolicy_r?;
+    toast <- r ~ { title: "Policy updated", lines: ["The admin's policy was replaced."], error: false };
+    load <- r ~ `Roster
+  };
+  {
     catch(e) fail("Removing the permission failed", (e.0).error);
     let r = rmperm_r?;
     let what = select r.changed {
@@ -821,6 +978,28 @@ let remote = |#q: &Question, #server: string = ""| -> Remote {
     _ => `Continue
   };
   let roster_keys = |k: KeyEvent| -> [`Stop, `Continue] select k.code {
+    kk@ `Char("a") => {
+      policy_title <- kk ~ "Add a role admin";
+      policy_target <- kk ~ `Add;
+      policy_fields_in <- kk ~ array::push_front(policy_fields(empty_policy), { label: "name", value: "" });
+      policy_open <- kk ~ true;
+      `Stop
+    },
+    kk@ `Char("e") => {
+      select kk ~ roster_sel {
+        null as _ => never(),
+        a => select a.kind {
+          `Signing => toast <- { title: "Signing slot", lines: ["[a.admin] is a signing slot; its policy is not editable."], error: true },
+          `Role => {
+            policy_title <- "Edit [a.admin]'s policy";
+            policy_target <- `Edit(a.admin);
+            policy_fields_in <- policy_fields(a.policy);
+            policy_open <- true
+          }
+        }
+      };
+      `Stop
+    },
     kk@ `Char("c") => { run <- kk ~ `ChangeOwnPassword; `Stop },
     kk@ `Char("p") => {
       select kk ~ roster_name {
@@ -900,22 +1079,24 @@ let remote = |#q: &Question, #server: string = ""| -> Remote {
   };
   let perms_keys = |k: KeyEvent| -> [`Stop, `Continue] select k.code {
     kk@ `Char("a") => {
-      pf_path <- line_edit::state(kk ~ "/");
-      pf_entity <- line_edit::state(kk ~ "");
-      pf_bits <- line_edit::state(kk ~ "");
-      pf_focus <- kk ~ 0;
-      perm_form <- kk ~ `Add;
+      perm_fields <- kk ~ [
+        { label: "path", value: "/" },
+        { label: "entity", value: "" },
+        { label: "bits", value: "" }
+      ];
+      perm_open <- kk ~ true;
       `Stop
     },
     kk@ `Char("e") => {
       select kk ~ perm_sel {
         null as _ => never(),
         r => {
-          pf_path <- line_edit::state(r.path);
-          pf_entity <- line_edit::state(r.entity);
-          pf_bits <- line_edit::state(r.bits);
-          pf_focus <- r ~ 2;
-          perm_form <- r ~ `Edit
+          perm_fields <- [
+            { label: "path", value: r.path },
+            { label: "entity", value: r.entity },
+            { label: "bits", value: r.bits }
+          ];
+          perm_open <- r ~ true
         }
       };
       `Stop
@@ -988,27 +1169,6 @@ let remote = |#q: &Question, #server: string = ""| -> Remote {
         },
         kk@ `Esc => { gate_for <- kk ~ null; `Stop },
         _ => `Stop
-      },
-      _ => `Stop
-    },
-    _ => `Stop
-  };
-  let perm_form_handle = |e: Event| -> [`Stop, `Continue] select e {
-    ev@ `Key(k) => select k.kind {
-      `Press => select k.code {
-        `Tab | `Down => { pf_focus <- (k ~ pf_focus + 1) % 3; `Stop },
-        `BackTab | `Up => { pf_focus <- (k ~ pf_focus + 2) % 3; `Stop },
-        kk@ `Enter => {
-          run <- kk ~ `SetPerm({ path: pf_path.value, entity: pf_entity.value, bits: pf_bits.value });
-          perm_form <- kk ~ null;
-          `Stop
-        },
-        kk@ `Esc => { perm_form <- kk ~ null; `Stop },
-        _ => select pf_focus {
-          0 => line_edit::handle(&pf_path, ev),
-          1 => line_edit::handle(&pf_entity, ev),
-          _ => line_edit::handle(&pf_bits, ev)
-        }
       },
       _ => `Stop
     },
@@ -1103,42 +1263,21 @@ let remote = |#q: &Question, #server: string = ""| -> Remote {
       )
     }
   };
-  let perm_form_widget = select perm_form {
-    null as _ => paragraph(&""),
-    mode => {
-      let title = select mode {
-        `Add => "Add a permission entry",
-        `Edit => "Edit permission bits"
-      };
-      let field = |label: string, i: i64, st: &line_edit::State| -> tui::Tui
-        layout(#direction: &`Horizontal, &[
-          child(#constraint: `Length(9), text(&[line(#style: hint, "[label]:")])),
-          child(#constraint: `Min(1), text(&[line_edit::view(#focused: pf_focus == i, st)]))
-        ]);
-      block(
-        #border: &`All,
-        #title: &line(title),
-        #title_bottom: &line(#style: hint, " Tab next field · Enter record · Esc cancel "),
-        &layout(#direction: &`Vertical, &[
-          child(#constraint: `Length(2), paragraph(#style: &hint,
-            &"Bits are a permission string such as swlpd; an empty entity is anonymous.")),
-          child(#constraint: `Length(1), field("path", 0, &pf_path)),
-          child(#constraint: `Length(1), field("entity", 1, &pf_entity)),
-          child(#constraint: `Length(1), field("bits", 2, &pf_bits))
-        ])
-      )
-    }
-  };
   let layers: Array<Layer> = {
     let gl: Array<Layer> = select gate_for {
       null as _ => [],
       _ => [layer(#width: &`Percentage(60), #height: &`Percentage(50),
         input_handler(#handle: &gate_handle, &gate_widget))]
     };
-    let pl: Array<Layer> = select perm_form {
-      null as _ => [],
-      _ => [layer(#width: &`Percentage(60), #height: &`Percentage(40),
-        input_handler(#handle: &perm_form_handle, &perm_form_widget))]
+    let pl: Array<Layer> = select perm_open {
+      false => [],
+      true => [layer(#width: &`Percentage(60), #height: &`Percentage(40),
+        input_handler(#handle: &perm_form.handle, &perm_form.view))]
+    };
+    let yl: Array<Layer> = select policy_open {
+      false => [],
+      true => [layer(#width: &`Percentage(70), #height: &`Percentage(70),
+        input_handler(#handle: &policy_form.handle, &policy_form.view))]
     };
     let cl: Array<Layer> = select confirm {
       null as _ => [],
@@ -1150,7 +1289,7 @@ let remote = |#q: &Question, #server: string = ""| -> Remote {
       _ => [layer(#width: &`Percentage(60), #height: &`Percentage(50),
         input_handler(#handle: &toast_handle, &toast_widget))]
     };
-    array::concat(gl, pl, cl, tl)
+    array::concat(gl, pl, yl, cl, tl)
   };
   // ── views ──
   let conn_err_lines: Array<tui::Line> = select conn_err {
@@ -1280,7 +1419,7 @@ let remote = |#q: &Question, #server: string = ""| -> Remote {
           line(#style: hint, "id-map groups: [groups]"),
           line(#style: hint, "server enroll scopes: [enroll]"),
           line(#style: hint, "perms edit scopes: [perms]"),
-          line(#style: hint, "may manage admins: [manage] · max validity [p.max_validity]")
+          line(#style: hint, "may manage admins: [manage] · max validity [dur_text(p.max_validity)]")
         ]
       }
     }

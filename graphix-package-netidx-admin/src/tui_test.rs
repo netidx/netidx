@@ -415,3 +415,86 @@ async fn landing_remembers_and_reverifies_a_domain() -> Result<()> {
     .await?;
     Ok(())
 }
+
+/// The roster's policy editor: `a` opens the form, a new role admin is
+/// minted with the policy typed into it (the one-time password toasted),
+/// and `e` on that admin edits the policy in place — the detail pane
+/// shows the new validity.
+#[tokio::test(flavor = "multi_thread")]
+async fn roster_adds_and_edits_an_admin() -> Result<()> {
+    let d = TestAdminDomain::start().await?;
+    let prog = remote_tab_program(&d.listen.to_string());
+    let mut h =
+        TuiTestHarness::with_register(&prog, crate::TEST_REGISTER, 100, 34).await?;
+    connect_via_modals(&mut h, &d.admin, &d.password).await?;
+    wait_render(&mut h, Duration::from_secs(60), "the panel menu", |lines| {
+        lines.iter().any(|l| l.contains("Admin Roster"))
+    })
+    .await?;
+    h.dispatch_event(key(KeyCode::Char('j'))).await?;
+    h.dispatch_event(key(KeyCode::Char('j'))).await?;
+    h.dispatch_event(key(KeyCode::Enter)).await?;
+    wait_render(&mut h, Duration::from_secs(60), "the roster panel", |lines| {
+        lines.iter().any(|l| l.contains("e edit policy"))
+    })
+    .await?;
+    // add: name, allowed SAN, validity, groups, scopes, roles, perms, manage, service
+    h.dispatch_event(key(KeyCode::Char('a'))).await?;
+    wait_render(&mut h, Duration::from_secs(60), "the add form", |lines| {
+        lines.iter().any(|l| l.contains("Add a role admin"))
+    })
+    .await?;
+    for (i, text) in ["bob", "*.example", "12h", "", "/apps", "Resolver", "", "no", ""]
+        .iter()
+        .enumerate()
+    {
+        if i > 0 {
+            h.dispatch_event(key(KeyCode::Tab)).await?;
+        }
+        for _ in 0..40 {
+            h.dispatch_event(key(KeyCode::Backspace)).await?;
+        }
+        type_text(&mut h, text).await?;
+    }
+    h.dispatch_event(key(KeyCode::Enter)).await?;
+    wait_render(&mut h, Duration::from_secs(60), "the one-time password", |lines| {
+        lines.iter().any(|l| l.contains("One-time password"))
+    })
+    .await?;
+    h.dispatch_event(key(KeyCode::Enter)).await?;
+    wait_render(&mut h, Duration::from_secs(60), "bob in the roster", |lines| {
+        lines.iter().any(|l| l.contains("bob"))
+    })
+    .await?;
+    // select bob — the roster lists the signing slots, then root, then
+    // bob — and edit
+    for _ in 0..3 {
+        h.dispatch_event(key(KeyCode::Char('j'))).await?;
+    }
+    wait_render(&mut h, Duration::from_secs(60), "bob's detail", |lines| {
+        lines.iter().any(|l| l.contains("max validity 12h"))
+    })
+    .await?;
+    h.dispatch_event(key(KeyCode::Char('e'))).await?;
+    wait_render(&mut h, Duration::from_secs(60), "the edit form", |lines| {
+        lines.iter().any(|l| l.contains("Edit bob's policy"))
+    })
+    .await?;
+    // validity is the second field
+    h.dispatch_event(key(KeyCode::Tab)).await?;
+    for _ in 0..40 {
+        h.dispatch_event(key(KeyCode::Backspace)).await?;
+    }
+    type_text(&mut h, "36h").await?;
+    h.dispatch_event(key(KeyCode::Enter)).await?;
+    wait_render(&mut h, Duration::from_secs(60), "the policy toast", |lines| {
+        lines.iter().any(|l| l.contains("Policy updated"))
+    })
+    .await?;
+    h.dispatch_event(key(KeyCode::Enter)).await?;
+    wait_render(&mut h, Duration::from_secs(60), "the edited validity", |lines| {
+        lines.iter().any(|l| l.contains("max validity 36h"))
+    })
+    .await?;
+    Ok(())
+}

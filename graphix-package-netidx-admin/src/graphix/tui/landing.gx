@@ -36,7 +36,12 @@ let upsert = |book: Book, domain: string, addr: string, fp: string| -> Book
     }
   };
 
-let landing = |#q: &Question, #connected: &[Connected, null]| -> Landing {
+let landing = |
+  #q: &Question,
+  #connected: &[Connected, null],
+  #on_connect: fn(c: Connect) -> null,
+  #on_manual: fn(e: Any) -> null
+| -> Landing {
   let hint = style(#fg: `DarkGray);
   let selstyle = style(#add_modifier: [`Reversed]);
   let bold = style(#add_modifier: [`Bold]);
@@ -145,8 +150,6 @@ let landing = |#q: &Question, #connected: &[Connected, null]| -> Landing {
   };
   // ── keys ──
   let sel = 0;
-  let connect: [Connect, null] = null;
-  let manual = false;
   let handle = |e: Event| -> [`Stop, `Continue] select e {
     `Key(k) => select k.kind {
       `Press => select k.code {
@@ -156,7 +159,7 @@ let landing = |#q: &Question, #connected: &[Connected, null]| -> Landing {
           `Stop
         },
         kk@ `Char("d") => { discover_at <- kk; `Stop },
-        kk@ `Char("c") => { manual <- kk ~ true; `Stop },
+        kk@ `Char("c") => { on_manual(kk); `Stop },
         kk@ `Char("r") => { poll <- kk; `Stop },
         kk@ `Enter => {
           select kk ~ toast {
@@ -166,10 +169,10 @@ let landing = |#q: &Question, #connected: &[Connected, null]| -> Landing {
                 [] => never(),
                 rows => {
                   let row = rows[min(i, array::len(rows) - 1)]$;
-                  connect <- {
+                  on_connect({
                     server: row.addr,
                     glyph: package::parse_fingerprint(row.known.fingerprint)$
-                  }
+                  })
                 }
               }
             },
@@ -236,8 +239,6 @@ let landing = |#q: &Question, #connected: &[Connected, null]| -> Landing {
   {
     view,
     handle,
-    status: line(#style: hint, " Enter connect · d discover · c connect direct · r refresh "),
-    connect,
-    manual
+    status: line(#style: hint, " Enter connect · d discover · c connect direct · r refresh ")
   }
 }
