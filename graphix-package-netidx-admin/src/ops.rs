@@ -29,6 +29,10 @@ use netidx::resolver_server::config::ReadGate;
 use netidx_admin::{
     discovery,
     ops::{self, AdminTarget, RecordedEdit},
+    paths,
+    plan::enroll,
+    provenance::InstallRecord,
+    transport,
 };
 use netidx_admin_proto::{
     AdminServerId, PeerResult, Role, Secret, ServiceUnit, ServiceUnitDef,
@@ -1424,3 +1428,144 @@ impl EvalCachedAsync for DiscoverEv {
 }
 
 pub(crate) type Discover = CachedArgsAsync<DiscoverEv>;
+
+// ── verified discovery, identity fetch, this host's domain ───────
+
+#[derive(Debug, Clone, IntoValue)]
+struct DomainReportV {
+    domain: String,
+    servers: Vec<String>,
+    identity: Option<ceremony::CaIdentityV>,
+    error: Option<String>,
+}
+
+#[derive(Debug, Clone, IntoValue)]
+struct DiscoveryV {
+    domains: Vec<DomainReportV>,
+    diagnosis: Vec<String>,
+}
+
+fn opt_timeout(v: Option<&Value>, default: Duration) -> Option<Duration> {
+    match v? {
+        Value::Null => Some(default),
+        Value::Duration(d) => Some(**d),
+        _ => None,
+    }
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct DiscoverDomainsEv;
+
+impl EvalCachedAsync for DiscoverDomainsEv {
+    type Args = Duration;
+
+    const NAME: &str = "netidx_admin_discover_domains";
+
+    fn prepare_args(&mut self, cached: &CachedVals) -> Option<Self::Args> {
+        let timeout =
+            opt_timeout(cached.0.first()?.as_ref(), discovery::DISCOVERY_TIMEOUT)?;
+        cached.0.get(1)?.as_ref()?;
+        Some(timeout)
+    }
+
+    fn eval(timeout: Self::Args) -> impl Future<Output = Value> + Send {
+        async move {
+            let reports = enroll::discover_admin_domains(
+                timeout,
+                netidx_admin_proto::NodeKind::Client,
+                None,
+            )
+            .await;
+            let diagnosis = enroll::discovery_diagnosis(&reports).unwrap_or_default();
+            let domains = reports
+                .into_iter()
+                .map(|r| DomainReportV {
+                    domain: r.domain,
+                    servers: r.admin_servers.iter().map(|a| a.to_string()).collect(),
+                    identity: r.identity.as_ref().ok().map(ceremony::CaIdentityV::from),
+                    error: r.identity.err(),
+                })
+                .collect();
+            DiscoveryV { domains, diagnosis }.into()
+        }
+    }
+}
+
+pub(crate) type DiscoverDomains = CachedArgsAsync<DiscoverDomainsEv>;
+
+/// How long one identity fetch may take before the address counts as
+/// unreachable — a down or firewalled server must not stall a screen.
+const IDENTITY_TIMEOUT: Duration = Duration::from_secs(3);
+
+#[derive(Debug, Default)]
+pub(crate) struct IdentityAtEv;
+
+impl EvalCachedAsync for IdentityAtEv {
+    type Args = (Duration, SocketAddr);
+
+    const NAME: &str = "netidx_admin_identity_at";
+
+    fn prepare_args(&mut self, cached: &CachedVals) -> Option<Self::Args> {
+        let timeout = opt_timeout(cached.0.first()?.as_ref(), IDENTITY_TIMEOUT)?;
+        let addr = cached.get::<String>(1)?.parse().ok()?;
+        Some((timeout, addr))
+    }
+
+    fn eval((timeout, addr): Self::Args) -> impl Future<Output = Value> + Send {
+        async move {
+            let fetched = tokio::time::timeout(
+                timeout,
+                transport::fetch_identity(addr, netidx_admin_proto::NodeKind::Client),
+            )
+            .await;
+            match fetched {
+                Ok(Ok(id)) => ceremony::CaIdentityV::from(&id).into(),
+                Ok(Err(e)) => admin_err(e),
+                Err(_) => errf!("Admin", "no answer from {addr} within {timeout:?}"),
+            }
+        }
+    }
+}
+
+pub(crate) type IdentityAt = CachedArgsAsync<IdentityAtEv>;
+
+#[derive(Debug, Clone, IntoValue)]
+struct LocalDomainV {
+    domain: String,
+    fingerprint: String,
+    addr: Option<String>,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct LocalDomainEv;
+
+impl EvalCachedAsync for LocalDomainEv {
+    type Args = ();
+
+    const NAME: &str = "netidx_admin_local_domain";
+
+    fn prepare_args(&mut self, cached: &CachedVals) -> Option<Self::Args> {
+        cached.0.first()?.as_ref()?;
+        Some(())
+    }
+
+    fn eval(_: Self::Args) -> impl Future<Output = Value> + Send {
+        async move {
+            let record = paths::discover_install_record()
+                .ok()
+                .and_then(|p| InstallRecord::load(&p).ok());
+            let Some(record) = record else { return Value::Null };
+            let Some(net) = record.admin_domain else { return Value::Null };
+            let addr = ops::local_admin_server_listen()
+                .or(record.admin_servers.first().copied());
+            LocalDomainV {
+                domain: net.domain,
+                fingerprint: net.ca_fingerprint,
+                addr: addr.map(|a| a.to_string()),
+            }
+            .into()
+        }
+    }
+}
+
+pub(crate) type LocalDomain = CachedArgsAsync<LocalDomainEv>;

@@ -654,8 +654,10 @@ ours.** The glyph itself is the second lesson — captured as a bare
 `[Fingerprint, null]` and defaulted, the way the tab already wrote it;
 whether a connect asks the gesture at all depends on whether the
 domain's cert is the user CA dir's (`resolve_identity` verifies against
-the local CA silently), which the fixture now reports as
-`gesture_expected` so the TUI tests branch on it instead of assuming.
+the local CA silently) — a fixture predictor for it proved wrong
+within the hour (the landing test saw the gesture the predictor
+denied), so the TUI tests now wait for whichever of the gesture and
+the next question appears and answer that.
 
 ## 2026-09-02 — "shut for another 29m": datetime − datetime, and what durations look like
 
@@ -715,3 +717,78 @@ on 08-31, so the super-linear growth seen then did not continue; the
 fastcall sweep and strict fusion landed in between. Real performance
 measurement (release builds, the actual binary) waits for the finished
 port (Eric, 2026-09-02).
+
+## 2026-09-02 — `Error as _` in a select arm: a parse error reported at the wrong line
+
+The landing screen's glyph pane wanted `select parse_fingerprint(s) {
+Error as _ => …, fp => … }`. A bare `Error` type predicate does not
+parse, and the report is "Unexpected ` ` / can't use keyword as a
+function or variable name" at the `select` line's scrutinee column,
+three lines above the arm — the reserved-word diagnostic class logged
+on 08-18 and 08-21, fourth sighting. The documented way is `?`/`$`
+(or `is_err`) to dissect `[T, Error<..>]`, and that is what the code
+does now; the parameterized `Error<`E(string)> as _` form is what the
+grammar accepts. **Disposition: accepted for the code (`is_err`);
+graphix work item unchanged — a refusal inside a select arm must name
+the arm's position and say what it refused; "keyword" for `Error` is
+the wrong word twice over.**
+
+## 2026-09-02 — the accidental counter: an unsampled read of a connect's own target
+
+The landing screen spun at 100% CPU on its first live run (Eric saw
+it). Two select arms did `known <- upsert(known, …)`: the arm reads
+`known` freely, so the update it schedules re-fires the arm, which
+schedules another — the `x <- x + 1` counter idiom, written by
+accident. The fix is the documented one, sample the read with the
+event (`upsert(c ~ known, …)`), and it is the third time today the
+same rule bit the port: the pick-screen Enter handler read `pick_sel`
+freely (caught by reading), the gate chooser read `now` (caught by
+reading), and this one reached the harness. **Disposition: fixed in
+the code; graphix work item proposed — a lint for a connect whose
+target is read unsampled inside the same select arm. The legitimate
+counter is written `x <- n ~ x + 1` or `x <- x + 1` with a scrutinee
+that gates it; an arm that connects to a binding it also reads
+without `~` is a self-loop every time it is selected, and the
+compiler can say so where the operator would otherwise see a fan.**
+
+## 2026-09-02 — a component's event outputs cannot be `never()` fields
+
+The landing screen returned `{ view, handle, status, connect: Connect,
+manual: Any }` with `connect` and `manual` bound to `never()` until a
+key set them — and rendered blank: a struct literal produces only
+when every field has a value, so the component was bottom until its
+first Enter. The remote tab's own struct never hit this because its
+fields are all present from the start. **Disposition: the idiom —
+outputs a component raises later are nullable values (`[Connect,
+null]`, a bool) or `&` out-params, never bare `never()` fields.
+Accepted as bottom-propagation working as ruled; belongs in the book's
+component chapter next to "sample free reads with the event".**
+
+## 2026-09-02 — the landing screen's phantom Enter: sibling pattern binds, and an unchecked call site
+
+The landing test's second connect asked the identity gesture despite
+the saved glyph. The question bus trace showed the truth: the
+landing's Enter requested a connect (with the glyph), and one cycle
+later the CONNECT FORM's Enter handler ran with no keypress and
+restarted the ceremony with `glyph = null`. The tab's handler is
+`select e { ev@ `Key(k) => select k.kind { `Press => select screen {
+`Landing => land.handle(ev), `Connect => connect_keys(k), … }}}`: the
+landing arm consumed the key through `ev`, the screen flipped, and the
+connect arm's first dispatch received the sibling bind `k` FIRED. The
+wake catch-up tracker (09-01) excluded only a select's own pattern
+binds; an enclosing select's binds looked like two independent free
+inputs, and `k`'s fire counted as unseen. Six probes narrowed it: the
+same shape passes in-language with a bare formal, a plain callee, a
+late-bound callee, and inside a lambda frame — it fails only when one
+arm reads the whole-value capture and a sibling arm reads the payload.
+**Disposition: FIXED in graphix — pattern binds of every enclosing
+select are outside the tracker (`Bind::pattern`); pinned in-language
+(`select_sibling_binds_spent`) and at the callable layer
+(`callable_body_flip_reads_standing_key_stale`).** On the way the
+runtime's `compile_callable` turned out to build its call site with no
+typecheck, analysis or fusion (it predates typecheck1); it runs the
+statement pipeline now (`check_and_fuse`). Not the cause here, but
+Eric's principle stands: nothing skips typechecking. And a lesson for
+the test side: the fixture's gesture predictor was wrong within the
+hour — the harness now waits for whichever of the gesture and the next
+question appears.

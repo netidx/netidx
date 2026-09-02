@@ -62,4 +62,7 @@ let add_role_admin = |name: string, policy: Policy, t: Target| -> Result<string,
 let reset_password = |name: string, t: Target| -> Result<string, AdminError> 'netidx_admin_reset_password;
 let set_admin_policy = |name: string, policy: Policy, t: Target| -> Result<null, AdminError> 'netidx_admin_set_admin_policy;
 let remove_admin = |name: string, t: Target| -> Result<null, AdminError> 'netidx_admin_remove_admin;
-let discover = |#timeout: [duration, null] = null, trigger: Any| -> Result<Array<Discovered>, AdminError> 'netidx_admin_discover
+let discover = |#timeout: [duration, null] = null, trigger: Any| -> Result<Array<Discovered>, AdminError> 'netidx_admin_discover;
+let discover_domains = |#timeout: [duration, null] = null, trigger: Any| -> Result<Discovery, AdminError> 'netidx_admin_discover_domains;
+let identity_at = |#timeout: [duration, null] = null, server: string| -> Result<CaIdentity, AdminError> 'netidx_admin_identity_at;
+let local_domain = |trigger: Any| -> [{ domain: string, fingerprint: string, addr: [string, null] }, null] 'netidx_admin_local_domain

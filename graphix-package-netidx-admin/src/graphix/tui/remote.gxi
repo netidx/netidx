@@ -16,7 +16,8 @@ type Remote = {
 /// ceremony the tab starts feeds its questions there (wire the bus to
 /// ONE shared `pump` and compose `Remote.layers` UNDER the pump's —
 /// the pump's modals must stay on top). `#server` pre-fills the
-/// connect screen's address input. Compose with `handle`'s
+/// connect screen's address input and starts the tab there; without it
+/// the tab starts on the landing screen (the known admin domains). Compose with `handle`'s
 /// input_handler INSIDE the overlay wrapping the base view — outside
 /// it, the base consumes keys before an open modal layer sees them.
 val remote: fn(#q: &Question, ?#server: string) -> Remote;

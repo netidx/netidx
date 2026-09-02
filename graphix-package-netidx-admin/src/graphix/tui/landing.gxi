@@ -1,0 +1,40 @@
+use package::{Fingerprint, Question};
+use tui::overlay::Layer;
+
+/// One saved admin domain — a CA identity (its fingerprint text)
+/// reachable at one or more admin-server addresses, tried in order.
+type Known = { domain: string, fingerprint: string, addrs: Array<string> };
+
+/// The saved set, as the bookmarks file holds it.
+type Book = { domains: Array<Known> };
+
+/// What the landing screen asks the tab to do: connect to a verified
+/// domain at the address that answered, with the fingerprint it was
+/// saved under so the gesture is not asked again.
+type Connect = { server: string, glyph: Fingerprint };
+
+/// A session the tab established, for the registry to remember.
+type Connected = { domain: string, server: string, fingerprint: string };
+
+/// The landing screen's surface: its view and status line, the key
+/// handler, and its two requests — `connect` is set per Enter on a
+/// verified domain, `manual` per `c` (both are values, null and false
+/// until asked: a struct produces only when every field has one).
+type Landing = {
+  view: tui::Tui,
+  handle: fn(e: tui::input_handler::Event) -> [`Stop, `Continue],
+  status: tui::Line,
+  connect: [Connect, null],
+  manual: bool
+};
+
+/// The admin-domain tab's landing screen: the registry of known admin
+/// domains — the bookmarks file in this program's config directory,
+/// seeded with this host's own domain from its install record —
+/// re-verified on entry by fetching each saved address's identity and
+/// matching the saved fingerprint, so a reused address on another
+/// network can never pose as a domain trusted elsewhere. `d` browses
+/// the network and records what verified; `r` re-checks. Sessions the
+/// tab establishes arrive on `#connected` and are recorded. Questions
+/// go to the app's bus `#q` like every other screen's.
+val landing: fn(#q: &Question, #connected: &[Connected, null]) -> Landing;

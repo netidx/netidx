@@ -1,0 +1,243 @@
+use package::{AdminError, discover_domains, identity_at, local_domain};
+use super::{fingerprint_lines, glyph};
+use tui::{line, span, style};
+use tui::block::{self, *};
+use tui::input_handler::{self, *};
+use tui::layout::{self, *};
+use tui::list::{self, *};
+use tui::paragraph::{self, *};
+use tui::text::{self, *};
+
+type Poll = [`Present(string), `Absent];
+
+let admin_text = |a: AdminError| -> string select a {
+  `Admin(m) => m,
+  `PasswordChangeRequired(name) => "[name]'s password must be changed first",
+  `Unsupported(m) => "unsupported on this platform: [m]"
+};
+
+// record a domain under its fingerprint: a new address joins the
+// saved ones, a changed name replaces the saved one
+let upsert = |book: Book, domain: string, addr: string, fp: string| -> Book
+  select array::find(book.domains, |k: Known| k.fingerprint == fp) {
+    null as _ => { domains: array::push(book.domains, { domain, fingerprint: fp, addrs: [addr] }) },
+    _ => {
+      domains: array::map(book.domains, |k: Known| -> Known select k.fingerprint == fp {
+        true => {
+          domain,
+          fingerprint: fp,
+          addrs: select array::find(k.addrs, |a: string| a == addr) {
+            null as _ => array::push(k.addrs, addr),
+            _ => k.addrs
+          }
+        },
+        false => k
+      })
+    }
+  };
+
+let landing = |#q: &Question, #connected: &[Connected, null]| -> Landing {
+  let hint = style(#fg: `DarkGray);
+  let selstyle = style(#add_modifier: [`Reversed]);
+  let bold = style(#add_modifier: [`Bold]);
+  // ── the bookmarks file ──
+  let path: [string, null] = select sys::dirs::config_dir() {
+    null as _ => null,
+    d => sys::join_path(d, "netidx-admin-tui", "admin-domains.json")
+  };
+  let dir: [string, null] = select sys::dirs::config_dir() {
+    null as _ => null,
+    d => sys::join_path(d, "netidx-admin-tui")
+  };
+  let known: Book = { domains: [] };
+  let notice: [string, null] = null;
+  {
+    catch(e) never();
+    let text = select path {
+      null as _ => never(),
+      p => sys::fs::read_all(p)?
+    };
+    let loaded: Book = json::read(text)?;
+    known <- loaded
+  };
+  // this host's own domain, from its install record
+  select local_domain(true) {
+    null as _ => never(),
+    { domain, fingerprint, addr } => select addr {
+      null as _ => never(),
+      a => known <- upsert(a ~ known, domain, a, fingerprint)
+    }
+  };
+  let save: Any = never();
+  {
+    catch(e) notice <- "could not save the admin domain list: [e]";
+    let d = select save ~ dir {
+      null as _ => never(),
+      d => d
+    };
+    let made = sys::fs::create_dir(#all: true, d)?;
+    let p = select made ~ path {
+      null as _ => never(),
+      p => p
+    };
+    sys::fs::write_all(#path: p, json::write_str(#pretty: true, made ~ known)?)?
+  };
+  // ── verification: each saved domain, at each address, in order —
+  // at load, after every change to the set, and on demand ──
+  let poll: Any = known;
+  let polling = false;
+  polling <- poll ~ true;
+  let states: Array<Poll> = array::map(poll ~ known.domains, |k: Known| -> Poll {
+    let seen = array::map(k.addrs, |a: string| -> [string, null] {
+      let id = identity_at(a);
+      select is_err(id) {
+        true => null,
+        false => select (id$).fingerprint.code == k.fingerprint {
+          true => a,
+          false => null
+        }
+      }
+    });
+    select array::find(seen, |a: [string, null]| select a { null as _ => false, _ => true }) {
+      null as _ => `Absent,
+      a => `Present(a)
+    }
+  });
+  polling <- states ~ false;
+  let visible: Array<{ known: Known, addr: string }> = array::filter_map(
+    array::zip(known.domains, states),
+    |(k, st): (Known, Poll)| -> [{ known: Known, addr: string }, null] select st {
+      `Present(addr) => { known: k, addr },
+      `Absent => null
+    }
+  );
+  // ── a session the tab established is remembered, and re-checked ──
+  select *connected {
+    null as _ => never(),
+    c => {
+      known <- upsert(c ~ known, c.domain, c.server, c.fingerprint);
+      save <- c
+    }
+  };
+  // ── discovery: what verified is recorded ──
+  let discover_at: Any = never();
+  let toast: [{ title: string, lines: Array<string> }, null] = null;
+  {
+    catch(e) toast <- { title: "Discovery failed", lines: [admin_text((e.0).error)] };
+    let found = discover_domains(discover_at)?;
+    let verified = array::filter_map(found.domains, |r| select r.identity {
+      null as _ => null,
+      id => { domain: r.domain, servers: r.servers, fp: id.fingerprint.code }
+    });
+    known <- array::fold(verified, found ~ known, |book: Book, v| array::fold(
+      v.servers,
+      book,
+      |b: Book, s: string| upsert(b, v.domain, s, v.fp)
+    ));
+    save <- found;
+    toast <- select array::len(found.diagnosis) {
+      0 => select array::len(verified) {
+        0 => { title: "Discovery", lines: ["No admin domain answered on the local network."] },
+        n => { title: "Discovery", lines: ["Found [n] admin domain(s); they are saved."] }
+      },
+      _ => { title: "Discovery", lines: found.diagnosis }
+    }
+  };
+  // ── keys ──
+  let sel = 0;
+  let connect: [Connect, null] = null;
+  let manual = false;
+  let handle = |e: Event| -> [`Stop, `Continue] select e {
+    `Key(k) => select k.kind {
+      `Press => select k.code {
+        `Up | `Char("k") => { sel <- max(0, (k ~ sel) - 1); `Stop },
+        `Down | `Char("j") => {
+          sel <- min(max(0, array::len(k ~ visible) - 1), (k ~ sel) + 1);
+          `Stop
+        },
+        kk@ `Char("d") => { discover_at <- kk; `Stop },
+        kk@ `Char("c") => { manual <- kk ~ true; `Stop },
+        kk@ `Char("r") => { poll <- kk; `Stop },
+        kk@ `Enter => {
+          select kk ~ toast {
+            null as _ => {
+              let i = kk ~ sel;
+              select kk ~ visible {
+                [] => never(),
+                rows => {
+                  let row = rows[min(i, array::len(rows) - 1)]$;
+                  connect <- {
+                    server: row.addr,
+                    glyph: package::parse_fingerprint(row.known.fingerprint)$
+                  }
+                }
+              }
+            },
+            _ => toast <- null
+          };
+          `Stop
+        },
+        kk@ `Esc => { toast <- kk ~ null; `Stop },
+        _ => `Continue
+      },
+      _ => `Continue
+    },
+    _ => `Continue
+  };
+  // ── the view ──
+  let empty: Array<tui::Line> = select (array::len(known.domains), polling, array::len(visible)) {
+    (0, _, _) => [line(#style: hint,
+      "No saved admin domains yet. Press d to discover admin domains on the local network, or c to connect to one by address.")],
+    (_, true, 0) => [line(#style: hint, "Checking saved admin domains…")],
+    (_, false, 0) => [line(#style: hint,
+      "No saved admin domain is reachable here right now (an admin domain only shows once its identity has been re-verified at a saved address). Press r to re-check.")],
+    _ => []
+  };
+  let items = array::map(visible, |v| line(array::concat(
+    [span("[v.known.domain] ")],
+    [span(#style: hint, "([v.addr])")]
+  )));
+  let side: Array<tui::Line> = select visible {
+    [] => [],
+    rows => {
+      let row = rows[min(sel, array::len(rows) - 1)]$;
+      let parsed = package::parse_fingerprint(row.known.fingerprint);
+      select is_err(parsed) {
+        true => [line(#style: hint, "saved fingerprint does not parse")],
+        false => {
+          let fp = parsed$;
+          array::concat([line(#style: hint, "CA glyph")], glyph(fp), fingerprint_lines(fp))
+        }
+      }
+    }
+  };
+  let notice_lines: Array<tui::Line> = select notice {
+    null as _ => [],
+    m => [line(#style: style(#fg: `Red), m)]
+  };
+  let toast_lines: Array<tui::Line> = select toast {
+    null as _ => [],
+    t => array::concat([line(#style: bold, t.title)], array::map(t.lines, |l| line(l)))
+  };
+  let view = block(
+    #border: &`All,
+    #title: &line("Admin Domains"),
+    #title_bottom: &line(#style: hint, " Enter connect · d discover · c connect direct · r refresh "),
+    &layout(#direction: &`Horizontal, &[
+      child(#constraint: `Min(30), layout(#direction: &`Vertical, &[
+        child(#constraint: `Length(array::len(empty)), paragraph(#trim: &false, &empty)),
+        child(#constraint: `Min(1), list(#highlight_style: &selstyle, #selected: &sel, &items)),
+        child(#constraint: `Length(array::len(toast_lines)), paragraph(#trim: &false, &toast_lines)),
+        child(#constraint: `Length(array::len(notice_lines)), text(&notice_lines))
+      ])),
+      child(#constraint: `Length(28), paragraph(#alignment: &`Center, #trim: &false, &side))
+    ])
+  );
+  {
+    view,
+    handle,
+    status: line(#style: hint, " Enter connect · d discover · c connect direct · r refresh "),
+    connect,
+    manual
+  }
+}

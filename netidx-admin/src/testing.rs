@@ -329,17 +329,6 @@ impl TestAdminDomain {
         Ok(t)
     }
 
-    /// Whether a connect to this domain asks the operator to confirm the
-    /// CA's identity: it does unless this domain's certificate is the one
-    /// in the user CA directory, which a resolve verifies against silently.
-    pub fn gesture_expected(&self) -> bool {
-        let local = paths::user_ca_dir()
-            .ok()
-            .and_then(|d| std::fs::read(d.join("certificate.pem")).ok())
-            .and_then(|pem| Fingerprint::of_cert_pem(&pem).ok());
-        local.as_ref() != Some(&self.fingerprint)
-    }
-
     /// Mint a role admin that may manage admins, over a password session
     /// of the founding superuser; returns the one-time password the CA
     /// requires to be changed at first login. Nothing is left in the

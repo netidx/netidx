@@ -59,12 +59,34 @@ let result = overlay(#layers: &layers,
     )
 }
 
+/// Accept the identity gesture if the ceremony asks it: whether it does
+/// depends on whether the domain's CA is the one in the user CA
+/// directory, which the tests do not control — so wait for whichever
+/// of the gesture and the next question comes up.
+async fn accept_gesture_if_asked(h: &mut TuiTestHarness, next: &str) -> Result<()> {
+    wait_render(
+        h,
+        Duration::from_secs(60),
+        "the gesture or the next question",
+        |lines| {
+            lines
+                .iter()
+                .any(|l| l.contains("Confirm the CA's identity") || l.contains(next))
+        },
+    )
+    .await?;
+    let asked = h.render_lines()?.iter().any(|l| l.contains("Confirm the CA's identity"));
+    if asked {
+        h.dispatch_event(key(KeyCode::Char('a'))).await?;
+    }
+    Ok(())
+}
+
 /// From the connect screen (address pre-filled): start the ceremony and
-/// answer the gesture, the admin name, and the password through the
-/// pump's modals.
+/// answer the gesture (if asked), the admin name, and the password
+/// through the pump's modals.
 async fn connect_via_modals(
     h: &mut TuiTestHarness,
-    d: &TestAdminDomain,
     admin: &str,
     password: &str,
 ) -> Result<()> {
@@ -73,13 +95,7 @@ async fn connect_via_modals(
     })
     .await?;
     h.dispatch_event(key(KeyCode::Enter)).await?;
-    if d.gesture_expected() {
-        wait_render(h, Duration::from_secs(60), "the identity modal", |lines| {
-            lines.iter().any(|l| l.contains("Confirm the CA's identity"))
-        })
-        .await?;
-        h.dispatch_event(key(KeyCode::Char('a'))).await?;
-    }
+    accept_gesture_if_asked(h, "admin name").await?;
     // no #admin was passed, so the ceremony asks for the name too; the
     // field pre-seeds the question's default (the OS username)
     answer_text(h, "admin name", admin).await?;
@@ -133,13 +149,7 @@ let result = overlay(#layers: &p.layers, paragraph(&"base"))
     h.watch("test::status").await?;
     // the security gesture: the ConfirmIdentity modal comes up with the
     // CA's glyph and grouped fingerprint
-    if d.gesture_expected() {
-        wait_render(&mut h, Duration::from_secs(60), "the identity modal", |lines| {
-            lines.iter().any(|l| l.contains("Confirm the CA's identity"))
-        })
-        .await?;
-        h.dispatch_event(key(KeyCode::Char('a'))).await?;
-    }
+    accept_gesture_if_asked(&mut h, "admin password").await?;
     // the password question renders as a masked text modal
     wait_render(&mut h, Duration::from_secs(60), "the password modal", |lines| {
         lines.iter().any(|l| l.contains("admin password"))
@@ -193,7 +203,7 @@ async fn remote_tab_drives_the_panels() -> Result<()> {
     let prog = remote_tab_program(&d.listen.to_string());
     let mut h =
         TuiTestHarness::with_register(&prog, crate::TEST_REGISTER, 100, 30).await?;
-    connect_via_modals(&mut h, &d, &d.admin, &d.password).await?;
+    connect_via_modals(&mut h, &d.admin, &d.password).await?;
     // the ceremony finishes and the panel menu names the session
     let admin = d.admin.clone();
     wait_render(&mut h, Duration::from_secs(60), "the panel menu", |lines| {
@@ -239,7 +249,7 @@ async fn remote_tab_routes_a_reset_password() -> Result<()> {
     let prog = remote_tab_program(&d.listen.to_string());
     let mut h =
         TuiTestHarness::with_register(&prog, crate::TEST_REGISTER, 100, 30).await?;
-    connect_via_modals(&mut h, &d, "alice", &one_time).await?;
+    connect_via_modals(&mut h, "alice", &one_time).await?;
     // refused with PasswordChangeRequired: the change-password ceremony
     // asks the current password (the gesture, if any, was confirmed once
     // already and rides along as the glyph), then the new one twice
@@ -252,7 +262,7 @@ async fn remote_tab_routes_a_reset_password() -> Result<()> {
     .await?;
     h.dispatch_event(key(KeyCode::Enter)).await?;
     // the new password opens a session
-    connect_via_modals(&mut h, &d, "alice", "a-brand-new-password").await?;
+    connect_via_modals(&mut h, "alice", "a-brand-new-password").await?;
     wait_render(&mut h, Duration::from_secs(60), "alice's menu", |lines| {
         lines.iter().any(|l| l.contains("as alice"))
     })
@@ -291,7 +301,7 @@ async fn remote_tab_opens_the_services_and_perms_screens() -> Result<()> {
     let prog = remote_tab_program(&d.listen.to_string());
     let mut h =
         TuiTestHarness::with_register(&prog, crate::TEST_REGISTER, 100, 30).await?;
-    connect_via_modals(&mut h, &d, &d.admin, &d.password).await?;
+    connect_via_modals(&mut h, &d.admin, &d.password).await?;
     wait_render(&mut h, Duration::from_secs(60), "the panel menu", |lines| {
         lines.iter().any(|l| l.contains("Services"))
     })
@@ -336,6 +346,71 @@ async fn remote_tab_opens_the_services_and_perms_screens() -> Result<()> {
     h.dispatch_event(key(KeyCode::Enter)).await?;
     wait_render(&mut h, Duration::from_secs(60), "the toast dismissed", |lines| {
         !lines.iter().any(|l| l.contains("No read gate"))
+    })
+    .await?;
+    Ok(())
+}
+
+/// The landing screen: with no address passed the tab starts on the
+/// registry — empty here, the bookmarks live under the test's config
+/// redirect — and `c` reaches connect-by-address. A session established
+/// there is remembered to the bookmarks file and, back on the landing
+/// after a disconnect, re-verified at its address and listed; Enter on
+/// it connects with the saved fingerprint and the cached session, so
+/// the menu comes up with no question asked.
+#[tokio::test(flavor = "multi_thread")]
+async fn landing_remembers_and_reverifies_a_domain() -> Result<()> {
+    let d = TestAdminDomain::start().await?;
+    let prog = remote_tab_program("");
+    let mut h =
+        TuiTestHarness::with_register(&prog, crate::TEST_REGISTER, 100, 30).await?;
+    wait_render(&mut h, Duration::from_secs(60), "the empty landing", |lines| {
+        lines.iter().any(|l| l.contains("No saved admin domains yet"))
+    })
+    .await?;
+    h.dispatch_event(key(KeyCode::Char('c'))).await?;
+    wait_render(&mut h, Duration::from_secs(60), "the connect screen", |lines| {
+        lines.iter().any(|l| l.contains("Connect to an admin domain"))
+    })
+    .await?;
+    type_text(&mut h, &d.listen.to_string()).await?;
+    connect_via_modals(&mut h, &d.admin, &d.password).await?;
+    wait_render(&mut h, Duration::from_secs(60), "the panel menu", |lines| {
+        lines.iter().any(|l| l.contains("Enrollment Queue"))
+    })
+    .await?;
+    // the session was recorded
+    let book = std::path::PathBuf::from(std::env::var("XDG_CONFIG_HOME")?)
+        .join("netidx-admin-tui")
+        .join("admin-domains.json");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if let Ok(text) = std::fs::read_to_string(&book)
+            && text.contains(&d.domain)
+        {
+            break;
+        }
+        if Instant::now() > deadline {
+            bail!("the bookmarks file never recorded {}", d.domain);
+        }
+        h.drain().await?;
+    }
+    // disconnect: the landing re-verifies the saved domain and lists it
+    h.dispatch_event(key(KeyCode::Esc)).await?;
+    let domain = d.domain.clone();
+    let listen = d.listen.to_string();
+    wait_render(&mut h, Duration::from_secs(60), "the verified domain", |lines| {
+        lines.iter().any(|l| l.contains(&domain) && l.contains(&listen))
+    })
+    .await?;
+    // Enter connects with the saved fingerprint and the session the
+    // first connect cached: no gesture, no name, no password — the
+    // menu comes straight up
+    h.dispatch_event(key(KeyCode::Enter)).await?;
+    let admin = d.admin.clone();
+    wait_render(&mut h, Duration::from_secs(60), "the panel menu again", |lines| {
+        lines.iter().any(|l| l.contains(&format!("as {admin}")))
+            && lines.iter().any(|l| l.contains("Enrollment Queue"))
     })
     .await?;
     Ok(())

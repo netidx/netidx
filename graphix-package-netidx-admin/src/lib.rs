@@ -643,6 +643,9 @@ graphix_derive::defpackage! {
         ops::SetAdminPolicy,
         ops::RemoveAdmin,
         ops::Discover,
+        ops::DiscoverDomains,
+        ops::IdentityAt,
+        ops::LocalDomain,
     ],
 }
 

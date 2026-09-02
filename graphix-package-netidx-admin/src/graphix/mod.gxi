@@ -547,4 +547,44 @@ val discover: fn(
   trigger: Any
 ) -> Result<Array<Discovered>, AdminError>;
 
+/// One admin domain a discovery pass heard from: the servers that
+/// advertised it, and its CA identity fetched from them — or why that
+/// failed (`identity` null, `error` set), which is the beacon of a
+/// server this host cannot reach.
+type DomainReport = {
+  domain: string,
+  servers: Array<string>,
+  identity: [CaIdentity, null],
+  error: [string, null]
+};
+
+/// What a discovery pass found. `diagnosis` is non-empty exactly when
+/// something answered and none of it verified — the lines explain why,
+/// for an operator who would otherwise read it as "nothing found".
+type Discovery = { domains: Array<DomainReport>, diagnosis: Array<string> };
+
+/// Browse for admin domains AND verify each one's CA identity — the
+/// discovery a landing screen records. One pass per `trigger`;
+/// `#timeout` defaults to the discovery window.
+val discover_domains: fn(
+  ?#timeout: [duration, null],
+  trigger: Any
+) -> Result<Discovery, AdminError>;
+
+/// The CA identity an admin server presents, fetched without
+/// confirming or trusting it — what a saved domain is re-checked
+/// against before it is offered. One fetch per `server` delivery; an
+/// address that does not answer within `#timeout` (3 seconds) errors.
+val identity_at: fn(
+  ?#timeout: [duration, null],
+  server: string
+) -> Result<CaIdentity, AdminError>;
+
+/// The admin domain this host belongs to, from its install record:
+/// the domain, its CA fingerprint text, and this host's own admin
+/// server address (or the first one it enrolled through). Null on a
+/// host with no install record or a standalone one. Re-read per
+/// `trigger`.
+val local_domain: fn(trigger: Any) -> [{ domain: string, fingerprint: string, addr: [string, null] }, null];
+
 mod tui;

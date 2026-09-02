@@ -8,6 +8,7 @@ use package::{
   reconcile_ca, remove_admin, remove_perm, remove_server, reset_password,
   result, revoke, service_control, set_perm, set_read_gate, show_perms
 };
+use super::landing::{self, Connected};
 use tui::{line, style};
 use tui::block::{self, *};
 use tui::input_handler::{self, *};
@@ -21,7 +22,7 @@ use tui::text::{self, *};
 
 type PanelKind = [`Queue, `Delegations, `Roster, `Servers, `Certs, `Services, `Perms];
 
-type Screen = [`Connect, `Menu, `Panel(PanelKind), `ServerPick, `ClusterPick];
+type Screen = [`Landing, `Connect, `Menu, `Panel(PanelKind), `ServerPick, `ClusterPick];
 
 type GateReq = [ReadGate, `ShutFor(duration)];
 
@@ -180,13 +181,34 @@ let remote = |#q: &Question, #server: string = ""| -> Remote {
   let bold = style(#add_modifier: [`Bold]);
   // ── connection state ──
   let target: Target = never();
-  let screen: Screen = `Connect;
+  let screen: Screen = select server {
+    "" => `Landing,
+    _ => `Connect
+  };
   let ed = line_edit::state(server);
   let connect_to: string = never();
+  // a domain the landing screen verified against its saved fingerprint
+  // connects without the gesture
+  let connect_glyph: [Fingerprint, null] = null;
   let conn_err: [string, null] = null;
   conn_err <- connect_to ~ null;
-  let connect_c = connect(connect_to);
+  let connect_c = connect(#glyph: connect_glyph, connect_to);
   *q <- questions(connect_c);
+  // ── the landing screen: known admin domains ──
+  let connected: [Connected, null] = null;
+  let land = landing::landing(#q: q, #connected: &connected);
+  select land.connect {
+    null as _ => never(),
+    c => {
+      connect_glyph <- c.glyph;
+      connect_to <- c.server;
+      screen <- c ~ `Connect
+    }
+  };
+  select land.manual {
+    true => screen <- `Connect,
+    false => never()
+  };
   // the CA fingerprint the operator confirmed during this connect, so
   // a follow-on ceremony against the same server skips the gesture
   let glyph: [Fingerprint, null] = null;
@@ -205,7 +227,12 @@ let remote = |#q: &Question, #server: string = ""| -> Remote {
     };
     let t = result(connect_c)?;
     target <- t;
-    screen <- t ~ `Menu
+    screen <- t ~ `Menu;
+    connected <- select info(t) {
+      `Remote({ server, identity, .. }) =>
+        { domain: identity.domain, server, fingerprint: identity.fingerprint.code },
+      `Local(_) => null
+    }
   };
   // ── shared ui state ──
   let menu_sel = 0;
@@ -664,6 +691,7 @@ let remote = |#q: &Question, #server: string = ""| -> Remote {
   };
   // ── key handling ──
   let panel_last: i64 = select screen {
+    `Landing => 0,
     `Connect => 0,
     `Menu => 0,
     `Panel(`Queue) => max(0, opt_len(queue_rows) - 1),
@@ -685,10 +713,14 @@ let remote = |#q: &Question, #server: string = ""| -> Remote {
     kk@ `Enter => {
       select kk ~ ed.value {
         "" => never(),
-        v => connect_to <- v
+        v => {
+          connect_glyph <- null;
+          connect_to <- v
+        }
       };
       `Stop
     },
+    kk@ `Esc => { screen <- kk ~ `Landing; `Stop },
     _ => line_edit::handle(&ed, ev)
   };
   let menu_keys = |k: KeyEvent| -> [`Stop, `Continue] select k.code {
@@ -708,7 +740,7 @@ let remote = |#q: &Question, #server: string = ""| -> Remote {
       pick_sel <- p ~ 0;
       `Stop
     },
-    kk@ `Esc => { screen <- kk ~ `Connect; `Stop },
+    kk@ `Esc => { screen <- kk ~ `Landing; `Stop },
     _ => `Continue
   };
   let pick_keys = |k: KeyEvent| -> [`Stop, `Continue] select k.code {
@@ -921,6 +953,7 @@ let remote = |#q: &Question, #server: string = ""| -> Remote {
   let handle = |e: Event| -> [`Stop, `Continue] select e {
     ev@ `Key(k) => select k.kind {
       `Press => select screen {
+        `Landing => land.handle(ev),
         `Connect => connect_keys(ev, k),
         `Menu => menu_keys(k),
         `Panel(p) => panel_keys(k, p),
@@ -1127,7 +1160,7 @@ let remote = |#q: &Question, #server: string = ""| -> Remote {
   let connect_view = block(
     #border: &`All,
     #title: &line("Connect to an admin domain"),
-    #title_bottom: &line(#style: hint, " Enter connect "),
+    #title_bottom: &line(#style: hint, " Enter connect · Esc back "),
     &layout(#direction: &`Vertical, &[
       child(#constraint: `Length(2),
         paragraph(#style: &hint, &"Enter the admin server's address (host:port).")),
@@ -1434,6 +1467,7 @@ let remote = |#q: &Question, #server: string = ""| -> Remote {
     block(#border: &`All, #title: &line(entry.title), &w)
   };
   let body: tui::Tui = select screen {
+    `Landing => land.view,
     `Connect => connect_view,
     `Menu => menu_view,
     `Panel(`Queue) => panel_view(`Queue, queue_view),
@@ -1447,7 +1481,8 @@ let remote = |#q: &Question, #server: string = ""| -> Remote {
     `ClusterPick => cluster_pick_view
   };
   let status: tui::Line = select screen {
-    `Connect => line(#style: hint, " type an address · Enter connect "),
+    `Landing => land.status,
+    `Connect => line(#style: hint, " type an address · Enter connect · Esc back "),
     `Menu => line(#style: hint, " ↑/↓ move · Enter open · Esc disconnect "),
     `ServerPick => line(#style: hint, " ↑/↓ move · Enter open · Esc back "),
     `ClusterPick => line(#style: hint, " ↑/↓ move · Enter open · Esc back "),
