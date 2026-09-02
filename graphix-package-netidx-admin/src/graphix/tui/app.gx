@@ -1,0 +1,73 @@
+use package::Question;
+use super::{local, pump, remote};
+use tui::{line, style};
+use tui::input_handler::{self, *};
+use tui::layout::{self, *};
+use tui::overlay::{self, *};
+use tui::tabs::{self, *};
+use tui::text::{self, *};
+
+let app = |#server: string = ""| -> tui::Tui {
+  let hint = style(#fg: `DarkGray);
+  let selstyle = style(#add_modifier: [`Reversed]);
+  let q: Question = never();
+  let p = pump(q);
+  let loc = local::local(#q: &q);
+  let rem = remote::remote(#q: &q, #server: server);
+  let tab = select server {
+    "" => 0,
+    _ => 1
+  };
+  // the tab's own keys come first; what it leaves alone reaches the
+  // global ones
+  let tab_handle = |e: Event| -> [`Stop, `Continue] select e ~ tab {
+    0 => loc.handle(e),
+    _ => rem.handle(e)
+  };
+  let global = |e: Event| -> [`Stop, `Continue] select e {
+    `Key(k) => select k.kind {
+      `Press => select k.code {
+        `Tab => {
+          tab <- select k ~ loc.installed {
+            true => ((k ~ tab) + 1) % 2,
+            false => k ~ 0
+          };
+          `Stop
+        },
+        `Char("q") => { tui::exit(k ~ null); `Stop },
+        _ => `Continue
+      },
+      _ => `Continue
+    },
+    _ => `Continue
+  };
+  let body: tui::Tui = select loc.installed {
+    false => loc.view,
+    true => tabs(
+      #selected: &tab,
+      #highlight_style: &selstyle,
+      &[(line("Local"), loc.view), (line("Admin Domain"), rem.view)]
+    )
+  };
+  let status: tui::Line = select p.progress {
+    null as _ => select tab {
+      0 => loc.status,
+      _ => rem.status
+    },
+    pr => line(#style: hint, " working… [pr.message] ")
+  };
+  let layers = array::concat(
+    select tab {
+      0 => loc.layers,
+      _ => rem.layers
+    },
+    p.layers
+  );
+  overlay(#layers: &layers,
+    input_handler(#handle: &tab_handle,
+      &input_handler(#handle: &global,
+        &layout(#direction: &`Vertical, &[
+          child(#constraint: `Min(1), body),
+          child(#constraint: `Length(1), text(&[status]))
+        ]))))
+}

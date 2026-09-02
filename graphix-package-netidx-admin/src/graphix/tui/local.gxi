@@ -1,0 +1,26 @@
+use package::Question;
+use tui::overlay::Layer;
+
+/// The Local tab's surface: its view and status line, the key
+/// handler, its modal layers (the welcome dialog, the status card,
+/// confirmations, toasts, and the local admin panels' own), and
+/// whether anything is installed on this host — a fresh machine has
+/// only the install choices, so the app shows no tab bar.
+type Local = {
+  view: tui::Tui,
+  handle: fn(e: tui::input_handler::Event) -> [`Stop, `Continue],
+  status: tui::Line,
+  layers: Array<Layer>,
+  installed: bool
+};
+
+/// The Local tab: what is installed on this host and what can be done
+/// with it. An installed host shows the selected install's action
+/// list — status, update, renew, the local admin server's roster and
+/// permissions, the CA credential actions, backup — beside a
+/// description of the highlighted one; `‹`/`›` switch between a user-
+/// and a system-scope install. A fresh host shows the roles it could
+/// take. The admin-domain sync check and the CA credential probe run
+/// in the background and the list grows as they land; `R` re-detects.
+/// Ceremonies' questions go to the app's bus `#q`.
+val local: fn(#q: &Question) -> Local;

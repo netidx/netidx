@@ -137,8 +137,8 @@ async fn abstract_type_predicate_is_nominal() -> anyhow::Result<()> {
 
 /// Milestone timing per the findings-log discipline: registration
 /// (all stdlib + this package's packed-AST decode + typecheck) and
-/// the compile of a pump+remote composition (the app-main-shaped
-/// call site). Run by hand at every ~1k lines of `.gx`:
+/// the compile of the app main (both tabs under the pump). Run by
+/// hand at every ~1k lines of `.gx`:
 /// `cargo test -p graphix-package-netidx-admin milestone_timing -- --ignored --nocapture`
 #[tokio::test]
 #[ignore = "milestone timing, run by hand"]
@@ -147,15 +147,7 @@ async fn milestone_timing() -> anyhow::Result<()> {
     let t0 = std::time::Instant::now();
     let ctx = graphix_package_core::testing::init(tx, &crate::TEST_REGISTER).await?;
     let reg = t0.elapsed();
-    let prog = arcstr::literal!(
-        r#"
-let q: netidx_admin::Question = never();
-let r = netidx_admin::tui::remote::remote(#q: &q, #server: "127.0.0.1:1");
-let p = netidx_admin::tui::pump(q);
-let layers = array::concat(r.layers, p.layers);
-(r.view, p.busy, layers)
-"#
-    );
+    let prog = arcstr::literal!("netidx_admin::tui::app::app(#server: \"127.0.0.1:1\")");
     let t1 = std::time::Instant::now();
     ctx.rt.compile(prog).await?;
     let compile = t1.elapsed();

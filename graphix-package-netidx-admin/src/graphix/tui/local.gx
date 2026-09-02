@@ -1,0 +1,877 @@
+use package::{
+  AdminError, CaCredentials, Change, Install, InstallRole, LocalCa,
+  ServiceState, Target, auto_approve, backup, ca_credentials, external_csr,
+  external_install, installs, local as local_target, local_resolver_base,
+  parse_fingerprint, questions, recovery_rotate, renew, result, sync_check,
+  units_dir, update
+};
+use super::{
+  Confirm, Toast, admin_text, confirm_layers, fingerprint_lines, glyph,
+  toast_layers
+};
+use super::panels::{self, CloseReason, Entry};
+use tui::{line, span, style};
+use tui::block::{self, *};
+use tui::input_handler::{self, *};
+use tui::layout::{self, *};
+use tui::list::{self, *};
+use tui::overlay::{self, layer, Layer};
+use tui::paragraph::{self, *};
+use tui::text::{self, *};
+
+type SyncState = [
+  `NotApplicable,
+  `Checking,
+  `InSync,
+  `OutOfSync(Array<Change>),
+  `Failed(string)
+];
+
+type Probe = [`None, `Probing, `Ready(CaCredentials), `Failed(string)];
+
+type Act = [
+  `Status,
+  `Update,
+  `Join(bool),
+  `AddParent,
+  `Renew,
+  `Services,
+  `Admins,
+  `Perms,
+  `AutoApprove(bool),
+  `RecoveryRotate,
+  `ExternalCsr,
+  `ExternalInstall,
+  `Backup,
+  `Uninstall,
+  `Install(InstallRole, bool),
+  `Restore
+];
+
+type Item = { label: string, act: Act, desc: string };
+
+type Screen = [`Home, `Admin];
+
+let role_title = |r: InstallRole| -> string select r {
+  `Ca => "CA",
+  `Workstation => "Workstation",
+  `Resolver => "Resolver",
+  `Publisher => "Publisher"
+};
+
+let service_word = |s: ServiceState| -> string select s {
+  `Active => "running",
+  `Inactive => "stopped",
+  `NotInstalled => "no service"
+};
+
+let change_text = |c: Change| -> string select c {
+  `Add(s) => "+ add [s]",
+  `Del(s) => "- remove [s]",
+  `Reauth(s) => "~ change [s]"
+};
+
+let fresh_choices: Array<{ act: Act, title: string, blurb: string }> = [
+  {
+    act: `Install(`Ca, false),
+    title: "CA",
+    blurb: "Install the admin domain's certificate authority on this machine. It may be dedicated to this role; resolver servers are installed separately and enroll with it."
+  },
+  {
+    act: `Install(`Workstation, false),
+    title: "Workstation",
+    blurb: "Turn this machine into a full netidx node: a local resolver serving a /local namespace plus a matching client. Join an existing admin domain to enroll a TLS identity, or run standalone. The usual choice for a laptop or desktop."
+  },
+  {
+    act: `Install(`Resolver, false),
+    title: "Resolver",
+    blurb: "A network-facing resolver server — the directory that maps paths to publishers for a whole admin domain or a delegated subtree. Can mint a new admin domain's certificate authority and admin server, or enroll under an existing one."
+  },
+  {
+    act: `Install(`Publisher, false),
+    title: "Publisher",
+    blurb: "A client configuration for a host that publishes data: point it at an admin domain's resolvers with the right auth. Installs a certificate-renewal service when the admin domain uses TLS."
+  },
+  {
+    act: `Restore,
+    title: "Restore from Backup",
+    blurb: "Restore a complete managed installation from a verified backup bundle. The destination must be a clean machine or an identical interrupted restore."
+  }
+];
+
+let desc = |a: Act| -> string select a {
+  `Status => "Full status detail for this install: its config, whether it is in sync with the admin domain, and its CA glyph.",
+  `Update => "Reconcile this host's resolver list with the admin domain, adding or removing resolvers as necessary.",
+  `Join(dry) => select dry {
+    false => "Graduate this local-only workstation onto an admin domain, enrolling a TLS identity.",
+    true => "Preview joining an admin domain, without changing anything."
+  },
+  `AddParent => "Attach this resolver under a parent resolver by delegation.",
+  `Renew => "Renew this host's TLS certificates from the admin domain's CA now. The auto-renew service does this automatically unless it has been turned off.",
+  `Services => "Manage netidx services on this machine — list them, start/stop/restart, and create, edit, or delete units.",
+  `Admins => "Manage this admin server's admins and their scopes.",
+  `Perms => "View and edit this host's permissions.",
+  `AutoApprove(rotate) => select rotate {
+    true => "Rotate this admin server's auto-renew credential. The auto-renew service automatically renews expiring certificates for the admin domain's members.",
+    false => "Enable the auto-renew service, which automatically renews expiring certificates for the admin domain's members, without an admin approving each one."
+  },
+  `RecoveryRotate => "Mint a fresh CA recovery password. Use this if you lost or forgot the old one — it retires the old password. Works only locally, on the CA machine.",
+  `ExternalCsr => "Write a subordinate-CA CSR for your external PKI to sign.",
+  `ExternalInstall => "Install the externally-signed CA certificate returned by your PKI.",
+  `Backup => "Back up this complete managed installation. CA state is captured consistently while the CA remains online; machine credentials are re-enrolled on restore.",
+  `Uninstall => "Remove this install — its config and OS service.",
+  `Install(_, dry) => select dry {
+    false => "Install this role on the machine.",
+    true => "Preview installing this role — show the plan without changing anything."
+  },
+  `Restore => "Restore a complete installation from a verified backup bundle."
+};
+
+// the destructive actions are held behind a yes/no
+let confirm_text = |a: Act| -> [string, null] select a {
+  `AutoApprove(true) => "Rotate the auto-approve credential? The current keytab stops working; the admin server re-mints and re-seals it.",
+  `RecoveryRotate => "Rotate the CA recovery password? The current recovery password stops working and a new one is shown once — save it.",
+  `Uninstall => "Remove this install? This stops and removes the OS service and deletes its configuration (the CA directory is kept).",
+  _ => null
+};
+
+let rec pad = |s: string, n: i64| -> string select str::len(s) {
+  l if l >= n => s,
+  _ => pad(str::concat(" ", s), n)
+};
+
+let local = |#q: &Question| -> Local {
+  let hint = style(#fg: `DarkGray);
+  let selstyle = style(#add_modifier: [`Reversed]);
+  let bold = style(#add_modifier: [`Bold]);
+  let good = style(#fg: `Green);
+  let warn = style(#fg: `Yellow);
+  let toast: [Toast, null] = null;
+  let fail = |title: string, a: AdminError| -> null {
+    toast <- { title, lines: [admin_text(a)], error: true };
+    null
+  };
+  // ── detection: what is installed here, re-read on demand and after
+  // every action ──
+  let refresh: Any = true;
+  let detected: [Array<Install>, null] = null;
+  {
+    catch(e) fail("Detecting installs failed", (e.0).error);
+    detected <- installs(refresh)?
+  };
+  let units: [string, null] = units_dir(refresh);
+  let own_base: [string, null] = local_resolver_base(refresh);
+  let sel = 0;
+  let n_installs = select detected {
+    null as _ => 0,
+    xs => array::len(xs)
+  };
+  let current: [Install, null] = select detected {
+    null as _ => null,
+    [] => null,
+    xs => xs[min(sel, array::len(xs) - 1)]$
+  };
+  let fresh = select detected {
+    null as _ => false,
+    [] => true,
+    _ => false
+  };
+  // ── the facts that take a round trip, one per install; every
+  // detection re-checks them ──
+  let syncs: Array<SyncState> = select detected {
+    null as _ => [],
+    xs => array::map(xs, |i: Install| -> SyncState select (i.admin_domain, i.role) {
+      (null, _) => `NotApplicable,
+      (_, `Ca) => `NotApplicable,
+      _ => {
+        let st: SyncState = `Checking;
+        {
+          catch(e) st <- `Failed(admin_text((e.0).error));
+          st <- select sync_check(#config_root: i.config_dir, i.role)? {
+            `InSync => `InSync,
+            `OutOfSync(cs) => `OutOfSync(cs)
+          }
+        };
+        st
+      }
+    })
+  };
+  let probes: Array<Probe> = select detected {
+    null as _ => [],
+    xs => array::map(xs, |i: Install| -> Probe select i.local_ca {
+      null as _ => `None,
+      lca => {
+        let p: Probe = `Probing;
+        {
+          catch(e) p <- `Failed(admin_text((e.0).error));
+          p <- `Ready(ca_credentials(#cfg: lca.cfg, lca.ca_dir)?)
+        };
+        p
+      }
+    })
+  };
+  let sync: SyncState = select syncs {
+    [] => `NotApplicable,
+    xs => xs[min(sel, array::len(xs) - 1)]$
+  };
+  let probe: Probe = select probes {
+    [] => `None,
+    xs => xs[min(sel, array::len(xs) - 1)]$
+  };
+  let lca: [LocalCa, null] = select current {
+    null as _ => null,
+    d => d.local_ca
+  };
+  // ── the selected install's actions ──
+  let item = |label: string, act: Act| -> Item { label, act, desc: desc(act) };
+  let items: Array<Item> = select current {
+    null as _ => [],
+    d => {
+      let joined = select d.admin_domain {
+        null as _ => false,
+        _ => true
+      };
+      let update_items: Array<Item> = select (joined, d.role) {
+        (true, `Ca) => [],
+        (true, _) => [item("Update Resolvers", `Update)],
+        _ => []
+      };
+      let join_items: Array<Item> = select (d.role, joined) {
+        (`Workstation, false) => [
+          item("Join an Admin Domain", `Join(false)),
+          item("Preview Join (Dry Run)", `Join(true))
+        ],
+        _ => []
+      };
+      let parent_items: Array<Item> = select d.role {
+        `Resolver => [item("Add a Parent", `AddParent)],
+        _ => []
+      };
+      let renew_items: Array<Item> = select (joined, d.renewable) {
+        (true, true) => [item("Renew Certificates", `Renew)],
+        _ => []
+      };
+      let service_items: Array<Item> = select units {
+        null as _ => [],
+        _ => [item("Services", `Services)]
+      };
+      let ca_items: Array<Item> = select d.local_ca {
+        null as _ => [],
+        l => {
+          let admin_items: Array<Item> = select l.cfg {
+            null as _ => [],
+            _ => array::concat(
+              [item("Admins", `Admins)],
+              select own_base {
+                null as _ => [],
+                _ => [item("Permissions", `Perms)]
+              }
+            )
+          };
+          let cred_items: Array<Item> = select probe {
+            `Ready(c) => array::concat(
+              select c.auto_approve_present {
+                true => [item("Rotate Auto-Renew Credential", `AutoApprove(true))],
+                false => [item("Enable Auto-Renew", `AutoApprove(false))]
+              },
+              select c.recovery_present {
+                true => [item("Rotate Recovery Password", `RecoveryRotate)],
+                false => []
+              },
+              select c.external_signed {
+                false => [],
+                true => select c.external_installed {
+                  true => [
+                    item("Emit Renewal CSR (External CA)", `ExternalCsr),
+                    item("Install Renewed Certificate (External CA)", `ExternalInstall)
+                  ],
+                  false => [
+                    item("Re-emit Signing CSR (External CA)", `ExternalCsr),
+                    item("Install Signed Certificate (External CA)", `ExternalInstall)
+                  ]
+                }
+              }
+            ),
+            _ => []
+          };
+          array::concat(admin_items, cred_items)
+        }
+      };
+      array::concat(
+        [item("Status", `Status)],
+        update_items,
+        join_items,
+        parent_items,
+        renew_items,
+        service_items,
+        ca_items,
+        [item("Back Up This Install", `Backup), item("Uninstall", `Uninstall)]
+      )
+    }
+  };
+  let n_items = array::len(items);
+  let offered = |a: Act| -> bool select array::find(items, |it: Item| it.act == a) {
+    null as _ => false,
+    _ => true
+  };
+  // ── ui state ──
+  let menu_sel = 0;
+  let show_status = false;
+  let welcome_seen = false;
+  let role_sel = 0;
+  let screen: Screen = `Home;
+  let confirm: [Confirm<Act>, null] = null;
+  // an action the operator chose: confirmed first when destructive
+  let chosen: Act = never();
+  let run: Act = never();
+  select chosen {
+    a => select confirm_text(a) {
+      null as _ => run <- a,
+      m => confirm <- { message: m, action: a }
+    }
+  };
+  // ── keys ──
+  let home_keys = |k: KeyEvent| -> [`Stop, `Continue] select k.code {
+    `Up | `Char("k") => { menu_sel <- max(0, (k ~ menu_sel) - 1); `Stop },
+    `Down | `Char("j") => {
+      menu_sel <- min(max(0, (k ~ n_items) - 1), (k ~ menu_sel) + 1);
+      `Stop
+    },
+    `Left => { sel <- max(0, (k ~ sel) - 1); menu_sel <- k ~ 0; `Stop },
+    `Right => {
+      sel <- min(max(0, (k ~ n_installs) - 1), (k ~ sel) + 1);
+      menu_sel <- k ~ 0;
+      `Stop
+    },
+    kk@ `Enter => {
+      select kk ~ items {
+        [] => never(),
+        xs => chosen <- (xs[min(kk ~ menu_sel, array::len(xs) - 1)]$).act
+      };
+      `Stop
+    },
+    kk@ `Char("u") => { chosen <- kk ~ `Uninstall; `Stop },
+    kk@ `Char("U") => {
+      select kk ~ offered(`Update) {
+        true => chosen <- kk ~ `Update,
+        false => never()
+      };
+      `Stop
+    },
+    kk@ `Char("r") => {
+      select kk ~ offered(`Renew) {
+        true => chosen <- kk ~ `Renew,
+        false => never()
+      };
+      `Stop
+    },
+    kk@ `Char("R") => { refresh <- kk; `Stop },
+    _ => `Continue
+  };
+  let fresh_keys = |k: KeyEvent| -> [`Stop, `Continue] select k.code {
+    `Up | `Char("k") => { role_sel <- max(0, (k ~ role_sel) - 1); `Stop },
+    `Down | `Char("j") => {
+      role_sel <- min(array::len(fresh_choices) - 1, (k ~ role_sel) + 1);
+      `Stop
+    },
+    kk@ `Enter => { chosen <- (fresh_choices[kk ~ role_sel]$).act; `Stop },
+    kk@ `Char("p") => {
+      select (fresh_choices[kk ~ role_sel]$).act {
+        `Install(role, _) => chosen <- `Install(role, true),
+        _ => never()
+      };
+      `Stop
+    },
+    _ => `Continue
+  };
+  // ── the local admin server's panels: the roster, and this host's
+  // own permissions ──
+  let admin_req: { cfg: string, panel: [`Roster, `Perms] } = never();
+  admin_req <- select run {
+    x@ `Admins => select x ~ lca {
+      null as _ => never(),
+      l => select l.cfg {
+        null as _ => never(),
+        c => { cfg: c, panel: `Roster }
+      }
+    },
+    x@ `Perms => select x ~ lca {
+      null as _ => never(),
+      l => select l.cfg {
+        null as _ => never(),
+        c => { cfg: c, panel: `Perms }
+      }
+    },
+    _ => never()
+  };
+  let admin_target: Target = never();
+  let admin_entry: Entry = never();
+  {
+    catch(e) fail("Opening this host's admin server failed", (e.0).error);
+    let t = local_target(#cfg_path: admin_req.cfg, admin_req)?;
+    admin_target <- t;
+    admin_entry <- select t ~ admin_req.panel {
+      `Roster => `Roster,
+      `Perms => select t ~ own_base {
+        null as _ => never(),
+        b => `Perms(b)
+      }
+    };
+    screen <- t ~ `Admin
+  };
+  let pan = panels::panels(
+    #q: q,
+    #entry: admin_entry,
+    #on_close: |why: CloseReason| -> null { screen <- why ~ `Home; null },
+    admin_target
+  );
+  // ── the lifecycle ceremonies ──
+  let renew_c = select run {
+    x@ `Renew => renew(x),
+    _ => never()
+  };
+  let update_c = select run {
+    x@ `Update => select x ~ current {
+      null as _ => never(),
+      d => update(#config_root: d.config_dir, d.role)
+    },
+    _ => never()
+  };
+  let backup_c = select run {
+    x@ `Backup => select x ~ current {
+      null as _ => never(),
+      d => backup(#config_root: d.config_dir, #target: null, d.scope)
+    },
+    _ => never()
+  };
+  let autoapprove_c = select run {
+    `AutoApprove(rotate) => select rotate ~ lca {
+      null as _ => never(),
+      l => auto_approve(#rotate: rotate, #cfg: l.cfg, l.ca_dir)
+    },
+    _ => never()
+  };
+  let recovery_c = select run {
+    x@ `RecoveryRotate => select x ~ lca {
+      null as _ => never(),
+      l => recovery_rotate(#cfg: l.cfg, l.ca_dir)
+    },
+    _ => never()
+  };
+  let csr_c = select run {
+    x@ `ExternalCsr => select x ~ lca {
+      null as _ => never(),
+      l => external_csr(l.ca_dir)
+    },
+    _ => never()
+  };
+  let extinstall_c = select run {
+    x@ `ExternalInstall => select x ~ lca {
+      null as _ => never(),
+      l => external_install(#signed: null, #root: null, l.ca_dir)
+    },
+    _ => never()
+  };
+  *q <- questions(renew_c);
+  *q <- questions(update_c);
+  *q <- questions(backup_c);
+  *q <- questions(autoapprove_c);
+  *q <- questions(recovery_c);
+  *q <- questions(csr_c);
+  *q <- questions(extinstall_c);
+  // ── their outcomes: a toast, then re-detect ──
+  {
+    catch(e) fail("Renewal failed", (e.0).error);
+    let r = result(renew_c)?;
+    toast <- select r.summary {
+      null as _ => {
+        title: "Nothing to renew",
+        lines: ["Every certificate on this host is outside its renewal window."],
+        error: false
+      },
+      s => {
+        let failed = array::map(r.failed, |f| "[f.cert]: [f.why]");
+        let done = array::concat(r.renewed, r.awaiting_approval);
+        {
+          title: select array::len(r.failed) {
+            0 => "Renewed",
+            _ => "Renewal incomplete"
+          },
+          lines: array::concat([s], done, failed),
+          error: array::len(r.failed) > 0
+        }
+      }
+    };
+    refresh <- r
+  };
+  {
+    catch(e) fail("Update failed", (e.0).error);
+    let r = result(update_c)?;
+    toast <- select r {
+      `UpToDate => {
+        title: "Up to date",
+        lines: ["Already in sync with the admin domain — no changes."],
+        error: false
+      },
+      `Applied({ changes, warnings, restart_hint }) => {
+        title: "Updated",
+        lines: array::concat(
+          array::map(changes, change_text),
+          array::map(warnings, |w| "warning: [w]"),
+          ["", restart_hint]
+        ),
+        error: false
+      }
+    };
+    refresh <- r
+  };
+  {
+    catch(e) fail("Backup failed", (e.0).error);
+    let r = result(backup_c)?;
+    let components = str::join(#sep: ", ", r.components);
+    toast <- {
+      title: "Installation backup created",
+      lines: [
+        "Target: [r.target]",
+        "Components: [components]",
+        "[r.files] files · [r.bytes] bytes",
+        "Fresh enrollment on restore: [r.identities_to_reenroll] credential(s)",
+        "Manifest SHA-256: [r.manifest_sha256]"
+      ],
+      error: false
+    }
+  };
+  {
+    catch(e) fail("Auto-renew setup failed", (e.0).error);
+    let r = result(autoapprove_c)?;
+    toast <- select r {
+      `HotSwapped({ warning }) => {
+        title: "Auto-approve rotated",
+        lines: array::concat(
+          ["The running admin server rotated its auto-approve credential in place (no downtime)."],
+          select warning {
+            null as _ => [],
+            w => [w]
+          }
+        ),
+        error: false
+      },
+      `Offline({ rotate, keytab, wiring }) => {
+        let verb = select rotate {
+          true => "rotated",
+          false => "enabled"
+        };
+        let wired = select wiring {
+          `Updated(p) => "Config updated: [p]",
+          `NoCaConfig => "No CA config owns this CA.",
+          `Failed(e) => "Config update failed (non-fatal): [e]"
+        };
+        {
+          title: select rotate {
+            true => "Auto-approve rotated",
+            false => "Auto-approve enabled"
+          },
+          lines: ["Auto-approve [verb]. Keytab: [keytab]", wired],
+          error: false
+        }
+      }
+    };
+    refresh <- r
+  };
+  {
+    catch(e) fail("Rotating the recovery password failed", (e.0).error);
+    let r = result(recovery_c)?;
+    toast <- {
+      title: "Recovery password rotated",
+      lines: [select r {
+        `HotSwapped => "The running admin server minted a new recovery password (shown above) in place.",
+        `Offline => "Minted a new recovery password (shown above)."
+      }],
+      error: false
+    };
+    refresh <- r
+  };
+  {
+    catch(e) fail("Emitting the CSR failed", (e.0).error);
+    let p = result(csr_c)?;
+    toast <- {
+      title: "CSR emitted",
+      lines: ["Wrote a renewal CSR to [p]. Have your external PKI sign it, then install the signed certificate."],
+      error: false
+    }
+  };
+  {
+    catch(e) fail("Installing the certificate failed", (e.0).error);
+    let r = result(extinstall_c)?;
+    toast <- select r {
+      `FirstInstall({ cfg_path, service_scope }) => {
+        title: "CA certificate installed",
+        lines: array::concat(
+          ["Installed the externally-signed CA certificate; CA configured at [cfg_path]."],
+          select service_scope {
+            null as _ => [],
+            `User => ["Register its OS service: netidx admin service install --scope user"],
+            `System => ["Register its OS service: netidx admin service install --scope system"]
+          }
+        ),
+        error: false
+      },
+      `OfflineCa => {
+        title: "Certificate installed",
+        lines: ["Installed the externally-signed offline CA certificate."],
+        error: false
+      },
+      `Renewal => {
+        title: "Certificate renewed",
+        lines: ["Renewed the CA certificate. Its admin server was not running; start it to serve the new certificate."],
+        error: false
+      },
+      `HotRenewed({ ca_fingerprint }) => {
+        title: "Certificate renewed",
+        lines: ["Renewed the externally-signed CA without stopping it.", "CA identity: [ca_fingerprint]"],
+        error: false
+      }
+    };
+    refresh <- r
+  };
+  // ── the actions this TUI does not run yet ──
+  let not_yet = |what: string, cli: string| -> Toast {
+    title: what,
+    lines: ["This TUI does not do this yet; until it does, use the command line:", cli],
+    error: true
+  };
+  select run {
+    x@ `Status => show_status <- x ~ true,
+    x@ `Services => toast <- x ~ not_yet("Services", "netidx admin service …"),
+    x@ `Uninstall => toast <- x ~ not_yet("Uninstall", "netidx admin uninstall"),
+    `Join(dry) => toast <- dry ~ not_yet("Join an admin domain", "netidx admin workstation join"),
+    x@ `AddParent => toast <- x ~ not_yet("Add a parent", "netidx admin resolver add-parent"),
+    `Install(role, _) => toast <- role ~ not_yet("Install", "netidx admin <role> install"),
+    x@ `Restore => toast <- x ~ not_yet("Restore", "netidx admin restore"),
+    _ => never()
+  };
+  // ── the status card ──
+  let kv = |label: string, value: string| -> tui::Line
+    line([span(#style: hint, "[pad(label, 17)]: "), span(value)]);
+  let kvs = |label: string, value: string, st: tui::Style| -> tui::Line
+    line([span(#style: hint, "[pad(label, 17)]: "), span(#style: st, value)]);
+  let status_lines: Array<tui::Line> = select current {
+    null as _ => [],
+    d => {
+      let domain = select d.admin_domain {
+        null as _ => "standalone (local-only)",
+        n => n.domain
+      };
+      let servers: Array<tui::Line> = select d.admin_servers {
+        [] => [],
+        xs => [kv("Admin servers", str::join(#sep: ", ", xs))]
+      };
+      let creds: Array<tui::Line> = select d.local_ca {
+        null as _ => [],
+        _ => select probe {
+          `None => [],
+          `Probing => [kvs("CA credentials", "checking…", hint)],
+          `Failed(e) => [kvs("CA credentials", e, warn)],
+          `Ready(c) => array::concat(
+            [select c.auto_approve_present {
+              false => kvs("Auto-approve", "not set up", hint),
+              true => select c.auto_approve_wired {
+                true => kvs("Auto-approve", "active", good),
+                false => kvs("Auto-approve", "present (not wired)", warn)
+              }
+            }],
+            [select c.recovery_present {
+              true => kvs("Recovery slot", "set", good),
+              false => kvs("Recovery slot", "MISSING", warn)
+            }],
+            select c.external_signed {
+              false => [],
+              true => select c.external_installed {
+                true => [kvs("External CA", "installed", good)],
+                false => [kvs("External CA", "awaiting signature", warn)]
+              }
+            }
+          )
+        }
+      };
+      let service = select d.service {
+        `Active => kvs("OS service", "active (running)", good),
+        `Inactive => kvs("OS service", "installed, not running", warn),
+        `NotInstalled => kvs("OS service", "not installed", hint)
+      };
+      let sync_lines: Array<tui::Line> = select sync {
+        `NotApplicable => [],
+        `Checking => [kvs("Admin domain sync", "checking…", hint)],
+        `InSync => [kvs("Admin domain sync", "✓ in sync", good)],
+        `Failed(e) => [kvs("Admin domain sync", "could not check ([e])", hint)],
+        `OutOfSync(cs) => array::concat(
+          [kvs("Admin domain sync", "⚠ [array::len(cs)] pending change(s) — press U to apply", warn)],
+          array::map(cs, |c: Change| line([span("                   "), span(#style: warn, change_text(c))]))
+        )
+      };
+      array::concat(
+        [
+          kv("Role", role_title(d.role)),
+          kv("Base", d.base),
+          kv("Data-plane auth", d.auth),
+          kv("Admin domain", domain)
+        ],
+        servers,
+        creds,
+        [service, kv("Config", d.config_dir), kv("Installed", "[cast<datetime>(d.created_unix)$]")],
+        sync_lines
+      )
+    }
+  };
+  let ca_glyph: Array<tui::Line> = select current {
+    null as _ => [],
+    d => select d.admin_domain {
+      null as _ => [],
+      n => {
+        let parsed = parse_fingerprint(n.fingerprint);
+        select is_err(parsed) {
+          true => [line(#style: hint, "recorded fingerprint does not parse")],
+          false => {
+            let fp = parsed$;
+            array::concat([line(#style: hint, "CA glyph")], glyph(fp), fingerprint_lines(fp))
+          }
+        }
+      }
+    }
+  };
+  let status_handle = |e: Event| -> [`Stop, `Continue] select e {
+    `Key(k) => select k.kind {
+      `Press => { show_status <- k ~ false; `Stop },
+      _ => `Stop
+    },
+    _ => `Stop
+  };
+  let status_layers: Array<Layer> = select show_status {
+    false => [],
+    true => {
+      let title = select current {
+        null as _ => "Status",
+        d => "[role_title(d.role)] status"
+      };
+      let content: tui::Tui = select ca_glyph {
+        [] => paragraph(#trim: &false, &status_lines),
+        g => layout(#direction: &`Horizontal, &[
+          child(#constraint: `Min(0), paragraph(#trim: &false, &status_lines)),
+          child(#constraint: `Length(24), paragraph(#alignment: &`Center, #trim: &false, &g))
+        ])
+      };
+      [layer(#width: &`Percentage(85), #height: &`Percentage(75),
+        input_handler(#handle: &status_handle, &block(
+          #border: &`All,
+          #title: &line(title),
+          #title_bottom: &line(#style: hint, " any key to close "),
+          &content)))]
+    }
+  };
+  // ── the fresh-machine welcome ──
+  let welcome_handle = |e: Event| -> [`Stop, `Continue] select e {
+    `Key(k) => select k.kind {
+      `Press => { welcome_seen <- k ~ true; `Stop },
+      _ => `Stop
+    },
+    _ => `Stop
+  };
+  let welcome_layers: Array<Layer> = select (fresh, welcome_seen) {
+    (true, false) => [layer(#width: &`Length(64), #height: &`Length(10),
+      input_handler(#handle: &welcome_handle, &block(
+        #border: &`All,
+        #title: &line("Welcome to netidx"),
+        &paragraph(#trim: &true, &[
+          line(#style: bold, "netidx isn't installed on this machine."),
+          line(""),
+          line("Choose a role to install — a Workstation for a laptop or desktop, a Resolver to run an admin domain's directory, or a Publisher — or choose Restore from Backup to recover any managed installation."),
+          line(""),
+          line(#style: selstyle, " Press Enter to continue ")
+        ]))))],
+    _ => []
+  };
+  // ── the views ──
+  let fresh_view = {
+    let titles = array::map(fresh_choices, |c| line(c.title));
+    let choice = fresh_choices[min(role_sel, array::len(fresh_choices) - 1)]$;
+    let keys = select choice.act {
+      `Restore => " Enter restore ",
+      _ => " Enter install · p preview "
+    };
+    layout(#direction: &`Horizontal, &[
+      child(#constraint: `Length(24), block(
+        #border: &`All,
+        #title: &line("Set Up This Machine"),
+        #title_bottom: &line(#style: hint, keys),
+        &list(#highlight_style: &selstyle, #selected: &role_sel, &titles))),
+      child(#constraint: `Min(0), block(
+        #border: &`All,
+        #title: &line(choice.title),
+        &paragraph(&choice.blurb)))
+    ])
+  };
+  let home_view = {
+    let labels = array::map(items, |it| line(it.label));
+    let title = select current {
+      null as _ => "",
+      d => "[role_title(d.role)] ([service_word(d.service)])"
+    };
+    let keys = select n_installs {
+      n if n > 1 => " ↑/↓ select · Enter run · ‹/› switch install ",
+      _ => " ↑/↓ select · Enter run "
+    };
+    let desc_lines: Array<tui::Line> = select items {
+      [] => [],
+      xs => [line((xs[min(menu_sel, array::len(xs) - 1)]$).desc)]
+    };
+    layout(#direction: &`Horizontal, &[
+      child(#constraint: `Min(0), block(
+        #border: &`All,
+        #title: &line(title),
+        #title_bottom: &line(#style: hint, keys),
+        &list(#highlight_style: &selstyle, #selected: &menu_sel, &labels))),
+      child(#constraint: `Length(42), block(
+        #border: &`All,
+        #title: &line("Description"),
+        &paragraph(#trim: &false, &desc_lines)))
+    ])
+  };
+  let handle = |e: Event| -> [`Stop, `Continue] select e {
+    ev@ `Key(k) => select k.kind {
+      `Press => select screen {
+        `Admin => pan.handle(ev),
+        `Home => select k ~ fresh {
+          true => fresh_keys(k),
+          false => home_keys(k)
+        }
+      },
+      _ => `Continue
+    },
+    _ => `Continue
+  };
+  let view: tui::Tui = select screen {
+    `Admin => pan.view,
+    `Home => select fresh {
+      true => fresh_view,
+      false => home_view
+    }
+  };
+  let status: tui::Line = select screen {
+    `Admin => pan.status,
+    `Home => select fresh {
+      true => line(#style: hint, " ↑/↓ choose · Enter install "),
+      false => line(#style: hint, " Enter run · U update · r renew · u uninstall · R re-detect ")
+    }
+  };
+  let layers: Array<Layer> = array::concat(
+    select screen {
+      `Admin => pan.layers,
+      `Home => []
+    },
+    welcome_layers,
+    status_layers,
+    confirm_layers(#on_confirm: |a: Act| -> null { run <- a; null }, &confirm),
+    toast_layers(&toast)
+  );
+  { view, handle, status, layers, installed: !fresh }
+}

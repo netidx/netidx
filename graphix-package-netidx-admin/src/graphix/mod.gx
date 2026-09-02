@@ -65,4 +65,16 @@ let remove_admin = |name: string, t: Target| -> Result<null, AdminError> 'netidx
 let discover = |#timeout: [duration, null] = null, trigger: Any| -> Result<Array<Discovered>, AdminError> 'netidx_admin_discover;
 let discover_domains = |#timeout: [duration, null] = null, trigger: Any| -> Result<Discovery, AdminError> 'netidx_admin_discover_domains;
 let identity_at = |#timeout: [duration, null] = null, server: string| -> Result<CaIdentity, AdminError> 'netidx_admin_identity_at;
-let local_domain = |trigger: Any| -> [{ domain: string, fingerprint: string, addr: [string, null] }, null] 'netidx_admin_local_domain
+let local_domain = |trigger: Any| -> [{ domain: string, fingerprint: string, addr: [string, null] }, null] 'netidx_admin_local_domain;
+let installs = |trigger: Any| -> Result<Array<Install>, AdminError> 'netidx_admin_installs;
+let sync_check = |#config_root: string, role: InstallRole| -> Result<Sync, AdminError> 'netidx_admin_sync_check;
+let ca_credentials = |#cfg: [string, null], ca_dir: string| -> Result<CaCredentials, AdminError> 'netidx_admin_ca_credentials;
+let units_dir = |trigger: Any| -> [string, null] 'netidx_admin_units_dir;
+let local_resolver_base = |trigger: Any| -> [string, null] 'netidx_admin_local_resolver_base;
+let renew = |trigger: Any| -> Ceremony<RenewReport> 'netidx_admin_renew;
+let update = |#config_root: string, role: InstallRole| -> Ceremony<UpdateOutcome> 'netidx_admin_update;
+let backup = |#config_root: string, #target: [string, null], scope: Scope| -> Ceremony<BackupOutcome> 'netidx_admin_backup;
+let auto_approve = |#rotate: bool, #cfg: [string, null], ca_dir: string| -> Ceremony<AutoApproveOutcome> 'netidx_admin_auto_approve;
+let recovery_rotate = |#cfg: [string, null], ca_dir: string| -> Ceremony<RecoveryRotateOutcome> 'netidx_admin_recovery_rotate;
+let external_csr = |ca_dir: string| -> Ceremony<string> 'netidx_admin_external_csr;
+let external_install = |#signed: [string, null], #root: [string, null], ca_dir: string| -> Ceremony<ExternalInstallOutcome> 'netidx_admin_external_install

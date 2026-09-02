@@ -1,5 +1,5 @@
 use package::{AdminError, discover_domains, identity_at, local_domain};
-use super::{fingerprint_lines, glyph};
+use super::{admin_text, fingerprint_lines, glyph};
 use tui::{line, span, style};
 use tui::block::{self, *};
 use tui::input_handler::{self, *};
@@ -9,12 +9,6 @@ use tui::paragraph::{self, *};
 use tui::text::{self, *};
 
 type Poll = [`Present(string), `Absent];
-
-let admin_text = |a: AdminError| -> string select a {
-  `Admin(m) => m,
-  `PasswordChangeRequired(name) => "[name]'s password must be changed first",
-  `Unsupported(m) => "unsupported on this platform: [m]"
-};
 
 // record a domain under its fingerprint: a new address joins the
 // saved ones, a changed name replaces the saved one

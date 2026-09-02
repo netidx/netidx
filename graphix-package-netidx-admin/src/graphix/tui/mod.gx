@@ -46,6 +46,72 @@ let fingerprint_lines = |fp: Fingerprint| -> Array<tui::Line> {
   ))
 };
 
+let admin_text = |a: AdminError| -> string select a {
+  `Admin(m) => m,
+  `PasswordChangeRequired(name) => "[name]'s password must be changed first",
+  `Unsupported(m) => "unsupported on this platform: [m]"
+};
+
+let toast_layers = |t: &[Toast, null]| -> Array<Layer> {
+  let hint = style(#fg: `DarkGray);
+  let handle = |e: Event| -> [`Stop, `Continue] select e {
+    `Key(k) => select k.kind {
+      `Press => select k.code {
+        `Enter | `Esc | `Char(" ") => { *t <- k ~ null; `Stop },
+        _ => `Stop
+      },
+      _ => `Stop
+    },
+    _ => `Stop
+  };
+  select *t {
+    null as _ => [],
+    tt => {
+      let body = str::join(#sep: "\n", tt.lines);
+      let tstyle = select tt.error {
+        true => style(#fg: `Red),
+        false => style(#fg: `Green)
+      };
+      [layer(#width: &`Percentage(60), #height: &`Percentage(50),
+        input_handler(#handle: &handle, &block(
+          #border: &`All,
+          #title: &line(#style: tstyle, tt.title),
+          #title_bottom: &line(#style: hint, " Enter dismiss "),
+          &paragraph(#trim: &false, &body))))]
+    }
+  }
+};
+
+let confirm_layers = |#on_confirm: fn(a: 'a) -> null, c: &[Confirm<'a>, null]| -> Array<Layer> {
+  let hint = style(#fg: `DarkGray);
+  let handle = |e: Event| -> [`Stop, `Continue] select e {
+    `Key(k) => select k.kind {
+      `Press => select k.code {
+        `Char("y") | `Enter => {
+          select k ~ *c {
+            null as _ => never(),
+            cc => { on_confirm(cc.action); *c <- cc ~ null }
+          };
+          `Stop
+        },
+        `Char("n") | `Esc => { *c <- k ~ null; `Stop },
+        _ => `Stop
+      },
+      _ => `Stop
+    },
+    _ => `Stop
+  };
+  select *c {
+    null as _ => [],
+    cc => [layer(#width: &`Percentage(60), #height: &`Percentage(50),
+      input_handler(#handle: &handle, &block(
+        #border: &`All,
+        #title: &line("Confirm"),
+        #title_bottom: &line(#style: hint, " y confirm · n cancel "),
+        &paragraph(#trim: &false, &cc.message))))]
+  }
+};
+
 let qid = |b: Blocking| -> QuestionId select b {
   `Text({ id, .. }) => id,
   `Secret({ id, .. }) => id,

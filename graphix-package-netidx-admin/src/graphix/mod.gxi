@@ -587,4 +587,162 @@ val identity_at: fn(
 /// `trigger`.
 val local_domain: fn(trigger: Any) -> [{ domain: string, fingerprint: string, addr: [string, null] }, null];
 
+/// Which role template produced an install on this host.
+type InstallRole = [`Ca, `Workstation, `Resolver, `Publisher];
+
+/// An install's OS service, as the service manager reports it.
+type ServiceState = [`Active, `Inactive, `NotInstalled];
+
+/// Where an install's config and record live: the user's config
+/// directory or the system's.
+type Scope = [`User, `System];
+
+/// The CA tooling an install owns: its CA directory and the
+/// admin-server config serving it (null for an offline CA).
+type LocalCa = { ca_dir: string, cfg: [string, null] };
+
+/// One install recorded on this host: its role, base path and
+/// data-plane auth, the admin domain it founded or joined (null for a
+/// standalone install), every admin server it knows, when it was
+/// installed, its OS service's state, its scope and config root, the
+/// CA it owns if any, and whether this host holds a TLS identity the
+/// admin domain's CA could renew.
+type Install = {
+  role: InstallRole,
+  base: string,
+  auth: string,
+  admin_domain: [{ domain: string, fingerprint: string }, null],
+  admin_servers: Array<string>,
+  created_unix: u64,
+  service: ServiceState,
+  scope: Scope,
+  config_dir: string,
+  local_ca: [LocalCa, null],
+  renewable: bool
+};
+
+/// Every install recorded on this host, user scope first. Re-detects
+/// per `trigger`.
+val installs: fn(trigger: Any) -> Result<Array<Install>, AdminError>;
+
+/// One edit a reconcile with the admin domain would make to this
+/// host's configs.
+type Change = [`Add(string), `Del(string), `Reauth(string)];
+
+/// How an install's configs compare with the admin domain's map.
+type Sync = [`InSync, `OutOfSync(Array<Change>)];
+
+/// Check a joined install's configs against the admin domain — the
+/// quiet half of `update`. Re-checks per `role` delivery.
+val sync_check: fn(#config_root: string, role: InstallRole) -> Result<Sync, AdminError>;
+
+/// The credential state of a CA this host owns: whether the
+/// auto-approve slot exists and is wired into the daemon config,
+/// whether the recovery-password slot exists, and whether the CA is
+/// signed by an external PKI and has its certificate installed.
+type CaCredentials = {
+  auto_approve_present: bool,
+  auto_approve_wired: bool,
+  recovery_present: bool,
+  external_signed: bool,
+  external_installed: bool
+};
+
+/// Read a local CA's credential state — over the daemon's control
+/// socket when it runs, from its files otherwise. Re-reads per
+/// `ca_dir` delivery. Unix only.
+val ca_credentials: fn(#cfg: [string, null], ca_dir: string) -> Result<CaCredentials, AdminError>;
+
+/// The local activation supervisor's unit directory, or null when this
+/// host has none. Re-reads per `trigger`.
+val units_dir: fn(trigger: Any) -> [string, null];
+
+/// The base path of the resolver this host runs, from its resolver
+/// config, or null when it runs none. Re-reads per `trigger`.
+val local_resolver_base: fn(trigger: Any) -> [string, null];
+
+/// What one renewal pass did: a one-line summary (null when nothing
+/// was due), the certificates renewed, those awaiting an admin's
+/// approval, and those that failed with why.
+type RenewReport = {
+  summary: [string, null],
+  renewed: Array<string>,
+  awaiting_approval: Array<string>,
+  failed: Array<{ cert: string, why: string }>
+};
+
+/// Renew this host's TLS certificates from the admin domain's CA now.
+val renew: fn(trigger: Any) -> Ceremony<RenewReport>;
+
+/// What `update` did: nothing, or the edits it applied with the
+/// reconcile's warnings and what must be restarted for them to take
+/// effect.
+type UpdateOutcome = [
+  `UpToDate,
+  `Applied({ changes: Array<Change>, warnings: Array<string>, restart_hint: string })
+];
+
+/// Reconcile a joined install's configs with the admin domain's map
+/// and apply the edits.
+val update: fn(#config_root: string, role: InstallRole) -> Ceremony<UpdateOutcome>;
+
+/// A backup bundle as written.
+type BackupOutcome = {
+  target: string,
+  role: InstallRole,
+  components: Array<string>,
+  files: u64,
+  bytes: u64,
+  identities_to_reenroll: u64,
+  manifest_sha256: string
+};
+
+/// Back up the complete managed installation at `#config_root`. With
+/// `#target` null the ceremony asks where to write the bundle.
+val backup: fn(#config_root: string, #target: [string, null], scope: Scope) -> Ceremony<BackupOutcome>;
+
+/// How an offline auto-approve setup wired the credential into the
+/// CA's config.
+type AutorenewWiring = [`Updated(string), `NoCaConfig, `Failed(string)];
+
+/// What `auto_approve` did: the running daemon swapped the credential
+/// in place, or it was minted offline.
+type AutoApproveOutcome = [
+  `HotSwapped({ warning: [string, null] }),
+  `Offline({ rotate: bool, keytab: string, wiring: AutorenewWiring })
+];
+
+/// Enable (or with `#rotate` true, rotate) the local CA's auto-approve
+/// credential, which lets its admin server renew the admin domain's
+/// certificates without an admin approving each one. Unix only.
+val auto_approve: fn(#rotate: bool, #cfg: [string, null], ca_dir: string) -> Ceremony<AutoApproveOutcome>;
+
+/// Whether the recovery password was minted by the running daemon or
+/// offline. The password itself arrives as a `OneTimeSecret` event.
+type RecoveryRotateOutcome = [`HotSwapped, `Offline];
+
+/// Mint a fresh CA recovery password, retiring the old one. Unix only.
+val recovery_rotate: fn(#cfg: [string, null], ca_dir: string) -> Ceremony<RecoveryRotateOutcome>;
+
+/// Write a subordinate-CA CSR for the external PKI to sign; the result
+/// is the CSR's path. Unix only.
+val external_csr: fn(ca_dir: string) -> Ceremony<string>;
+
+/// What installing an externally-signed certificate did: the CA's
+/// first install (its admin server is configured at `cfg_path` and
+/// needs an OS service at `service_scope` when not null), an offline
+/// CA's, a renewal the stopped daemon serves at its next start, or a
+/// renewal the running daemon took in place.
+type ExternalInstallOutcome = [
+  `FirstInstall({ cfg_path: string, service_scope: [Scope, null] }),
+  `OfflineCa,
+  `Renewal,
+  `HotRenewed({ ca_fingerprint: string })
+];
+
+/// Install the externally-signed CA certificate the PKI returned. With
+/// `#signed` null the ceremony asks for its path (and for the PKI's
+/// root certificate, optional). Unix only.
+val external_install: fn(#signed: [string, null], #root: [string, null], ca_dir: string) -> Ceremony<ExternalInstallOutcome>;
+
 mod tui;

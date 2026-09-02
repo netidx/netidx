@@ -1,0 +1,42 @@
+use package::{Question, Target};
+use tui::overlay::Layer;
+
+/// The admin-server panels: the enrollment queue, delegation
+/// requests, the admin roster, the registered servers, issued
+/// certificates, one server's services, and a resolver cluster's
+/// permissions.
+type PanelKind = [`Queue, `Delegations, `Roster, `Servers, `Certs, `Services, `Perms];
+
+/// Where the surface opens: on the panel menu, or directly on one
+/// panel — the roster, or the permissions of the cluster at a base
+/// path — with no menu behind it.
+type Entry = [`Menu, `Roster, `Perms(string)];
+
+/// Why the surface closed: the operator backed out of its entry
+/// screen, or the session's credential is gone (the admin changed
+/// their own password) and the caller must connect again.
+type CloseReason = [`Back, `SessionLost];
+
+/// The panel surface: its view and status line, the key handler, and
+/// its modal layers (forms, the read-gate chooser, confirmations,
+/// toasts).
+type Panels = {
+  view: tui::Tui,
+  handle: fn(e: tui::input_handler::Event) -> [`Stop, `Continue],
+  status: tui::Line,
+  layers: Array<Layer>
+};
+
+/// The panels over one admin-server target — a remote session or this
+/// host's own admin server over its control socket. Every panel is a
+/// table over the ops surface with its actions dispatched as
+/// ceremonies; their questions go to the app's bus `#q`. Deliver
+/// `#entry` once `target` holds the target it opens on — a panel
+/// entry loads its panel on that delivery. Esc from the entry screen
+/// calls `#on_close`.
+val panels: fn(
+  #q: &Question,
+  #entry: Entry,
+  #on_close: fn(why: CloseReason) -> null,
+  target: Target
+) -> Panels;

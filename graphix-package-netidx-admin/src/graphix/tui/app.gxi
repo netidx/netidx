@@ -1,0 +1,6 @@
+/// The admin TUI: the Local tab (this host's install and what can be
+/// done with it) and the Admin Domain tab (remote admin servers),
+/// under one question pump. Tab switches tabs once something is
+/// installed here; q quits. `#server` starts on the Admin Domain
+/// tab's connect screen at that address.
+val app: fn(?#server: string) -> tui::Tui;

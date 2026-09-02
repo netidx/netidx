@@ -12,6 +12,7 @@ Compile-time milestones (log at every ~1k lines of `.gx`):
 |------|-----------|----------------|-------|
 | 2026-08-21 | 909 | reg 417ms / pump-callsite 593ms | DEV build (unoptimized). Registration = all stdlib + package packed-AST decode + typecheck; the 593ms is ONE `pump(...)` call site's per-callsite instance elaboration of the ~300-line pump body. No wall yet; watch the per-callsite number as the app main grows. |
 | 2026-08-31 | 1799 | reg 1.13s / app-main 2.68s | DEV build. The app-main number is the pump+remote composition (`milestone_timing`, now a permanent ignored test): two instance elaborations of the ~700-line remote body + pump. 2x the lines, ~4.5x the elaboration cost — no wall, but the growth is super-linear; re-measure at 3k. |
+| 2026-09-02 | 3333 | reg 1.16s / app-main 7.91s | DEV build. `milestone_timing` now compiles `app::app` — both tabs under one pump, which elaborates the 1.5k-line panels body TWICE (once per tab). 1.85x the lines, ~3x the elaboration cost: still super-linear, no wall. Under load (six fixture tests + a concurrent gate build) a first render took over 60s and a landing test timed out; alone it passes in 29s. |
 
 ---
 
@@ -24,12 +25,15 @@ line carries a conscious "accepted" with Eric's name on it.
 Graphix, language and compiler:
 
 1. **Parse diagnostics: the refusal reason and position must survive
-   the combine merge** (08-18, 08-21 twice, 09-02 `Error as _` and the
-   unknown duration unit — five sightings). A reserved word in a
-   binding position, an unescaped `[`, a bare `Error` predicate, a
-   `duration:3.h` all report "Unexpected `(`" lines away from the
-   cause. `grow::parsing`'s thread-local solved this for depth
-   refusals; keyword/unit refusals need the same or their own check.
+   the combine merge** (08-18, 08-21 twice, 09-02 `Error as _`, the
+   unknown duration unit, and `let ok = …` — six sightings). A
+   reserved word in a binding position, an unescaped `[`, a bare
+   `Error` predicate, a `duration:3.h` all report "Unexpected `(`"
+   lines away from the cause. `grow::parsing`'s thread-local solved
+   this for depth refusals; keyword/unit refusals need the same or
+   their own check. The sixth sighting adds a facet: the package
+   build script reports "parse error at line: 141, column: 9" with NO
+   MODULE NAME, in a package of nine modules.
 2. **`never()` arms leave a select's type open** (09-02): annotate the
    binding is the documented answer; whether `never()` should type as
    an absorbed bottom instead of a fresh variable is a ruling not yet
@@ -53,6 +57,24 @@ Graphix, language and compiler:
     (place references, `design/place_references.md`): `&a[i]`, `&s.f`,
     `&t.0`, `&m{k}` and chains are places; the form edits through
     `line_edit::handle(&vals[i], e)`.
+13. **A connect with a constant right-hand side inside a select arm
+    fires once per selection, not per re-match** (09-02, measured:
+    `s <- 100` in a re-matched arm fired 2 times against 10 for
+    `s <- k ~ 100`). Organic firing as designed — the arm's inputs
+    did not fire — but it is the trap behind two latent bugs in the
+    remote tab's menu and pick handlers (`screen <- \`ServerPick`
+    worked only when another key had deselected the arm in between).
+    Fixed in the port by sampling; the idiom joins item 7's list. A
+    lint is the language-side answer: a `<-` inside a select arm
+    whose right-hand side depends on none of the arm's fired inputs.
+14. **Bool literal coverage does not reach into payload or tuple
+    positions** (09-02): `` `Join(false) `` + `` `Join(true) `` do not
+    cover `` `Join(bool) ``, and `(true, true)`/`(true, false)`/
+    `(false, _)` do not cover `(bool, bool)`, although `true`/`false`
+    complete a bool at the top level (`select.rs`'s `saw_true`/
+    `saw_false` pair is top-level only). Nested selects are the idiom
+    today; the fix is literal pooling per position — the twin of the
+    Set-distribution rule (08-31), applied to literals.
 11. **A select over `[fn(..), null]` reports the bind arm dead** (09-02):
     `select on_cancel { null as _ => never(), f => f(e) }` is refused
     with "pattern '_: fn(e: Any) -> null will never match fn(e: Any) ->
@@ -68,6 +90,17 @@ Book:
    other arms are `never()`; a component's event outputs are
    callbacks, never struct fields (a struct re-fires whole); sample
    every free read in a handler arm with the event.
+
+Port scope (not Graphix findings; here so nothing is forgotten):
+
+15. **The Local tab's deferred surfaces** (09-02): the local Services
+    surface (list/control/create/edit/delete over the activation
+    supervisor — its editor needs phase E's `$EDITOR` handoff), and
+    the Uninstall / Join / Add-a-Parent / Install / Restore actions
+    (phase 4's install ceremonies and phase 5's privileged handoff).
+    Each shows a toast naming the CLI command until it lands. The
+    externally-signed CA's first install prints the service-install
+    command for the same reason (phase E).
 
 Test side and package:
 
@@ -89,7 +122,7 @@ the phantom event replay (08-31); the change-password route and the
 ceremony `Trigger`, `sys::time::diff` and the time fast fns, duration
 literal units and format, the sibling-pattern-bind phantom and the
 `compile_callable` pipeline, the fixture's lock race, session-cache
-leak and gesture predictor (09-02).
+leak and gesture predictor, `tui::exit` (09-02).
 
 ## 2026-08-18 — no modal/overlay widget in graphix-package-tui
 
@@ -914,3 +947,77 @@ reads apply the path, writes patch the root at delivery (so sibling
 writes in one cycle both land), a dynamic key moves the reference. The
 form's focused editor is `line_edit::handle(&vals[i], e)` again;
 `step` stays as the pure API. Ledger 12, closed.
+
+## 2026-09-02 — a constant right-hand side in a select arm fires once per selection
+
+Writing the Local tab's key handlers I checked the rule I had been
+following ("sample every free read in a handler arm with the event")
+against a constant, which is not a read at all: does `screen <-
+\`Menu` inside a `kk@ \`Esc => …` arm fire on every Esc? Measured
+with a 20ms clock and a select re-matching one arm ten times: the
+constant form fired 2 times (init and the arm's first selection),
+the sampled form `s <- k ~ 100` fired 10. That is the organic firing
+rule as designed — a same-arm re-match re-emits the arm's value, and
+the arm's connect has no fired input — but it is a trap for handler
+code, and it had already bitten: the remote tab's menu opened the
+Services and Permissions pickers with `screen <- \`ServerPick` (a
+constant), and its pick screens opened their panels the same way. Both
+worked in the tests only because another key had deselected the arm
+in between; open a pick, Esc back, and choose it again with no other
+key pressed and the screen did not change. **Disposition: the port
+samples every arm-local write with the event, the two latent bugs are
+fixed in the panels split, the idiom joins the book list (ledger 7),
+and a lint is proposed (ledger 13).**
+
+## 2026-09-02 — bool literals do not pool inside payloads or tuples
+
+The Local tab's action descriptions wanted `` `Join(false) => … `` and
+`` `Join(true) => … `` (Rust's `Join { dry_run: false }` arms), and its
+external-CA rows wanted `select (signed, installed) { (false, _) =>
+…, (true, true) => …, (true, false) => … }`. Both are refused as
+non-exhaustive: the coverage walk pools a `true`/`false` pair only at
+the top level of an arm; inside a variant payload or a tuple position
+a literal arm is refutable and claims nothing. The Set-distribution
+rule (08-31) pools same-shaped TYPE members per position; literals
+need the same pooling. **Disposition: nested selects in the port;
+ledger 14 for the compiler.**
+
+## 2026-09-02 — the package build script's parse error names no module
+
+`let ok = style(#fg: \`Green)` in the Local tab: `ok` is a reserved
+literal word, and the refusal came out of the package build script as
+"parse error at line: 141, column: 9" — no module, in a package of
+nine `.gx` files. Sixth sighting of ledger 1 with a new facet (the
+file). **Disposition: ledger 1.**
+
+## 2026-09-02 — a TUI program could not end itself
+
+The app shell's `q` had nothing to call: the tui runner ends only on
+Ctrl-C (its stop signal to the shell) or the shell's own stop, and
+`sys::exit` would leave the terminal in raw mode on the alternate
+screen. **Disposition: fixed in graphix — `tui::exit(trigger)` fires
+the runner's stop signal (shared through libstate at display start),
+so the shell restores the terminal and ends the program exactly as
+Ctrl-C does.**
+
+## 2026-09-02 — the Local tab, slice 1
+
+Landed: the package's Local surface (`installs` detection over both
+config roots — the admin-server config's CA role names the CA
+directory, which the Rust TUI hard-coded as `<root>/ca`; `sync_check`;
+`ca_credentials`; `units_dir`; `local_resolver_base`; the `renew`,
+`update`, `backup`, `auto_approve`, `recovery_rotate`, `external_csr`
+and `external_install` ceremonies, each returning structured outcomes
+so every message is composed in Graphix); the panels split
+(`tui::panels` over any `Target`, opened on the menu or directly on
+the roster / this host's permissions; `remote` is landing + connect +
+panels); the shared `toast_layers`/`confirm_layers` modals
+(`Confirm<'a>` is the first polymorphic widget in the package); the
+Local tab itself (the fresh-machine welcome and role menu, the action
+list with its description pane, the status card with the glyph, the
+background sync and credential probes as per-slot `array::map`
+derivations — no take-pending/apply machinery; `‹`/`›` across
+installs; `R` re-detects); and `tui::app`, the two tabs under one
+pump with `Tab`/`q` as global keys behind the tab's own. Pinned by
+the harness test over a CA install record in the fixture's root.
+Deferred: ledger 15.

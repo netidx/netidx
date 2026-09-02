@@ -498,3 +498,110 @@ async fn roster_adds_and_edits_an_admin() -> Result<()> {
     .await?;
     Ok(())
 }
+
+/// This host's install record for the Local tab, removed when the test
+/// ends — the fixture's config root is shared by every test in the
+/// process, and a leftover record would seed the landing screen of the
+/// next one.
+struct InstallRecordGuard(std::path::PathBuf);
+
+impl Drop for InstallRecordGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+/// The row offset from the `Status` item to the item labeled `label`
+/// in the rendered action list.
+fn rows_below_status(lines: &[String], label: &str) -> Result<usize> {
+    let row = |what: &str| {
+        lines
+            .iter()
+            .position(|l| l.contains(what))
+            .ok_or_else(|| anyhow::anyhow!("no {what} row in:\n{}", lines.join("\n")))
+    };
+    let status = row("Status")?;
+    let target = row(label)?;
+    Ok(target.saturating_sub(status))
+}
+
+/// The Local tab over a CA founded on this host: detection reads the
+/// install record, the action list offers the CA's local admin tools,
+/// the status card shows the domain and its glyph once the credential
+/// probe lands, and Admins opens the roster over the control socket.
+#[tokio::test(flavor = "multi_thread")]
+async fn local_tab_detects_a_ca_install_and_opens_its_roster() -> Result<()> {
+    use netidx_admin::provenance::{AdminDomainIdentity, InstallRecord, InstallRole};
+    let d = TestAdminDomain::start().await?;
+    let record = InstallRecord::new(
+        InstallRole::Ca,
+        "/",
+        "tls",
+        Some(AdminDomainIdentity::new(&d.domain, &d.fingerprint)),
+        Some(d.listen),
+    );
+    let path = netidx_admin::paths::user_install_record()?;
+    std::fs::write(&path, serde_json::to_vec_pretty(&record)?)?;
+    let _guard = InstallRecordGuard(path);
+    let prog = "let result = netidx_admin::tui::app::app()";
+    let mut h =
+        TuiTestHarness::with_register(prog, crate::TEST_REGISTER, 120, 40).await?;
+    // the install's role and service state title the action list; the
+    // admin-server config names the CA, so its local admin tools are
+    // offered before any probe answers
+    wait_render(&mut h, Duration::from_secs(60), "the CA's action list", |lines| {
+        lines.iter().any(|l| l.contains("CA ("))
+            && lines.iter().any(|l| l.contains("Admins"))
+            && lines.iter().any(|l| l.contains("Back Up This Install"))
+    })
+    .await?;
+    // something is installed, so the app shows its tab bar
+    let lines = h.render_lines()?;
+    assert!(
+        lines.iter().any(|l| l.contains("Local") && l.contains("Admin Domain")),
+        "no tab bar:\n{}",
+        lines.join("\n")
+    );
+    // the credential probe lands and the list grows
+    wait_render(&mut h, Duration::from_secs(60), "the credential actions", |lines| {
+        lines.iter().any(|l| l.contains("Rotate Recovery Password"))
+    })
+    .await?;
+    // Status is the first item: its card names the domain and carries
+    // the CA glyph and the probe's verdicts
+    h.dispatch_event(key(KeyCode::Enter)).await?;
+    let domain = d.domain.clone();
+    wait_render(&mut h, Duration::from_secs(60), "the status card", move |lines| {
+        lines.iter().any(|l| l.contains("Admin domain") && l.contains(&domain))
+            && lines.iter().any(|l| l.contains("CA glyph"))
+            && lines.iter().any(|l| l.contains("Recovery slot") && l.contains("set"))
+    })
+    .await?;
+    // any key closes it
+    h.dispatch_event(key(KeyCode::Esc)).await?;
+    wait_render(&mut h, Duration::from_secs(10), "the card to close", |lines| {
+        !lines.iter().any(|l| l.contains("any key to close"))
+    })
+    .await?;
+    // Admins: the roster over this host's control socket
+    let n = rows_below_status(&h.render_lines()?, "Admins")?;
+    for _ in 0..n {
+        h.dispatch_event(key(KeyCode::Down)).await?;
+    }
+    h.dispatch_event(key(KeyCode::Enter)).await?;
+    let admin = d.admin.clone();
+    wait_render(&mut h, Duration::from_secs(60), "the roster", move |lines| {
+        lines.iter().any(|l| l.contains("Admin Roster"))
+            && lines.iter().any(|l| l.contains(&admin) && l.contains("role"))
+    })
+    .await?;
+    // Esc backs straight out to the action list — there is no panel menu
+    // behind a local panel
+    h.dispatch_event(key(KeyCode::Esc)).await?;
+    wait_render(&mut h, Duration::from_secs(10), "the action list again", |lines| {
+        lines.iter().any(|l| l.contains("CA ("))
+            && !lines.iter().any(|l| l.contains("Admin Roster"))
+    })
+    .await?;
+    Ok(())
+}

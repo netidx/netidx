@@ -1,9 +1,30 @@
 use super::{
-    AdminDomain, Answer, answer, CaIdentity, FieldInfo, Fingerprint, identicon,
-    OneTimeSecretKind, Question, QuestionId, Stage
+    AdminDomain, AdminError, Answer, answer, CaIdentity, FieldInfo, Fingerprint,
+    identicon, OneTimeSecretKind, Question, QuestionId, Stage
 };
 use tui::{line, span, style};
 use tui::overlay::{self, layer, Layer};
+
+/// An admin error as one line for the operator.
+val admin_text: fn(a: AdminError) -> string;
+
+/// A message the operator dismisses: a title, its lines, and whether
+/// it reports a failure.
+type Toast = { title: string, lines: Array<string>, error: bool };
+
+/// A destructive action held behind a yes/no: the question and the
+/// action to run on yes.
+type Confirm<'a> = { message: string, action: 'a };
+
+/// The toast modal over `t`: one layer while a toast is up, none
+/// otherwise. Enter, Esc or space clears it (through the reference);
+/// every other key is swallowed.
+val toast_layers: fn(t: &[Toast, null]) -> Array<Layer>;
+
+/// The confirm modal over `c`: one layer while a confirmation is up.
+/// `y` or Enter calls `#on_confirm` with the held action and clears
+/// it; `n` or Esc clears it.
+val confirm_layers: fn(#on_confirm: fn(a: 'a) -> null, c: &[Confirm<'a>, null]) -> Array<Layer>;
 
 /// A fingerprint's 8x8 identicon as styled lines — the glyph on its
 /// black tile, ready to render in a paragraph. The visual half of the
@@ -52,4 +73,7 @@ type Pump = {
 val pump: fn(q: Question) -> Pump;
 
 mod landing;
+mod panels;
 mod remote;
+mod local;
+mod app;

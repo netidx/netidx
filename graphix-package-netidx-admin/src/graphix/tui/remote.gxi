@@ -1,10 +1,9 @@
 use package::Question;
 use tui::overlay::{self, Layer};
 
-/// The admin-domain tab: the connect screen, the panel menu, and the
-/// panels themselves (enrollment queue, delegations, roster, servers,
-/// issued certificates), each a table over the ops surface with its
-/// actions dispatched as ceremonies.
+/// The admin-domain tab: the landing screen (the known admin
+/// domains), the connect screen, and the admin-server panels over
+/// the session it opens.
 type Remote = {
   view: tui::Tui,
   handle: fn(e: tui::input_handler::Event) -> [`Stop, `Continue],
@@ -17,7 +16,7 @@ type Remote = {
 /// ONE shared `pump` and compose `Remote.layers` UNDER the pump's —
 /// the pump's modals must stay on top). `#server` pre-fills the
 /// connect screen's address input and starts the tab there; without it
-/// the tab starts on the landing screen (the known admin domains). Compose with `handle`'s
+/// the tab starts on the landing screen. Compose with `handle`'s
 /// input_handler INSIDE the overlay wrapping the base view — outside
 /// it, the base consumes keys before an open modal layer sees them.
 val remote: fn(#q: &Question, ?#server: string) -> Remote;

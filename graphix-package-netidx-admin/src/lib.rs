@@ -646,10 +646,23 @@ graphix_derive::defpackage! {
         ops::DiscoverDomains,
         ops::IdentityAt,
         ops::LocalDomain,
+        local::Installs,
+        local::SyncCheck,
+        local::CaCredentials,
+        local::UnitsDir,
+        local::LocalResolverBase,
+        local::Renew,
+        local::Update,
+        local::Backup,
+        local::AutoApprove,
+        local::RecoveryRotate,
+        local::ExternalCsr,
+        local::ExternalInstall,
     ],
 }
 
 mod ceremony;
+mod local;
 mod ops;
 
 #[cfg(all(test, unix))]
