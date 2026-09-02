@@ -110,19 +110,15 @@ let fresh_choices: Array<{ act: Act, title: string, blurb: string }> = [
 let desc = |a: Act| -> string select a {
   `Status => "Full status detail for this install: its config, whether it is in sync with the admin domain, and its CA glyph.",
   `Update => "Reconcile this host's resolver list with the admin domain, adding or removing resolvers as necessary.",
-  `Join(dry) => select dry {
-    false => "Graduate this local-only workstation onto an admin domain, enrolling a TLS identity.",
-    true => "Preview joining an admin domain, without changing anything."
-  },
+  `Join(false) => "Graduate this local-only workstation onto an admin domain, enrolling a TLS identity.",
+  `Join(true) => "Preview joining an admin domain, without changing anything.",
   `AddParent => "Attach this resolver under a parent resolver by delegation.",
   `Renew => "Renew this host's TLS certificates from the admin domain's CA now. The auto-renew service does this automatically unless it has been turned off.",
   `Services => "Manage netidx services on this machine — list them, start/stop/restart, and create, edit, or delete units.",
   `Admins => "Manage this admin server's admins and their scopes.",
   `Perms => "View and edit this host's permissions.",
-  `AutoApprove(rotate) => select rotate {
-    true => "Rotate this admin server's auto-renew credential. The auto-renew service automatically renews expiring certificates for the admin domain's members.",
-    false => "Enable the auto-renew service, which automatically renews expiring certificates for the admin domain's members, without an admin approving each one."
-  },
+  `AutoApprove(true) => "Rotate this admin server's auto-renew credential. The auto-renew service automatically renews expiring certificates for the admin domain's members.",
+  `AutoApprove(false) => "Enable the auto-renew service, which automatically renews expiring certificates for the admin domain's members, without an admin approving each one.",
   `RecoveryRotate => "Mint a fresh CA recovery password. Use this if you lost or forgot the old one — it retires the old password. Works only locally, on the CA machine.",
   `ExternalCsr => "Write a subordinate-CA CSR for your external PKI to sign.",
   `ExternalInstall => "Install the externally-signed CA certificate returned by your PKI.",
@@ -131,10 +127,8 @@ let desc = |a: Act| -> string select a {
   `UninstallWith(_) => "Remove this install — its config and OS service.",
   `FinishRestore => "Finish re-enrolling roles after CA startup.",
   `AddParentTo(_) => "Attach this resolver under a parent resolver by delegation.",
-  `Install(_, dry) => select dry {
-    false => "Install this role on the machine.",
-    true => "Preview installing this role — show the plan without changing anything."
-  },
+  `Install(_, false) => "Install this role on the machine.",
+  `Install(_, true) => "Preview installing this role — show the plan without changing anything.",
   `Restore => "Restore a complete installation from a verified backup bundle."
 };
 
@@ -289,18 +283,16 @@ let local = |#q: &Question| -> Local {
                 true => [item("Rotate Recovery Password", `RecoveryRotate)],
                 false => []
               },
-              select c.external_signed {
-                false => [],
-                true => select c.external_installed {
-                  true => [
-                    item("Emit Renewal CSR (External CA)", `ExternalCsr),
-                    item("Install Renewed Certificate (External CA)", `ExternalInstall)
-                  ],
-                  false => [
-                    item("Re-emit Signing CSR (External CA)", `ExternalCsr),
-                    item("Install Signed Certificate (External CA)", `ExternalInstall)
-                  ]
-                }
+              select (c.external_signed, c.external_installed) {
+                (false, _) => [],
+                (true, true) => [
+                  item("Emit Renewal CSR (External CA)", `ExternalCsr),
+                  item("Install Renewed Certificate (External CA)", `ExternalInstall)
+                ],
+                (true, false) => [
+                  item("Re-emit Signing CSR (External CA)", `ExternalCsr),
+                  item("Install Signed Certificate (External CA)", `ExternalInstall)
+                ]
               }
             ),
             _ => []
@@ -1102,23 +1094,19 @@ let local = |#q: &Question| -> Local {
           `Probing => [kvs("CA credentials", "checking…", hint)],
           `Failed(e) => [kvs("CA credentials", e, warn)],
           `Ready(c) => array::concat(
-            [select c.auto_approve_present {
-              false => kvs("Auto-approve", "not set up", hint),
-              true => select c.auto_approve_wired {
-                true => kvs("Auto-approve", "active", good),
-                false => kvs("Auto-approve", "present (not wired)", warn)
-              }
+            [select (c.auto_approve_present, c.auto_approve_wired) {
+              (true, true) => kvs("Auto-approve", "active", good),
+              (true, false) => kvs("Auto-approve", "present (not wired)", warn),
+              (false, _) => kvs("Auto-approve", "not set up", hint)
             }],
             [select c.recovery_present {
               true => kvs("Recovery slot", "set", good),
               false => kvs("Recovery slot", "MISSING", warn)
             }],
-            select c.external_signed {
-              false => [],
-              true => select c.external_installed {
-                true => [kvs("External CA", "installed", good)],
-                false => [kvs("External CA", "awaiting signature", warn)]
-              }
+            select (c.external_signed, c.external_installed) {
+              (false, _) => [],
+              (true, true) => [kvs("External CA", "installed", good)],
+              (true, false) => [kvs("External CA", "awaiting signature", warn)]
             }
           )
         }

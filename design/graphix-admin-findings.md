@@ -26,14 +26,17 @@ Graphix, language and compiler:
 
 1. **Parse diagnostics: the refusal reason and position must survive
    the combine merge** (08-18, 08-21 twice, 09-02 `Error as _`, the
-   unknown duration unit, and `let ok = …` — six sightings). A
-   reserved word in a binding position, an unescaped `[`, a bare
-   `Error` predicate, a `duration:3.h` all report "Unexpected `(`"
-   lines away from the cause. `grow::parsing`'s thread-local solved
-   this for depth refusals; keyword/unit refusals need the same or
-   their own check. The sixth sighting adds a facet: the package
-   build script reports "parse error at line: 141, column: 9" with NO
-   MODULE NAME, in a package of nine modules.
+   unknown duration unit, and `let ok = …` — six sightings). PARTLY
+   FIXED 09-02 night: a reserved word in a name position now records
+   its reason and position (`grow::note_reason`), and the parse's
+   failure reports it when the failure lies on that line or before
+   it — "note: at line: 2, column: 5: `ok` is a reserved word and
+   cannot be used as a name" under combine's "Unexpected `l`". Still
+   open: the unescaped `[` in a string, the bare `Error` predicate,
+   the unknown duration unit — each wants its own note at the refusal
+   site. RETRACTED: the "no module name" facet — the package build
+   script does name the file ("packing graphix AST blob: parsing
+   …/landing.gx"); my log filter had dropped that line.
 2. **`never()` arms leave a select's type open** (09-02): annotate the
    binding is the documented answer; whether `never()` should type as
    an absorbed bottom instead of a fresh variable is a ruling not yet
@@ -41,10 +44,12 @@ Graphix, language and compiler:
 3. **Lint: a connect whose target is read unsampled in the same select
    arm** (09-02, the accidental counter — three sightings in one
    afternoon, one reached the harness at 100% CPU). Proposed.
-4. **`let`-destructured sibling binds in the wake catch-up tracker**
-   (09-02, `design/wake_catchup.md` addendum): the select-arm case is
-   fixed; `let (a, b) = pair` siblings have the same facet relation and
-   are not covered. Fix when a program hits it.
+4. ~~**`let`-destructured sibling binds in the wake catch-up tracker**
+   (09-02).~~ FIXED 09-02 night: a destructuring `let`'s binds carry
+   their group's representative (`Bind::facet`), and `TrackedFires`
+   keys its bits by it — a read of any sibling spends the delivery
+   for all; the catch-up at wake still delivers every sibling the arm
+   reads. Pinned by `let_sibling_binds_spent` (both engines).
 5. **Arithmetic as traits** (09-02, `design/traits.md` §5): needs
    traits v2 (a trait parameter for the right operand, an associated
    Output). Datetime/duration stays in `sys::time` until then.
@@ -78,20 +83,22 @@ Graphix, language and compiler:
     connect's glyph reset) — fixed the same way. A lint is the
     language-side answer: a `<-` inside a select arm whose right-hand
     side depends on none of the arm's fired inputs.
-14. **Bool literal coverage does not reach into payload or tuple
-    positions** (09-02): `` `Join(false) `` + `` `Join(true) `` do not
-    cover `` `Join(bool) ``, and `(true, true)`/`(true, false)`/
-    `(false, _)` do not cover `(bool, bool)`, although `true`/`false`
-    complete a bool at the top level (`select.rs`'s `saw_true`/
-    `saw_false` pair is top-level only). Nested selects are the idiom
-    today; the fix is literal pooling per position — the twin of the
-    Set-distribution rule (08-31), applied to literals.
-11. **A select over `[fn(..), null]` reports the bind arm dead** (09-02):
-    `select on_cancel { null as _ => never(), f => f(e) }` is refused
-    with "pattern '_: fn(e: Any) -> null will never match fn(e: Any) ->
-    null, unused match cases" — the dead-arm check does not accept a
-    function member as matching its own type. Worked around by making
-    the callback required; an optional callback is a natural API.
+14. ~~**Bool literal coverage does not reach into payload or tuple
+    positions** (09-02, three sightings in one day).~~ FIXED 09-02
+    night: composite arms whose only refutable leaves are bool
+    literals pool coverage per position by SHAPE (`LiteralPool`,
+    `select.rs`) — same-shaped arms cover the scrutinee's member of
+    that shape once their literal vectors cover every assignment of
+    the positions any of them tests; the dead-arm walk subtracts the
+    same member, so a wildcard behind a complete ladder is dead. The
+    port's nested selects are ladders again. Pins: `bool_pair_ladder_
+    covers`, `variant_bool_ladder_covers`, `bool_pair_ladder_dead_tail`.
+11. ~~**A select over `[fn(..), null]` reports the bind arm dead**
+    (09-02).~~ FIXED 09-02 night: `could_match` had no function arm
+    at all (a function against anything was "never"); two function
+    types could match when their arities, labels and components
+    could. `tui::form`'s `#on_cancel` is optional again; the ignored
+    repro is a live pin.
 
 Book:
 
@@ -138,7 +145,9 @@ literal units and format, the sibling-pattern-bind phantom and the
 `compile_callable` pipeline, the fixture's lock race, session-cache
 leak and gesture predictor, `tui::exit`, the payload-pattern
 residual, the Local tab and its services surface, the phase 4
-ceremonies, the phase E handoff (09-02).
+ceremonies, the phase E handoff, and the ledger's four small
+compiler items — 4, 11, 14 and the reserved-word half of 1 (09-02
+night).
 
 ## 2026-08-18 — no modal/overlay widget in graphix-package-tui
 
@@ -1173,3 +1182,33 @@ unions needs a handler over their union — the checker refused
 `fail(.., (e.0).error)` with the `TerminalError` member present, and
 the fix is a select on the error whose fall-through arm narrows to
 the admin error (the residual fix from earlier tonight).
+
+## 2026-09-02 — the ledger's small compiler fixes
+
+Four in one pass, each with a pin, and the port re-shaped to use
+them the same night:
+
+- **11**, a select over `[fn(..), null]`: `Type::could_match` had no
+  function arm — a function against anything answered "never" — so
+  the dead-arm walk refused the bind arm after `null as _`. Two
+  function types now could-match when their arities, labels and
+  components could. `tui::form`'s `#on_cancel` is optional again.
+- **14**, bool literals in composite positions: `LiteralPool` groups
+  arms by shape (tuple arity, variant tag+arity, struct fields),
+  keeps each arm's literal vector, and declares the shape covered
+  when the vectors cover every assignment of the tested positions;
+  the covered type is the scrutinee's own member of that shape (an
+  `_` position is still an open cell in the coverage pass, so the
+  arm's predicate cannot be the key). The dead-arm walk runs the
+  same pool and subtracts the member. The Local tab's descriptions
+  and the CA credential rows are literal ladders again.
+- **4**, `let`-destructured siblings: `Bind::facet` names the group's
+  representative; `TrackedFires` keys its bits by it and delivers
+  the catch-up to every sibling the arm reads, so a read of `a`
+  spends `b`'s fire too. The `select_sibling_binds_spent` twin for
+  `let` pins it.
+- **1**, the reserved-word half: `fname` records the word and its
+  position when it refuses one, and `grow::parsing` reports it under
+  combine's merged expectation when the failure lies on that line or
+  before it. The "no module name" facet was my own log filter and is
+  retracted.
