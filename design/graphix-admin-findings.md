@@ -586,3 +586,73 @@ payload binds keep exact equality; the shape fuses). The pump's
 keymaps keep the outer-binding sampling they were refactored to —
 both idioms are now legal, and new code can use whichever reads
 better.
+
+## 2026-09-02 — strict fusion reached the package: two pure builtins stopped fusing
+
+Resuming the port after graphix's strict-fusion flip (2026-09-01) and
+the fastcall sweep (09-02), the package's own suite showed three
+fixtures failing their `FuseExpect::Jit` annotation — `parse_fingerprint`
+and `identicon` are `Sync` + `STATELESS` builtins that fused under the
+old rules and, under strict fusion, fuse only with a registered fast
+fn. The bidirectional harness is what caught it: an external package
+re-annotated nothing and still saw the regression the day it rebuilt.
+
+**Disposition: fixed in the package (one `FASTCALL` per builtin, the
+eval delegating to the same fn through `fast_eval`) — exactly the
+one-line opt-in the performance model advertises. Positive finding for
+the model: a package author outside the stdlib gets the fused site
+with no compiler involvement. Worth a line in the `#[native]` chapter:
+a pure builtin that does not register a fast fn is a node-walk
+boundary by rule, and the harness will say so.**
+
+## 2026-09-02 — test-side: the domain fixture's config lock outlives its drop
+
+With a fourth live-domain test in the package, `TestAdminDomain` began
+failing to start ("acquiring the test config lock"): the fixture holds
+its serialization guard as a struct field and aborts its daemon task in
+`Drop`, but the daemon's config-dir lock is released only when the
+aborted task actually unwinds — after the guard is gone and the next
+fixture is already trying. **Disposition: netidx test fixture, not
+graphix — `start_with_password` now retries the lock for up to ten
+seconds.** Also on the test side: a graphix setup program that
+`connect`s leaves a cached session for its admin in the process, and a
+later `connect` that names nobody rides it (correct package behavior —
+the TUI test's setup logged in as root and the tab then connected as
+root with no questions). The fixture gained `mint_role_admin`, which
+mints over a password session and caches nothing.
+
+## 2026-09-02 — the change-password route, and what starts a ceremony
+
+The slice: `change_password_at` (a from-scratch password session that
+replaces a reset password; the finding of 08-31), `#glyph` on both
+session ceremonies (a CA fingerprint confirmed once rides along, so the
+follow-on flow skips the gesture), `info` (what a `Target` is, for the
+menu title), the tab's routing of a refused connect into the ceremony,
+and `c` on the roster for the session's own password. Both live tests
+drive it end to end — through the package API in graphix, and through
+the tab's modals.
+
+The graphix e2e program stalled twice, and both stalls were the same
+package-design fact seen from two sides. The ceremony builtins started
+on the delivery of their trailing positional (`server`, or the
+`Target`) and read whatever the labeled args held at that moment —
+CachedArgs-style builtins, by contrast, wait until every argument is
+present. So `connect(#password: one_time, listen)` with an async
+`one_time` started at init on the literal address and asked for the
+password; and `change_password_at(#glyph: must_change ~ glyph, …)` with
+a never-fired `glyph` started never, silently (the sample was bottom).
+In the TUI both read as "the pump asks a question you expected the
+program to have answered" — a stall only where nothing answers.
+**Disposition: package fix — one `Trigger` (ceremony.rs) shared by every
+ceremony builtin: the trailing positional is still the trigger, and a
+start now waits until every argument is present, a trigger that fires
+while another argument is undelivered or bottom starting the ceremony
+when that one arrives. No graphix change: `~` sequencing and the
+bottom-in-bottom-out rule behaved exactly as ruled; the asymmetry was
+ours.** The glyph itself is the second lesson — captured as a bare
+`Fingerprint` from a select that may never fire, it must be typed
+`[Fingerprint, null]` and defaulted, the way the tab already wrote it;
+whether a connect asks the gesture at all depends on whether the
+domain's cert is the user CA dir's (`resolve_identity` verifies against
+the local CA silently), which the fixture now reports as
+`gesture_expected` so the TUI tests branch on it instead of assuming.

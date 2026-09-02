@@ -96,6 +96,18 @@ type CaIdentity = {
 /// A netidx admin domain discovered on the local network.
 type AdminDomain = { domain: string, identity: CaIdentity };
 
+/// What a target is: this host's own admin server (its config path),
+/// or a remote session — the server address, the admin it
+/// authenticates, and the CA identity the operator confirmed.
+/// Presentation data for a title or a status line.
+type TargetInfo = [
+  `Local({ cfg_path: string }),
+  `Remote({ server: string, admin: string, identity: CaIdentity })
+];
+
+/// Describe a target.
+val info: fn(t: Target) -> TargetInfo;
+
 /// The presentation descriptor of a question: the CLI flag a script
 /// would pass (the question's stable identity), a short label, and
 /// newcomer-actionable help.
@@ -160,11 +172,15 @@ type Answer = [
 
 /// Open an authenticated remote-admin session: the security gesture
 /// (`ConfirmIdentity`), the admin name, and the password arrive as
-/// events unless provided. `Done` carries the session as a `Target`.
+/// events unless provided. `#glyph` is a CA fingerprint the operator
+/// already confirmed out of band — an identity that matches it is
+/// accepted without the gesture, one that doesn't is refused. `Done`
+/// carries the session as a `Target`.
 val connect: fn(
   ?#admin: [string, null],
   ?#password: [string, null],
   ?#ca_dir: [string, null],
+  ?#glyph: [Fingerprint, null],
   server: string
 ) -> Ceremony<Target>;
 
@@ -368,8 +384,24 @@ val remove_server: fn(id: string, t: Target) -> Ceremony<RemoveServerOutcome>;
 val reconcile_ca: fn(t: Target) -> Ceremony<ReconcileOutcome>;
 
 /// Change the authenticated admin's own password. With `#new_password`
-/// null the ceremony asks for it (and its confirmation).
+/// null the ceremony asks for it (and its confirmation). The credential
+/// the target was opened with is gone afterwards — connect again.
 val change_password: fn(?#new_password: [string, null], t: Target) -> Ceremony<null>;
+
+/// Change an admin's password from scratch — the route when `connect`
+/// fails with `PasswordChangeRequired`: the CA refuses every session
+/// but the one that replaces a reset password, so there is no `Target`
+/// to hand `change_password`. The identity gesture (unless `#glyph`
+/// matches), the admin name, the current password, and the new one
+/// twice arrive as events unless provided. Connect again afterwards.
+val change_password_at: fn(
+  ?#admin: [string, null],
+  ?#password: [string, null],
+  ?#ca_dir: [string, null],
+  ?#glyph: [Fingerprint, null],
+  ?#new_password: [string, null],
+  server: string
+) -> Ceremony<null>;
 
 /// Resolver cluster base paths known to the CA.
 val list_resolver_clusters: fn(t: Target) -> Result<Array<string>, AdminError>;

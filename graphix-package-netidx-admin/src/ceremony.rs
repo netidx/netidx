@@ -70,7 +70,7 @@ impl From<Field> for FieldInfoV {
 }
 
 #[derive(Debug, Clone, IntoValue)]
-struct CaIdentityV {
+pub(crate) struct CaIdentityV {
     fingerprint: FingerprintV,
     domain: String,
     roles: Vec<String>,
@@ -692,6 +692,41 @@ async fn forward(
 /// Wire up a ceremony: the event channel, the parked op (spawned on
 /// first observation), and the cancel guard. Returns the wrapped
 /// `Ceremony` value.
+/// The argument discipline every ceremony builtin shares: the trailing
+/// positional is the trigger, and a start waits for every argument to
+/// be present — a trigger that fires while another argument is still
+/// undelivered (or bottom) starts the ceremony when that one arrives.
+#[derive(Debug)]
+pub(crate) struct Trigger {
+    args: CachedVals,
+    pending: bool,
+}
+
+impl Trigger {
+    pub(crate) fn new<R: Rt, E: UserEvent>(from: &[Node<R, E>]) -> Self {
+        Trigger { args: CachedVals::new(from), pending: false }
+    }
+
+    /// Update the argument slots; `Some` when the ceremony starts this
+    /// cycle, holding every argument's value.
+    pub(crate) fn tick<R: Rt, E: UserEvent>(
+        &mut self,
+        ctx: &mut ExecCtx<R, E>,
+        from: &mut [Node<R, E>],
+        event: &mut Event<E>,
+    ) -> Option<&[Option<Value>]> {
+        self.args.update_full(ctx, from, event);
+        let last = from.len() - 1;
+        self.pending |= self.args.1[last].is_fired();
+        if self.pending && !self.args.any_bottom() {
+            self.pending = false;
+            Some(&self.args.0)
+        } else {
+            None
+        }
+    }
+}
+
 pub(crate) fn start_ceremony<R: Rt, E: UserEvent>(
     ctx: &mut ExecCtx<R, E>,
     accept_glyph: Option<netidx_admin_proto::fingerprint::Fingerprint>,

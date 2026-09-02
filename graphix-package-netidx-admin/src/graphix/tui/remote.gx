@@ -1,9 +1,10 @@
 use package::{
-  AdminError, AdminInfo, IssuedEntry, PendingDelegation, QueueItem, ServerInfo,
-  SlotKind, Target, approve, approve_delegation, approve_renewals, connect,
-  deny, deny_delegation, issued, list_admins, list_pending_delegations,
-  list_queue, list_servers, questions, reconcile_ca, remove_admin,
-  remove_server, reset_password, result, revoke
+  AdminError, AdminInfo, Fingerprint, IssuedEntry, PendingDelegation, QueueItem,
+  ServerInfo, SlotKind, Target, approve, approve_delegation, approve_renewals,
+  change_password, change_password_at, connect, deny, deny_delegation, info,
+  issued, list_admins, list_pending_delegations, list_queue, list_servers,
+  questions, reconcile_ca, remove_admin, remove_server, reset_password, result,
+  revoke
 };
 use tui::{line, style};
 use tui::block::{self, *};
@@ -28,6 +29,7 @@ type Act = [
   `DenyDelegation(string),
   `Revoke(string),
   `ResetPassword(string),
+  `ChangeOwnPassword,
   `RemoveAdmin(string),
   `RemoveServer(string),
   `Reconcile
@@ -54,7 +56,7 @@ let panels: Array<MenuEntry> = [
     kind: `Roster,
     title: "Admin Roster",
     desc: "The admin domain's admins and their scopes.",
-    keys: " p reset-password · d remove · r refresh · Esc back "
+    keys: " c change my password · p reset-password · d remove · r refresh · Esc back "
   },
   {
     kind: `Servers,
@@ -102,22 +104,49 @@ let remote = |#q: &Question, #server: string = ""| -> Remote {
   let screen: Screen = `Connect;
   let ed = line_edit::state(server);
   let connect_to: string = never();
-  let connected_to = "";
   let conn_err: [string, null] = null;
   conn_err <- connect_to ~ null;
   let connect_c = connect(connect_to);
   *q <- questions(connect_c);
+  // the CA fingerprint the operator confirmed during this connect, so
+  // a follow-on ceremony against the same server skips the gesture
+  let glyph: [Fingerprint, null] = null;
+  glyph <- connect_to ~ null;
+  glyph <- select questions(connect_c) {
+    `ConfirmIdentity({ identity, .. }) => identity.fingerprint,
+    _ => never()
+  };
+  // a reset password authorizes nothing but its own replacement: the
+  // CA refuses the session and names the admin, and that routes here
+  let must_change: string = never();
   {
-    catch(e) conn_err <- admin_text((e.0).error);
+    catch(e) select (e.0).error {
+      `PasswordChangeRequired(name) => must_change <- name,
+      other => conn_err <- admin_text(other)
+    };
     let t = result(connect_c)?;
     target <- t;
-    connected_to <- t ~ connect_to;
     screen <- t ~ `Menu
   };
   // ── shared ui state ──
   let menu_sel = 0;
   let row_sel = 0;
   let toast: [Toast, null] = null;
+  let chpw_at_c = change_password_at(
+    #admin: must_change,
+    #glyph: must_change ~ glyph,
+    must_change ~ connect_to
+  );
+  *q <- questions(chpw_at_c);
+  {
+    catch(e) conn_err <- admin_text((e.0).error);
+    let r = result(chpw_at_c)?;
+    toast <- r ~ {
+      title: "Password changed",
+      lines: ["Connect again with the new password."],
+      error: false
+    }
+  };
   let confirm: [{ message: string, action: Act }, null] = null;
   let fail = |title: string, a: AdminError| -> null {
     toast <- { title, lines: [admin_text(a)], error: true };
@@ -255,6 +284,10 @@ let remote = |#q: &Question, #server: string = ""| -> Remote {
     `ResetPassword(name) => reset_password(name, name ~ target),
     _ => never()
   };
+  let chpw_c = select run {
+    x@ `ChangeOwnPassword => change_password(x ~ target),
+    _ => never()
+  };
   let rmadmin_r = select run {
     `RemoveAdmin(name) => remove_admin(name, name ~ target),
     _ => never()
@@ -273,6 +306,7 @@ let remote = |#q: &Question, #server: string = ""| -> Remote {
   *q <- questions(apdel_c);
   *q <- questions(dendel_c);
   *q <- questions(revoke_c);
+  *q <- questions(chpw_c);
   *q <- questions(rmserver_c);
   *q <- questions(reconcile_c);
   // ── action outcomes: toast the summary, then refresh the panel ──
@@ -356,6 +390,16 @@ let remote = |#q: &Question, #server: string = ""| -> Remote {
       error: false
     };
     load <- pw ~ `Roster
+  };
+  {
+    catch(e) fail("Changing the password failed", (e.0).error);
+    let r = result(chpw_c)?;
+    toast <- r ~ {
+      title: "Password changed",
+      lines: ["The session's credential is gone — connect again with the new password."],
+      error: false
+    };
+    screen <- r ~ `Connect
   };
   {
     catch(e) fail("Removing the admin failed", (e.0).error);
@@ -469,6 +513,7 @@ let remote = |#q: &Question, #server: string = ""| -> Remote {
     _ => `Continue
   };
   let roster_keys = |k: KeyEvent| -> [`Stop, `Continue] select k.code {
+    kk@ `Char("c") => { run <- kk ~ `ChangeOwnPassword; `Stop },
     kk@ `Char("p") => {
       select kk ~ roster_name {
         null as _ => never(),
@@ -646,9 +691,13 @@ let remote = |#q: &Question, #server: string = ""| -> Remote {
   let menu_view = {
     let items = array::map(panels, |p| line(p.title));
     let desc: Array<tui::Line> = [line(#style: hint, (panels[menu_sel]$).desc)];
+    let title = select info(target) {
+      `Remote({ server, admin, identity }) => "[identity.domain] — [server] as [admin]",
+      `Local({ cfg_path }) => "this host — [cfg_path]"
+    };
     block(
       #border: &`All,
-      #title: &line("Admin domain — [connected_to]"),
+      #title: &line(title),
       #title_bottom: &line(#style: hint, " ↑/↓ move · Enter open · Esc disconnect "),
       &layout(#direction: &`Vertical, &[
         child(#constraint: `Length(array::len(panels)),

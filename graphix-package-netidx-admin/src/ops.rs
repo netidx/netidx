@@ -14,7 +14,7 @@
 
 use crate::{
     FingerprintV, TargetValue, admin_err,
-    ceremony::{self, BoxOp},
+    ceremony::{self, BoxOp, Trigger},
     get_target, rows_value,
 };
 use anyhow::{Result, anyhow, bail};
@@ -24,7 +24,7 @@ use graphix_compiler::{
     Apply, BuiltIn, Event, ExecCtx, Node, Rt, Scope, TagValue, UserEvent,
     effects::EffectKind, errf, expr::ExprId, typ::FnType,
 };
-use graphix_package_core::{CachedArgsAsync, CachedVals, EvalCachedAsync, seam_tick};
+use graphix_package_core::{CachedArgsAsync, CachedVals, EvalCachedAsync};
 use netidx_admin::{
     discovery,
     ops::{self, AdminTarget, RecordedEdit},
@@ -33,7 +33,7 @@ use netidx_admin_proto::{
     AdminServerId, PeerResult, Role, Secret, fingerprint::Fingerprint, policy::Policy,
 };
 use netidx_derive::{FromValue, IntoValue};
-use netidx_value::Value;
+use netidx_value::{FromValue, Value};
 use std::{fmt::Debug, marker::PhantomData, net::SocketAddr, time::Duration};
 
 // ── shared conversions ───────────────────────────────────────────
@@ -393,7 +393,7 @@ impl From<discovery::Discovered> for DiscoveredV {
 
 // ── config value helpers ─────────────────────────────────────────
 
-fn opt_string(v: Option<&Value>) -> Result<Option<String>> {
+pub(crate) fn opt_string(v: Option<&Value>) -> Result<Option<String>> {
     match v {
         None | Some(Value::Null) => Ok(None),
         Some(Value::String(s)) => Ok(Some(s.to_string())),
@@ -401,10 +401,29 @@ fn opt_string(v: Option<&Value>) -> Result<Option<String>> {
     }
 }
 
-fn req_string(v: Option<&Value>, what: &str) -> Result<String> {
+pub(crate) fn req_string(v: Option<&Value>, what: &str) -> Result<String> {
     match opt_string(v)? {
         Some(s) => Ok(s),
         None => bail!("{what} is required"),
+    }
+}
+
+/// A `[Fingerprint, null]` arg: the CA fingerprint already confirmed.
+pub(crate) fn opt_glyph(v: Option<&Value>) -> Result<Option<Fingerprint>> {
+    match v {
+        None | Some(Value::Null) => Ok(None),
+        Some(v) => {
+            let fp = FingerprintV::from_value(v.clone())?;
+            Ok(Some(Fingerprint::parse_text(&fp.code)?))
+        }
+    }
+}
+
+/// The trailing `Target` arg of a ceremony.
+fn target_arg(v: Option<&Value>) -> Option<TargetValue> {
+    match v? {
+        Value::Abstract(a) => a.downcast_ref::<TargetValue>().cloned(),
+        _ => None,
     }
 }
 
@@ -467,7 +486,7 @@ pub(crate) trait RemoteOp: Debug + Send + Sync + 'static {
 
 #[derive(Debug)]
 pub(crate) struct RemoteCeremony<T: RemoteOp> {
-    cfg: Vec<Option<Value>>,
+    trigger: Trigger,
     out: TagValue,
     ph: PhantomData<T>,
 }
@@ -481,11 +500,11 @@ impl<R: Rt, E: UserEvent, T: RemoteOp> BuiltIn<R, E> for RemoteCeremony<T> {
         _typ: &'a FnType,
         _resolved: Option<&'d FnType>,
         _scope: &'b Scope,
-        _from: &'c [Node<R, E>],
+        from: &'c [Node<R, E>],
         _top_id: ExprId,
     ) -> Result<Box<dyn Apply<R, E>>> {
         Ok(Box::new(RemoteCeremony::<T> {
-            cfg: vec![None; T::NCFG],
+            trigger: Trigger::new(from),
             out: TagValue::phantom(),
             ph: PhantomData,
         }))
@@ -499,28 +518,17 @@ impl<R: Rt, E: UserEvent, T: RemoteOp> Apply<R, E> for RemoteCeremony<T> {
         from: &mut [Node<R, E>],
         event: &mut Event<E>,
     ) -> &TagValue {
-        let (cfg_nodes, target_node) = from.split_at_mut(T::NCFG);
-        for (i, n) in cfg_nodes.iter_mut().enumerate() {
-            if let Some(tv) = seam_tick(n.update(ctx, event)) {
-                self.cfg[i] = Some(tv.value_cloned());
-            }
-        }
-        let target = match seam_tick(target_node[0].update(ctx, event)) {
-            Some(tv) => tv.value_cloned(),
-            None => return self.out.ride(),
+        let Some(args) = self.trigger.tick(ctx, from, event) else {
+            return self.out.ride();
         };
-        let target = match &target {
-            Value::Abstract(a) => match a.downcast_ref::<TargetValue>() {
-                Some(t) => t.clone(),
-                None => return self.out.ride(),
-            },
-            _ => return self.out.ride(),
+        let Some(target) = target_arg(args[T::NCFG].as_ref()) else {
+            return self.out.ride();
         };
         let (conn, fp) = match target.remote() {
             Ok(r) => r,
             Err(e) => return self.out.set(TagValue::fired(admin_err(e))),
         };
-        match T::op(&self.cfg, conn) {
+        match T::op(&args[..T::NCFG], conn) {
             Ok(op) => {
                 self.out.set(TagValue::fired(ceremony::start_ceremony(ctx, Some(fp), op)))
             }
@@ -874,7 +882,7 @@ pub(crate) type ReconcileCa = RemoteCeremony<ReconcileCaOp>;
 /// than a [`RemoteOp`].
 #[derive(Debug)]
 pub(crate) struct ChangePassword {
-    new_password: Option<String>,
+    trigger: Trigger,
     out: TagValue,
 }
 
@@ -887,10 +895,13 @@ impl<R: Rt, E: UserEvent> BuiltIn<R, E> for ChangePassword {
         _typ: &'a FnType,
         _resolved: Option<&'d FnType>,
         _scope: &'b Scope,
-        _from: &'c [Node<R, E>],
+        from: &'c [Node<R, E>],
         _top_id: ExprId,
     ) -> Result<Box<dyn Apply<R, E>>> {
-        Ok(Box::new(ChangePassword { new_password: None, out: TagValue::phantom() }))
+        Ok(Box::new(ChangePassword {
+            trigger: Trigger::new(from),
+            out: TagValue::phantom(),
+        }))
     }
 }
 
@@ -901,26 +912,17 @@ impl<R: Rt, E: UserEvent> Apply<R, E> for ChangePassword {
         from: &mut [Node<R, E>],
         event: &mut Event<E>,
     ) -> &TagValue {
-        let (pw_node, target_node) = from.split_at_mut(1);
-        if let Some(tv) = seam_tick(pw_node[0].update(ctx, event)) {
-            self.new_password = match tv.value_cloned() {
-                Value::String(s) => Some(s.to_string()),
-                _ => None,
-            };
-        }
-        let target = match seam_tick(target_node[0].update(ctx, event)) {
-            Some(tv) => tv.value_cloned(),
-            None => return self.out.ride(),
+        let Some(args) = self.trigger.tick(ctx, from, event) else {
+            return self.out.ride();
         };
-        let target = match &target {
-            Value::Abstract(a) => match a.downcast_ref::<TargetValue>() {
-                Some(t) => t.clone(),
-                None => return self.out.ride(),
-            },
-            _ => return self.out.ride(),
+        let Some(target) = target_arg(args[1].as_ref()) else {
+            return self.out.ride();
+        };
+        let new_password = match opt_string(args[0].as_ref()) {
+            Ok(p) => p.map(Secret),
+            Err(e) => return self.out.set(TagValue::fired(errf!("Admin", "{e:#}"))),
         };
         let glyph = target.remote().ok().map(|(_, fp)| fp);
-        let new_password = self.new_password.clone().map(Secret);
         let op: BoxOp = Box::new(move |ans| {
             Box::pin(async move {
                 ops::roster::change_password(ans, &target.0, new_password).await?;

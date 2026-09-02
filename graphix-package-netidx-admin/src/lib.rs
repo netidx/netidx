@@ -6,15 +6,15 @@
 //! crate is BRIDGING ONLY — types, IO, and the `Answerer` seam; decision
 //! and presentation logic belongs in Graphix (the no-workarounds rule).
 
-use anyhow::{Error, Result};
+use anyhow::{Context, Error, Result};
 use arcstr::ArcStr;
 use compact_str::format_compact;
 use graphix_compiler::{
-    Apply, BuiltIn, Event, ExecCtx, Node, Rt, Scope, TagValue, UserEvent,
+    Apply, BuiltIn, Event, ExecCtx, FastFn, Node, Rt, Scope, TagValue, UserEvent,
     effects::EffectKind, errf, expr::ExprId, typ::FnType,
 };
 use graphix_package_core::{
-    CachedArgs, CachedArgsAsync, CachedVals, EvalCached, EvalCachedAsync, seam_tick,
+    CachedArgs, CachedArgsAsync, CachedVals, EvalCached, EvalCachedAsync, fast_eval,
 };
 use netidx_admin::{
     answer::Answerer as _,
@@ -25,10 +25,14 @@ use netidx_admin_proto::{
     policy::{AdminInfo, SlotKind},
 };
 use netidx_derive::{FromValue, IntoValue};
-use netidx_value::{Abstract, ValArray, Value, abstract_type::AbstractWrapper};
+use netidx_value::{
+    Abstract, FromValue, ValArray, Value, abstract_type::AbstractWrapper,
+};
 use std::{
     cmp::Ordering,
+    fmt,
     hash::{Hash, Hasher},
+    marker::PhantomData,
     net::SocketAddr,
     path::PathBuf,
     sync::{Arc, LazyLock},
@@ -314,20 +318,25 @@ type ListAdmins = CachedArgsAsync<ListAdminsEv>;
 
 // ── parse_fingerprint (sync, pure) ───────────────────────────────
 
+fn fc_parse_fingerprint(args: &[Value]) -> Option<Value> {
+    let Value::String(code) = &args[0] else { return None };
+    Some(match Fingerprint::parse_text(code) {
+        Ok(fp) => FingerprintV::from(&fp).into(),
+        Err(e) => errf!("Admin", "{e:#}"),
+    })
+}
+
 #[derive(Debug, Default)]
 struct ParseFingerprintEv;
 
 impl<R: Rt, E: UserEvent> EvalCached<R, E> for ParseFingerprintEv {
     const EFFECT: EffectKind = EffectKind::Sync;
     const STATELESS: bool = true;
+    const FASTCALL: Option<FastFn> = Some(fc_parse_fingerprint);
     const NAME: &str = "netidx_admin_parse_fingerprint";
 
-    fn eval(&mut self, _ctx: &mut ExecCtx<R, E>, cached: &CachedVals) -> Option<Value> {
-        let code = cached.get::<String>(0)?;
-        Some(match Fingerprint::parse_text(&code) {
-            Ok(fp) => FingerprintV::from(&fp).into(),
-            Err(e) => errf!("Admin", "{e:#}"),
-        })
+    fn eval(&mut self, _ctx: &mut ExecCtx<R, E>, from: &CachedVals) -> Option<Value> {
+        fast_eval(fc_parse_fingerprint, from)
     }
 }
 
@@ -348,113 +357,182 @@ struct IdenticonV {
     color: RgbV,
 }
 
+fn fc_identicon(args: &[Value]) -> Option<Value> {
+    let fp = FingerprintV::get(args[0].clone())?;
+    Some(match Fingerprint::parse_text(&fp.code) {
+        Ok(fp) => {
+            let (r, g, b) = fp.identicon_color();
+            IdenticonV {
+                cells: fp.identicon_cells().iter().map(|row| row.to_vec()).collect(),
+                color: RgbV { r, g, b },
+            }
+            .into()
+        }
+        Err(e) => errf!("Admin", "{e:#}"),
+    })
+}
+
 #[derive(Debug, Default)]
 struct IdenticonEv;
 
 impl<R: Rt, E: UserEvent> EvalCached<R, E> for IdenticonEv {
     const EFFECT: EffectKind = EffectKind::Sync;
     const STATELESS: bool = true;
+    const FASTCALL: Option<FastFn> = Some(fc_identicon);
     const NAME: &str = "netidx_admin_identicon";
 
-    fn eval(&mut self, _ctx: &mut ExecCtx<R, E>, cached: &CachedVals) -> Option<Value> {
-        let fp = cached.get::<FingerprintV>(0)?;
-        Some(match Fingerprint::parse_text(&fp.code) {
-            Ok(fp) => {
-                let (r, g, b) = fp.identicon_color();
-                IdenticonV {
-                    cells: fp.identicon_cells().iter().map(|row| row.to_vec()).collect(),
-                    color: RgbV { r, g, b },
-                }
-                .into()
-            }
-            Err(e) => errf!("Admin", "{e:#}"),
-        })
+    fn eval(&mut self, _ctx: &mut ExecCtx<R, E>, from: &CachedVals) -> Option<Value> {
+        fast_eval(fc_identicon, from)
     }
 }
 
 type Identicon = CachedArgs<IdenticonEv>;
 
-// ── connect (ceremony) ───────────────────────────────────────────
+// ── info (sync, pure) ────────────────────────────────────────────
 
-/// Open an authenticated remote-admin session as a ceremony: the
-/// identity confirmation, admin name, and password arrive as events
-/// unless provided; `Done` carries the `Target`.
-#[derive(Debug)]
-pub(crate) struct Connect {
-    admin: Option<String>,
-    password: Option<String>,
-    ca_dir: Option<String>,
-    out: TagValue,
+#[cfg_attr(not(unix), allow(dead_code))]
+#[derive(Debug, Clone, IntoValue)]
+enum TargetInfoV {
+    Local { cfg_path: String },
+    Remote { server: String, admin: String, identity: ceremony::CaIdentityV },
 }
 
-impl<R: Rt, E: UserEvent> BuiltIn<R, E> for Connect {
+fn fc_info(args: &[Value]) -> Option<Value> {
+    let Value::Abstract(a) = &args[0] else { return None };
+    let t = a.downcast_ref::<TargetValue>()?;
+    Some(
+        match &*t.0 {
+            #[cfg(unix)]
+            AdminTarget::Local { cfg_path } => {
+                TargetInfoV::Local { cfg_path: cfg_path.display().to_string() }
+            }
+            AdminTarget::Remote { session } => TargetInfoV::Remote {
+                server: session.server.to_string(),
+                admin: session.admin.clone(),
+                identity: (&session.identity).into(),
+            },
+        }
+        .into(),
+    )
+}
+
+#[derive(Debug, Default)]
+struct InfoEv;
+
+impl<R: Rt, E: UserEvent> EvalCached<R, E> for InfoEv {
+    const EFFECT: EffectKind = EffectKind::Sync;
+    const STATELESS: bool = true;
+    const FASTCALL: Option<FastFn> = Some(fc_info);
+    const NAME: &str = "netidx_admin_info";
+
+    fn eval(&mut self, _ctx: &mut ExecCtx<R, E>, from: &CachedVals) -> Option<Value> {
+        fast_eval(fc_info, from)
+    }
+}
+
+type Info = CachedArgs<InfoEv>;
+
+// ── session ceremonies: connect, change_password_at ──────────────
+
+/// What a session ceremony runs once its credentials are in hand.
+pub(crate) trait SessionKind: fmt::Debug + Send + Sync + 'static {
+    const NAME: &str;
+
+    /// `extra` holds the kind's own labeled args — the ones between
+    /// `#glyph` and the positional `server`.
+    fn run(
+        addr: SocketAddr,
+        ca_dir: Option<PathBuf>,
+        admin: Option<String>,
+        password: Option<netidx_admin_proto::Secret>,
+        extra: &[Option<Value>],
+    ) -> Result<ceremony::BoxOp>;
+}
+
+/// A ceremony that opens a session from scratch. The labeled args
+/// `#admin`, `#password`, `#ca_dir` and `#glyph` (the CA fingerprint
+/// already confirmed out of band — a matching identity is accepted
+/// without asking) come first, then the kind's own, then the positional
+/// `server`, the trigger.
+#[derive(Debug)]
+pub(crate) struct SessionCeremony<K: SessionKind> {
+    trigger: ceremony::Trigger,
+    out: TagValue,
+    ph: PhantomData<K>,
+}
+
+impl<R: Rt, E: UserEvent, K: SessionKind> BuiltIn<R, E> for SessionCeremony<K> {
     const EFFECT: EffectKind = EffectKind::Async;
-    const NAME: &str = "netidx_admin_connect";
+    const NAME: &str = K::NAME;
 
     fn init<'a, 'b, 'c, 'd>(
         _ctx: &'a mut ExecCtx<R, E>,
         _typ: &'a FnType,
         _resolved: Option<&'d FnType>,
         _scope: &'b Scope,
-        _from: &'c [Node<R, E>],
+        from: &'c [Node<R, E>],
         _top_id: ExprId,
     ) -> Result<Box<dyn Apply<R, E>>> {
-        Ok(Box::new(Connect {
-            admin: None,
-            password: None,
-            ca_dir: None,
+        Ok(Box::new(SessionCeremony::<K> {
+            trigger: ceremony::Trigger::new(from),
             out: TagValue::phantom(),
+            ph: PhantomData,
         }))
     }
 }
 
-fn opt_str_arg<R: Rt, E: UserEvent>(
-    ctx: &mut ExecCtx<R, E>,
-    node: &mut Node<R, E>,
-    event: &mut Event<E>,
-    into: &mut Option<String>,
-) {
-    if let Some(tv) = seam_tick(node.update(ctx, event)) {
-        *into = match tv.value_cloned() {
-            Value::String(s) => Some(s.to_string()),
-            _ => None,
-        };
-    }
-}
-
-impl<R: Rt, E: UserEvent> Apply<R, E> for Connect {
+impl<R: Rt, E: UserEvent, K: SessionKind> Apply<R, E> for SessionCeremony<K> {
     fn update(
         &mut self,
         ctx: &mut ExecCtx<R, E>,
         from: &mut [Node<R, E>],
         event: &mut Event<E>,
     ) -> &TagValue {
-        let (admin_n, rest) = from.split_first_mut().unwrap();
-        let (password_n, rest) = rest.split_first_mut().unwrap();
-        let (ca_dir_n, rest) = rest.split_first_mut().unwrap();
-        let (server_n, _) = rest.split_first_mut().unwrap();
-        opt_str_arg(ctx, admin_n, event, &mut self.admin);
-        opt_str_arg(ctx, password_n, event, &mut self.password);
-        opt_str_arg(ctx, ca_dir_n, event, &mut self.ca_dir);
-        let server = match seam_tick(server_n.update(ctx, event)) {
-            Some(tv) => match tv.value_cloned() {
-                Value::String(s) => s,
-                _ => return self.out.ride(),
-            },
-            None => return self.out.ride(),
+        let Some(args) = self.trigger.tick(ctx, from, event) else {
+            return self.out.ride();
         };
-        let addr: SocketAddr = match server.parse() {
-            Ok(a) => a,
-            Err(e) => {
-                return self
-                    .out
-                    .set(TagValue::fired(errf!("Admin", "bad server address: {e}")));
-            }
-        };
-        let admin = self.admin.clone();
-        let password = self.password.clone().map(netidx_admin_proto::Secret);
-        let ca_dir = self.ca_dir.clone().map(PathBuf::from);
-        let op: ceremony::BoxOp = Box::new(move |ans| {
+        let started = (|| -> Result<Value> {
+            let (server, extra) = args[4..].split_last().expect("a server arg");
+            let addr: SocketAddr = ops::req_string(server.as_ref(), "server")?
+                .parse()
+                .context("bad server address")?;
+            let op = K::run(
+                addr,
+                ops::opt_string(args[2].as_ref())?.map(PathBuf::from),
+                ops::opt_string(args[0].as_ref())?,
+                ops::opt_string(args[1].as_ref())?.map(netidx_admin_proto::Secret),
+                extra,
+            )?;
+            let glyph = ops::opt_glyph(args[3].as_ref())?;
+            Ok(ceremony::start_ceremony(ctx, glyph, op))
+        })();
+        self.out.set(TagValue::fired(match started {
+            Ok(v) => v,
+            Err(e) => errf!("Admin", "{e:#}"),
+        }))
+    }
+
+    fn sleep(&mut self, _ctx: &mut ExecCtx<R, E>) {}
+
+    fn reset_replay(&mut self, _ctx: &mut ExecCtx<R, E>) {}
+}
+
+/// Open an authenticated remote-admin session; `Done` carries the
+/// `Target`.
+#[derive(Debug)]
+pub(crate) struct ConnectKind;
+
+impl SessionKind for ConnectKind {
+    const NAME: &str = "netidx_admin_connect";
+
+    fn run(
+        addr: SocketAddr,
+        ca_dir: Option<PathBuf>,
+        admin: Option<String>,
+        password: Option<netidx_admin_proto::Secret>,
+        _extra: &[Option<Value>],
+    ) -> Result<ceremony::BoxOp> {
+        Ok(Box::new(move |ans| {
             Box::pin(async move {
                 let session =
                     aops::open_admin_session(ans, Some(addr), ca_dir, admin, password)
@@ -480,14 +558,50 @@ impl<R: Rt, E: UserEvent> Apply<R, E> for Connect {
                 Ok(TARGET_WRAPPER
                     .wrap(TargetValue(Arc::new(AdminTarget::Remote { session }))))
             })
-        });
-        self.out.set(TagValue::fired(ceremony::start_ceremony(ctx, None, op)))
+        }))
     }
-
-    fn sleep(&mut self, _ctx: &mut ExecCtx<R, E>) {}
-
-    fn reset_replay(&mut self, _ctx: &mut ExecCtx<R, E>) {}
 }
+
+type Connect = SessionCeremony<ConnectKind>;
+
+/// Change an admin's password over a fresh password session — the
+/// route when `connect` is refused with `PasswordChangeRequired`, where
+/// no `Target` exists to hand `change_password`. The one labeled extra
+/// is `#new_password`.
+#[derive(Debug)]
+pub(crate) struct ChangePasswordAtKind;
+
+impl SessionKind for ChangePasswordAtKind {
+    const NAME: &str = "netidx_admin_change_password_at";
+
+    fn run(
+        addr: SocketAddr,
+        ca_dir: Option<PathBuf>,
+        admin: Option<String>,
+        password: Option<netidx_admin_proto::Secret>,
+        extra: &[Option<Value>],
+    ) -> Result<ceremony::BoxOp> {
+        let new_password =
+            ops::opt_string(extra[0].as_ref())?.map(netidx_admin_proto::Secret);
+        Ok(Box::new(move |ans| {
+            Box::pin(async move {
+                let session = aops::open_admin_password_session(
+                    ans,
+                    Some(addr),
+                    ca_dir,
+                    admin,
+                    password,
+                )
+                .await?;
+                let target = AdminTarget::Remote { session };
+                aops::roster::change_password(ans, &target, new_password).await?;
+                Ok(Value::Null)
+            })
+        }))
+    }
+}
+
+type ChangePasswordAt = SessionCeremony<ChangePasswordAtKind>;
 
 // ── package registration ─────────────────────────────────────────
 
@@ -498,7 +612,9 @@ graphix_derive::defpackage! {
         ListAdmins,
         ParseFingerprint,
         Identicon,
+        Info,
         Connect,
+        ChangePasswordAt,
         ceremony::Events,
         ceremony::Answer,
         ops::ListQueue,

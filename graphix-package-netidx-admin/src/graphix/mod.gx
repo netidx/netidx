@@ -3,7 +3,9 @@ let drift = |t: Target| -> Result<Array<ServerDrift>, AdminError> 'netidx_admin_
 let list_admins = |t: Target| -> Result<Array<AdminInfo>, AdminError> 'netidx_admin_list_admins;
 let parse_fingerprint = |code: string| -> Result<Fingerprint, `Admin(string)> 'netidx_admin_parse_fingerprint;
 let identicon = |fp: Fingerprint| -> Result<{cells: Array<Array<bool>>, color: {r: u8, g: u8, b: u8}}, `Admin(string)> 'netidx_admin_identicon;
-let connect = |#admin: [string, null] = null, #password: [string, null] = null, #ca_dir: [string, null] = null, server: string| -> Ceremony<Target> 'netidx_admin_connect;
+let info = |t: Target| -> TargetInfo 'netidx_admin_info;
+let connect = |#admin: [string, null] = null, #password: [string, null] = null, #ca_dir: [string, null] = null, #glyph: [Fingerprint, null] = null, server: string| -> Ceremony<Target> 'netidx_admin_connect;
+let change_password_at = |#admin: [string, null] = null, #password: [string, null] = null, #ca_dir: [string, null] = null, #glyph: [Fingerprint, null] = null, #new_password: [string, null] = null, server: string| -> Ceremony<null> 'netidx_admin_change_password_at;
 let events = |c: Ceremony<'r>| -> Event<'r> 'netidx_admin_events;
 let answer = |id: QuestionId, a: Answer| -> [null, Error<`Admin(string)>] 'netidx_admin_answer;
 
