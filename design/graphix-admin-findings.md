@@ -15,6 +15,69 @@ Compile-time milestones (log at every ~1k lines of `.gx`):
 
 ---
 
+## Open work items — the ledger (keep current; strike an item when it lands)
+
+Every entry below has a dated finding with the full story further
+down. The campaign ends when this list is empty or every remaining
+line carries a conscious "accepted" with Eric's name on it.
+
+Graphix, language and compiler:
+
+1. **Parse diagnostics: the refusal reason and position must survive
+   the combine merge** (08-18, 08-21 twice, 09-02 `Error as _` and the
+   unknown duration unit — five sightings). A reserved word in a
+   binding position, an unescaped `[`, a bare `Error` predicate, a
+   `duration:3.h` all report "Unexpected `(`" lines away from the
+   cause. `grow::parsing`'s thread-local solved this for depth
+   refusals; keyword/unit refusals need the same or their own check.
+2. **`never()` arms leave a select's type open** (09-02): annotate the
+   binding is the documented answer; whether `never()` should type as
+   an absorbed bottom instead of a fresh variable is a ruling not yet
+   asked for. Book line either way.
+3. **Lint: a connect whose target is read unsampled in the same select
+   arm** (09-02, the accidental counter — three sightings in one
+   afternoon, one reached the harness at 100% CPU). Proposed.
+4. **`let`-destructured sibling binds in the wake catch-up tracker**
+   (09-02, `design/wake_catchup.md` addendum): the select-arm case is
+   fixed; `let (a, b) = pair` siblings have the same facet relation and
+   are not covered. Fix when a program hits it.
+5. **Arithmetic as traits** (09-02, `design/traits.md` §5): needs
+   traits v2 (a trait parameter for the right operand, an associated
+   Output). Datetime/duration stays in `sys::time` until then.
+6. **Terminal suspend/resume** for `sudo`/`$EDITOR` handoff (08-18):
+   the phase E prerequisite; composes with `sys::process` Inherit.
+
+Book:
+
+7. **The `#[native]` chapter** (the performance model), plus the four
+   idioms this campaign named: a pure builtin without a fast fn is a
+   node-walk boundary by rule; annotate a `let x: T = select …` whose
+   other arms are `never()`; a component's event outputs are nullable
+   value fields, never `never()` fields; sample every free read in a
+   handler arm with the event.
+
+Test side and package:
+
+8. **A resolver in the test domain** (09-02): the services, read-gate
+   and perms flows are driven only to their empty states against the
+   CA-only fixture.
+9. **Real performance measurement** after the port (Eric, 09-02):
+   release builds, the actual binary; the debug-build milestones are
+   trend checks only.
+10. **Engine locality** (Eric, 09-02, not a finding here): the runtime
+    task may run each cycle on a different worker; measure the thread
+    id per cycle before designing around it (a per-context memo loan,
+    or pinning the runtime to a thread).
+
+Closed this campaign, for the record: the modal/overlay widget and
+synthetic key events (08-18); the module system (08-22); coverage
+distribution and the union rectangle, def-side instance typechecking,
+the phantom event replay (08-31); the change-password route and the
+ceremony `Trigger`, `sys::time::diff` and the time fast fns, duration
+literal units and format, the sibling-pattern-bind phantom and the
+`compile_callable` pipeline, the fixture's lock race, session-cache
+leak and gesture predictor (09-02).
+
 ## 2026-08-18 — no modal/overlay widget in graphix-package-tui
 
 Found by survey before any code: the admin TUI is modal-driven
