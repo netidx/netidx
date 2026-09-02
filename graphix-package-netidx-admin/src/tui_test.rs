@@ -693,3 +693,102 @@ async fn services_surface_creates_and_deletes_a_unit() -> Result<()> {
     .await?;
     Ok(())
 }
+
+/// A fresh machine: the welcome dialog, the role menu, and a dry-run
+/// preview of the Workstation role reaching the guided install's first
+/// question through the pump — cancelled there, which the tab reports
+/// as the install failing. Then, with a CA install recorded, the
+/// teardown's chained question: the confirmation, then whether to
+/// destroy the CA, cancelled before anything runs.
+#[tokio::test(flavor = "multi_thread")]
+async fn fresh_machine_previews_an_install_and_a_teardown_asks_about_the_ca() -> Result<()>
+{
+    use netidx_admin::provenance::{AdminDomainIdentity, InstallRecord, InstallRole};
+    let d = TestAdminDomain::start().await?;
+    let record_path = netidx_admin::paths::user_install_record()?;
+    let _ = std::fs::remove_file(&record_path);
+    let prog = "let result = netidx_admin::tui::app::app()";
+    let mut h =
+        TuiTestHarness::with_register(prog, crate::TEST_REGISTER, 120, 40).await?;
+    wait_render(&mut h, Duration::from_secs(60), "the welcome dialog", |lines| {
+        lines.iter().any(|l| l.contains("Welcome to netidx"))
+    })
+    .await?;
+    // no tab bar on a fresh machine
+    let lines = h.render_lines()?;
+    assert!(
+        !lines.iter().any(|l| l.contains("Local") && l.contains("Admin Domain")),
+        "a fresh machine showed the tab bar:\n{}",
+        lines.join("\n")
+    );
+    h.dispatch_event(key(KeyCode::Enter)).await?;
+    wait_render(&mut h, Duration::from_secs(10), "the role menu", |lines| {
+        lines.iter().any(|l| l.contains("Set Up This Machine"))
+            && lines.iter().any(|l| l.contains("Restore from Backup"))
+            && !lines.iter().any(|l| l.contains("Welcome to netidx"))
+    })
+    .await?;
+    // Workstation is the second choice; p previews it
+    h.dispatch_event(key(KeyCode::Down)).await?;
+    wait_render(&mut h, Duration::from_secs(10), "the workstation blurb", |lines| {
+        lines.iter().any(|l| l.contains("full netidx node"))
+    })
+    .await?;
+    h.dispatch_event(key(KeyCode::Char('p'))).await?;
+    // the guided flow's first question, or a preview that finished
+    // without one
+    wait_render(
+        &mut h,
+        Duration::from_secs(60),
+        "the install's first question",
+        |lines| {
+            lines
+                .iter()
+                .any(|l| l.contains("Esc cancel") || l.contains("Workstation preview"))
+        },
+    )
+    .await?;
+    if !h.render_lines()?.iter().any(|l| l.contains("Workstation preview")) {
+        h.dispatch_event(key(KeyCode::Esc)).await?;
+        wait_render(&mut h, Duration::from_secs(60), "the cancelled install", |lines| {
+            lines.iter().any(|l| l.contains("Install failed"))
+        })
+        .await?;
+    }
+    h.dispatch_event(key(KeyCode::Enter)).await?;
+    // now a CA install is recorded: the tab re-detects on R and offers
+    // Uninstall, which asks twice before it touches anything
+    let record = InstallRecord::new(
+        InstallRole::Ca,
+        "/",
+        "tls",
+        Some(AdminDomainIdentity::new(&d.domain, &d.fingerprint)),
+        Some(d.listen),
+    );
+    std::fs::write(&record_path, serde_json::to_vec_pretty(&record)?)?;
+    let _guard = InstallRecordGuard(record_path);
+    h.dispatch_event(key(KeyCode::Char('R'))).await?;
+    wait_render(&mut h, Duration::from_secs(60), "the CA's action list", |lines| {
+        lines.iter().any(|l| l.contains("CA ("))
+            && lines.iter().any(|l| l.contains("Uninstall"))
+    })
+    .await?;
+    h.dispatch_event(key(KeyCode::Char('u'))).await?;
+    wait_render(&mut h, Duration::from_secs(10), "the uninstall confirmation", |lines| {
+        lines.iter().any(|l| l.contains("Remove this install?"))
+    })
+    .await?;
+    h.dispatch_event(key(KeyCode::Char('y'))).await?;
+    wait_render(&mut h, Duration::from_secs(10), "the CA question", |lines| {
+        lines.iter().any(|l| l.contains("This install owns a CA"))
+            && lines.iter().any(|l| l.contains("Keep the CA directory"))
+    })
+    .await?;
+    h.dispatch_event(key(KeyCode::Esc)).await?;
+    wait_render(&mut h, Duration::from_secs(10), "the question dismissed", |lines| {
+        !lines.iter().any(|l| l.contains("This install owns a CA"))
+            && lines.iter().any(|l| l.contains("CA ("))
+    })
+    .await?;
+    Ok(())
+}

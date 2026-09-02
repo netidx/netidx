@@ -251,10 +251,14 @@ pub async fn run_workstation(
         // A workstation runs in the operator's session → user-scope service.
         ServiceNeed::at(ServiceScope::User),
         record,
-        async move |ans, _config_lock| match (&post_apply_units_dir, joined) {
-            (Some(d), true) => install_agent_unit(ans, d),
-            _ => Ok(()),
-        },
+        Box::new(move |ans, _config_lock| {
+            Box::pin(async move {
+                match (&post_apply_units_dir, joined) {
+                    (Some(d), true) => install_agent_unit(ans, d),
+                    _ => Ok(()),
+                }
+            })
+        }),
     )
     .await
 }

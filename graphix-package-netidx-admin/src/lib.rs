@@ -656,6 +656,14 @@ graphix_derive::defpackage! {
         local::InstallUnit,
         local::RemoveUnit,
         local::UnitTemplate,
+        lifecycle::Install,
+        lifecycle::Join,
+        lifecycle::ParentCandidates,
+        lifecycle::AddParent,
+        lifecycle::RestoreStage,
+        lifecycle::RestoreFinish,
+        lifecycle::Uninstall,
+        lifecycle::InstallService,
         local::Renew,
         local::Update,
         local::Backup,
@@ -667,6 +675,7 @@ graphix_derive::defpackage! {
 }
 
 mod ceremony;
+mod lifecycle;
 mod local;
 mod ops;
 

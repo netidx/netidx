@@ -44,7 +44,7 @@ use std::{
 // ── the data model ───────────────────────────────────────────────
 
 #[derive(Debug, Clone, Copy, FromValue, IntoValue)]
-enum InstallRoleV {
+pub(crate) enum InstallRoleV {
     Ca,
     Workstation,
     Resolver,
@@ -81,7 +81,7 @@ enum ServiceStateV {
 }
 
 #[derive(Debug, Clone, Copy, FromValue, IntoValue)]
-enum ScopeV {
+pub(crate) enum ScopeV {
     User,
     System,
 }
@@ -290,7 +290,7 @@ enum SyncV {
     OutOfSync(Vec<ChangeV>),
 }
 
-fn role_arg(v: Option<&Value>) -> Option<InstallRole> {
+pub(crate) fn role_arg(v: Option<&Value>) -> Option<InstallRole> {
     InstallRoleV::from_value(v?.clone()).ok().map(InstallRole::from)
 }
 
@@ -334,7 +334,7 @@ struct CaCredentialsV {
     external_installed: bool,
 }
 
-fn opt_path(v: Option<&Value>) -> Result<Option<PathBuf>> {
+pub(crate) fn opt_path(v: Option<&Value>) -> Result<Option<PathBuf>> {
     Ok(opt_string(v)?.map(PathBuf::from))
 }
 
@@ -809,7 +809,7 @@ impl<R: Rt, E: UserEvent, T: LocalOp> Apply<R, E> for LocalCeremony<T> {
     fn reset_replay(&mut self, _ctx: &mut ExecCtx<R, E>) {}
 }
 
-fn string_arg(v: Option<&Value>, what: &str) -> Result<String> {
+pub(crate) fn string_arg(v: Option<&Value>, what: &str) -> Result<String> {
     match v {
         Some(Value::String(s)) => Ok(s.to_string()),
         Some(v) => bail!("{what}: expected a string, got {v}"),
@@ -817,11 +817,11 @@ fn string_arg(v: Option<&Value>, what: &str) -> Result<String> {
     }
 }
 
-fn path_arg(v: Option<&Value>, what: &str) -> Result<PathBuf> {
+pub(crate) fn path_arg(v: Option<&Value>, what: &str) -> Result<PathBuf> {
     string_arg(v, what).map(PathBuf::from)
 }
 
-fn bool_arg(v: Option<&Value>, what: &str) -> Result<bool> {
+pub(crate) fn bool_arg(v: Option<&Value>, what: &str) -> Result<bool> {
     match v {
         Some(Value::Bool(b)) => Ok(*b),
         Some(v) => bail!("{what}: expected a bool, got {v}"),

@@ -22,6 +22,7 @@ use crate::{
 };
 use anyhow::{Context, Result, bail};
 use compact_str::format_compact;
+use futures::future::BoxFuture;
 use std::{
     net::{IpAddr, SocketAddr},
     path::{Path, PathBuf},
@@ -339,20 +340,31 @@ pub fn install_agent_unit(ans: &mut dyn Answerer, units_dir: &Path) -> Result<()
     Ok(())
 }
 
+/// The step an install runs after its template is applied and recorded:
+/// admin domain I/O against the `Answerer`, under the install-wide config
+/// lock. A boxed future with a named lifetime, so the install future is
+/// `Send` for any spawner — an `AsyncFnOnce` here left rustc unable to
+/// prove that for a spawned frontend.
+pub type PostApply<'a> = Box<
+    dyn for<'b> FnOnce(
+            &'b mut dyn Answerer,
+            &'b ConfigDirLock,
+        ) -> BoxFuture<'b, Result<()>>
+        + Send
+        + 'a,
+>;
+
 /// Describe + apply the rendered template, record the usable core install,
 /// then run a post-apply step (never on `--dry-run`) and make the single
 /// end-of-install OS-service decision. Returns the scope the frontend should
 /// install a service at, or `None`.
-///
-/// `post_apply` receives the `Answerer` and install-wide config lock. It is an
-/// `AsyncFnOnce` because standing up the admin server is admin domain I/O.
 pub async fn finish_with(
     ans: &mut dyn Answerer,
     rt: RenderedTemplate,
     common: &InstallCommon,
     need: ServiceNeed,
     record: InstallRecord,
-    post_apply: impl AsyncFnOnce(&mut dyn Answerer, &ConfigDirLock) -> Result<()>,
+    post_apply: PostApply<'_>,
 ) -> Result<Option<ServiceScope>> {
     finish_with_record_path(ans, rt, common, need, record, None, post_apply).await
 }
@@ -364,7 +376,7 @@ async fn finish_with_record_path(
     need: ServiceNeed,
     mut record: InstallRecord,
     record_path_override: Option<&Path>,
-    post_apply: impl AsyncFnOnce(&mut dyn Answerer, &ConfigDirLock) -> Result<()>,
+    post_apply: PostApply<'_>,
 ) -> Result<Option<ServiceScope>> {
     ans.note(&rt.describe());
     match &common.mode {
@@ -848,11 +860,13 @@ mod tests {
             ServiceNeed::NONE,
             record.clone(),
             Some(&record_path),
-            async move |_ans, _config_lock| {
-                assert!(check_record.exists());
-                assert!(check_perms.exists());
-                bail!("simulated admin domain failure")
-            },
+            Box::new(move |_ans, _config_lock| {
+                Box::pin(async move {
+                    assert!(check_record.exists());
+                    assert!(check_perms.exists());
+                    bail!("simulated admin domain failure")
+                })
+            }),
         )
         .await
         .unwrap_err();

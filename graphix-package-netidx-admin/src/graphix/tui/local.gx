@@ -1,9 +1,11 @@
 use package::{
   AdminError, CaCredentials, Change, Install, InstallRole, LocalCa,
-  ServiceState, Target, auto_approve, backup, ca_credentials, external_csr,
-  external_install, installs, local as local_target, local_resolver_base,
-  parse_fingerprint, questions, recovery_rotate, renew, result, sync_check,
-  units_dir, update
+  ParentCandidate, Scope, ServiceState, Staged, Target, add_parent,
+  auto_approve, backup, ca_credentials, external_csr, external_install,
+  install, install_service, installs, join, local as local_target,
+  local_resolver_base, parent_candidates, parse_fingerprint, questions,
+  recovery_rotate, renew, restore_finish, restore_stage, result, sync_check,
+  uninstall, units_dir, update
 };
 use super::{
   Confirm, Toast, admin_text, confirm_layers, fingerprint_lines, glyph,
@@ -13,6 +15,7 @@ use super::panels::{self, CloseReason, Entry};
 use super::services;
 use tui::{line, span, style};
 use tui::block::{self, *};
+use tui::form::{self, *};
 use tui::input_handler::{self, *};
 use tui::layout::{self, *};
 use tui::list::{self, *};
@@ -45,8 +48,11 @@ type Act = [
   `ExternalInstall,
   `Backup,
   `Uninstall,
+  `UninstallWith(bool),
   `Install(InstallRole, bool),
-  `Restore
+  `Restore,
+  `FinishRestore,
+  `AddParentTo({ parent: string, resolvers: [Array<string>, null], path: string })
 ];
 
 type Item = { label: string, act: Act, desc: string };
@@ -121,6 +127,9 @@ let desc = |a: Act| -> string select a {
   `ExternalInstall => "Install the externally-signed CA certificate returned by your PKI.",
   `Backup => "Back up this complete managed installation. CA state is captured consistently while the CA remains online; machine credentials are re-enrolled on restore.",
   `Uninstall => "Remove this install — its config and OS service.",
+  `UninstallWith(_) => "Remove this install — its config and OS service.",
+  `FinishRestore => "Finish re-enrolling roles after CA startup.",
+  `AddParentTo(_) => "Attach this resolver under a parent resolver by delegation.",
   `Install(_, dry) => select dry {
     false => "Install this role on the machine.",
     true => "Preview installing this role — show the plan without changing anything."
@@ -132,7 +141,7 @@ let desc = |a: Act| -> string select a {
 let confirm_text = |a: Act| -> [string, null] select a {
   `AutoApprove(true) => "Rotate the auto-approve credential? The current keytab stops working; the admin server re-mints and re-seals it.",
   `RecoveryRotate => "Rotate the CA recovery password? The current recovery password stops working and a new one is shown once — save it.",
-  `Uninstall => "Remove this install? This stops and removes the OS service and deletes its configuration (the CA directory is kept).",
+  `Uninstall => "Remove this install? This stops and removes the OS service and deletes its configuration.",
   _ => null
 };
 
@@ -331,6 +340,15 @@ let local = |#q: &Question| -> Local {
       m => confirm <- { message: m, action: a }
     }
   };
+  // a restore parked until its CA's service runs; F finishes it
+  let restore_staged: [Staged, null] = null;
+  let finish_restore = |t: Any| -> null {
+    select t ~ restore_staged {
+      null as _ => toast <- { title: "No restore to finish", lines: ["No staged restore is waiting."], error: true },
+      _ => run <- t ~ `FinishRestore
+    };
+    null
+  };
   // ── keys ──
   let home_keys = |k: KeyEvent| -> [`Stop, `Continue] select k.code {
     `Up | `Char("k") => { menu_sel <- max(0, (k ~ menu_sel) - 1); `Stop },
@@ -367,6 +385,7 @@ let local = |#q: &Question| -> Local {
       `Stop
     },
     kk@ `Char("R") => { refresh <- kk; `Stop },
+    kk@ `Char("F") => { finish_restore(kk); `Stop },
     _ => `Continue
   };
   let fresh_keys = |k: KeyEvent| -> [`Stop, `Continue] select k.code {
@@ -383,6 +402,8 @@ let local = |#q: &Question| -> Local {
       };
       `Stop
     },
+    kk@ `Char("F") => { finish_restore(kk); `Stop },
+    kk@ `Char("R") => { refresh <- kk; `Stop },
     _ => `Continue
   };
   // ── the local admin server's panels: the roster, and this host's
@@ -646,22 +667,358 @@ let local = |#q: &Question| -> Local {
     };
     refresh <- r
   };
-  // ── the actions this TUI does not run yet ──
-  let not_yet = |what: string, cli: string| -> Toast {
-    title: what,
-    lines: ["This TUI does not do this yet; until it does, use the command line:", cli],
-    error: true
-  };
+  // ── navigation, and the questions a teardown asks first ──
+  let ca_ask = false;
+  let ca_sel = 0;
+  let parent_root: string = never();
+  let parent_open = false;
+  let parent_sel = 0;
   select run {
     x@ `Status => show_status <- x ~ true,
     x@ `Services => { svc_open <- x; screen <- x ~ `Services },
-    x@ `Uninstall => toast <- x ~ not_yet("Uninstall", "netidx admin uninstall"),
-    `Join(dry) => toast <- dry ~ not_yet("Join an admin domain", "netidx admin workstation join"),
-    x@ `AddParent => toast <- x ~ not_yet("Add a parent", "netidx admin resolver add-parent"),
-    `Install(role, _) => toast <- role ~ not_yet("Install", "netidx admin <role> install"),
-    x@ `Restore => toast <- x ~ not_yet("Restore", "netidx admin restore"),
+    x@ `Uninstall => select x ~ lca {
+      null as _ => run <- x ~ `UninstallWith(false),
+      _ => { ca_sel <- x ~ 0; ca_ask <- x ~ true }
+    },
+    x@ `AddParent => select x ~ current {
+      null as _ => never(),
+      d => { parent_root <- d.config_dir; parent_sel <- d ~ 0; parent_open <- d ~ true }
+    },
     _ => never()
   };
+  // ── the OS service a role needs afterwards: registered here at user
+  // scope; at system scope the operator is told the command ──
+  let svc_req: { scope: Scope, name: [string, null], for_user: [string, null] } = never();
+  let svc_r = install_service(#scope: svc_req.scope, #name: svc_req.name, #for_user: svc_req.for_user, svc_req);
+  let svc_ok: string = never();
+  {
+    catch(e) toast <- {
+      title: "The OS service is not registered",
+      lines: [admin_text((e.0).error), "Register it, then choose Status to check the service."],
+      error: true
+    };
+    svc_ok <- svc_r?
+  };
+  {
+    toast <- { title: "OS service registered", lines: [svc_ok], error: false };
+    refresh <- svc_ok
+  };
+  let need_service = |t: Any, scope: [Scope, null]| -> null {
+    select t ~ scope {
+      null as _ => never(),
+      sc => svc_req <- { scope: sc, name: null, for_user: null }
+    };
+    null
+  };
+  // ── the lifecycle ceremonies ──
+  let install_c = select run {
+    `Install(role, dry) => install(#role: role, #dry_run: dry, role),
+    _ => never()
+  };
+  let join_c = select run {
+    `Join(dry) => join(#dry_run: dry, dry),
+    _ => never()
+  };
+  let addparent_c = select run {
+    `AddParentTo(a) => select a ~ current {
+      null as _ => never(),
+      d => add_parent(#config_root: d.config_dir, #parent: a.parent, #resolvers: a.resolvers, #path: a.path, d)
+    },
+    _ => never()
+  };
+  let restore_c = select run {
+    x@ `Restore => restore_stage(#bundle: null, x),
+    _ => never()
+  };
+  let finish_c = select run {
+    x@ `FinishRestore => select x ~ restore_staged {
+      null as _ => never(),
+      st => restore_finish(st)
+    },
+    _ => never()
+  };
+  let uninstall_c = select run {
+    `UninstallWith(remove_ca) => select remove_ca ~ current {
+      null as _ => never(),
+      d => uninstall(#scope: d.scope, #config_dir: d.config_dir, #remove_ca: remove_ca, d)
+    },
+    _ => never()
+  };
+  *q <- questions(install_c);
+  *q <- questions(join_c);
+  *q <- questions(addparent_c);
+  *q <- questions(restore_c);
+  *q <- questions(finish_c);
+  *q <- questions(uninstall_c);
+  {
+    catch(e) fail("Install failed", (e.0).error);
+    let r = result(install_c)?;
+    let role_name = select run {
+      `Install(role, _) => role_title(role),
+      _ => "Role"
+    };
+    toast <- select r {
+      `Preview({ service }) => {
+        title: "[role_name] preview",
+        lines: array::concat(
+          ["Preview only — nothing was written."],
+          select service {
+            null as _ => [],
+            _ => ["A real install would then register the OS service."]
+          }
+        ),
+        error: false
+      },
+      `Installed({ service }) => {
+        title: "[role_name] installed",
+        lines: [select service {
+          null as _ => "Configuration written. No OS service was registered.",
+          _ => "Configuration written. Registering the OS service…"
+        }],
+        error: false
+      },
+      `CaAwaitingSignature({ csr }) => {
+        title: "CA awaiting external signature",
+        lines: [
+          "The CA is not running yet; no OS service was registered.",
+          "Subordinate-CA CSR: [csr]",
+          "Have the external PKI sign that CSR, return here, and choose Install Signed Certificate (External CA)."
+        ],
+        error: false
+      }
+    };
+    select r {
+      `Installed({ service }) => need_service(r, service),
+      _ => never()
+    };
+    refresh <- r
+  };
+  {
+    catch(e) fail("Join failed", (e.0).error);
+    let r = result(join_c)?;
+    let dry = select run {
+      `Join(d) => d,
+      _ => false
+    };
+    toast <- select r ~ dry {
+      true => { title: "Join preview", lines: ["Preview only — nothing was written."], error: false },
+      false => { title: "Joined", lines: ["Joined the admin domain. Restart the local resolver to use it."], error: false }
+    };
+    refresh <- r
+  };
+  {
+    catch(e) fail("Adding the parent failed", (e.0).error);
+    let r = result(addparent_c)?;
+    toast <- {
+      title: "Parent added",
+      lines: [
+        "Delegation of [r.proposed_path] requested and approved.",
+        "Configuration is written; do not restart the whole admin domain at once. Restart one member, wait the resolver delay-reads period for publishers to republish, then restart the next member."
+      ],
+      error: false
+    };
+    refresh <- r
+  };
+  let restore_done = |t: Any, role: InstallRole, service: [Scope, null], reconciled: [string, null]| -> null {
+    toast <- {
+      title: t ~ "Restore complete",
+      lines: array::concat(
+        ["[role_title(role)] is installed and ready."],
+        select reconciled {
+          null as _ => [],
+          op => ["Resolver hierarchy reconciled (operation [op])."]
+        }
+      ),
+      error: false
+    };
+    need_service(t, service);
+    restore_staged <- t ~ null;
+    refresh <- t;
+    null
+  };
+  {
+    catch(e) fail("Restore failed", (e.0).error);
+    let r = result(restore_c)?;
+    select r {
+      `Finish(o) => restore_done(o, o.role, o.service, o.reconciled),
+      `ServiceThenFinish({ scope, service, staged }) => {
+        restore_staged <- staged;
+        toast <- {
+          title: "CA restored",
+          lines: ["Starting the CA before re-enrolling its co-located TLS roles… Once its service runs, press F to finish the restore."],
+          error: false
+        };
+        svc_req <- { scope, name: service.name, for_user: service.for_user }
+      }
+    }
+  };
+  select svc_ok ~ restore_staged {
+    null as _ => never(),
+    _ => run <- svc_ok ~ `FinishRestore
+  };
+  {
+    catch(e) fail("Finishing the restore failed", (e.0).error);
+    let o = result(finish_c)?;
+    restore_done(o, o.role, o.service, o.reconciled)
+  };
+  {
+    catch(e) fail("Uninstall failed", (e.0).error);
+    let r = result(uninstall_c)?;
+    let kept_lines = |kept: Array<{ path: string, why: string }>| -> Array<string>
+      array::map(kept, |k| "Kept [k.path] ([k.why]).");
+    toast <- select r {
+      `Nothing => { title: "Uninstalled", lines: ["Nothing to remove."], error: false },
+      `Removed(rep) => {
+        let service_note = select rep.service_was_installed {
+          true => " and the OS service",
+          false => ""
+        };
+        let destroyed: Array<string> = select rep.ca_destroyed {
+          null as _ => [],
+          d => ["Destroyed the CA at [d]."]
+        };
+        {
+          title: "Uninstalled",
+          lines: array::concat(
+            ["Removed [array::len(rep.removed)] path(s)[service_note]."],
+            kept_lines(rep.kept),
+            destroyed
+          ),
+          error: false
+        }
+      },
+      `Escalate({ covers, argv, .. }) => {
+        let cmd = str::join(#sep: " ", argv);
+        {
+          title: "Administrator privileges needed",
+          lines: [
+            "Removing the system-scope parts needs root. Run:",
+            "sudo netidx [cmd] --yes",
+            select covers {
+              `Everything => "That completes the removal.",
+              `SystemServiceOnly => "Then choose Uninstall again to remove the user-scope configuration."
+            }
+          ],
+          error: true
+        }
+      }
+    };
+    refresh <- r
+  };
+  // ── the teardown's CA question, and the parent picker with its form ──
+  let ca_handle = |e: Event| -> [`Stop, `Continue] select e {
+    `Key(k) => select k.kind {
+      `Press => select k.code {
+        `Up | `Char("k") => { ca_sel <- max(0, (k ~ ca_sel) - 1); `Stop },
+        `Down | `Char("j") => { ca_sel <- min(1, (k ~ ca_sel) + 1); `Stop },
+        kk@ `Enter => {
+          run <- `UninstallWith((kk ~ ca_sel) == 1);
+          ca_ask <- kk ~ false;
+          `Stop
+        },
+        kk@ `Esc => { ca_ask <- kk ~ false; `Stop },
+        _ => `Stop
+      },
+      _ => `Stop
+    },
+    _ => `Stop
+  };
+  let ca_layers: Array<Layer> = select ca_ask {
+    false => [],
+    true => [layer(#width: &`Percentage(70), #height: &`Percentage(40),
+      input_handler(#handle: &ca_handle, &block(
+        #border: &`All,
+        #title: &line("This install owns a CA"),
+        #title_bottom: &line(#style: hint, " ↑/↓ choose · Enter confirm · Esc cancel "),
+        &layout(#direction: &`Vertical, &[
+          child(#constraint: `Length(2), paragraph(#style: &hint,
+            &"Removing the CA directory destroys the admin domain's trust root: every enrolled node's certificate becomes unverifiable and unrenewable. There is no undo.")),
+          child(#constraint: `Min(2), list(#highlight_style: &selstyle, #selected: &ca_sel, &[
+            line("Keep the CA directory"),
+            line("DESTROY the CA — irreversible")
+          ]))
+        ]))))]
+  };
+  let parent_cands_r = parent_candidates(#config_root: parent_root, parent_root);
+  let parent_cands: [Array<ParentCandidate>, null] = null;
+  {
+    catch(e) fail("Listing the parent candidates failed", (e.0).error);
+    parent_cands <- parent_cands_r?
+  };
+  let parent_cands_or_empty: Array<ParentCandidate> = select parent_cands {
+    null as _ => [],
+    cs => cs
+  };
+  let parent_pick: [Array<string>, null] = null;
+  let parent_fields: Array<Field> = never();
+  let parent_form_open = false;
+  let parent_form = form(
+    #title: "Add a parent",
+    #help: "The parent's admin server is a host or host:port; the subtree is the path this resolver will own under it.",
+    #on_submit: |v: Array<string>| -> null {
+      run <- `AddParentTo({ parent: v[0]$, resolvers: v ~ parent_pick, path: v[1]$ });
+      parent_form_open <- v ~ false;
+      null
+    },
+    #on_cancel: |e: Any| -> null { parent_form_open <- e ~ false; null },
+    parent_fields
+  );
+  let parent_handle = |e: Event| -> [`Stop, `Continue] select e {
+    `Key(k) => select k.kind {
+      `Press => select k.code {
+        `Up | `Char("k") => { parent_sel <- max(0, (k ~ parent_sel) - 1); `Stop },
+        `Down | `Char("j") => {
+          parent_sel <- min(array::len(k ~ parent_cands_or_empty), (k ~ parent_sel) + 1);
+          `Stop
+        },
+        kk@ `Enter => {
+          let i = kk ~ parent_sel;
+          select kk ~ parent_cands_or_empty {
+            cs => select array::len(cs) {
+              n if i < n => {
+                let c = cs[i]$;
+                parent_pick <- [c.resolver];
+                parent_fields <- [{ label: "parent admin server", value: c.admin }, { label: "subtree path", value: "" }]
+              },
+              _ => {
+                parent_pick <- cs ~ null;
+                parent_fields <- cs ~ [{ label: "parent admin server", value: "" }, { label: "subtree path", value: "" }]
+              }
+            }
+          };
+          parent_open <- kk ~ false;
+          parent_form_open <- kk ~ true;
+          `Stop
+        },
+        kk@ `Esc => { parent_open <- kk ~ false; `Stop },
+        _ => `Stop
+      },
+      _ => `Stop
+    },
+    _ => `Stop
+  };
+  let parent_layers: Array<Layer> = array::concat(
+    select parent_open {
+      false => [],
+      true => {
+        let items: Array<tui::Line> = select parent_cands {
+          null as _ => [line(#style: hint, "looking for parents in the admin domain's map…"), line("Enter an address manually…")],
+          cs => array::push(array::map(cs, |c: ParentCandidate| line("[c.resolver]  [c.base]  via [c.admin]")), line("Enter an address manually…"))
+        };
+        [layer(#width: &`Percentage(70), #height: &`Percentage(50),
+          input_handler(#handle: &parent_handle, &block(
+            #border: &`All,
+            #title: &line("Pick a parent"),
+            #title_bottom: &line(#style: hint, " ↑/↓ move · Enter choose · Esc cancel "),
+            &list(#highlight_style: &selstyle, #selected: &parent_sel, &items))))]
+      }
+    },
+    select parent_form_open {
+      false => [],
+      true => [layer(#width: &`Percentage(70), #height: &`Percentage(40),
+        input_handler(#handle: &parent_form.handle, &parent_form.view))]
+    }
+  );
   // ── the status card ──
   let kv = |label: string, value: string| -> tui::Line
     line([span(#style: hint, "[pad(label, 17)]: "), span(value)]);
@@ -886,6 +1243,8 @@ let local = |#q: &Question| -> Local {
     },
     welcome_layers,
     status_layers,
+    ca_layers,
+    parent_layers,
     confirm_layers(#on_confirm: |a: Act| -> null { run <- a; null }, &confirm),
     toast_layers(&toast)
   );

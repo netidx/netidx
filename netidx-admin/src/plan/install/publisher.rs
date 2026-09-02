@@ -6,7 +6,7 @@
 //! is the certificate-renewal supervisor, for TLS setups.
 
 use super::{
-    InstallCommon, admin_domain_provenance, finish_with, install_agent_unit,
+    InstallCommon, PostApply, admin_domain_provenance, finish_with, install_agent_unit,
     prompt_resolver_port, prompt_resolver_tls_name, publisher_bind_shape,
     resolve_units_dir, suggest_client_san,
 };
@@ -301,11 +301,13 @@ pub async fn run_publisher(
         default_bind_config,
     };
     let rt = template::publisher(&params)?;
-    finish_with(ans, rt, &common, need, record, async move |ans, _config_lock| {
-        match &units_dir {
-            Some(d) => install_agent_unit(ans, d),
-            None => Ok(()),
-        }
-    })
-    .await
+    let post_apply: PostApply<'_> = Box::new(move |ans, _config_lock| {
+        Box::pin(async move {
+            match &units_dir {
+                Some(d) => install_agent_unit(ans, d),
+                None => Ok(()),
+            }
+        })
+    });
+    finish_with(ans, rt, &common, need, record, post_apply).await
 }

@@ -723,6 +723,107 @@ val remove_unit: fn(#units_dir: string, name: string) -> Result<bool, AdminError
 /// The starter definition a create flow seeds its form with.
 val unit_template: fn(trigger: Any) -> UnitDef;
 
+/// What installing a role did: a preview (nothing written), an
+/// install, or a CA left waiting for its external PKI's signature. The
+/// service is the OS service the role needs registered at that scope,
+/// null when none.
+type InstallOutcome = [
+  `Preview({ service: [Scope, null] }),
+  `Installed({ service: [Scope, null] }),
+  `CaAwaitingSignature({ csr: string })
+];
+
+/// Install a role on this host — the guided flow: its questions
+/// arrive as events. `#dry_run` shows the plan and writes nothing.
+val install: fn(#role: InstallRole, #dry_run: bool, trigger: Any) -> Ceremony<InstallOutcome>;
+
+/// Graduate this local-only workstation onto an admin domain,
+/// enrolling a TLS identity. `#dry_run` previews.
+val join: fn(#dry_run: bool, trigger: Any) -> Ceremony<null>;
+
+/// A resolver this host's map offers as a parent: its admin server,
+/// its resolver endpoint, and its cluster's base path.
+type ParentCandidate = { admin: string, resolver: string, base: string };
+
+/// The parents this resolver could attach under, from its admin
+/// domain's map; empty when the map is unreachable. Re-reads per
+/// `trigger`.
+val parent_candidates: fn(#config_root: string, trigger: Any) -> Result<Array<ParentCandidate>, AdminError>;
+
+/// The subtree this resolver now owns under its parent.
+type AddParentOutcome = { proposed_path: string };
+
+/// Attach this resolver under a parent by delegation: `#parent` is the
+/// parent's admin-server address (host or host:port); `#resolvers`
+/// names the parent resolvers picked from the candidates, or null when
+/// the parent is not in this host's map; `#path` is the subtree.
+val add_parent: fn(
+  #config_root: string,
+  #parent: string,
+  #resolvers: [Array<string>, null],
+  #path: string,
+  trigger: Any
+) -> Ceremony<AddParentOutcome>;
+
+/// What a finished restore leaves: the role now installed, the OS
+/// service it still needs (null when none), and the CA hierarchy
+/// reconciliation a relocated resolver forced.
+type RestoreOutcome = { role: InstallRole, service: [Scope, null], reconciled: [string, null] };
+
+/// A restore parked between its two steps. Only `restore_stage` mints
+/// one; `restore_finish` consumes it.
+type Staged;
+
+/// The OS service a restored CA must run under before its co-located
+/// identities can re-enroll.
+type ServiceIntent = { name: string, for_user: [string, null] };
+
+/// Where a restore stands after staging: finished in one go, or parked
+/// until the CA's service is registered at `scope`.
+type RestoreStaged = [
+  `Finish(RestoreOutcome),
+  `ServiceThenFinish({ scope: Scope, service: ServiceIntent, staged: Staged })
+];
+
+/// Restore a backup bundle onto this host. With `#bundle` null the
+/// ceremony asks for the bundle directory. A bundle with a CA stages,
+/// hands back the service the CA needs, and waits for `restore_finish`.
+val restore_stage: fn(#bundle: [string, null], trigger: Any) -> Ceremony<RestoreStaged>;
+
+/// Finish a staged restore once its CA's service runs: re-enroll the
+/// co-located identities.
+val restore_finish: fn(staged: Staged) -> Ceremony<RestoreOutcome>;
+
+/// What an uninstall removed and kept.
+type UninstallReport = {
+  service_was_installed: bool,
+  removed: Array<string>,
+  kept: Array<{ path: string, why: string }>,
+  ca_destroyed: [string, null]
+};
+
+/// What uninstalling did: nothing was installed at that scope; the
+/// teardown ran; or an elevated step must run first — the whole
+/// teardown, or only the system-scope service a user-scope install
+/// registered (uninstall again after it). `argv` is the `netidx`
+/// invocation the elevated step runs.
+type UninstallOutcome = [
+  `Nothing,
+  `Removed(UninstallReport),
+  `Escalate({ scope: Scope, covers: [`Everything, `SystemServiceOnly], argv: Array<string>, plan: UninstallReport })
+];
+
+/// Tear down the install at `#scope` under `#config_dir`: its OS
+/// service and its configuration; `#remove_ca` also destroys the CA
+/// directory, irreversibly.
+val uninstall: fn(#scope: Scope, #config_dir: string, #remove_ca: bool, trigger: Any) -> Ceremony<UninstallOutcome>;
+
+/// Register this host's OS service at `#scope` (`#name` defaults to
+/// netidx, `#for_user` to the current user); the result is a summary
+/// line. User scope runs in-process; system scope needs administrator
+/// privileges and errors naming the command to run.
+val install_service: fn(#scope: Scope, #name: [string, null], #for_user: [string, null], trigger: Any) -> Result<string, AdminError>;
+
 /// What one renewal pass did: a one-line summary (null when nothing
 /// was due), the certificates renewed, those awaiting an admin's
 /// approval, and those that failed with why.

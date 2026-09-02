@@ -641,75 +641,80 @@ pub async fn run_resolver(
         // Then the renewal daemon, on any host with certificates our CA can
         // renew (a netidx-CA-issued resolver identity, or an admin-server
         // serving cert).
-        async move |ans, config_lock| {
-            #[cfg(unix)]
-            let admin_server_ready = post_apply_admin_server(
-                ans,
-                probe.have(),
-                kind,
-                no_admin_server,
-                with_admin_server,
-                listen,
-                resolver_base,
-                post_apply_units_dir.as_deref(),
-                resolver_config_actual.clone(),
-                id_map_actual,
-                config_lock,
-            )
-            .await?;
-            #[cfg(unix)]
-            if let Some((parent_conf, subtree, child, confirmed)) = install_delegation {
-                if !admin_server_ready {
-                    bail!(
-                        "the child admin server was not enrolled, so its pending \
-                         CA-owned resolver cluster cannot be delegated"
-                    );
-                }
-                let parent_addrs = delegation::delegate_under_parent(
+        Box::new(move |ans, config_lock| {
+            Box::pin(async move {
+                #[cfg(unix)]
+                let admin_server_ready = post_apply_admin_server(
                     ans,
-                    parent_conf,
-                    &subtree,
-                    &child,
-                    None,
-                    confirmed.as_ref(),
+                    probe.have(),
+                    kind,
+                    no_admin_server,
+                    with_admin_server,
+                    listen,
+                    resolver_base,
+                    post_apply_units_dir.as_deref(),
+                    resolver_config_actual.clone(),
+                    id_map_actual,
+                    config_lock,
                 )
                 .await?;
-                let parent_ref = ParentRef {
-                    path: ArcStr::from(subtree.as_str()),
-                    addrs: parent_addrs
-                        .into_iter()
-                        .map(|r| (r.addr, delegation::info_to_referral_auth(&r.auth)))
-                        .collect(),
-                };
-                let update =
-                    template::set_parent_referral(&resolver_config_actual, parent_ref)?;
-                ans.note(&update.describe());
-                update
-                    .apply(config_lock)
-                    .context("writing the approved parent referral")?;
-            }
-            #[cfg(not(unix))]
-            {
-                let _ = (&probe, kind, no_admin_server, with_admin_server, listen);
-                let _ = (resolver_config_actual, id_map_actual);
-                let _ = (ans, config_lock, post_apply_units_dir, netidx_ca);
-            }
-            // A resolver host normally runs an admin server, which does both
-            // housekeeping jobs in-process — no agent unit, and no second
-            // process racing it for the same identities. The exception is a
-            // resolver installed `--no-admin-server`: it still has a
-            // CA-issued identity to renew, and nothing else on the box to
-            // renew it.
-            #[cfg(unix)]
-            if let Some(d) = post_apply_units_dir.as_deref()
-                && netidx_ca
-                && !admin_server_ready
-                && paths::discover_admin_server_config().is_err()
-            {
-                install_agent_unit(ans, d)?;
-            }
-            Ok(())
-        },
+                #[cfg(unix)]
+                if let Some((parent_conf, subtree, child, confirmed)) = install_delegation
+                {
+                    if !admin_server_ready {
+                        bail!(
+                            "the child admin server was not enrolled, so its pending \
+                         CA-owned resolver cluster cannot be delegated"
+                        );
+                    }
+                    let parent_addrs = delegation::delegate_under_parent(
+                        ans,
+                        parent_conf,
+                        &subtree,
+                        &child,
+                        None,
+                        confirmed.as_ref(),
+                    )
+                    .await?;
+                    let parent_ref = ParentRef {
+                        path: ArcStr::from(subtree.as_str()),
+                        addrs: parent_addrs
+                            .into_iter()
+                            .map(|r| (r.addr, delegation::info_to_referral_auth(&r.auth)))
+                            .collect(),
+                    };
+                    let update = template::set_parent_referral(
+                        &resolver_config_actual,
+                        parent_ref,
+                    )?;
+                    ans.note(&update.describe());
+                    update
+                        .apply(config_lock)
+                        .context("writing the approved parent referral")?;
+                }
+                #[cfg(not(unix))]
+                {
+                    let _ = (&probe, kind, no_admin_server, with_admin_server, listen);
+                    let _ = (resolver_config_actual, id_map_actual);
+                    let _ = (ans, config_lock, post_apply_units_dir, netidx_ca);
+                }
+                // A resolver host normally runs an admin server, which does both
+                // housekeeping jobs in-process — no agent unit, and no second
+                // process racing it for the same identities. The exception is a
+                // resolver installed `--no-admin-server`: it still has a
+                // CA-issued identity to renew, and nothing else on the box to
+                // renew it.
+                #[cfg(unix)]
+                if let Some(d) = post_apply_units_dir.as_deref()
+                    && netidx_ca
+                    && !admin_server_ready
+                    && paths::discover_admin_server_config().is_err()
+                {
+                    install_agent_unit(ans, d)?;
+                }
+                Ok(())
+            })
+        }),
     )
     .await
 }

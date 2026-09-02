@@ -176,6 +176,33 @@ pub struct Escalation {
     pub plan: UninstallReport,
 }
 
+/// The `netidx admin uninstall` invocation that performs an [`Escalation`].
+/// Every frontend spawns the elevated step, so every frontend builds its
+/// argument list here rather than spelling out the flags.
+pub fn elevated_argv(e: &Escalation) -> Vec<String> {
+    let mut args = vec![
+        "admin".to_string(),
+        "uninstall".to_string(),
+        "--scope".to_string(),
+        match e.scope {
+            ServiceScope::User => "user".to_string(),
+            ServiceScope::System => "system".to_string(),
+        },
+        "--for-user".to_string(),
+        e.for_user.clone(),
+        "--service-name".to_string(),
+        e.service_name.clone(),
+    ];
+    if let Some(dir) = &e.config_dir {
+        args.push("--config-dir".to_string());
+        args.push(dir.display().to_string());
+    }
+    if e.remove_ca {
+        args.push("--with-ca".to_string());
+    }
+    args
+}
+
 /// How much of a teardown an [`Escalation`] performs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Covers {

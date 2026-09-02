@@ -48,8 +48,15 @@ Graphix, language and compiler:
 5. **Arithmetic as traits** (09-02, `design/traits.md` §5): needs
    traits v2 (a trait parameter for the right operand, an associated
    Output). Datetime/duration stays in `sys::time` until then.
-6. **Terminal suspend/resume** for `sudo`/`$EDITOR` handoff (08-18):
-   the phase E prerequisite; composes with `sys::process` Inherit.
+6. **Terminal suspend/resume** for the `sudo`/`su` handoff (08-18):
+   the phase E prerequisite; composes with `sys::process` Inherit. The
+   `$EDITOR` half is no longer needed (every editor became an in-TUI
+   form). What waits on it, as of 09-02 evening: registering a
+   system-scope OS service after an install, a restore or an
+   external-CA install (`install_service` does user scope in-process
+   and names the `sudo` command otherwise), and the elevated half of
+   a teardown (`uninstall` reports `Escalate` with the argv). Each
+   path shows the command until the handoff lands.
 12. ~~**A reference into a value** (09-02, `&vals[i]`): readable and
     unwritable, so no `&State` widget API could reach a state held in
     a collection — `tui::form` grew a pure `step` and an
@@ -99,15 +106,14 @@ Book:
 
 Port scope (not Graphix findings; here so nothing is forgotten):
 
-15. **The Local tab's deferred actions** (09-02): Uninstall / Join /
-    Add-a-Parent / Install / Restore (phase 4's install ceremonies and
-    phase 5's privileged handoff). Each shows a toast naming the CLI
-    command until it lands. The externally-signed CA's first install
-    prints the service-install command for the same reason (phase E).
-    ~~The local Services surface~~ landed the same evening
-    (`tui::services`): list, control, and unit create / edit / delete
-    through an in-TUI form over every field of the unit file — the
-    perms decision applied again, so no `$EDITOR` is needed here.
+15. ~~**The Local tab's deferred actions** (09-02): Uninstall / Join /
+    Add-a-Parent / Install / Restore.~~ All landed the same evening
+    (phase 4): `install`/`join`/`add_parent`/`restore_stage`+
+    `restore_finish`/`uninstall` ceremonies, driven from the fresh
+    role menu and the action list, with the teardown's chained CA
+    question and the parent picker in Graphix. Only their
+    system-scope service / elevated steps wait, on item 6. ~~The local
+    Services surface~~ landed too (`tui::services`).
 
 Test side and package:
 
@@ -130,7 +136,8 @@ ceremony `Trigger`, `sys::time::diff` and the time fast fns, duration
 literal units and format, the sibling-pattern-bind phantom and the
 `compile_callable` pipeline, the fixture's lock race, session-cache
 leak and gesture predictor, `tui::exit`, the payload-pattern
-residual (09-02).
+residual, the Local tab and its services surface, the phase 4
+ceremonies (09-02).
 
 ## 2026-08-18 — no modal/overlay widget in graphix-package-tui
 
@@ -1062,3 +1069,43 @@ check the editor loop did, before the write. Pinned by
 `services_surface_creates_and_deletes_a_unit` (no supervisor: the
 unit lists as not loaded, which is the state the Rust surface named
 for it).
+
+## 2026-09-02 — the install engines' futures were not `Send`
+
+Spawning `run_ca`/`run_resolver` as a ceremony failed to compile:
+"implementation of `Send` is not general enough" for the
+`&ConfigDirLock` the engines' post-apply step captures, and
+"`AsyncFnOnce` is not general enough" for the step itself. The seam
+was `impl AsyncFnOnce(&mut dyn Answerer, &ConfigDirLock) -> Result<()>`,
+which rustc cannot prove `Send` under the higher-ranked lifetimes a
+spawned future needs; the ratatui TUI never noticed because it polls
+the op on its own task without the bound. **Disposition: fixed in
+netidx-admin — `PostApply<'a>` is a boxed `for<'b> FnOnce(..) ->
+BoxFuture<'b, ..> + Send`, the four callers and the test box their
+step; the install futures are `Send` for any spawner now (the same
+seam Atlas would hit).** The elevated-uninstall argument list moved
+from the CLI crate into `netidx_admin::uninstall::elevated_argv`
+for the same reason: a second frontend needed it.
+
+## 2026-09-02 — phase 4: the lifecycle ceremonies
+
+Landed: `install` (every role; a dry run previews), `join`,
+`parent_candidates` + `add_parent` (the picker and the path form in
+Graphix; one parent resolver is picked, where the Rust TUI offered a
+multi-select), `restore_stage`/`restore_finish` around the service a
+recovered CA needs (the parked restore rides an opaque `Staged`
+value; `F` finishes it; a user-scope service step chains into the
+finish automatically), `uninstall` (the confirmation, then — on a
+host that owns a CA — a chooser between keeping and destroying it;
+`Escalate` reports the elevated command and whether a second pass is
+needed), and `install_service` for the OS service a role runs under.
+The fresh role menu and the action list dispatch all of it through
+the one `run` channel. Pinned by
+`fresh_machine_previews_an_install_and_a_teardown_asks_about_the_ca`:
+the welcome, the role menu, a Workstation dry run reaching the guided
+flow's first question through the pump and cancelled there, then the
+teardown's two questions on a recorded CA install, cancelled before
+anything runs. One idiom note: `R` (re-detect) had to be bound on
+both screens — a key the operator expects everywhere must be handled
+in every screen's handler, since the tab's handler is one select
+over the screen.
