@@ -664,6 +664,8 @@ graphix_derive::defpackage! {
         lifecycle::RestoreFinish,
         lifecycle::Uninstall,
         lifecycle::InstallService,
+        lifecycle::EscalateCommand,
+        lifecycle::VerifySystemService,
         local::Renew,
         local::Update,
         local::Backup,

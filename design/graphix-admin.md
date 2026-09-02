@@ -6,9 +6,11 @@ Port state (2026-09-02): phases A–C done; D — the remote tab complete,
 the Local tab landed (detection, status, every lifecycle action —
 install / join / add-parent / restore / uninstall included — the
 local admin panels through `tui::panels`, the Services surface
-`tui::services`, the app shell `tui::app`). Phase E (the privileged
-handoff for system-scope service and teardown steps) and the parity
-review remain. The running
+`tui::services`, the app shell `tui::app`, and phase E's privileged
+handoff through `tui::run_in_terminal`). Remaining: lab validation of
+the handoff on a real terminal, the release-build measurement, a full
+lab validation, then the parity review — the ratatui TUI stays until
+those are done (Eric, 09-02). The running
 state lives in the findings log's ledger.
 
 ## Objective — read this first

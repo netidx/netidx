@@ -1,11 +1,12 @@
 use package::{
   AdminError, CaCredentials, Change, Install, InstallRole, LocalCa,
   ParentCandidate, Scope, ServiceState, Staged, Target, add_parent,
-  auto_approve, backup, ca_credentials, external_csr, external_install,
-  install, install_service, installs, join, local as local_target,
-  local_resolver_base, parent_candidates, parse_fingerprint, questions,
-  recovery_rotate, renew, restore_finish, restore_stage, result, sync_check,
-  uninstall, units_dir, update
+  auto_approve, backup, ca_credentials, escalate_command, external_csr,
+  external_install, install, install_service, installs, join,
+  local as local_target, local_resolver_base, parent_candidates,
+  parse_fingerprint, questions, recovery_rotate, renew, restore_finish,
+  restore_stage, result, sync_check, uninstall, units_dir, update,
+  verify_system_service
 };
 use super::{
   Confirm, Toast, admin_text, confirm_layers, fingerprint_lines, glyph,
@@ -687,21 +688,52 @@ let local = |#q: &Question| -> Local {
     _ => never()
   };
   // ── the OS service a role needs afterwards: registered here at user
-  // scope; at system scope the operator is told the command ──
+  // scope; at system scope the invocation runs privileged on the
+  // released terminal and the service manager's state judges it ──
   let svc_req: { scope: Scope, name: [string, null], for_user: [string, null] } = never();
   let svc_r = install_service(#scope: svc_req.scope, #name: svc_req.name, #for_user: svc_req.for_user, svc_req);
   let svc_ok: string = never();
+  // a privileged step: what it is, the netidx invocation, and what
+  // follows its exit
+  type Then = [`VerifyService({ name: string, for_user: string }), `UninstallAgain(bool), `Nothing];
+  let priv_req: { what: string, argv: Array<string>, then: Then } = never();
   {
-    catch(e) toast <- {
-      title: "The OS service is not registered",
-      lines: [admin_text((e.0).error), "Register it, then choose Status to check the service."],
-      error: true
-    };
-    svc_ok <- svc_r?
+    catch(e) fail("Registering the OS service failed", (e.0).error);
+    select svc_r? {
+      `Registered(line) => svc_ok <- line,
+      `Privileged({ what, argv, name, for_user }) =>
+        priv_req <- { what, argv, then: `VerifyService({ name, for_user }) }
+    }
   };
   {
     toast <- { title: "OS service registered", lines: [svc_ok], error: false };
     refresh <- svc_ok
+  };
+  let priv_cmd = escalate_command(priv_req.argv, priv_req);
+  let priv_note = "Administrator privileges are needed to [priv_req.what].";
+  let priv_exit: i64 = never();
+  {
+    catch(e) select (e.0).error {
+      `TerminalError(m) => toast <- { title: "The privileged step could not run", lines: [m], error: true },
+      a => fail("The privileged step could not start", a)
+    };
+    let cmd = priv_cmd?;
+    let code = tui::run_in_terminal(#args: cmd.args, #note: priv_note, cmd.program)?;
+    priv_exit <- code
+  };
+  let verify_req: { name: string, for_user: string, code: i64 } = never();
+  select priv_exit ~ priv_req.then {
+    `VerifyService({ name, for_user }) => verify_req <- { name, for_user, code: priv_exit },
+    `UninstallAgain(remove_ca) => run <- `UninstallWith(remove_ca),
+    `Nothing => select priv_exit {
+      0 => refresh <- priv_exit,
+      code => toast <- { title: "The privileged step failed", lines: ["It exited with status [code]."], error: true }
+    }
+  };
+  let verified = verify_system_service(#name: verify_req.name, #for_user: verify_req.for_user, verify_req.code);
+  {
+    catch(e) fail("The system service is not running", (e.0).error);
+    svc_ok <- verified?
   };
   let need_service = |t: Any, scope: [Scope, null]| -> null {
     select t ~ scope {
@@ -887,21 +919,32 @@ let local = |#q: &Question| -> Local {
           error: false
         }
       },
-      `Escalate({ covers, argv, .. }) => {
-        let cmd = str::join(#sep: " ", argv);
-        {
-          title: "Administrator privileges needed",
-          lines: [
-            "Removing the system-scope parts needs root. Run:",
-            "sudo netidx [cmd] --yes",
-            select covers {
-              `Everything => "That completes the removal.",
-              `SystemServiceOnly => "Then choose Uninstall again to remove the user-scope configuration."
-            }
-          ],
-          error: true
-        }
+      `Escalate({ covers, .. }) => {
+        title: "Administrator privileges needed",
+        lines: [
+          "The system-scope parts are removed on the terminal next; enter your password there.",
+          select covers {
+            `Everything => "That completes the removal.",
+            `SystemServiceOnly => "The user-scope configuration is removed afterwards."
+          }
+        ],
+        error: false
       }
+    };
+    let remove_ca = select run {
+      `UninstallWith(rc) => rc,
+      _ => false
+    };
+    select r {
+      `Escalate({ covers, argv, .. }) => priv_req <- {
+        what: "tear down the install",
+        argv: array::push(argv, "--yes"),
+        then: select covers {
+          `Everything => `Nothing,
+          `SystemServiceOnly => `UninstallAgain(r ~ remove_ca)
+        }
+      },
+      _ => never()
     };
     refresh <- r
   };

@@ -818,11 +818,35 @@ type UninstallOutcome = [
 /// directory, irreversibly.
 val uninstall: fn(#scope: Scope, #config_dir: string, #remove_ca: bool, trigger: Any) -> Ceremony<UninstallOutcome>;
 
+/// A service registration: done in-process (the summary line), or a
+/// `netidx` invocation to run privileged — `what` names the step for
+/// the operator, `argv` is the invocation, and `name`/`for_user`
+/// identify the service to verify afterwards.
+type ServiceRegistration = [
+  `Registered(string),
+  `Privileged({ what: string, argv: Array<string>, name: string, for_user: string })
+];
+
 /// Register this host's OS service at `#scope` (`#name` defaults to
-/// netidx, `#for_user` to the current user); the result is a summary
-/// line. User scope runs in-process; system scope needs administrator
-/// privileges and errors naming the command to run.
-val install_service: fn(#scope: Scope, #name: [string, null], #for_user: [string, null], trigger: Any) -> Result<string, AdminError>;
+/// netidx, `#for_user` to the current user). User scope runs in-process;
+/// system scope needs root and the terminal, so it hands back the
+/// invocation — run it through `escalate_command` and
+/// `tui::run_in_terminal`, then `verify_system_service`.
+val install_service: fn(#scope: Scope, #name: [string, null], #for_user: [string, null], trigger: Any) -> Result<ServiceRegistration, AdminError>;
+
+/// A program and its arguments.
+type Command = { program: string, args: Array<string> };
+
+/// The command that performs the `netidx` invocation `args` as root on
+/// a released terminal: a shell that execs it directly when already
+/// root, under sudo when the operator may (a cached credential first,
+/// else one prompt), else under su with root's password. Unix only.
+val escalate_command: fn(args: Array<string>, trigger: Any) -> Result<Command, AdminError>;
+
+/// Judge a privileged service registration by the service manager's
+/// state, not the child's exit code: only a running service is success.
+/// `code` is the child's exit code; the result is the summary line.
+val verify_system_service: fn(#name: string, #for_user: string, code: i64) -> Result<string, AdminError>;
 
 /// What one renewal pass did: a one-line summary (null when nothing
 /// was due), the certificates renewed, those awaiting an admin's

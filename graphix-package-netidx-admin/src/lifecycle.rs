@@ -14,7 +14,7 @@ use crate::{
     },
     ops::opt_string,
 };
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use arcstr::ArcStr;
 use graphix_package_core::{CachedArgsAsync, CachedVals, EvalCachedAsync};
 use netidx_admin::{
@@ -35,6 +35,7 @@ use netidx_admin::{
         },
         resolve_admin_server_addr,
     },
+    privileged,
     provenance::InstallRole,
     service::{self, ServiceParams, ServiceScope},
     uninstall::{self, Covers, KeepReason, UninstallInput, UninstallReport},
@@ -543,21 +544,26 @@ pub(crate) type Uninstall = LocalCeremony<UninstallOp>;
 
 // ── the OS service a role runs under ─────────────────────────────
 
-fn current_exe() -> Result<PathBuf> {
-    std::env::current_exe().context("could not determine the current netidx binary")
+/// A user-scope service is registered in-process; a system-scope one
+/// needs root and the terminal, so the frontend runs the named
+/// invocation privileged and then verifies the service.
+#[derive(Debug, Clone, IntoValue)]
+enum ServiceRegistrationV {
+    Registered(String),
+    Privileged { what: String, argv: Vec<String>, name: String, for_user: String },
 }
 
 fn install_service(
     scope: ServiceScope,
     name: Option<String>,
     for_user: Option<String>,
-) -> Result<String> {
+) -> Result<ServiceRegistrationV> {
     let name = name.unwrap_or_else(|| ServiceParams::DEFAULT_NAME.to_string());
     let for_user = match for_user {
         Some(u) => u,
         None => service::resolve_for_user(None)?,
     };
-    let exe = current_exe()?;
+    let exe = privileged::current_exe()?;
     let activation_dir = netidx_activation::runtime::default_units_dir()
         .context("no default activation unit directory was found")?;
     match scope {
@@ -570,16 +576,22 @@ fn install_service(
                 activation_dir: Some(activation_dir),
             };
             let installed = service::install(&params)?;
-            Ok(format!("registered the user service ({})", installed.service_id))
+            Ok(ServiceRegistrationV::Registered(format!(
+                "registered the user service ({})",
+                installed.service_id
+            )))
         }
-        ServiceScope::System => bail!(
-            "registering the system service needs administrator privileges; run: sudo {} \
-             admin host service install --scope system --for-user {for_user} \
-             --service-name {name} --netidx-binary {} --activation-dir {}",
-            exe.display(),
-            exe.display(),
-            activation_dir.display()
-        ),
+        ServiceScope::System => Ok(ServiceRegistrationV::Privileged {
+            what: "install the system service".to_string(),
+            argv: privileged::install_service_argv(
+                &for_user,
+                &name,
+                &exe,
+                &activation_dir,
+            ),
+            name,
+            for_user,
+        }),
     }
 }
 
@@ -606,7 +618,7 @@ impl EvalCachedAsync for InstallServiceEv {
             })
             .await
             {
-                Ok(Ok(line)) => Value::from(line),
+                Ok(Ok(r)) => r.into(),
                 Ok(Err(e)) => admin_err(e),
                 Err(e) => admin_err(e.into()),
             }
@@ -615,3 +627,74 @@ impl EvalCachedAsync for InstallServiceEv {
 }
 
 pub(crate) type InstallService = CachedArgsAsync<InstallServiceEv>;
+
+#[derive(Debug, Clone, IntoValue)]
+struct CommandV {
+    program: String,
+    args: Vec<String>,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct EscalateCommandEv;
+
+impl EvalCachedAsync for EscalateCommandEv {
+    type Args = Vec<String>;
+
+    const NAME: &str = "netidx_admin_escalate_command";
+
+    fn prepare_args(&mut self, cached: &CachedVals) -> Option<Self::Args> {
+        let args = cached.get::<Vec<String>>(0)?;
+        cached.0.get(1)?.as_ref()?;
+        Some(args)
+    }
+
+    fn eval(args: Self::Args) -> impl Future<Output = Value> + Send {
+        async move {
+            let built = privileged::current_exe()
+                .and_then(|exe| privileged::privileged_command(&exe, &args));
+            match built {
+                Ok((program, args)) => CommandV { program, args }.into(),
+                Err(e) => admin_err(e),
+            }
+        }
+    }
+}
+
+pub(crate) type EscalateCommand = CachedArgsAsync<EscalateCommandEv>;
+
+#[derive(Debug, Default)]
+pub(crate) struct VerifySystemServiceEv;
+
+impl EvalCachedAsync for VerifySystemServiceEv {
+    type Args = (String, String, i64);
+
+    const NAME: &str = "netidx_admin_verify_system_service";
+
+    fn prepare_args(&mut self, cached: &CachedVals) -> Option<Self::Args> {
+        let name = cached.get::<String>(0)?;
+        let for_user = cached.get::<String>(1)?;
+        let code = cached.get::<i64>(2)?;
+        Some((name, for_user, code))
+    }
+
+    fn eval((name, for_user, code): Self::Args) -> impl Future<Output = Value> + Send {
+        async move {
+            let ran = if code == 0 {
+                Ok(())
+            } else {
+                Err(anyhow::anyhow!("the privileged step exited with status {code}"))
+            };
+            match tokio::task::spawn_blocking(move || {
+                privileged::verify_system_service(&name, &for_user, ran)
+            })
+            .await
+            {
+                Ok(Ok(line)) => Value::from(line),
+                Ok(Err(e)) => admin_err(e),
+                Err(e) => admin_err(e.into()),
+            }
+        }
+    }
+}
+
+pub(crate) type VerifySystemService = CachedArgsAsync<VerifySystemServiceEv>;

@@ -98,6 +98,7 @@ pub mod paths;
 pub mod perms;
 /// The CA's authoritative copy of each resolver cluster's permissions.
 pub mod perms_model;
+pub mod privileged;
 /// The install planner: the decision logic behind `admin <role> install`,
 /// driven through the [`answer::Answerer`] seam so every frontend shares it.
 pub mod plan;

@@ -48,15 +48,15 @@ Graphix, language and compiler:
 5. **Arithmetic as traits** (09-02, `design/traits.md` §5): needs
    traits v2 (a trait parameter for the right operand, an associated
    Output). Datetime/duration stays in `sys::time` until then.
-6. **Terminal suspend/resume** for the `sudo`/`su` handoff (08-18):
-   the phase E prerequisite; composes with `sys::process` Inherit. The
-   `$EDITOR` half is no longer needed (every editor became an in-TUI
-   form). What waits on it, as of 09-02 evening: registering a
-   system-scope OS service after an install, a restore or an
-   external-CA install (`install_service` does user scope in-process
-   and names the `sudo` command otherwise), and the elevated half of
-   a teardown (`uninstall` reports `Escalate` with the argv). Each
-   path shows the command until the handoff lands.
+6. ~~**Terminal suspend/resume** for the `sudo`/`su` handoff
+   (08-18).~~ Built 09-02 night (phase E): `tui::run_in_terminal`
+   in graphix, `netidx_admin::privileged` in the library, and the
+   Local tab's privileged step for system-scope service registration
+   (after an install, a restore, an external-CA install) and the
+   elevated half of a teardown. The `$EDITOR` half was never needed
+   (every editor became an in-TUI form). NEEDS LAB VALIDATION on a
+   real terminal with sudo and with su — the harness is headless and
+   pins only the no-display error.
 12. ~~**A reference into a value** (09-02, `&vals[i]`): readable and
     unwritable, so no `&State` widget API could reach a state held in
     a collection — `tui::form` grew a pure `step` and an
@@ -137,7 +137,7 @@ literal units and format, the sibling-pattern-bind phantom and the
 `compile_callable` pipeline, the fixture's lock race, session-cache
 leak and gesture predictor, `tui::exit`, the payload-pattern
 residual, the Local tab and its services surface, the phase 4
-ceremonies (09-02).
+ceremonies, the phase E handoff (09-02).
 
 ## 2026-08-18 — no modal/overlay widget in graphix-package-tui
 
@@ -1109,3 +1109,45 @@ anything runs. One idiom note: `R` (re-detect) had to be bound on
 both screens — a key the operator expects everywhere must be handled
 in every screen's handler, since the tab's handler is one select
 over the screen.
+
+## 2026-09-02 — phase E: the privileged handoff
+
+The design question was who decides how to become root. The ratatui
+TUI probes `sudo -n -l`, then `sudo -l` (which may prompt), then falls
+back to `su`, all inside its suspended window. A Graphix package
+cannot probe while the TUI owns the terminal (a prompt would land in
+raw mode on the alternate screen), and the tui package must not learn
+netidx's escalation policy. So the decision moved INTO THE CHILD:
+`netidx_admin::privileged::privileged_command` returns `/bin/sh -c
+<become-root script> netidx-privileged <su form> <exe> <args…>` — the
+script execs directly as root, under sudo when the operator may (a
+cached credential first, else one prompt), else under `su -c` with
+the same command quoted for a shell — and the tui package's one new
+capability is generic: `tui::run_in_terminal(#args, #note, program)`
+suspends the display (drops the crossterm reader so its thread cannot
+fight the child for stdin, as the ratatui TUI does), runs the program
+with inherited stdio, re-inits the terminal with a full repaint, and
+returns the exit code. The runner's control (stop signal + suspend
+channel) is one libstate entry; the suspend receiver is parked there
+until a display takes it and handed back when it ends, so a headless
+harness gets an honest "no terminal display is running" error instead
+of a hang.
+
+On the package side `install_service` returns `` `Registered(line) ``
+or `` `Privileged({ what, argv, name, for_user }) ``,
+`escalate_command(argv)` wraps an invocation as above, and
+`verify_system_service` judges the step by the service manager's
+state — only a running service is success, whatever the child's exit
+code said (the ratatui rule, now in the library as
+`system_service_outcome`; its tests moved with it). The Local tab
+chains: install / restore / external-CA install → service needed →
+privileged run → verify → toast, and a staged restore finishes itself
+once the service is verified; a teardown's `Escalate` runs the
+elevated half and, when it covered only the system service, runs
+the user-scope pass afterwards. **Disposition: built; lab validation
+on a real terminal is required before this counts as landed (ledger
+6).** One typing note: a block whose `?`s raise two different error
+unions needs a handler over their union — the checker refused
+`fail(.., (e.0).error)` with the `TerminalError` member present, and
+the fix is a select on the error whose fall-through arm narrows to
+the admin error (the residual fix from earlier tonight).
