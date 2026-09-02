@@ -19,7 +19,7 @@ use arcstr::ArcStr;
 use futures::{SinkExt, channel::mpsc};
 use graphix_compiler::{
     Apply, BindId, BuiltIn, Event, ExecCtx, Node, Rt, Scope, TagValue, UserEvent,
-    effects::EffectKind, errf, expr::ExprId, typ::FnType,
+    effects::Effect, errf, expr::ExprId, typ::FnType,
 };
 use graphix_package_core::{CachedArgs, CachedVals, EvalCached};
 use netidx_admin::{
@@ -768,7 +768,7 @@ pub(crate) struct Events {
 }
 
 impl<R: Rt, E: UserEvent> BuiltIn<R, E> for Events {
-    const EFFECT: EffectKind = EffectKind::Async;
+    const EFFECT: Effect = Effect::Async;
     const NAME: &str = "netidx_admin_events";
 
     fn init<'a, 'b, 'c, 'd>(
@@ -847,7 +847,7 @@ fn get_question_id(cached: &CachedVals, idx: usize) -> Option<QuestionIdValue> {
 pub(crate) struct AnswerEv;
 
 impl<R: Rt, E: UserEvent> EvalCached<R, E> for AnswerEv {
-    const EFFECT: EffectKind = EffectKind::Sync;
+    const EFFECT: Effect = Effect::Sync;
     const NAME: &str = "netidx_admin_answer";
 
     fn eval(&mut self, _ctx: &mut ExecCtx<R, E>, cached: &CachedVals) -> Option<Value> {

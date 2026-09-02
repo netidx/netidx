@@ -22,7 +22,7 @@ use arcstr::ArcStr;
 use enumflags2::BitFlags;
 use graphix_compiler::{
     Apply, BuiltIn, Event, ExecCtx, Node, Rt, Scope, TagValue, UserEvent,
-    effects::EffectKind, errf, expr::ExprId, typ::FnType,
+    effects::Effect, errf, expr::ExprId, typ::FnType,
 };
 use graphix_package_core::{CachedArgsAsync, CachedVals, EvalCachedAsync};
 use netidx::resolver_server::config::ReadGate;
@@ -644,7 +644,7 @@ pub(crate) struct RemoteCeremony<T: RemoteOp> {
 }
 
 impl<R: Rt, E: UserEvent, T: RemoteOp> BuiltIn<R, E> for RemoteCeremony<T> {
-    const EFFECT: EffectKind = EffectKind::Async;
+    const EFFECT: Effect = Effect::Async;
     const NAME: &str = T::NAME;
 
     fn init<'a, 'b, 'c, 'd>(
@@ -1118,7 +1118,7 @@ pub(crate) struct ChangePassword {
 }
 
 impl<R: Rt, E: UserEvent> BuiltIn<R, E> for ChangePassword {
-    const EFFECT: EffectKind = EffectKind::Async;
+    const EFFECT: Effect = Effect::Async;
     const NAME: &str = "netidx_admin_change_password";
 
     fn init<'a, 'b, 'c, 'd>(

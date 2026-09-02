@@ -10,8 +10,8 @@ use anyhow::{Context, Error, Result};
 use arcstr::ArcStr;
 use compact_str::format_compact;
 use graphix_compiler::{
-    Apply, BuiltIn, Event, ExecCtx, FastFn, Node, Rt, Scope, TagValue, UserEvent,
-    effects::EffectKind, errf, expr::ExprId, typ::FnType,
+    Apply, BuiltIn, Event, ExecCtx, FastCall, Node, Rt, Scope, TagValue, UserEvent,
+    effects::Effect, errf, expr::ExprId, typ::FnType,
 };
 use graphix_package_core::{
     CachedArgs, CachedArgsAsync, CachedVals, EvalCached, EvalCachedAsync, fast_eval,
@@ -330,9 +330,7 @@ fn fc_parse_fingerprint(args: &[Value]) -> Option<Value> {
 struct ParseFingerprintEv;
 
 impl<R: Rt, E: UserEvent> EvalCached<R, E> for ParseFingerprintEv {
-    const EFFECT: EffectKind = EffectKind::Sync;
-    const STATELESS: bool = true;
-    const FASTCALL: Option<FastFn> = Some(fc_parse_fingerprint);
+    const EFFECT: Effect = Effect::Stateless(Some(FastCall::Plain(fc_parse_fingerprint)));
     const NAME: &str = "netidx_admin_parse_fingerprint";
 
     fn eval(&mut self, _ctx: &mut ExecCtx<R, E>, from: &CachedVals) -> Option<Value> {
@@ -376,9 +374,7 @@ fn fc_identicon(args: &[Value]) -> Option<Value> {
 struct IdenticonEv;
 
 impl<R: Rt, E: UserEvent> EvalCached<R, E> for IdenticonEv {
-    const EFFECT: EffectKind = EffectKind::Sync;
-    const STATELESS: bool = true;
-    const FASTCALL: Option<FastFn> = Some(fc_identicon);
+    const EFFECT: Effect = Effect::Stateless(Some(FastCall::Plain(fc_identicon)));
     const NAME: &str = "netidx_admin_identicon";
 
     fn eval(&mut self, _ctx: &mut ExecCtx<R, E>, from: &CachedVals) -> Option<Value> {
@@ -420,9 +416,7 @@ fn fc_info(args: &[Value]) -> Option<Value> {
 struct InfoEv;
 
 impl<R: Rt, E: UserEvent> EvalCached<R, E> for InfoEv {
-    const EFFECT: EffectKind = EffectKind::Sync;
-    const STATELESS: bool = true;
-    const FASTCALL: Option<FastFn> = Some(fc_info);
+    const EFFECT: Effect = Effect::Stateless(Some(FastCall::Plain(fc_info)));
     const NAME: &str = "netidx_admin_info";
 
     fn eval(&mut self, _ctx: &mut ExecCtx<R, E>, from: &CachedVals) -> Option<Value> {
@@ -462,7 +456,7 @@ pub(crate) struct SessionCeremony<K: SessionKind> {
 }
 
 impl<R: Rt, E: UserEvent, K: SessionKind> BuiltIn<R, E> for SessionCeremony<K> {
-    const EFFECT: EffectKind = EffectKind::Async;
+    const EFFECT: Effect = Effect::Async;
     const NAME: &str = K::NAME;
 
     fn init<'a, 'b, 'c, 'd>(
