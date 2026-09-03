@@ -318,12 +318,12 @@ let panels = |
     #on_submit: |v: Array<string>| -> null {
       select v ~ policy_target {
         `Add => select read_policy(v[1..]$) {
-          `BadValidity => toast <- v ~ bad_validity,
-          p => { run <- `AddAdmin({ name: v[0]$, policy: p }); policy_open <- p ~ false }
+          `BadValidity => toast <- bad_validity,
+          p => { run <- `AddAdmin({ name: v[0]$, policy: p }); policy_open <- false }
         },
         `Edit(name) => select read_policy(v) {
-          `BadValidity => toast <- v ~ bad_validity,
-          p => { run <- `SetPolicy({ name, policy: p }); policy_open <- p ~ false }
+          `BadValidity => toast <- bad_validity,
+          p => { run <- `SetPolicy({ name, policy: p }); policy_open <- false }
         }
       };
       null
@@ -811,29 +811,29 @@ let panels = |
     _ => 0
   };
   let menu_keys = |k: KeyEvent| -> [`Stop, `Continue] select k.code {
-    `Up | `Char("k") => { menu_sel <- max(0, (k ~ menu_sel) - 1); `Stop },
+    `Up | `Char("k") => { menu_sel <- max(0, menu_sel - 1); `Stop },
     `Down | `Char("j") => {
-      menu_sel <- min(array::len(menu_entries) - 1, (k ~ menu_sel) + 1);
+      menu_sel <- min(array::len(menu_entries) - 1, menu_sel + 1);
       `Stop
     },
     kk@ `Enter => {
       let p = (menu_entries[kk ~ menu_sel]$).kind;
       select p {
-        `Services => { screen <- p ~ `ServerPick; pick <- p ~ `Servers },
-        `Perms => { screen <- p ~ `ClusterPick; pick <- p ~ `Clusters },
+        `Services => { screen <- `ServerPick; pick <- `Servers },
+        `Perms => { screen <- `ClusterPick; pick <- `Clusters },
         _ => { screen <- `Panel(p); load <- p }
       };
-      row_sel <- p ~ 0;
-      pick_sel <- p ~ 0;
+      row_sel <- 0;
+      pick_sel <- 0;
       `Stop
     },
     kk@ `Esc => { on_close(kk ~ `Back); `Stop },
     _ => `Continue
   };
   let pick_keys = |k: KeyEvent| -> [`Stop, `Continue] select k.code {
-    `Up | `Char("k") => { pick_sel <- max(0, (k ~ pick_sel) - 1); `Stop },
-    `Down | `Char("j") => { pick_sel <- min(k ~ pick_last, (k ~ pick_sel) + 1); `Stop },
-    kk@ `Esc => { screen <- kk ~ `Menu; `Stop },
+    `Up | `Char("k") => { pick_sel <- max(0, pick_sel - 1); `Stop },
+    `Down | `Char("j") => { pick_sel <- min(pick_last, pick_sel + 1); `Stop },
+    kk@ `Esc => { screen <- `Menu; `Stop },
     kk@ `Enter => {
       let i = kk ~ pick_sel;
       select kk ~ (screen, svc_servers, clusters) {
@@ -843,8 +843,8 @@ let panels = |
             0 => never(),
             n => {
               service_server <- rows[min(i, n - 1)]$;
-              screen <- kk ~ `Panel(`Services);
-              load <- kk ~ `Services
+              screen <- `Panel(`Services);
+              load <- `Services
             }
           }
         },
@@ -854,14 +854,14 @@ let panels = |
             0 => never(),
             n => {
               perms_at <- bases[min(i, n - 1)]$;
-              screen <- kk ~ `Panel(`Perms);
-              load <- kk ~ `Perms
+              screen <- `Panel(`Perms);
+              load <- `Perms
             }
           }
         },
         _ => never()
       };
-      row_sel <- kk ~ 0;
+      row_sel <- 0;
       `Stop
     },
     _ => `Continue
@@ -884,7 +884,7 @@ let panels = |
       };
       `Stop
     },
-    kk@ `Char("R") => { run <- kk ~ `Renewals; `Stop },
+    kk@ `Char("R") => { run <- `Renewals; `Stop },
     _ => `Continue
   };
   let deleg_keys = |k: KeyEvent| -> [`Stop, `Continue] select k.code {
@@ -909,10 +909,10 @@ let panels = |
   };
   let roster_keys = |k: KeyEvent| -> [`Stop, `Continue] select k.code {
     kk@ `Char("a") => {
-      policy_title <- kk ~ "Add a role admin";
-      policy_target <- kk ~ `Add;
-      policy_fields_in <- kk ~ array::push_front(policy_fields(empty_policy), { label: "name", value: "" });
-      policy_open <- kk ~ true;
+      policy_title <- "Add a role admin";
+      policy_target <- `Add;
+      policy_fields_in <- array::push_front(policy_fields(empty_policy), { label: "name", value: "" });
+      policy_open <- true;
       `Stop
     },
     kk@ `Char("e") => {
@@ -930,7 +930,7 @@ let panels = |
       };
       `Stop
     },
-    kk@ `Char("c") => { run <- kk ~ `ChangeOwnPassword; `Stop },
+    kk@ `Char("c") => { run <- `ChangeOwnPassword; `Stop },
     kk@ `Char("p") => {
       select kk ~ roster_name {
         null as _ => never(),
@@ -954,7 +954,7 @@ let panels = |
     _ => `Continue
   };
   let server_keys = |k: KeyEvent| -> [`Stop, `Continue] select k.code {
-    kk@ `Char("c") => { run <- kk ~ `Reconcile; `Stop },
+    kk@ `Char("c") => { run <- `Reconcile; `Stop },
     kk@ `Char("g") => {
       select kk ~ server_sel {
         null as _ => never(),
@@ -1009,12 +1009,12 @@ let panels = |
   };
   let perms_keys = |k: KeyEvent| -> [`Stop, `Continue] select k.code {
     kk@ `Char("a") => {
-      perm_fields <- kk ~ [
+      perm_fields <- [
         { label: "path", value: "/" },
         { label: "entity", value: "" },
         { label: "bits", value: "" }
       ];
-      perm_open <- kk ~ true;
+      perm_open <- true;
       `Stop
     },
     kk@ `Char("e") => {
@@ -1026,7 +1026,7 @@ let panels = |
             { label: "entity", value: r.entity },
             { label: "bits", value: r.bits }
           ];
-          perm_open <- r ~ true
+          perm_open <- true
         }
       };
       `Stop
@@ -1046,15 +1046,15 @@ let panels = |
   let panel_keys = |k: KeyEvent, p: PanelKind| -> [`Stop, `Continue] select k.code {
     kk@ `Esc => {
       select kk ~ entry {
-        `Menu => screen <- kk ~ `Menu,
+        `Menu => screen <- `Menu,
         _ => on_close(kk ~ `Back)
       };
       `Stop
     },
-    kk@ `Char("r") => { load <- kk ~ p; `Stop },
-    `Up | `Char("k") => { row_sel <- max(0, (k ~ row_sel) - 1); `Stop },
+    kk@ `Char("r") => { load <- p; `Stop },
+    `Up | `Char("k") => { row_sel <- max(0, row_sel - 1); `Stop },
     `Down | `Char("j") => {
-      row_sel <- min(k ~ panel_last, (k ~ row_sel) + 1);
+      row_sel <- min(panel_last, row_sel + 1);
       `Stop
     },
     _ => select p {
@@ -1083,9 +1083,9 @@ let panels = |
   let gate_handle = |e: Event| -> [`Stop, `Continue] select e {
     `Key(k) => select k.kind {
       `Press => select k.code {
-        `Up | `Char("k") => { gate_sel <- max(0, (k ~ gate_sel) - 1); `Stop },
+        `Up | `Char("k") => { gate_sel <- max(0, gate_sel - 1); `Stop },
         `Down | `Char("j") => {
-          gate_sel <- min(array::len(gate_choices) - 1, (k ~ gate_sel) + 1);
+          gate_sel <- min(array::len(gate_choices) - 1, gate_sel + 1);
           `Stop
         },
         kk@ `Enter => {
@@ -1098,10 +1098,10 @@ let panels = |
               w => confirm <- { message: w, action: `Gate({ server: s.id, gate: g }) }
             }
           };
-          gate_for <- kk ~ null;
+          gate_for <- null;
           `Stop
         },
-        kk@ `Esc => { gate_for <- kk ~ null; `Stop },
+        kk@ `Esc => { gate_for <- null; `Stop },
         _ => `Stop
       },
       _ => `Stop
