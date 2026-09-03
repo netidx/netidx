@@ -149,8 +149,52 @@ async fn milestone_timing() -> anyhow::Result<()> {
     let reg = t0.elapsed();
     let prog = arcstr::literal!("netidx_admin::tui::app::app(#server: \"127.0.0.1:1\")");
     let t1 = std::time::Instant::now();
-    ctx.rt.compile(prog).await?;
+    ctx.rt.compile(prog.clone()).await?;
     let compile = t1.elapsed();
-    eprintln!("milestone: registration {reg:?}, app-main compile {compile:?}");
+    let stats = ctx.rt.fusion_stats().await?;
+    eprintln!(
+        "milestone: registration {reg:?}, app-main compile {compile:?} \
+         (kernels attempted {} fused {})",
+        stats.attempted, stats.fused
+    );
+    // the blocker profile: failure reasons with quoted names elided
+    let mut reasons: std::collections::HashMap<String, usize> = Default::default();
+    for f in &stats.failed {
+        let mut key = String::new();
+        let mut quoted = false;
+        for c in f.reason.chars() {
+            match (c, quoted) {
+                ('`', false) => {
+                    quoted = true;
+                    key.push_str("`_`");
+                }
+                ('`', true) => quoted = false,
+                (_, true) => (),
+                (c, false) => key.push(c),
+            }
+        }
+        if let Some((i, _)) = key.char_indices().nth(110) {
+            key.truncate(i);
+        }
+        *reasons.entry(key).or_default() += 1;
+    }
+    let mut reasons: Vec<_> = reasons.into_iter().collect();
+    reasons.sort_by(|a, b| b.1.cmp(&a.1));
+    for (reason, n) in reasons.iter().take(15) {
+        eprintln!("milestone:   {n:5} {reason}");
+    }
+    // the same compile with fusion off: the JIT's share of startup
+    let (tx, _rx) = tokio::sync::mpsc::channel(10);
+    let ctx = graphix_package_core::testing::init_with_flags_and_setup(
+        tx,
+        &crate::TEST_REGISTER,
+        vec![],
+        enumflags2::BitFlags::from(graphix_compiler::CFlag::FusionDisabled),
+        |_| {},
+    )
+    .await?;
+    let t2 = std::time::Instant::now();
+    ctx.rt.compile(prog).await?;
+    eprintln!("milestone: app-main compile without fusion {:?}", t2.elapsed());
     Ok(())
 }

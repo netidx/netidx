@@ -13,6 +13,7 @@ Compile-time milestones (log at every ~1k lines of `.gx`):
 | 2026-08-21 | 909 | reg 417ms / pump-callsite 593ms | DEV build (unoptimized). Registration = all stdlib + package packed-AST decode + typecheck; the 593ms is ONE `pump(...)` call site's per-callsite instance elaboration of the ~300-line pump body. No wall yet; watch the per-callsite number as the app main grows. |
 | 2026-08-31 | 1799 | reg 1.13s / app-main 2.68s | DEV build. The app-main number is the pump+remote composition (`milestone_timing`, now a permanent ignored test): two instance elaborations of the ~700-line remote body + pump. 2x the lines, ~4.5x the elaboration cost — no wall, but the growth is super-linear; re-measure at 3k. |
 | 2026-09-02 | 3840 | reg 0.94s / app-main 5.12s | DEV build, quiet box. `milestone_timing` now compiles `app::app` — both tabs and the services surface under one pump, which elaborates the 1.5k-line panels body TWICE (once per tab). A 3333-line reading taken while the harness suite ran beside it said 7.9s: measure alone. 2.1x the lines, ~1.9x the elaboration cost — linear this time; no wall. Under load (six fixture tests + a concurrent gate build) a first render took over 60s and a landing test timed out; alone it passes in 29s. |
+| 2026-09-03 | 5434 | DEV reg 1.05–1.24s / app-main 5.9–6.6s (2.7s with fusion off); RELEASE reg 93ms / app-main 455–472ms (228ms with fusion off) | The first RELEASE reading (LTO, codegen-units=1, netidx's profile). Kernels: 1286 attempted, 324 fused. Runtime (release, `milestone_latency`): app build 532ms, first frame 584ms, role-menu key p50 3.2ms / p95 4.6ms, modal text key p50 0.17ms, Backspace 0.10ms, bare render 0.12ms. Debug is ~13x slower to compile and ~4x slower per key. 1.4x the lines, 1.2x the DEV elaboration cost — linear. |
 
 ---
 
@@ -132,9 +133,20 @@ Test side and package:
 8. **A resolver in the test domain** (09-02): the services, read-gate
    and perms flows are driven only to their empty states against the
    CA-only fixture.
-9. **Real performance measurement** after the port (Eric, 09-02):
+9. ~~**Real performance measurement** after the port (Eric, 09-02):
    release builds, the actual binary; the debug-build milestones are
-   trend checks only.
+   trend checks only.~~ DONE 09-03 (the row in the milestone table and
+   the dated entry): at 5,434 lines the release build compiles the
+   app in 455ms after a 93ms registration, first frame at 584ms; a
+   role-menu key settles in 3.2ms (p50), a text key in 0.17ms, a
+   bare render in 0.12ms. Fusion is HALF the compile (228ms of 455)
+   for 324 kernels out of 1,286 attempts. What it guides is in the
+   entry: startup is fine and linear; the JIT's runtime benefit is
+   invisible at human input rates and its startup cost is the failed
+   attempts; the 3.2ms role-menu key is the one hot path worth a
+   profile. The ship binary (the `netidx admin` embed) does not
+   exist yet — the harness takes the runtime's own event and draw
+   path, so these are its numbers.
 10. **Engine locality** (Eric, 09-02, not a finding here): the runtime
     task may run each cycle on a different worker; measure the thread
     id per cycle before designing around it (a per-context memo loan,
@@ -1244,3 +1256,60 @@ them the same night:
   the select chapter ("Writing From an Arm": sampled = per delivery,
   constant = per selection, measured 9 vs 2) and the TUI input
   chapter points handlers at it.
+
+## 2026-09-03 — milestone: 5.4k lines, the first release measurement
+
+`milestone_timing` and the new `milestone_latency` (both ignored,
+run by hand in each profile; the harness gained
+`dispatch_event_timed`, the time from a key to the LAST update batch
+it produced with the quiescence wait excluded) at 5,434 lines of
+package Graphix:
+
+| | DEV | RELEASE |
+|---|---|---|
+| registration (stdlib + packed-AST decode + typecheck) | 1.05–1.24s | 93ms |
+| app-main compile, fusion on | 5.9–6.6s | 455–472ms |
+| app-main compile, fusion off | 2.7s | 228ms |
+| app build + first frame (harness) | 6.94s / 7.00s | 532ms / 584ms |
+| role-menu Down/Up, p50 / p95 / max | 12.4 / 13.6 / 24.5ms | 3.21 / 4.56 / 7.50ms |
+| modal text field Char, p50 / p95 | 0.77 / 12.4ms | 0.17 / 2.60ms |
+| modal text field Backspace, p50 | 0.68ms | 0.10ms |
+| bare render (120x40), p50 | 1.35ms | 0.12ms |
+
+Kernels: 1,286 attempted, 324 fused (25%). The blocker profile (the
+top of 962 failures, names elided): 147 "builtin call site not
+discovered — doesn't fuse" (a builtin without a fast fn: widget
+constructors and effects, by strict-fusion rule), 78 "nullable
+scrutinee bind predicate is not scalar", 33 "select scrutinee type
+Set([Variant…" (a union-of-structs scrutinee), 15 "whole-variant @
+binding not lowerable", 14 "value operand has unexpected type None",
+10 "nested variant payload pattern", 10+10 "select arm of shape
+String/Struct can't widen to the Value merge", 6 "slice-suffix @/head
+binding"; the long tail is one "subtree node-walks" per region whose
+interior holds any of those.
+
+What it guides:
+
+1. **Startup is fine and linear.** 0.6s to the first frame in the
+   real profile at 5.4k lines, and the DEV elaboration cost has grown
+   linearly with the lines since 2.5k. No wall.
+2. **Fusion is half of startup for a 25% success rate**, and a
+   failure costs the same as a success — "is it fusable" IS the
+   compile attempt. The three largest buckets (no fast fn, a
+   non-scalar nullable bind, a union-of-structs scrutinee) are
+   decidable from the node shape before any CLIF is emitted; a cheap
+   pre-gate would remove most of the 962 attempts' cost. That is
+   the compiler item this measurement raises (predictable fusion:
+   refusals should be cheap).
+3. **The JIT's runtime benefit is invisible at human input rates.**
+   Every key settles in single-digit milliseconds and a render in
+   0.12ms; nothing here is a latency problem. The cost side is the
+   only side that shows.
+4. **One hot path**: a role-menu key is 20x a text key (3.2ms vs
+   0.17ms). The action list rebuilds every row's line and the role's
+   blurb per key; whether that is the interp's per-slot lazy-bind
+   cost (the `LambdaIds` hub) or the widget rebuild is a
+   `GRAPHIX_DBG_PERF` question — ledger 10's territory.
+
+**Disposition: ledger 9 closed; the fusion pre-gate and the role-menu
+profile are the follow-ups, both graphix-side.**

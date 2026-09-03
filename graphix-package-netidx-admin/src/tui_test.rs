@@ -792,3 +792,89 @@ async fn fresh_machine_previews_an_install_and_a_teardown_asks_about_the_ca() ->
     .await?;
     Ok(())
 }
+
+/// Key-to-settled latency of the whole app on a fresh machine, the
+/// runtime side of the milestone table (`milestone_timing` is the
+/// compile side). Reports, per key kind, the time from dispatch to the
+/// last update batch the key produced (the harness's quiescence wait
+/// excluded), plus the app build, the first frame and a bare render.
+/// Run by hand in BOTH profiles:
+/// `cargo test [--release] -p graphix-package-netidx-admin milestone_latency -- --ignored --nocapture`
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "milestone latency, run by hand"]
+async fn milestone_latency() -> Result<()> {
+    fn report(what: &str, mut v: Vec<Duration>) {
+        v.sort();
+        let n = v.len();
+        let ms = |d: Duration| d.as_secs_f64() * 1e3;
+        eprintln!(
+            "milestone latency: {what}: n={n} p50={:.2}ms p95={:.2}ms max={:.2}ms",
+            ms(v[n / 2]),
+            ms(v[n * 95 / 100]),
+            ms(v[n - 1])
+        );
+    }
+    let d = TestAdminDomain::start().await?;
+    let record_path = netidx_admin::paths::user_install_record()?;
+    let _ = std::fs::remove_file(&record_path);
+    let t0 = Instant::now();
+    let prog = "let result = netidx_admin::tui::app::app()";
+    let mut h =
+        TuiTestHarness::with_register(prog, crate::TEST_REGISTER, 120, 40).await?;
+    let build = t0.elapsed();
+    wait_render(&mut h, Duration::from_secs(60), "the welcome dialog", |lines| {
+        lines.iter().any(|l| l.contains("Welcome to netidx"))
+    })
+    .await?;
+    let first_frame = t0.elapsed();
+    eprintln!("milestone latency: app build {build:?}, first frame {first_frame:?}");
+    h.dispatch_event(key(KeyCode::Enter)).await?;
+    wait_render(&mut h, Duration::from_secs(10), "the role menu", |lines| {
+        lines.iter().any(|l| l.contains("Set Up This Machine"))
+    })
+    .await?;
+    // the role menu: a list selection plus the role's blurb per key
+    let mut moves = Vec::new();
+    for _ in 0..25 {
+        moves.push(h.dispatch_event_timed(key(KeyCode::Down)).await?);
+        moves.push(h.dispatch_event_timed(key(KeyCode::Up)).await?);
+    }
+    report("role menu Down/Up", moves);
+    // the guided install's first question through the pump: a modal
+    // text field, typed into and erased
+    h.dispatch_event(key(KeyCode::Down)).await?;
+    h.dispatch_event(key(KeyCode::Char('p'))).await?;
+    wait_render(
+        &mut h,
+        Duration::from_secs(60),
+        "the install's first question",
+        |lines| {
+            lines
+                .iter()
+                .any(|l| l.contains("Esc cancel") || l.contains("Workstation preview"))
+        },
+    )
+    .await?;
+    if h.render_lines()?.iter().any(|l| l.contains("Esc cancel")) {
+        let mut typed = Vec::new();
+        for c in "the quick brown fox jumps".chars() {
+            typed.push(h.dispatch_event_timed(key(KeyCode::Char(c))).await?);
+        }
+        report("modal text field Char", typed);
+        let mut erased = Vec::new();
+        for _ in 0..25 {
+            erased.push(h.dispatch_event_timed(key(KeyCode::Backspace)).await?);
+        }
+        report("modal text field Backspace", erased);
+        h.dispatch_event(key(KeyCode::Esc)).await?;
+    }
+    let mut renders = Vec::new();
+    for _ in 0..50 {
+        let t = Instant::now();
+        let _ = h.render()?;
+        renders.push(t.elapsed());
+    }
+    report("bare render", renders);
+    drop(d);
+    Ok(())
+}
