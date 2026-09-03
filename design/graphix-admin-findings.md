@@ -46,9 +46,12 @@ Graphix, language and compiler:
    The port's six `_r: Result<…>` annotations and twenty typed
    never-lets are rewritten. Book: the select chapter's "Arms That
    Never Fire".
-3. **Lint: a connect whose target is read unsampled in the same select
+3. ~~**Lint: a connect whose target is read unsampled in the same select
    arm** (09-02, the accidental counter — three sightings in one
-   afternoon, one reached the harness at 100% CPU). Proposed.
+   afternoon, one reached the harness at 100% CPU).~~ DROPPED 09-03
+   (Eric): the same shape is a legitimate way to write a loop
+   (`select go { true => x <- x + 1, … }`); nothing in the code
+   distinguishes intent.
 4. ~~**`let`-destructured sibling binds in the wake catch-up tracker**
    (09-02).~~ FIXED 09-02 night: a destructuring `let`'s binds carry
    their group's representative (`Bind::facet`), and `TrackedFires`
@@ -75,19 +78,15 @@ Graphix, language and compiler:
     (place references, `design/place_references.md`): `&a[i]`, `&s.f`,
     `&t.0`, `&m{k}` and chains are places; the form edits through
     `line_edit::handle(&vals[i], e)`.
-13. **A connect with a constant right-hand side inside a select arm
-    fires once per selection, not per re-match** (09-02, measured:
-    `s <- 100` in a re-matched arm fired 2 times against 10 for
-    `s <- k ~ 100`). Organic firing as designed — the arm's inputs
-    did not fire — but it is the trap behind two latent bugs in the
-    remote tab's menu and pick handlers (`screen <- \`ServerPick`
-    worked only when another key had deselected the arm in between).
-    Fixed in the port by sampling; the idiom joins item 7's list. A
-    grep for the shape then found three more (the roster form's
-    close after a submit, its bad-validity toast, the manual
-    connect's glyph reset) — fixed the same way. A lint is the
-    language-side answer: a `<-` inside a select arm whose right-hand
-    side depends on none of the arm's fired inputs.
+13. ~~**A connect with a constant right-hand side inside a select arm
+    fires once per selection, not per re-match** (09-02).~~ CLOSED
+    09-03 by documentation (Eric): once you understand it, a constant
+    write IS the way to trigger on the selection changing (an "on
+    entering this state" write), and a lint on it — or on a write
+    that reads nothing from the handler's argument — would flag valid
+    programs and get annoying. The select chapter's "Writing From an
+    Arm" documents both forms with the measured counts (sampled 9,
+    constant 2 over ten deliveries); handlers sample the event.
 14. ~~**Bool literal coverage does not reach into payload or tuple
     positions** (09-02, three sightings in one day).~~ FIXED 09-02
     night: composite arms whose only refutable leaves are bool
@@ -1239,3 +1238,9 @@ them the same night:
   ride the same reporter; the reserved-word note is scoped to its
   word. Pin: graphix `parser/test.rs`
   `parse_errors_report_the_furthest_point`.
+- **3 and 13** (09-03, Eric's ruling): no lints. The accidental
+  counter is the intentional loop's shape, and a constant write in an
+  arm is the trigger on the selection changing — a tool. Documented in
+  the select chapter ("Writing From an Arm": sampled = per delivery,
+  constant = per selection, measured 9 vs 2) and the TUI input
+  chapter points handlers at it.
