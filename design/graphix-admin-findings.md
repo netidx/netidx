@@ -24,27 +24,20 @@ line carries a conscious "accepted" with Eric's name on it.
 
 Graphix, language and compiler:
 
-1. **Parse diagnostics: the refusal reason and position must survive
+1. ~~**Parse diagnostics: the refusal reason and position must survive
    the combine merge** (08-18, 08-21 twice, 09-02 `Error as _`, the
-   unknown duration unit, and `let ok = …` — six sightings). PARTLY
-   FIXED 09-02 night: a reserved word in a name position now records
-   its reason and position (`grow::note_reason`), and the parse's
-   failure reports it when the failure lies on that line or before
-   it — "note: at line: 2, column: 5: `ok` is a reserved word and
-   cannot be used as a name" under combine's "Unexpected `l`" (the
-   note names only words that never begin a construct — a statement
-   parser probes `select`/`let`/`mod` as names routinely). The bare
-   `Error` predicate is CLOSED by ruling (Eric, 09-02): `Error` is a
-   constructor and takes its parameter; `Error<Any> as e` is the
-   spelling for "any error" and works on both engines; a bare
-   constructor stays a parse error. `Error<_>` is a trap of a
-   different kind — `_` in type position is bottom, the type of
-   `never()`, so `Error<_>` is uninhabited and the arm is dead; the
-   dead-arm message now says so and names `Error<Any>`. Still open:
-   the unescaped `[` in a string and the unknown duration unit — each
-   wants its own note at the refusal site. RETRACTED: the "no module name" facet — the package build
-   script does name the file ("packing graphix AST blob: parsing
-   …/landing.gx"); my log filter had dropped that line.
+   unknown duration unit, and `let ok = …` — six sightings).~~ FIXED
+   09-03: parse errors report the FURTHEST point any branch reached,
+   with the source line and a caret — every recursion knot records
+   its input position, so a mistake on line 5 of a select arm is
+   reported on line 5, not at the `select` two lines up — and the
+   site notes ride the same reporter: a reserved word in a name
+   position (scoped to the word: `true +;` no longer blames `true`),
+   an unescaped `[` in a string, an unknown `duration:` unit
+   (`min` → "the units are ns, us, ms, s, m, h, d, M and y"), and
+   `///` in a `.gx`. The bare `Error` predicate stays CLOSED by
+   ruling (Eric, 09-02): `Error<Any> as e` is the spelling; `Error<_>`
+   is uninhabited and the dead-arm message names `Error<Any>`.
 2. ~~**`never()` arms leave a select's type open** (09-02).~~ FIXED
    09-03: Eric ruled `never` an absorbed bottom and a compiler
    intrinsic — `never()` / `never<T>(args…)` is syntax (the `<T>`
@@ -1234,3 +1227,15 @@ them the same night:
   cell to its binding (no discriminating witness found; kept as
   correct). Pins: graphix `lang/select.rs` `never_arms_absorb`/
   `never_typed`/`never_args_live`, parser `never_parses`.
+- **1**, the whole item (09-03): the position problem was general —
+  three different mistakes on line 5 of a select arm (`x +;`, an
+  unclosed `[`, `duration:30.min`) all reported ``Unexpected ` ` `` at
+  line 2 column 15, the space after `select`, because combine reports
+  the last alternative to fail and `attempt` resets the input. Every
+  `GrowStack` knot now records its input position (on success too)
+  and `grow::parsing` reports the furthest one with the source line
+  and a caret, keeping combine's own message only when it failed
+  there. Notes for the unescaped `[`, the unknown unit and `///`
+  ride the same reporter; the reserved-word note is scoped to its
+  word. Pin: graphix `parser/test.rs`
+  `parse_errors_report_the_furthest_point`.
