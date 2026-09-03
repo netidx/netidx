@@ -722,7 +722,7 @@ let local = |#q: &Question| -> Local {
       false => never()
     };
     println(go ~ "\nAdministrator privileges are needed to [priv_req.what].");
-    let child = sys::process::spawn(sys::process::options(#args: cmd.args, go ~ cmd.program))?;
+    let child = sys::process::spawn(go ~ sys::process::options(#args: cmd.args, cmd.program))?;
     let status = sys::process::wait(child.proc)?;
     suspended <- status ~ false;
     priv_exit <- select status.code {
