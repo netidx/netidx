@@ -692,8 +692,6 @@ impl<R: Rt, E: UserEvent, T: RemoteOp> Apply<R, E> for RemoteCeremony<T> {
         }
     }
 
-    fn sleep(&mut self, _ctx: &mut ExecCtx<R, E>) {}
-
     fn reset_replay(&mut self, _ctx: &mut ExecCtx<R, E>) {}
 }
 
@@ -1166,8 +1164,6 @@ impl<R: Rt, E: UserEvent> Apply<R, E> for ChangePassword {
         });
         self.out.set(TagValue::fired(ceremony::start_ceremony(ctx, glyph, op)))
     }
-
-    fn sleep(&mut self, _ctx: &mut ExecCtx<R, E>) {}
 
     fn reset_replay(&mut self, _ctx: &mut ExecCtx<R, E>) {}
 }

@@ -816,13 +816,6 @@ impl<R: Rt, E: UserEvent> Apply<R, E> for Events {
         }
     }
 
-    fn sleep(&mut self, ctx: &mut ExecCtx<R, E>) {
-        if let Some(id) = self.bind_id.take() {
-            ctx.rt.unref_var(id, self.top_id);
-        }
-        self.cached.clear();
-    }
-
     fn reset_replay(&mut self, _ctx: &mut ExecCtx<R, E>) {
         self.cached.clear();
     }
