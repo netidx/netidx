@@ -74,12 +74,12 @@ let landing = |
   {
     catch(e) notice <- "could not save the admin domain list: [(e.0).error]";
     seq save {
-      let d = select dir {
-        null as _ => never(),
-        d => d
-      };
-      sys::fs::create_dir(#all: true, d)?;
-      {
+      do {
+        let d = select dir {
+          null as _ => never(),
+          d => d
+        };
+        sys::fs::create_dir(#all: true, d)?;
         let p = select path {
           null as _ => never(),
           p => p
@@ -131,8 +131,8 @@ let landing = |
   {
     catch(e) toast <- { title: "Discovery failed", lines: [admin_text((e.0).error)] };
     seq discover_at {
-      let found = discover_domains(discover_at)?;
-      {
+      do {
+        let found = discover_domains(discover_at)?;
         let verified = array::filter_map(found.domains, |r| select r.identity {
           null as _ => null,
           id => { domain: r.domain, servers: r.servers, fp: id.fingerprint.code }
@@ -149,8 +149,7 @@ let landing = |
             n => { title: "Discovery", lines: ["Found [n] admin domain(s); they are saved."] }
           },
           _ => { title: "Discovery", lines: found.diagnosis }
-        };
-        found
+        }
       }
     }
   };

@@ -425,8 +425,8 @@ let local = |#q: &Question| -> Local {
   {
     catch(e) fail("Opening this host's admin server failed", (e.0).error);
     seq admin_r {
-      let t = admin_r?;
-      {
+      do {
+        let t = admin_r?;
         admin_target <- t;
         admin_entry <- select admin_req.panel {
           `Roster => `Roster,
@@ -435,8 +435,7 @@ let local = |#q: &Question| -> Local {
             b => `Perms(b)
           }
         };
-        screen <- t ~ `Admin;
-        t
+        screen <- `Admin
       }
     }
   };
@@ -522,8 +521,8 @@ let local = |#q: &Question| -> Local {
   {
     catch(e) fail("Renewal failed", (e.0).error);
     seq renew_r {
-      let r = renew_r?;
-      {
+      do {
+        let r = renew_r?;
         toast <- select r.summary {
           null as _ => {
             title: "Nothing to renew",
@@ -543,16 +542,15 @@ let local = |#q: &Question| -> Local {
             }
           }
         };
-        refresh <- r;
-        r
+        refresh <- r
       }
     }
   };
   {
     catch(e) fail("Update failed", (e.0).error);
     seq update_r {
-      let r = update_r?;
-      {
+      do {
+        let r = update_r?;
         toast <- select r {
           `UpToDate => {
             title: "Up to date",
@@ -569,16 +567,15 @@ let local = |#q: &Question| -> Local {
             error: false
           }
         };
-        refresh <- r;
-        r
+        refresh <- r
       }
     }
   };
   {
     catch(e) fail("Backup failed", (e.0).error);
     seq backup_r {
-      let r = backup_r?;
-      {
+      do {
+        let r = backup_r?;
         let components = str::join(#sep: ", ", r.components);
         toast <- {
           title: "Installation backup created",
@@ -590,16 +587,15 @@ let local = |#q: &Question| -> Local {
             "Manifest SHA-256: [r.manifest_sha256]"
           ],
           error: false
-        };
-        r
+        }
       }
     }
   };
   {
     catch(e) fail("Auto-renew setup failed", (e.0).error);
     seq autoapprove_r {
-      let r = autoapprove_r?;
-      {
+      do {
+        let r = autoapprove_r?;
         toast <- select r {
         `HotSwapped({ warning }) => {
           title: "Auto-approve rotated",
@@ -632,16 +628,15 @@ let local = |#q: &Question| -> Local {
           }
         }
         };
-        refresh <- r;
-        r
+        refresh <- r
       }
     }
   };
   {
     catch(e) fail("Rotating the recovery password failed", (e.0).error);
     seq recovery_r {
-      let r = recovery_r?;
-      {
+      do {
+        let r = recovery_r?;
         toast <- {
           title: "Recovery password rotated",
           lines: [select r {
@@ -650,27 +645,28 @@ let local = |#q: &Question| -> Local {
           }],
           error: false
         };
-        refresh <- r;
-        r
+        refresh <- r
       }
     }
   };
   {
     catch(e) fail("Emitting the CSR failed", (e.0).error);
     seq csr_r {
-      let p = csr_r?;
-      toast <- {
+      do {
+        let p = csr_r?;
+        toast <- {
         title: "CSR emitted",
         lines: ["Wrote a renewal CSR to [p]. Have your external PKI sign it, then install the signed certificate."],
         error: false
+        }
       }
     }
   };
   {
     catch(e) fail("Installing the certificate failed", (e.0).error);
     seq extinstall_r {
-      let r = extinstall_r?;
-      {
+      do {
+        let r = extinstall_r?;
         toast <- select r {
           `FirstInstall({ cfg_path, service_scope }) => {
             title: "CA certificate installed",
@@ -700,8 +696,7 @@ let local = |#q: &Question| -> Local {
             error: false
           }
         };
-        refresh <- r;
-        r
+        refresh <- r
       }
     }
   };
@@ -737,24 +732,22 @@ let local = |#q: &Question| -> Local {
   {
     catch(e) fail("Registering the OS service failed", (e.0).error);
     seq svc_r {
-      let r = svc_r?;
-      {
+      do {
+        let r = svc_r?;
         select r {
           `Registered(line) => { svc_ok <- line; null },
           `Privileged({ what, argv, name, for_user }) => {
             priv_req <- { what, argv, then: `VerifyService({ name, for_user }) };
             null
           }
-        };
-        r
+        }
       }
     }
   };
   seq svc_ok {
-    {
+    do {
       toast <- { title: "OS service registered", lines: [svc_ok], error: false };
-      refresh <- svc_ok;
-      svc_ok
+      refresh <- svc_ok
     }
   };
   let priv_cmd = escalate_command(priv_req.argv, priv_req);
@@ -774,13 +767,11 @@ let local = |#q: &Question| -> Local {
       let cmd = priv_cmd?;
       suspended <- true;
       until released;
-      let child = {
+      do {
         println("\nAdministrator privileges are needed to [priv_req.what].");
-        sys::process::spawn(sys::process::options(#args: cmd.args, cmd.program))?
-      };
-      let status = sys::process::wait(child.proc)?;
-      {
-        suspended <- status ~ false;
+        let child = sys::process::spawn(sys::process::options(#args: cmd.args, cmd.program))?;
+        let status = sys::process::wait(child.proc)?;
+        suspended <- false;
         select status.code {
           null as _ => -1,
           c => c
@@ -858,8 +849,8 @@ let local = |#q: &Question| -> Local {
   {
     catch(e) fail("Install failed", (e.0).error);
     seq install_r {
-      let r = install_r?;
-      {
+      do {
+        let r = install_r?;
         select r {
           `Installed({ service }) => need_service(r, service),
           _ => null
@@ -898,34 +889,32 @@ let local = |#q: &Question| -> Local {
           error: false
         }
         };
-        refresh <- r;
-        r
+        refresh <- r
       }
     }
   };
   {
     catch(e) fail("Join failed", (e.0).error);
     seq join_r {
-      let r = join_r?;
-      {
+      do {
+        let r = join_r?;
         let dry = select run {
           `Join(d) => d,
           _ => false
         };
-        toast <- r ~ select dry {
+        toast <- select dry {
           true => { title: "Join preview", lines: ["Preview only — nothing was written."], error: false },
           false => { title: "Joined", lines: ["Joined the admin domain. Restart the local resolver to use it."], error: false }
         };
-        refresh <- r;
-        r
+        refresh <- r
       }
     }
   };
   {
     catch(e) fail("Adding the parent failed", (e.0).error);
     seq addparent_r {
-      let r = addparent_r?;
-      {
+      do {
+        let r = addparent_r?;
         toast <- {
           title: "Parent added",
           lines: [
@@ -934,8 +923,7 @@ let local = |#q: &Question| -> Local {
           ],
           error: false
         };
-        refresh <- r;
-        r
+        refresh <- r
       }
     }
   };
@@ -959,8 +947,9 @@ let local = |#q: &Question| -> Local {
   {
     catch(e) fail("Restore failed", (e.0).error);
     seq restore_r {
-      let r = restore_r?;
-      select r {
+      do {
+        let r = restore_r?;
+        select r {
         `Finish(o) => restore_done(o, o.role, o.service, o.reconciled),
         `ServiceThenFinish({ scope, service, staged }) => {
           restore_staged <- staged;
@@ -972,6 +961,7 @@ let local = |#q: &Question| -> Local {
           svc_req <- { scope, name: service.name, for_user: service.for_user };
           null
         }
+        }
       }
     }
   };
@@ -982,15 +972,17 @@ let local = |#q: &Question| -> Local {
   {
     catch(e) fail("Finishing the restore failed", (e.0).error);
     seq finish_r {
-      let o = finish_r?;
-      restore_done(o, o.role, o.service, o.reconciled)
+      do {
+        let o = finish_r?;
+        restore_done(o, o.role, o.service, o.reconciled)
+      }
     }
   };
   {
     catch(e) fail("Uninstall failed", (e.0).error);
     seq uninstall_r {
-      let r = uninstall_r?;
-      {
+      do {
+        let r = uninstall_r?;
         let kept_lines = |kept: Array<{ path: string, why: string }>| -> Array<string>
           array::map(kept, |k| "Kept [k.path] ([k.why]).");
         toast <- select r {
@@ -1043,8 +1035,7 @@ let local = |#q: &Question| -> Local {
           null
         },
         _ => refresh <- r
-        };
-        r
+        }
       }
     }
   };

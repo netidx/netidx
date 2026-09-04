@@ -157,12 +157,8 @@ Test side and package:
     `t ~ scope`) after another statement (the toast) never writes.
     `never()` as a seq step stalls the run and busy-drops later
     triggers. Disposition: usage — optional follow-ons go in the step
-    immediately after the let, in a `{ }` with the other fan-out;
-    skip with `_ => null`. A do-block used as a seq step must end on
-    the wait's value — a connect as last expr never produces and the
-    machine stays busy (landing's second connect). Not a compiler fix
-    unless seq rewrites user `~` on captured lets, which would be
-    surprising.
+    immediately after the let. `do { }` is now a seq statement: one arm,
+    lets inside, connects pc-sampled. Skip with `_ => null`.
 
 Closed this campaign, for the record: the modal/overlay widget and
 synthetic key events (08-18); the module system (08-22); coverage
