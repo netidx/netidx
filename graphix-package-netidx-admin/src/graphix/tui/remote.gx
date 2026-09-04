@@ -63,12 +63,15 @@ let remote = |#q: &Question, #server: string = ""| -> Remote {
     };
     seq connect_r {
       let t = connect_r?;
-      target <- t;
-      screen <- `Panels;
-      connected <- select info(t) {
-        `Remote({ server, identity, .. }) =>
-          { domain: identity.domain, server, fingerprint: identity.fingerprint.code },
-        `Local(_) => null
+      {
+        target <- t;
+        screen <- t ~ `Panels;
+        connected <- select info(t) {
+          `Remote({ server, identity, .. }) =>
+            { domain: identity.domain, server, fingerprint: identity.fingerprint.code },
+          `Local(_) => null
+        };
+        t
       }
     }
   };
@@ -84,7 +87,7 @@ let remote = |#q: &Question, #server: string = ""| -> Remote {
     catch(e) conn_err <- admin_text((e.0).error);
     seq chpw_r {
       let r = chpw_r?;
-      toast <- {
+      toast <- r ~ {
         title: "Password changed",
         lines: ["Connect again with the new password."],
         error: false

@@ -79,11 +79,13 @@ let landing = |
         d => d
       };
       sys::fs::create_dir(#all: true, d)?;
-      let p = select path {
-        null as _ => never(),
-        p => p
-      };
-      sys::fs::write_all(#path: p, json::write_str(#pretty: true, known)?)?
+      {
+        let p = select path {
+          null as _ => never(),
+          p => p
+        };
+        sys::fs::write_all(#path: p, json::write_str(#pretty: true, known)?)?
+      }
     }
   };
   // ── verification: each saved domain, at each address, in order —
@@ -130,22 +132,25 @@ let landing = |
     catch(e) toast <- { title: "Discovery failed", lines: [admin_text((e.0).error)] };
     seq discover_at {
       let found = discover_domains(discover_at)?;
-      let verified = array::filter_map(found.domains, |r| select r.identity {
-        null as _ => null,
-        id => { domain: r.domain, servers: r.servers, fp: id.fingerprint.code }
-      });
-      known <- array::fold(verified, known, |book: Book, v| array::fold(
-        v.servers,
-        book,
-        |b: Book, s: string| upsert(b, v.domain, s, v.fp)
-      ));
-      save <- found;
-      toast <- select array::len(found.diagnosis) {
-        0 => select array::len(verified) {
-          0 => { title: "Discovery", lines: ["No admin domain answered on the local network."] },
-          n => { title: "Discovery", lines: ["Found [n] admin domain(s); they are saved."] }
-        },
-        _ => { title: "Discovery", lines: found.diagnosis }
+      {
+        let verified = array::filter_map(found.domains, |r| select r.identity {
+          null as _ => null,
+          id => { domain: r.domain, servers: r.servers, fp: id.fingerprint.code }
+        });
+        known <- array::fold(verified, known, |book: Book, v| array::fold(
+          v.servers,
+          book,
+          |b: Book, s: string| upsert(b, v.domain, s, v.fp)
+        ));
+        save <- found;
+        toast <- select array::len(found.diagnosis) {
+          0 => select array::len(verified) {
+            0 => { title: "Discovery", lines: ["No admin domain answered on the local network."] },
+            n => { title: "Discovery", lines: ["Found [n] admin domain(s); they are saved."] }
+          },
+          _ => { title: "Discovery", lines: found.diagnosis }
+        };
+        found
       }
     }
   };
