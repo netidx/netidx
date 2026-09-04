@@ -702,9 +702,13 @@ let local = |#q: &Question| -> Local {
     refresh <- svc_ok
   };
   let priv_cmd = escalate_command(priv_req.argv, priv_req);
-  // the display is suspended while the child owns the terminal
   let suspended = false;
   let priv_exit = never<i64>();
+  type PrivPc = [`Idle, `Cmd, `Susp, `Until, `Print, `Spawn, `Wait];
+  let pc: PrivPc = `Idle;
+  let cmd_c = never();
+  let child_c = never();
+  let what_c = never();
   {
     catch(e) {
       select (e.0).error {
@@ -712,22 +716,51 @@ let local = |#q: &Question| -> Local {
         `ProcessError(m) => toast <- { title: "The privileged step could not run", lines: [m], error: true },
         a => fail("The privileged step could not start", a)
       };
-      suspended <- e ~ false
+      suspended <- e ~ false;
+      pc <- e ~ `Idle
     };
     let cmd = priv_cmd?;
-    suspended <- cmd ~ true;
     let released = tui::suspend(suspended)?;
-    let go = select released {
-      true => released,
-      false => never()
-    };
-    println(go ~ "\nAdministrator privileges are needed to [priv_req.what].");
-    let child = sys::process::spawn(go ~ sys::process::options(#args: cmd.args, cmd.program))?;
-    let status = sys::process::wait(child.proc)?;
-    suspended <- status ~ false;
-    priv_exit <- select status.code {
-      null as _ => -1,
-      c => c
+    let idle = select pc { `Idle => true, _ => false };
+    let t = filter(cmd, |x| x ~ idle);
+    pc <- t ~ `Cmd;
+    select pc {
+      `Idle => never(),
+      `Cmd => {
+        cmd_c <- pc ~ cmd;
+        what_c <- pc ~ priv_req.what;
+        pc <- pc ~ `Susp
+      },
+      `Susp => {
+        suspended <- pc ~ true;
+        pc <- pc ~ `Until
+      },
+      `Until => select released {
+        true => pc <- pc ~ `Print,
+        false => never()
+      },
+      `Print => {
+        println(pc ~ "\nAdministrator privileges are needed to [what_c].");
+        pc <- pc ~ `Spawn
+      },
+      `Spawn => select cmd_c {
+        cmd => {
+          let child = sys::process::spawn(pc ~ sys::process::options(#args: cmd.args, cmd.program))?;
+          child_c <- child;
+          pc <- child ~ `Wait
+        }
+      },
+      `Wait => select child_c {
+        child => {
+          let status = sys::process::wait(child.proc)?;
+          suspended <- status ~ false;
+          priv_exit <- select status.code {
+            null as _ => -1,
+            c => c
+          };
+          pc <- priv_exit ~ `Idle
+        }
+      }
     }
   };
   let verify_req = never<{ name: string, for_user: string, code: i64 }>();
