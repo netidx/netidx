@@ -506,6 +506,8 @@ impl<R: Rt, E: UserEvent, K: SessionKind> Apply<R, E> for SessionCeremony<K> {
         }))
     }
 
+    fn sleep(&mut self, _ctx: &mut ExecCtx<R, E>) {}
+
     fn reset_replay(&mut self, _ctx: &mut ExecCtx<R, E>) {}
 }
 
