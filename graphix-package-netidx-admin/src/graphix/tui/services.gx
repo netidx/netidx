@@ -363,40 +363,46 @@ let services = |#units_dir: string, #on_close: fn(e: Any) -> null, open: Any| ->
   };
   {
     catch(e) fail("Service control failed", (e.0).error);
-    let states = control_r?;
-    let verb = select run {
-      `Control(c) => fmt_op(c.op),
-      _ => "Services"
-    };
-    toast <- {
-      title: states ~ verb,
-      lines: array::map(states, |u: LocalUnit| {
-        let (word, _) = state_word(u.state, true);
-        "[u.name]: [word]"
-      }),
-      error: false
-    };
-    load <- states
+    seq control_r {
+      let states = control_r?;
+      let verb = select run {
+        `Control(c) => fmt_op(c.op),
+        _ => "Services"
+      };
+      toast <- {
+        title: verb,
+        lines: array::map(states, |u: LocalUnit| {
+          let (word, _) = state_word(u.state, true);
+          "[u.name]: [word]"
+        }),
+        error: false
+      };
+      load <- states
+    }
   };
   {
     catch(e) fail("Saving the unit failed", (e.0).error);
-    let reloaded = install_r?;
-    let name = reloaded ~ select run {
-      `Install(i) => i.name,
-      _ => ""
-    };
-    toast <- { title: "Unit saved", lines: ["Saved unit [name].", reload_text(reloaded)], error: false };
-    load <- reloaded
+    seq install_r {
+      let reloaded = install_r?;
+      let name = select run {
+        `Install(i) => i.name,
+        _ => ""
+      };
+      toast <- { title: "Unit saved", lines: ["Saved unit [name].", reload_text(reloaded)], error: false };
+      load <- reloaded
+    }
   };
   {
     catch(e) fail("Deleting the unit failed", (e.0).error);
-    let reloaded = remove_r?;
-    let name = reloaded ~ select run {
-      `Delete(n) => n,
-      _ => ""
-    };
-    toast <- { title: "Unit deleted", lines: ["Deleted unit [name].", reload_text(reloaded)], error: false };
-    load <- reloaded
+    seq remove_r {
+      let reloaded = remove_r?;
+      let name = select run {
+        `Delete(n) => n,
+        _ => ""
+      };
+      toast <- { title: "Unit deleted", lines: ["Deleted unit [name].", reload_text(reloaded)], error: false };
+      load <- reloaded
+    }
   };
   // ── the view: the names beside the selected unit's status and
   // definition ──

@@ -52,12 +52,15 @@ let landing = |
   let notice: [string, null] = null;
   {
     catch(e) never();
-    let text = select path {
+    let p = select path {
       null as _ => never(),
-      p => sys::fs::read_all(p)?
+      p => p
     };
-    let loaded: Book = json::read(text)?;
-    known <- loaded
+    let file = sys::fs::is_file(p)?;
+    {
+      catch(e) notice <- "could not load the admin domain list: [(e.0).error]";
+      known <- json::read(sys::fs::read_all(file)?)?
+    }
   };
   // this host's own domain, from its install record
   select local_domain(true) {
@@ -69,17 +72,19 @@ let landing = |
   };
   let save: Any = never();
   {
-    catch(e) notice <- "could not save the admin domain list: [e]";
-    let d = select save ~ dir {
-      null as _ => never(),
-      d => d
-    };
-    let made = sys::fs::create_dir(#all: true, d)?;
-    let p = select made ~ path {
-      null as _ => never(),
-      p => p
-    };
-    sys::fs::write_all(#path: p, json::write_str(#pretty: true, made ~ known)?)?
+    catch(e) notice <- "could not save the admin domain list: [(e.0).error]";
+    seq save {
+      let d = select dir {
+        null as _ => never(),
+        d => d
+      };
+      sys::fs::create_dir(#all: true, d)?;
+      let p = select path {
+        null as _ => never(),
+        p => p
+      };
+      sys::fs::write_all(#path: p, json::write_str(#pretty: true, known)?)?
+    }
   };
   // ── verification: each saved domain, at each address, in order —
   // at load, after every change to the set, and on demand ──
@@ -123,23 +128,25 @@ let landing = |
   let toast: [{ title: string, lines: Array<string> }, null] = null;
   {
     catch(e) toast <- { title: "Discovery failed", lines: [admin_text((e.0).error)] };
-    let found = discover_domains(discover_at)?;
-    let verified = array::filter_map(found.domains, |r| select r.identity {
-      null as _ => null,
-      id => { domain: r.domain, servers: r.servers, fp: id.fingerprint.code }
-    });
-    known <- array::fold(verified, found ~ known, |book: Book, v| array::fold(
-      v.servers,
-      book,
-      |b: Book, s: string| upsert(b, v.domain, s, v.fp)
-    ));
-    save <- found;
-    toast <- select array::len(found.diagnosis) {
-      0 => select array::len(verified) {
-        0 => { title: "Discovery", lines: ["No admin domain answered on the local network."] },
-        n => { title: "Discovery", lines: ["Found [n] admin domain(s); they are saved."] }
-      },
-      _ => { title: "Discovery", lines: found.diagnosis }
+    seq discover_at {
+      let found = discover_domains(discover_at)?;
+      let verified = array::filter_map(found.domains, |r| select r.identity {
+        null as _ => null,
+        id => { domain: r.domain, servers: r.servers, fp: id.fingerprint.code }
+      });
+      known <- array::fold(verified, known, |book: Book, v| array::fold(
+        v.servers,
+        book,
+        |b: Book, s: string| upsert(b, v.domain, s, v.fp)
+      ));
+      save <- found;
+      toast <- select array::len(found.diagnosis) {
+        0 => select array::len(verified) {
+          0 => { title: "Discovery", lines: ["No admin domain answered on the local network."] },
+          n => { title: "Discovery", lines: ["Found [n] admin domain(s); they are saved."] }
+        },
+        _ => { title: "Discovery", lines: found.diagnosis }
+      }
     }
   };
   // ── keys ──

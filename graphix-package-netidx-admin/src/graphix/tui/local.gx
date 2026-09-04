@@ -421,18 +421,24 @@ let local = |#q: &Question| -> Local {
   };
   let admin_target = never<Target>();
   let admin_entry = never<Entry>();
+  let admin_r = local_target(#cfg_path: admin_req.cfg, admin_req);
   {
     catch(e) fail("Opening this host's admin server failed", (e.0).error);
-    let t = local_target(#cfg_path: admin_req.cfg, admin_req)?;
-    admin_target <- t;
-    admin_entry <- select t ~ admin_req.panel {
-      `Roster => `Roster,
-      `Perms => select t ~ own_base {
-        null as _ => never(),
-        b => `Perms(b)
+    seq admin_r {
+      let t = admin_r?;
+      {
+        admin_target <- t;
+        admin_entry <- select admin_req.panel {
+          `Roster => `Roster,
+          `Perms => select own_base {
+            null as _ => never(),
+            b => `Perms(b)
+          }
+        };
+        screen <- `Admin;
+        null
       }
-    };
-    screen <- t ~ `Admin
+    }
   };
   let pan = panels::panels(
     #q: q,
@@ -505,160 +511,181 @@ let local = |#q: &Question| -> Local {
   *q <- questions(recovery_c);
   *q <- questions(csr_c);
   *q <- questions(extinstall_c);
+  let renew_r = result(renew_c);
+  let update_r = result(update_c);
+  let backup_r = result(backup_c);
+  let autoapprove_r = result(autoapprove_c);
+  let recovery_r = result(recovery_c);
+  let csr_r = result(csr_c);
+  let extinstall_r = result(extinstall_c);
   // ── their outcomes: a toast, then re-detect ──
   {
     catch(e) fail("Renewal failed", (e.0).error);
-    let r = result(renew_c)?;
-    toast <- select r.summary {
-      null as _ => {
-        title: "Nothing to renew",
-        lines: ["Every certificate on this host is outside its renewal window."],
-        error: false
-      },
-      s => {
-        let failed = array::map(r.failed, |f| "[f.cert]: [f.why]");
-        let done = array::concat(r.renewed, r.awaiting_approval);
-        {
-          title: select array::len(r.failed) {
-            0 => "Renewed",
-            _ => "Renewal incomplete"
-          },
-          lines: array::concat([s], done, failed),
-          error: array::len(r.failed) > 0
+    seq renew_r {
+      let r = renew_r?;
+      toast <- select r.summary {
+        null as _ => {
+          title: "Nothing to renew",
+          lines: ["Every certificate on this host is outside its renewal window."],
+          error: false
+        },
+        s => {
+          let failed = array::map(r.failed, |f| "[f.cert]: [f.why]");
+          let done = array::concat(r.renewed, r.awaiting_approval);
+          {
+            title: select array::len(r.failed) {
+              0 => "Renewed",
+              _ => "Renewal incomplete"
+            },
+            lines: array::concat([s], done, failed),
+            error: array::len(r.failed) > 0
+          }
         }
-      }
-    };
-    refresh <- r
+      };
+      refresh <- r
+    }
   };
   {
     catch(e) fail("Update failed", (e.0).error);
-    let r = result(update_c)?;
-    toast <- select r {
-      `UpToDate => {
-        title: "Up to date",
-        lines: ["Already in sync with the admin domain — no changes."],
-        error: false
-      },
-      `Applied({ changes, warnings, restart_hint }) => {
-        title: "Updated",
-        lines: array::concat(
-          array::map(changes, change_text),
-          array::map(warnings, |w| "warning: [w]"),
-          ["", restart_hint]
-        ),
-        error: false
-      }
-    };
-    refresh <- r
+    seq update_r {
+      let r = update_r?;
+      toast <- select r {
+        `UpToDate => {
+          title: "Up to date",
+          lines: ["Already in sync with the admin domain — no changes."],
+          error: false
+        },
+        `Applied({ changes, warnings, restart_hint }) => {
+          title: "Updated",
+          lines: array::concat(
+            array::map(changes, change_text),
+            array::map(warnings, |w| "warning: [w]"),
+            ["", restart_hint]
+          ),
+          error: false
+        }
+      };
+      refresh <- r
+    }
   };
   {
     catch(e) fail("Backup failed", (e.0).error);
-    let r = result(backup_c)?;
-    let components = str::join(#sep: ", ", r.components);
-    toast <- {
-      title: "Installation backup created",
-      lines: [
-        "Target: [r.target]",
-        "Components: [components]",
-        "[r.files] files · [r.bytes] bytes",
-        "Fresh enrollment on restore: [r.identities_to_reenroll] credential(s)",
-        "Manifest SHA-256: [r.manifest_sha256]"
-      ],
-      error: false
+    seq backup_r {
+      let r = backup_r?;
+      let components = str::join(#sep: ", ", r.components);
+      toast <- {
+        title: "Installation backup created",
+        lines: [
+          "Target: [r.target]",
+          "Components: [components]",
+          "[r.files] files · [r.bytes] bytes",
+          "Fresh enrollment on restore: [r.identities_to_reenroll] credential(s)",
+          "Manifest SHA-256: [r.manifest_sha256]"
+        ],
+        error: false
+      }
     }
   };
   {
     catch(e) fail("Auto-renew setup failed", (e.0).error);
-    let r = result(autoapprove_c)?;
-    toast <- select r {
-      `HotSwapped({ warning }) => {
-        title: "Auto-approve rotated",
-        lines: array::concat(
-          ["The running admin server rotated its auto-approve credential in place (no downtime)."],
-          select warning {
-            null as _ => [],
-            w => [w]
-          }
-        ),
-        error: false
-      },
-      `Offline({ rotate, keytab, wiring }) => {
-        let verb = select rotate {
-          true => "rotated",
-          false => "enabled"
-        };
-        let wired = select wiring {
-          `Updated(p) => "Config updated: [p]",
-          `NoCaConfig => "No CA config owns this CA.",
-          `Failed(e) => "Config update failed (non-fatal): [e]"
-        };
-        {
-          title: select rotate {
-            true => "Auto-approve rotated",
-            false => "Auto-approve enabled"
-          },
-          lines: ["Auto-approve [verb]. Keytab: [keytab]", wired],
+    seq autoapprove_r {
+      let r = autoapprove_r?;
+      toast <- select r {
+        `HotSwapped({ warning }) => {
+          title: "Auto-approve rotated",
+          lines: array::concat(
+            ["The running admin server rotated its auto-approve credential in place (no downtime)."],
+            select warning {
+              null as _ => [],
+              w => [w]
+            }
+          ),
           error: false
+        },
+        `Offline({ rotate, keytab, wiring }) => {
+          let verb = select rotate {
+            true => "rotated",
+            false => "enabled"
+          };
+          let wired = select wiring {
+            `Updated(p) => "Config updated: [p]",
+            `NoCaConfig => "No CA config owns this CA.",
+            `Failed(e) => "Config update failed (non-fatal): [e]"
+          };
+          {
+            title: select rotate {
+              true => "Auto-approve rotated",
+              false => "Auto-approve enabled"
+            },
+            lines: ["Auto-approve [verb]. Keytab: [keytab]", wired],
+            error: false
+          }
         }
-      }
-    };
-    refresh <- r
+      };
+      refresh <- r
+    }
   };
   {
     catch(e) fail("Rotating the recovery password failed", (e.0).error);
-    let r = result(recovery_c)?;
-    toast <- {
-      title: "Recovery password rotated",
-      lines: [select r {
-        `HotSwapped => "The running admin server minted a new recovery password (shown above) in place.",
-        `Offline => "Minted a new recovery password (shown above)."
-      }],
-      error: false
-    };
-    refresh <- r
+    seq recovery_r {
+      let r = recovery_r?;
+      toast <- {
+        title: "Recovery password rotated",
+        lines: [select r {
+          `HotSwapped => "The running admin server minted a new recovery password (shown above) in place.",
+          `Offline => "Minted a new recovery password (shown above)."
+        }],
+        error: false
+      };
+      refresh <- r
+    }
   };
   {
     catch(e) fail("Emitting the CSR failed", (e.0).error);
-    let p = result(csr_c)?;
-    toast <- {
-      title: "CSR emitted",
-      lines: ["Wrote a renewal CSR to [p]. Have your external PKI sign it, then install the signed certificate."],
-      error: false
+    seq csr_r {
+      let p = csr_r?;
+      toast <- {
+        title: "CSR emitted",
+        lines: ["Wrote a renewal CSR to [p]. Have your external PKI sign it, then install the signed certificate."],
+        error: false
+      }
     }
   };
   {
     catch(e) fail("Installing the certificate failed", (e.0).error);
-    let r = result(extinstall_c)?;
-    toast <- select r {
-      `FirstInstall({ cfg_path, service_scope }) => {
-        title: "CA certificate installed",
-        lines: array::concat(
-          ["Installed the externally-signed CA certificate; CA configured at [cfg_path]."],
-          select service_scope {
-            null as _ => [],
-            `User => ["Register its OS service: netidx admin service install --scope user"],
-            `System => ["Register its OS service: netidx admin service install --scope system"]
-          }
-        ),
-        error: false
-      },
-      `OfflineCa => {
-        title: "Certificate installed",
-        lines: ["Installed the externally-signed offline CA certificate."],
-        error: false
-      },
-      `Renewal => {
-        title: "Certificate renewed",
-        lines: ["Renewed the CA certificate. Its admin server was not running; start it to serve the new certificate."],
-        error: false
-      },
-      `HotRenewed({ ca_fingerprint }) => {
-        title: "Certificate renewed",
-        lines: ["Renewed the externally-signed CA without stopping it.", "CA identity: [ca_fingerprint]"],
-        error: false
-      }
-    };
-    refresh <- r
+    seq extinstall_r {
+      let r = extinstall_r?;
+      toast <- select r {
+        `FirstInstall({ cfg_path, service_scope }) => {
+          title: "CA certificate installed",
+          lines: array::concat(
+            ["Installed the externally-signed CA certificate; CA configured at [cfg_path]."],
+            select service_scope {
+              null as _ => [],
+              `User => ["Register its OS service: netidx admin service install --scope user"],
+              `System => ["Register its OS service: netidx admin service install --scope system"]
+            }
+          ),
+          error: false
+        },
+        `OfflineCa => {
+          title: "Certificate installed",
+          lines: ["Installed the externally-signed offline CA certificate."],
+          error: false
+        },
+        `Renewal => {
+          title: "Certificate renewed",
+          lines: ["Renewed the CA certificate. Its admin server was not running; start it to serve the new certificate."],
+          error: false
+        },
+        `HotRenewed({ ca_fingerprint }) => {
+          title: "Certificate renewed",
+          lines: ["Renewed the externally-signed CA without stopping it.", "CA identity: [ca_fingerprint]"],
+          error: false
+        }
+      };
+      refresh <- r
+    }
   };
   // ── navigation, and the questions a teardown asks first ──
   let ca_ask = false;
@@ -691,13 +718,18 @@ let local = |#q: &Question| -> Local {
   let priv_req = never<{ what: string, argv: Array<string>, then: Then }>();
   {
     catch(e) fail("Registering the OS service failed", (e.0).error);
-    select svc_r? {
-      `Registered(line) => svc_ok <- line,
-      `Privileged({ what, argv, name, for_user }) =>
-        priv_req <- { what, argv, then: `VerifyService({ name, for_user }) }
+    seq svc_r {
+      let r = svc_r?;
+      select r {
+        `Registered(line) => { svc_ok <- line; null },
+        `Privileged({ what, argv, name, for_user }) => {
+          priv_req <- { what, argv, then: `VerifyService({ name, for_user }) };
+          null
+        }
+      }
     }
   };
-  {
+  seq svc_ok {
     toast <- { title: "OS service registered", lines: [svc_ok], error: false };
     refresh <- svc_ok
   };
@@ -789,74 +821,86 @@ let local = |#q: &Question| -> Local {
   *q <- questions(restore_c);
   *q <- questions(finish_c);
   *q <- questions(uninstall_c);
+  let install_r = result(install_c);
+  let join_r = result(join_c);
+  let addparent_r = result(addparent_c);
+  let restore_r = result(restore_c);
+  let finish_r = result(finish_c);
+  let uninstall_r = result(uninstall_c);
   {
     catch(e) fail("Install failed", (e.0).error);
-    let r = result(install_c)?;
-    let role_name = select run {
-      `Install(role, _) => role_title(role),
-      _ => "Role"
-    };
-    toast <- select r {
-      `Preview({ service }) => {
-        title: "[role_name] preview",
-        lines: array::concat(
-          ["Preview only — nothing was written."],
-          select service {
-            null as _ => [],
-            _ => ["A real install would then register the OS service."]
-          }
-        ),
-        error: false
-      },
-      `Installed({ service }) => {
-        title: "[role_name] installed",
-        lines: [select service {
-          null as _ => "Configuration written. No OS service was registered.",
-          _ => "Configuration written. Registering the OS service…"
-        }],
-        error: false
-      },
-      `CaAwaitingSignature({ csr }) => {
-        title: "CA awaiting external signature",
-        lines: [
-          "The CA is not running yet; no OS service was registered.",
-          "Subordinate-CA CSR: [csr]",
-          "Have the external PKI sign that CSR, return here, and choose Install Signed Certificate (External CA)."
-        ],
-        error: false
-      }
-    };
-    select r {
-      `Installed({ service }) => need_service(r, service),
-      _ => never()
-    };
-    refresh <- r
+    seq install_r {
+      let r = install_r?;
+      select r {
+        `Installed({ service }) => need_service(r, service),
+        _ => null
+      };
+      let role_name = select run {
+        `Install(role, _) => role_title(role),
+        _ => "Role"
+      };
+      toast <- select r {
+        `Preview({ service }) => {
+          title: "[role_name] preview",
+          lines: array::concat(
+            ["Preview only — nothing was written."],
+            select service {
+              null as _ => [],
+              _ => ["A real install would then register the OS service."]
+            }
+          ),
+          error: false
+        },
+        `Installed({ service }) => {
+          title: "[role_name] installed",
+          lines: [select service {
+            null as _ => "Configuration written. No OS service was registered.",
+            _ => "Configuration written. Registering the OS service…"
+          }],
+          error: false
+        },
+        `CaAwaitingSignature({ csr }) => {
+          title: "CA awaiting external signature",
+          lines: [
+            "The CA is not running yet; no OS service was registered.",
+            "Subordinate-CA CSR: [csr]",
+            "Have the external PKI sign that CSR, return here, and choose Install Signed Certificate (External CA)."
+          ],
+          error: false
+        }
+      };
+      refresh <- r
+    }
   };
   {
     catch(e) fail("Join failed", (e.0).error);
-    let r = result(join_c)?;
-    let dry = select run {
-      `Join(d) => d,
-      _ => false
-    };
-    toast <- select r ~ dry {
-      true => { title: "Join preview", lines: ["Preview only — nothing was written."], error: false },
-      false => { title: "Joined", lines: ["Joined the admin domain. Restart the local resolver to use it."], error: false }
-    };
-    refresh <- r
+    seq join_r {
+      let r = join_r?;
+      let dry = select run {
+        `Join(d) => d,
+        _ => false
+      };
+      toast <- select dry {
+        true => { title: "Join preview", lines: ["Preview only — nothing was written."], error: false },
+        false => { title: "Joined", lines: ["Joined the admin domain. Restart the local resolver to use it."], error: false }
+      };
+      refresh <- r
+    }
   };
   {
     catch(e) fail("Adding the parent failed", (e.0).error);
-    let r = result(addparent_c)?;
-    toast <- {
-      title: "Parent added",
-      lines: [
-        "Delegation of [r.proposed_path] requested and approved.",
-        "Configuration is written; do not restart the whole admin domain at once. Restart one member, wait the resolver delay-reads period for publishers to republish, then restart the next member."
-      ],
-      error: false
-    };
-    refresh <- r
+    seq addparent_r {
+      let r = addparent_r?;
+      toast <- {
+        title: "Parent added",
+        lines: [
+          "Delegation of [r.proposed_path] requested and approved.",
+          "Configuration is written; do not restart the whole admin domain at once. Restart one member, wait the resolver delay-reads period for publishers to republish, then restart the next member."
+        ],
+        error: false
+      };
+      refresh <- r
+    }
   };
   let restore_done = |t: Any, role: InstallRole, service: [Scope, null], reconciled: [string, null]| -> null {
     toast <- {
@@ -877,17 +921,20 @@ let local = |#q: &Question| -> Local {
   };
   {
     catch(e) fail("Restore failed", (e.0).error);
-    let r = result(restore_c)?;
-    select r {
-      `Finish(o) => restore_done(o, o.role, o.service, o.reconciled),
-      `ServiceThenFinish({ scope, service, staged }) => {
-        restore_staged <- staged;
-        toast <- {
-          title: "CA restored",
-          lines: ["Starting the CA before re-enrolling its co-located TLS roles… Once its service runs, press F to finish the restore."],
-          error: false
-        };
-        svc_req <- { scope, name: service.name, for_user: service.for_user }
+    seq restore_r {
+      let r = restore_r?;
+      select r {
+        `Finish(o) => restore_done(o, o.role, o.service, o.reconciled),
+        `ServiceThenFinish({ scope, service, staged }) => {
+          restore_staged <- staged;
+          toast <- {
+            title: "CA restored",
+            lines: ["Starting the CA before re-enrolling its co-located TLS roles… Once its service runs, press F to finish the restore."],
+            error: false
+          };
+          svc_req <- { scope, name: service.name, for_user: service.for_user };
+          null
+        }
       }
     }
   };
@@ -897,63 +944,69 @@ let local = |#q: &Question| -> Local {
   };
   {
     catch(e) fail("Finishing the restore failed", (e.0).error);
-    let o = result(finish_c)?;
-    restore_done(o, o.role, o.service, o.reconciled)
+    seq finish_r {
+      let o = finish_r?;
+      restore_done(o, o.role, o.service, o.reconciled)
+    }
   };
   {
     catch(e) fail("Uninstall failed", (e.0).error);
-    let r = result(uninstall_c)?;
-    let kept_lines = |kept: Array<{ path: string, why: string }>| -> Array<string>
-      array::map(kept, |k| "Kept [k.path] ([k.why]).");
-    toast <- select r {
-      `Nothing => { title: "Uninstalled", lines: ["Nothing to remove."], error: false },
-      `Removed(rep) => {
-        let service_note = select rep.service_was_installed {
-          true => " and the OS service",
-          false => ""
-        };
-        let destroyed: Array<string> = select rep.ca_destroyed {
-          null as _ => [],
-          d => ["Destroyed the CA at [d]."]
-        };
-        {
-          title: "Uninstalled",
-          lines: array::concat(
-            ["Removed [array::len(rep.removed)] path(s)[service_note]."],
-            kept_lines(rep.kept),
-            destroyed
-          ),
+    seq uninstall_r {
+      let r = uninstall_r?;
+      let kept_lines = |kept: Array<{ path: string, why: string }>| -> Array<string>
+        array::map(kept, |k| "Kept [k.path] ([k.why]).");
+      toast <- select r {
+        `Nothing => { title: "Uninstalled", lines: ["Nothing to remove."], error: false },
+        `Removed(rep) => {
+          let service_note = select rep.service_was_installed {
+            true => " and the OS service",
+            false => ""
+          };
+          let destroyed: Array<string> = select rep.ca_destroyed {
+            null as _ => [],
+            d => ["Destroyed the CA at [d]."]
+          };
+          {
+            title: "Uninstalled",
+            lines: array::concat(
+              ["Removed [array::len(rep.removed)] path(s)[service_note]."],
+              kept_lines(rep.kept),
+              destroyed
+            ),
+            error: false
+          }
+        },
+        `Escalate({ covers, .. }) => {
+          title: "Administrator privileges needed",
+          lines: [
+            "The system-scope parts are removed on the terminal next; enter your password there.",
+            select covers {
+              `Everything => "That completes the removal.",
+              `SystemServiceOnly => "The user-scope configuration is removed afterwards."
+            }
+          ],
           error: false
         }
-      },
-      `Escalate({ covers, .. }) => {
-        title: "Administrator privileges needed",
-        lines: [
-          "The system-scope parts are removed on the terminal next; enter your password there.",
-          select covers {
-            `Everything => "That completes the removal.",
-            `SystemServiceOnly => "The user-scope configuration is removed afterwards."
-          }
-        ],
-        error: false
+      };
+      let remove_ca = select run {
+        `UninstallWith(rc) => rc,
+        _ => false
+      };
+      select r {
+        `Escalate({ covers, argv, .. }) => {
+          priv_req <- {
+            what: "tear down the install",
+            argv: array::push(argv, "--yes"),
+            then: select covers {
+              `Everything => `Nothing,
+              `SystemServiceOnly => `UninstallAgain(remove_ca)
+            }
+          };
+          null
+        },
+        _ => refresh <- r
       }
-    };
-    let remove_ca = select run {
-      `UninstallWith(rc) => rc,
-      _ => false
-    };
-    select r {
-      `Escalate({ covers, argv, .. }) => priv_req <- {
-        what: "tear down the install",
-        argv: array::push(argv, "--yes"),
-        then: select covers {
-          `Everything => `Nothing,
-          `SystemServiceOnly => `UninstallAgain(r ~ remove_ca)
-        }
-      },
-      _ => never()
-    };
-    refresh <- r
+    }
   };
   // ── the teardown's CA question, and the parent picker with its form ──
   let ca_handle = |e: Event| -> [`Stop, `Continue] select e {

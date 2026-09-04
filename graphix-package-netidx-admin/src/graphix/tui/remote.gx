@@ -55,18 +55,21 @@ let remote = |#q: &Question, #server: string = ""| -> Remote {
   // a reset password authorizes nothing but its own replacement: the
   // CA refuses the session and names the admin, and that routes here
   let must_change = never<string>();
+  let connect_r = result(connect_c);
   {
     catch(e) select (e.0).error {
       `PasswordChangeRequired(name) => must_change <- name,
       other => conn_err <- admin_text(other)
     };
-    let t = result(connect_c)?;
-    target <- t;
-    screen <- t ~ `Panels;
-    connected <- select info(t) {
-      `Remote({ server, identity, .. }) =>
-        { domain: identity.domain, server, fingerprint: identity.fingerprint.code },
-      `Local(_) => null
+    seq connect_r {
+      let t = connect_r?;
+      target <- t;
+      screen <- `Panels;
+      connected <- select info(t) {
+        `Remote({ server, identity, .. }) =>
+          { domain: identity.domain, server, fingerprint: identity.fingerprint.code },
+        `Local(_) => null
+      }
     }
   };
   let toast: [Toast, null] = null;
@@ -76,13 +79,16 @@ let remote = |#q: &Question, #server: string = ""| -> Remote {
     must_change ~ connect_to
   );
   *q <- questions(chpw_at_c);
+  let chpw_r = result(chpw_at_c);
   {
     catch(e) conn_err <- admin_text((e.0).error);
-    let r = result(chpw_at_c)?;
-    toast <- r ~ {
-      title: "Password changed",
-      lines: ["Connect again with the new password."],
-      error: false
+    seq chpw_r {
+      let r = chpw_r?;
+      toast <- {
+        title: "Password changed",
+        lines: ["Connect again with the new password."],
+        error: false
+      }
     }
   };
   let connect_keys = |ev: Event, k: KeyEvent| -> [`Stop, `Continue] select k.code {

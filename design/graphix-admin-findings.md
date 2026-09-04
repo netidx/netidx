@@ -151,6 +151,15 @@ Test side and package:
     task may run each cycle on a different worker; measure the thread
     id per cycle before designing around it (a per-context memo loan,
     or pinning the runtime to a thread).
+16. **A seq let's fire is only live in the next step** (09-04). Later
+    steps see it standing. Top-level seq `<-` still fire (the lowering
+    samples on `pc`). A helper that samples on the let (`need_service`'s
+    `t ~ scope`) after another statement (the toast) never writes.
+    `never()` as a seq step stalls the run and busy-drops later
+    triggers. Disposition: usage — optional follow-ons go in the step
+    immediately after the let; skip with `_ => null`. Not a compiler
+    fix unless seq rewrites user `~` on captured lets, which would be
+    surprising.
 
 Closed this campaign, for the record: the modal/overlay widget and
 synthetic key events (08-18); the module system (08-22); coverage
@@ -1313,3 +1322,32 @@ What it guides:
 
 **Disposition: ledger 9 closed; the fusion pre-gate and the role-menu
 profile are the follow-ups, both graphix-side.**
+
+## 2026-09-04 — seq across the port, and a later-step standing let
+
+Straight-line `seq` replaced the hand-written wait-then-toast-then-
+refresh machines: local lifecycle (renew through uninstall, opening
+the in-process admin server, OS-service registration), every panel
+action outcome, the three services outcomes, landing save and
+discover, remote connect and the post-reset password change. One-liner
+loads, key handlers, per-slot sync/probe, and the pump stay as they
+are — they are not sequences.
+
+The first real bug the conversion introduced: `need_service(r, service)`
+after the install toast sampled `t ~ scope`, and `r` was already
+standing, so `svc_req` never wrote. Restore was fine only because
+`restore_done` is the step immediately after `let r`. Moved the
+install follow-on to that slot. Same class: a `never()` skip arm as a
+seq step stalls the machine (busy-drop); `_ => null` is the skip.
+
+Landing's `catch(e) never()` on the bookmarks file swallowed corrupt
+JSON with the missing-file case; missing is now `is_file` (silent),
+read/parse errors notice. Save interpolated the whole `Error` box;
+it peels `(e.0).error`.
+
+DEV `milestone_timing` after the conversion: registration 1.10s,
+app-main 7.36s (2.74s fusion off), 2102 attempted / 563 fused. More
+kernels because each seq is a select machine; still linear, no wall.
+All 28 package tests pass (TUI harness sequential).
+
+**Disposition: ledger 16; seq stays. No graphix change.**
