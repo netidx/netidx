@@ -821,6 +821,7 @@ impl<R: Rt, E: UserEvent> Apply<R, E> for Events {
             ctx.rt.unref_var(id, self.top_id);
         }
         self.cached.clear();
+        self.out = TagValue::phantom();
     }
 
     fn reset_replay(&mut self, _ctx: &mut ExecCtx<R, E>) {
