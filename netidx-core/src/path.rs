@@ -18,7 +18,7 @@ use std::{
 
 pub const SEP: char = '/';
 pub const ROOT: &str = "/";
-pub const PATH_ESC: LazyLock<Escape> =
+pub static PATH_ESC: LazyLock<Escape> =
     LazyLock::new(|| Escape::new('\\', &['\\', '/'], &[], None).unwrap());
 
 fn is_canonical(s: &str) -> bool {
