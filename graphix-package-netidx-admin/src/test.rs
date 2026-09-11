@@ -167,6 +167,9 @@ async fn milestone_image() -> anyhow::Result<()> {
     cold.shutdown().await;
     let mut warm_t = Vec::new();
     for _ in 0..5 {
+        // The previous runtime tears down on this executor after its
+        // shutdown returns; a start measured over it would count that.
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
         let (tx, _rx) = tokio::sync::mpsc::channel(10);
         let t = std::time::Instant::now();
         let warm = init_with_session(
