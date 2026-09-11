@@ -624,251 +624,217 @@ let panels = |
   {
     catch(e) fail("Approve failed", (e.0).error);
     seq approve_r {
-      do {
-        let r = approve_r?;
-        let groups = str::join(#sep: ", ", r.id_map_groups);
-        toast <- {
-          title: "Approved",
-          lines: array::concat(
-            ["[r.requested_name] approved", "id-map groups: [groups]"],
-            r.warnings
-          ),
-          error: false
-        };
-        load <- `Queue
-      }
+      let r = approve_r?;
+      let groups = str::join(#sep: ", ", r.id_map_groups);
+      toast <- {
+        title: "Approved",
+        lines: array::concat(
+          ["[r.requested_name] approved", "id-map groups: [groups]"],
+          r.warnings
+        ),
+        error: false
+      };
+      load <- `Queue
     }
   };
   {
     catch(e) fail("Deny failed", (e.0).error);
     seq deny_r {
-      do {
-        let name = deny_r?;
-        toast <- { title: "Denied", lines: ["Denied [name]"], error: false };
-        load <- `Queue
-      }
+      let name = deny_r?;
+      toast <- { title: "Denied", lines: ["Denied [name]"], error: false };
+      load <- `Queue
     }
   };
   {
     catch(e) fail("Approving renewals failed", (e.0).error);
     seq renewals_r {
-      do {
-        let rs = renewals_r?;
-        toast <- {
-          title: "Renewals",
-          lines: select array::len(rs) {
-            0 => ["No verified renewals were pending"],
-            _ => array::map(rs, |r| select r.error {
-              null as _ => "renewed [r.requested_name]",
-              e => "failed [r.requested_name]: [e]"
-            })
-          },
-          error: false
-        };
-        load <- `Queue
-      }
+      let rs = renewals_r?;
+      toast <- {
+        title: "Renewals",
+        lines: select array::len(rs) {
+          0 => ["No verified renewals were pending"],
+          _ => array::map(rs, |r| select r.error {
+            null as _ => "renewed [r.requested_name]",
+            e => "failed [r.requested_name]: [e]"
+          })
+        },
+        error: false
+      };
+      load <- `Queue
     }
   };
   {
     catch(e) fail("Approving the delegation failed", (e.0).error);
     seq apdel_r {
-      do {
-        let r = apdel_r?;
-        let lines = array::map(r.peers, |p| select p.error {
-          null as _ => "updated [p.server]",
-          e => "failed [p.server]: [e]"
-        });
-        toast <- {
-          title: "Delegation approved",
-          lines: array::concat(["[r.proposed_path] approved"], lines),
-          error: false
-        };
-        load <- `Delegations
-      }
+      let r = apdel_r?;
+      let lines = array::map(r.peers, |p| select p.error {
+        null as _ => "updated [p.server]",
+        e => "failed [p.server]: [e]"
+      });
+      toast <- {
+        title: "Delegation approved",
+        lines: array::concat(["[r.proposed_path] approved"], lines),
+        error: false
+      };
+      load <- `Delegations
     }
   };
   {
     catch(e) fail("Denying the delegation failed", (e.0).error);
     seq dendel_r {
-      do {
-        let r = dendel_r?;
-        toast <- {
-          title: "Delegation denied",
-          lines: ["Denied [r.proposed_path]"],
-          error: false
-        };
-        load <- `Delegations
-      }
+      let r = dendel_r?;
+      toast <- {
+        title: "Delegation denied",
+        lines: ["Denied [r.proposed_path]"],
+        error: false
+      };
+      load <- `Delegations
     }
   };
   {
     catch(e) fail("Revoke failed", (e.0).error);
     seq revoke_r {
-      do {
-        let r = revoke_r?;
-        let lines = array::map(r.revoked, |c| "revoked serial [c.serial] ([c.name])");
-        toast <- {
-          title: "Revoked",
-          lines: array::concat(lines, r.warnings),
-          error: false
-        };
-        load <- `Certs
-      }
+      let r = revoke_r?;
+      let lines = array::map(r.revoked, |c| "revoked serial [c.serial] ([c.name])");
+      toast <- {
+        title: "Revoked",
+        lines: array::concat(lines, r.warnings),
+        error: false
+      };
+      load <- `Certs
     }
   };
   {
     catch(e) fail("Password reset failed", (e.0).error);
     seq resetpw_r {
-      do {
-        let pw = resetpw_r?;
-        toast <- {
-          title: "One-time password",
-          lines: ["Record this now; it is never shown again:", pw],
-          error: false
-        };
-        load <- `Roster
-      }
+      let pw = resetpw_r?;
+      toast <- {
+        title: "One-time password",
+        lines: ["Record this now; it is never shown again:", pw],
+        error: false
+      };
+      load <- `Roster
     }
   };
   {
     catch(e) fail("Changing the password failed", (e.0).error);
     seq chpw_r {
-      do {
-        let r = chpw_r?;
-        toast <- {
-          title: "Password changed",
-          lines: ["The session's credential is gone — connect again with the new password."],
-          error: false
-        };
-        on_close(`SessionLost)
-      }
+      let r = chpw_r?;
+      toast <- {
+        title: "Password changed",
+        lines: ["The session's credential is gone — connect again with the new password."],
+        error: false
+      };
+      on_close(`SessionLost)
     }
   };
   {
     catch(e) fail("Removing the admin failed", (e.0).error);
     seq rmadmin_r {
-      do {
-        let r = rmadmin_r?;
-        toast <- {
-          title: "Admin removed",
-          lines: ["The keyslot was removed"],
-          error: false
-        };
-        load <- `Roster
-      }
+      let r = rmadmin_r?;
+      toast <- {
+        title: "Admin removed",
+        lines: ["The keyslot was removed"],
+        error: false
+      };
+      load <- `Roster
     }
   };
   {
     catch(e) fail("Removing the server failed", (e.0).error);
     seq rmserver_r {
-      do {
-        let r = rmserver_r?;
-        let lines = array::map(r.peers, |p| select p.error {
-          null as _ => "updated [p.server]",
-          e => "failed [p.server]: [e]"
-        });
-        toast <- {
-          title: "Server removed",
-          lines: array::concat(["revoked [r.revoked] certificates"], lines),
-          error: false
-        };
-        load <- `Servers
-      }
+      let r = rmserver_r?;
+      let lines = array::map(r.peers, |p| select p.error {
+        null as _ => "updated [p.server]",
+        e => "failed [p.server]: [e]"
+      });
+      toast <- {
+        title: "Server removed",
+        lines: array::concat(["revoked [r.revoked] certificates"], lines),
+        error: false
+      };
+      load <- `Servers
     }
   };
   {
     catch(e) fail("Reconcile failed", (e.0).error);
     seq reconcile_r {
-      do {
-        let r = reconcile_r?;
-        let lines = array::map(r.peers, |p| select p.error {
-          null as _ => "updated [p.server]",
-          e => "failed [p.server]: [e]"
-        });
-        toast <- { title: "Reconciled", lines, error: false };
-        load <- `Servers
-      }
+      let r = reconcile_r?;
+      let lines = array::map(r.peers, |p| select p.error {
+        null as _ => "updated [p.server]",
+        e => "failed [p.server]: [e]"
+      });
+      toast <- { title: "Reconciled", lines, error: false };
+      load <- `Servers
     }
   };
   {
     catch(e) fail("Service control failed", (e.0).error);
     seq svcc_r {
-      do {
-        let units = svcc_r?;
-        let verb = select run { `Service(a) => fmt_service_op(a.op), _ => "Applied" };
-        toast <- {
-          title: verb,
-          lines: array::map(units, |u| "[u.unit]: [fmt_unit_state(u.state)]"),
-          error: false
-        };
-        load <- `Services
-      }
+      let units = svcc_r?;
+      let verb = select run { `Service(a) => fmt_service_op(a.op), _ => "Applied" };
+      toast <- {
+        title: verb,
+        lines: array::map(units, |u| "[u.unit]: [fmt_unit_state(u.state)]"),
+        error: false
+      };
+      load <- `Services
     }
   };
   {
     catch(e) fail("Setting the read gate failed", (e.0).error);
     seq gate_r {
-      do {
-        let r = gate_r?;
-        toast <- {
-          title: "Read gate set",
-          lines: ["The member applies it at its next register; the Servers panel shows what it reports."],
-          error: false
-        };
-        load <- `Servers
-      }
+      let r = gate_r?;
+      toast <- {
+        title: "Read gate set",
+        lines: ["The member applies it at its next register; the Servers panel shows what it reports."],
+        error: false
+      };
+      load <- `Servers
     }
   };
   {
     catch(e) fail("Recording the permission failed", (e.0).error);
     seq setperm_r {
-      do {
-        let r = setperm_r?;
-        let what = select r.changed {
-          true => "Recorded as version [r.version]. Every member of the cluster converges within a poll interval.",
-          false => "Already so — nothing changed (version [r.version])."
-        };
-        toast <- { title: "Permissions updated", lines: [what], error: false };
-        load <- `Perms
-      }
+      let r = setperm_r?;
+      let what = select r.changed {
+        true => "Recorded as version [r.version]. Every member of the cluster converges within a poll interval.",
+        false => "Already so — nothing changed (version [r.version])."
+      };
+      toast <- { title: "Permissions updated", lines: [what], error: false };
+      load <- `Perms
     }
   };
   {
     catch(e) fail("Adding the admin failed", (e.0).error);
     seq addadmin_r {
-      do {
-        let pw = addadmin_r?;
-        toast <- {
-          title: "One-time password",
-          lines: ["Record this now; it is never shown again:", pw],
-          error: false
-        };
-        load <- `Roster
-      }
+      let pw = addadmin_r?;
+      toast <- {
+        title: "One-time password",
+        lines: ["Record this now; it is never shown again:", pw],
+        error: false
+      };
+      load <- `Roster
     }
   };
   {
     catch(e) fail("Setting the policy failed", (e.0).error);
     seq setpolicy_r {
-      do {
-        let r = setpolicy_r?;
-        toast <- { title: "Policy updated", lines: ["The admin's policy was replaced."], error: false };
-        load <- `Roster
-      }
+      let r = setpolicy_r?;
+      toast <- { title: "Policy updated", lines: ["The admin's policy was replaced."], error: false };
+      load <- `Roster
     }
   };
   {
     catch(e) fail("Removing the permission failed", (e.0).error);
     seq rmperm_r {
-      do {
-        let r = rmperm_r?;
-        let what = select r.changed {
-          true => "Removed; recorded as version [r.version].",
-          false => "There was no such entry (version [r.version])."
-        };
-        toast <- { title: "Permissions updated", lines: [what], error: false };
-        load <- `Perms
-      }
+      let r = rmperm_r?;
+      let what = select r.changed {
+        true => "Removed; recorded as version [r.version].",
+        false => "There was no such entry (version [r.version])."
+      };
+      toast <- { title: "Permissions updated", lines: [what], error: false };
+      load <- `Perms
     }
   };
   // ── key handling ──
