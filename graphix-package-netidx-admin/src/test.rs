@@ -191,6 +191,58 @@ async fn milestone_image() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// The image milestone with fusion on: the kernels travel in the image.
+/// `cargo test -p graphix-package-netidx-admin milestone_image_fused -- --ignored --nocapture`
+#[tokio::test]
+#[ignore = "timing, run by hand"]
+async fn milestone_image_fused() -> anyhow::Result<()> {
+    use graphix_compiler::expr::Source;
+    use graphix_package_core::testing::init_with_session;
+    use graphix_rt::RegistrationImage;
+    let prog = arcstr::literal!("netidx_admin::tui::app::app(#server: \"127.0.0.1:1\")");
+    let (tx, _rx) = tokio::sync::mpsc::channel(10);
+    let (reg_tx, _reg_rx) = tokio::sync::oneshot::channel();
+    let (prog_tx, prog_rx) = tokio::sync::oneshot::channel();
+    let t0 = std::time::Instant::now();
+    let cold = init_with_session(
+        tx,
+        &crate::TEST_REGISTER,
+        Default::default(),
+        RegistrationImage::Save(reg_tx),
+        Some(Source::Internal(prog)),
+        Some(prog_tx),
+    )
+    .await?;
+    let cold_t = t0.elapsed();
+    let image = prog_rx.await??;
+    let stats = cold.rt.fusion_stats().await?;
+    cold.shutdown().await;
+    let mut warm_t = Vec::new();
+    for _ in 0..5 {
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        let (tx, _rx) = tokio::sync::mpsc::channel(10);
+        let t = std::time::Instant::now();
+        let warm = init_with_session(
+            tx,
+            &crate::TEST_REGISTER,
+            Default::default(),
+            RegistrationImage::Load(image.clone()),
+            None,
+            None,
+        )
+        .await?;
+        warm_t.push(t.elapsed());
+        warm.shutdown().await;
+    }
+    eprintln!(
+        "milestone image fused: cold {cold_t:?} (kernels attempted {} fused {}), warm {warm_t:?}, image {} bytes",
+        stats.attempted,
+        stats.fused,
+        image.len()
+    );
+    Ok(())
+}
+
 /// `cargo test -p graphix-package-netidx-admin milestone_timing -- --ignored --nocapture`
 #[tokio::test]
 #[ignore = "milestone timing, run by hand"]
