@@ -139,6 +139,55 @@ async fn abstract_type_predicate_is_nominal() -> anyhow::Result<()> {
 /// (all stdlib + this package's packed-AST decode + typecheck) and
 /// the compile of the app main (both tabs under the pump). Run by
 /// hand at every ~1k lines of `.gx`:
+/// The session image of the app, cold against warm, wall clock,
+/// fusion off (the image cannot hold kernels); run by hand:
+/// `cargo test -p graphix-package-netidx-admin milestone_image -- --ignored --nocapture`
+#[tokio::test]
+#[ignore = "timing, run by hand"]
+async fn milestone_image() -> anyhow::Result<()> {
+    use graphix_compiler::{CFlag, expr::Source};
+    use graphix_package_core::testing::init_with_session;
+    use graphix_rt::RegistrationImage;
+    let prog = arcstr::literal!("netidx_admin::tui::app::app(#server: \"127.0.0.1:1\")");
+    let (tx, _rx) = tokio::sync::mpsc::channel(10);
+    let (reg_tx, _reg_rx) = tokio::sync::oneshot::channel();
+    let (prog_tx, prog_rx) = tokio::sync::oneshot::channel();
+    let t0 = std::time::Instant::now();
+    let cold = init_with_session(
+        tx,
+        &crate::TEST_REGISTER,
+        CFlag::FusionDisabled.into(),
+        RegistrationImage::Save(reg_tx),
+        Some(Source::Internal(prog)),
+        Some(prog_tx),
+    )
+    .await?;
+    let cold_t = t0.elapsed();
+    let image = prog_rx.await??;
+    cold.shutdown().await;
+    let mut warm_t = Vec::new();
+    for _ in 0..5 {
+        let (tx, _rx) = tokio::sync::mpsc::channel(10);
+        let t = std::time::Instant::now();
+        let warm = init_with_session(
+            tx,
+            &crate::TEST_REGISTER,
+            CFlag::FusionDisabled.into(),
+            RegistrationImage::Load(image.clone()),
+            None,
+            None,
+        )
+        .await?;
+        warm_t.push(t.elapsed());
+        warm.shutdown().await;
+    }
+    eprintln!(
+        "milestone image: cold {cold_t:?}, warm {warm_t:?}, image {} bytes",
+        image.len()
+    );
+    Ok(())
+}
+
 /// `cargo test -p graphix-package-netidx-admin milestone_timing -- --ignored --nocapture`
 #[tokio::test]
 #[ignore = "milestone timing, run by hand"]
