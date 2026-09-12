@@ -11,10 +11,11 @@ use arcstr::ArcStr;
 use compact_str::format_compact;
 use graphix_compiler::{
     Apply, BuiltIn, Event, ExecCtx, FastCall, Node, Rt, Scope, TagValue, UserEvent,
-    effects::Effect, errf, expr::ExprId, typ::FnType,
+    effects::Effect, errf, expr::ExprId, image::ImageBuf, typ::FnType,
 };
 use graphix_package_core::{
     CachedArgs, CachedArgsAsync, CachedVals, EvalCached, EvalCachedAsync, fast_eval,
+    unit_image_state,
 };
 use netidx_admin::{
     answer::Answerer as _,
@@ -24,6 +25,7 @@ use netidx_admin_proto::{
     fingerprint::Fingerprint,
     policy::{AdminInfo, SlotKind},
 };
+use netidx_core::pack::PackError;
 use netidx_derive::{FromValue, IntoValue};
 use netidx_value::{
     Abstract, FromValue, ValArray, Value, abstract_type::AbstractWrapper,
@@ -262,6 +264,15 @@ impl EvalCachedAsync for LocalEv {
     }
 }
 
+unit_image_state!(
+    LocalEv,
+    DriftEv,
+    ListAdminsEv,
+    ParseFingerprintEv,
+    IdenticonEv,
+    InfoEv
+);
+
 type Local = CachedArgsAsync<LocalEv>;
 
 // ── drift (async) ────────────────────────────────────────────────
@@ -473,9 +484,29 @@ impl<R: Rt, E: UserEvent, K: SessionKind> BuiltIn<R, E> for SessionCeremony<K> {
             ph: PhantomData,
         }))
     }
+
+    fn image_decode(
+        _ctx: &mut ExecCtx<R, E>,
+        _from: &[Node<R, E>],
+        buf: &mut &[u8],
+    ) -> Result<Box<dyn Apply<R, E>>, PackError> {
+        Ok(Box::new(SessionCeremony::<K> {
+            trigger: ceremony::Trigger::image_decode(buf)?,
+            out: TagValue::phantom(),
+            ph: PhantomData,
+        }))
+    }
 }
 
 impl<R: Rt, E: UserEvent, K: SessionKind> Apply<R, E> for SessionCeremony<K> {
+    fn image_len(&self) -> usize {
+        self.trigger.image_len()
+    }
+
+    fn image_encode(&self, buf: &mut ImageBuf) -> Result<(), PackError> {
+        self.trigger.image_encode(buf)
+    }
+
     fn update(
         &mut self,
         ctx: &mut ExecCtx<R, E>,

@@ -22,9 +22,11 @@ use arcstr::ArcStr;
 use enumflags2::BitFlags;
 use graphix_compiler::{
     Apply, BuiltIn, Event, ExecCtx, Node, Rt, Scope, TagValue, UserEvent,
-    effects::Effect, errf, expr::ExprId, typ::FnType,
+    effects::Effect, errf, expr::ExprId, image::ImageBuf, typ::FnType,
 };
-use graphix_package_core::{CachedArgsAsync, CachedVals, EvalCachedAsync};
+use graphix_package_core::{
+    CachedArgsAsync, CachedVals, EvalCachedAsync, unit_image_state,
+};
 use netidx::resolver_server::config::ReadGate;
 use netidx_admin::{
     discovery,
@@ -38,6 +40,7 @@ use netidx_admin_proto::{
     AdminServerId, PeerResult, Role, Secret, ServiceUnit, ServiceUnitDef,
     fingerprint::Fingerprint, policy::Policy,
 };
+use netidx_core::pack::PackError;
 use netidx_derive::{FromValue, IntoValue};
 use netidx_value::{FromValue, Value};
 use std::{fmt::Debug, marker::PhantomData, net::SocketAddr, time::Duration};
@@ -665,9 +668,29 @@ impl<R: Rt, E: UserEvent, T: RemoteOp> BuiltIn<R, E> for RemoteCeremony<T> {
             ph: PhantomData,
         }))
     }
+
+    fn image_decode(
+        _ctx: &mut ExecCtx<R, E>,
+        _from: &[Node<R, E>],
+        buf: &mut &[u8],
+    ) -> Result<Box<dyn Apply<R, E>>, PackError> {
+        Ok(Box::new(RemoteCeremony::<T> {
+            trigger: Trigger::image_decode(buf)?,
+            out: TagValue::phantom(),
+            ph: PhantomData,
+        }))
+    }
 }
 
 impl<R: Rt, E: UserEvent, T: RemoteOp> Apply<R, E> for RemoteCeremony<T> {
+    fn image_len(&self) -> usize {
+        self.trigger.image_len()
+    }
+
+    fn image_encode(&self, buf: &mut ImageBuf) -> Result<(), PackError> {
+        self.trigger.image_encode(buf)
+    }
+
     fn update(
         &mut self,
         ctx: &mut ExecCtx<R, E>,
@@ -1138,9 +1161,28 @@ impl<R: Rt, E: UserEvent> BuiltIn<R, E> for ChangePassword {
             out: TagValue::phantom(),
         }))
     }
+
+    fn image_decode(
+        _ctx: &mut ExecCtx<R, E>,
+        _from: &[Node<R, E>],
+        buf: &mut &[u8],
+    ) -> Result<Box<dyn Apply<R, E>>, PackError> {
+        Ok(Box::new(ChangePassword {
+            trigger: Trigger::image_decode(buf)?,
+            out: TagValue::phantom(),
+        }))
+    }
 }
 
 impl<R: Rt, E: UserEvent> Apply<R, E> for ChangePassword {
+    fn image_len(&self) -> usize {
+        self.trigger.image_len()
+    }
+
+    fn image_encode(&self, buf: &mut ImageBuf) -> Result<(), PackError> {
+        self.trigger.image_encode(buf)
+    }
+
     fn update(
         &mut self,
         ctx: &mut ExecCtx<R, E>,
@@ -1178,6 +1220,8 @@ macro_rules! target_op {
     ($ty:ident, $name:literal, $args:ty, $prepare:expr, $run:expr) => {
         #[derive(Debug, Default)]
         pub(crate) struct $ty;
+
+        unit_image_state!($ty);
 
         impl EvalCachedAsync for $ty {
             type Args = (TargetValue, $args);
@@ -1426,6 +1470,8 @@ impl EvalCachedAsync for DiscoverEv {
         }
     }
 }
+
+unit_image_state!(DiscoverEv, DiscoverDomainsEv, IdentityAtEv, LocalDomainEv);
 
 pub(crate) type Discover = CachedArgsAsync<DiscoverEv>;
 

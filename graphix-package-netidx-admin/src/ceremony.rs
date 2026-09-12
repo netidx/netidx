@@ -19,9 +19,13 @@ use arcstr::ArcStr;
 use futures::{SinkExt, channel::mpsc};
 use graphix_compiler::{
     Apply, BindId, BuiltIn, Event, ExecCtx, Node, Rt, Scope, TagValue, UserEvent,
-    effects::Effect, errf, expr::ExprId, typ::FnType,
+    effects::Effect,
+    errf,
+    expr::ExprId,
+    image::{self, ImageBuf},
+    typ::FnType,
 };
-use graphix_package_core::{CachedArgs, CachedVals, EvalCached};
+use graphix_package_core::{CachedArgs, CachedVals, EvalCached, unit_image_state};
 use netidx_admin::{
     answer::{
         AdminDomainChoice, AdminDomainOption, Answerer, Field, OneTimeSecret, Progress,
@@ -30,6 +34,7 @@ use netidx_admin::{
     transport::CaIdentity,
 };
 use netidx_admin_proto::Secret;
+use netidx_core::pack::{Pack, PackError};
 use netidx_derive::IntoValue;
 use netidx_value::{Abstract, Value, abstract_type::AbstractWrapper};
 use parking_lot::Mutex;
@@ -707,6 +712,21 @@ impl Trigger {
         Trigger { args: CachedVals::new(from), pending: false }
     }
 
+    pub(crate) fn image_len(&self) -> usize {
+        self.args.image_len() + self.pending.encoded_len()
+    }
+
+    pub(crate) fn image_encode(&self, buf: &mut ImageBuf) -> Result<(), PackError> {
+        self.args.image_encode(buf)?;
+        self.pending.encode(buf)
+    }
+
+    pub(crate) fn image_decode(buf: &mut &[u8]) -> Result<Self, PackError> {
+        let args = CachedVals::image_decode(buf)?;
+        let pending = bool::decode(buf)?;
+        Ok(Trigger { args, pending })
+    }
+
     /// Update the argument slots; `Some` when the ceremony starts this
     /// cycle, holding every argument's value.
     pub(crate) fn tick<R: Rt, E: UserEvent>(
@@ -786,9 +806,33 @@ impl<R: Rt, E: UserEvent> BuiltIn<R, E> for Events {
             out: TagValue::phantom(),
         }))
     }
+
+    fn image_decode(
+        _ctx: &mut ExecCtx<R, E>,
+        _from: &[Node<R, E>],
+        buf: &mut &[u8],
+    ) -> Result<Box<dyn Apply<R, E>>, PackError> {
+        let top_id = ExprId::decode(buf)?;
+        let cached = CachedVals::image_decode(buf)?;
+        Ok(Box::new(Events { top_id, cached, bind_id: None, out: TagValue::phantom() }))
+    }
 }
 
 impl<R: Rt, E: UserEvent> Apply<R, E> for Events {
+    fn image_len(&self) -> usize {
+        self.top_id.encoded_len() + self.cached.image_len()
+    }
+
+    /// A bound id is a running ceremony's event channel, which only a
+    /// cycle can attach.
+    fn image_encode(&self, buf: &mut ImageBuf) -> Result<(), PackError> {
+        if self.bind_id.is_some() {
+            return Err(PackError::Application(image::NOT_QUIESCENT));
+        }
+        self.top_id.encode(buf)?;
+        self.cached.image_encode(buf)
+    }
+
     fn update(
         &mut self,
         ctx: &mut ExecCtx<R, E>,
@@ -867,6 +911,8 @@ impl<R: Rt, E: UserEvent> EvalCached<R, E> for AnswerEv {
         })
     }
 }
+
+unit_image_state!(AnswerEv);
 
 pub(crate) type Answer = CachedArgs<AnswerEv>;
 

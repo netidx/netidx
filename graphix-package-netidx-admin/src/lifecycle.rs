@@ -16,7 +16,9 @@ use crate::{
 };
 use anyhow::{Context, Result};
 use arcstr::ArcStr;
-use graphix_package_core::{CachedArgsAsync, CachedVals, EvalCachedAsync};
+use graphix_package_core::{
+    CachedArgsAsync, CachedVals, EvalCachedAsync, unit_image_state,
+};
 use netidx_admin::{
     config_lock::ConfigDirLock,
     ops::delegation::{self, AddParentCompletion},
@@ -239,6 +241,13 @@ impl EvalCachedAsync for ParentCandidatesEv {
         }
     }
 }
+
+unit_image_state!(
+    ParentCandidatesEv,
+    InstallServiceEv,
+    EscalateCommandEv,
+    VerifySystemServiceEv
+);
 
 pub(crate) type ParentCandidates = CachedArgsAsync<ParentCandidatesEv>;
 

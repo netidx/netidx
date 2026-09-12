@@ -13,9 +13,11 @@ use anyhow::{Context, Result, bail};
 use arcstr::ArcStr;
 use graphix_compiler::{
     Apply, BuiltIn, Event, ExecCtx, Node, Rt, Scope, TagValue, UserEvent,
-    effects::Effect, errf, expr::ExprId, typ::FnType,
+    effects::Effect, errf, expr::ExprId, image::ImageBuf, typ::FnType,
 };
-use graphix_package_core::{CachedArgsAsync, CachedVals, EvalCachedAsync};
+use graphix_package_core::{
+    CachedArgsAsync, CachedVals, EvalCachedAsync, unit_image_state,
+};
 use netidx_activation::control::{ControlOp, UnitState};
 use netidx_admin::{
     activation::{
@@ -32,6 +34,7 @@ use netidx_admin::{
     service::{self, ServiceParams, ServiceScope, ServiceStatus},
     sync,
 };
+use netidx_core::pack::PackError;
 use netidx_derive::{FromValue, IntoValue};
 use netidx_value::{FromValue, ValArray, Value};
 use std::{
@@ -262,6 +265,19 @@ impl EvalCachedAsync for InstallsEv {
         }
     }
 }
+
+unit_image_state!(
+    InstallsEv,
+    SyncCheckEv,
+    CaCredentialsEv,
+    UnitsDirEv,
+    LocalResolverBaseEv,
+    ListUnitsEv,
+    ControlUnitsEv,
+    InstallUnitEv,
+    RemoveUnitEv,
+    UnitTemplateEv,
+);
 
 pub(crate) type Installs = CachedArgsAsync<InstallsEv>;
 
@@ -784,9 +800,29 @@ impl<R: Rt, E: UserEvent, T: LocalOp> BuiltIn<R, E> for LocalCeremony<T> {
             ph: PhantomData,
         }))
     }
+
+    fn image_decode(
+        _ctx: &mut ExecCtx<R, E>,
+        _from: &[Node<R, E>],
+        buf: &mut &[u8],
+    ) -> Result<Box<dyn Apply<R, E>>, PackError> {
+        Ok(Box::new(LocalCeremony::<T> {
+            trigger: Trigger::image_decode(buf)?,
+            out: TagValue::phantom(),
+            ph: PhantomData,
+        }))
+    }
 }
 
 impl<R: Rt, E: UserEvent, T: LocalOp> Apply<R, E> for LocalCeremony<T> {
+    fn image_len(&self) -> usize {
+        self.trigger.image_len()
+    }
+
+    fn image_encode(&self, buf: &mut ImageBuf) -> Result<(), PackError> {
+        self.trigger.image_encode(buf)
+    }
+
     fn update(
         &mut self,
         ctx: &mut ExecCtx<R, E>,
