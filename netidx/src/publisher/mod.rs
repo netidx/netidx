@@ -1995,19 +1995,21 @@ impl Publisher {
 
     /// Register a channel to receive errors about published paths.
     ///
-    /// An item is sent whenever a path's condition changes, and it names every
-    /// path that is affected. A resolver we can't reach is therefore reported
-    /// against each path it was holding, not once against "everything" —
-    /// which of your paths a given resolver holds depends on the delegation
-    /// hierarchy, and that is precisely what you should not have to know.
+    /// An item is sent whenever a path's condition changes. An empty set
+    /// means published with nothing wrong. A set without `NotPublished` means
+    /// published, but at least one resolver refused it.
     ///
-    /// An empty set means published with nothing wrong. A set without
-    /// `NotPublished` means published, but at least one resolver refused it.
+    /// The set is only a classification, the full detail can be read by
+    /// enabling logging, how you do that depends on which logger crate you
+    /// are using.
     ///
-    /// The set is a classification. Which resolver said what is in the log.
+    /// When you register a new channel it will receive an initial state
+    /// describing everything that is currently failing, and will thereafter
+    /// receive only updates.
     ///
-    /// Registering restates whatever is already failing, to the new channel
-    /// alone. Channels that are already registered hear only about changes.
+    /// If any of your registered channels becomes full, reporting of errors to
+    /// other registered channels will be delayed. Delayed error reporting will
+    /// *NOT* effect the operation of the publisher
     ///
     /// Drop the channel to stop receiving.
     pub fn errors(&self, tx: Sender<GPooled<Vec<(Path, PublishErrors)>>>) {
@@ -2044,20 +2046,19 @@ impl Publisher {
     }
 }
 
-async fn send_errors(batch: &[(Path, PublishErrors)], chans: &mut [ErrorChan]) {
-    if !batch.is_empty() {
-        for c in chans.iter_mut() {
-            let mut b = PUB_ERRORS.take();
-            b.extend(batch.iter().cloned());
-            let _ = c.send(b).await;
-        }
-    }
-}
-
 /// Deliver staged error state changes to the registered channels, and the
 /// whole current state to channels that have just registered. The only place
 /// that waits on a consumer; producers just stage.
 async fn error_loop(publisher: PublisherWeak, mut notify: Receiver<()>) {
+    async fn send_errors(batch: &[(Path, PublishErrors)], chans: &mut [ErrorChan]) {
+        if !batch.is_empty() {
+            for c in chans.iter_mut() {
+                let mut b = PUB_ERRORS.take();
+                b.extend(batch.iter().cloned());
+                let _ = c.send(b).await;
+            }
+        }
+    }
     while let Some(()) = notify.next().await {
         // whatever is staged while we are blocked goes out too
         loop {

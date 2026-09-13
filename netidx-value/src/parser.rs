@@ -496,9 +496,9 @@ where
             .map(|d| Value::DateTime(Arc::new(d))),
         constant("duration")
             .with(flt::<_, f64>().and(choice((
-                attempt(string("ns")),
-                attempt(string("us")),
                 attempt(string("ms")),
+                string("ns"),
+                string("us"),
                 string("s"),
                 string("m"),
                 string("h"),
