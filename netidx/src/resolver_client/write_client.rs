@@ -54,6 +54,8 @@ use tokio::{
 
 const TTL: u64 = 120;
 
+atomic_id!(ConId);
+
 /// How many events go in one batch, and equally the pool's bound: a batch that
 /// grows past it is dropped instead of cached, so the two must agree.
 const EVENT_CHUNK: usize = 10_000;
@@ -85,11 +87,17 @@ pub(crate) struct WriteEvent {
 /// is the only place that knows the whole member set.
 enum ConEvent {
     /// this member answered for these paths; `None` means it accepted
-    Outcome(SocketAddr, GPooled<Vec<(Path, Option<PublishError>)>>),
+    Outcome(ConId, GPooled<Vec<(Path, Option<PublishError>)>>),
     /// this member is not usable
-    Down(SocketAddr, PublishError),
+    Down(ConId, PublishError),
     /// this member is connected and taking writes
-    Up(SocketAddr),
+    Up(ConId),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Unavailable {
+    Pending,
+    Failed(PublishError),
 }
 
 /// Classify what a resolver said about a path it would not publish.
@@ -135,6 +143,7 @@ const LINGER: Duration = Duration::from_secs(TTL / 10);
 type Published = Arc<RwLock<IndexMap<Path, ToWrite, BuildHasherDefault<AHasher>>>>;
 
 struct Connection {
+    id: ConId,
     con: Option<Channel>,
     resolver_addr: SocketAddr,
     resolver_auth: Auth,
@@ -158,7 +167,7 @@ struct Connection {
     /// what this member has refused, so that only changes are reported
     refused: AHashMap<Path, PublishError>,
     /// what we last told `write_mgr` about this member. `None` is usable.
-    reported_down: Option<PublishError>,
+    reported_down: Option<Unavailable>,
 }
 
 impl Connection {
@@ -191,23 +200,20 @@ impl Connection {
 
     fn report(&self, outcomes: GPooled<Vec<(Path, Option<PublishError>)>>) {
         if !outcomes.is_empty() {
-            let _ = self
-                .events
-                .unbounded_send(ConEvent::Outcome(self.resolver_addr, outcomes));
+            let _ = self.events.unbounded_send(ConEvent::Outcome(self.id, outcomes));
         }
     }
 
     fn report_up(&mut self) {
         if self.reported_down.take().is_some() {
-            let _ = self.events.unbounded_send(ConEvent::Up(self.resolver_addr));
+            let _ = self.events.unbounded_send(ConEvent::Up(self.id));
         }
     }
 
     fn report_down(&mut self, reason: PublishError) {
-        if self.reported_down != Some(reason) {
-            self.reported_down = Some(reason);
-            let _ =
-                self.events.unbounded_send(ConEvent::Down(self.resolver_addr, reason));
+        if self.reported_down != Some(Unavailable::Failed(reason)) {
+            self.reported_down = Some(Unavailable::Failed(reason));
+            let _ = self.events.unbounded_send(ConEvent::Down(self.id, reason));
         }
     }
 
@@ -278,7 +284,13 @@ impl Connection {
         }
         let mut outcomes = OUTCOMES.take();
         for path in sent.drain(..) {
-            let r: FromWrite = con.receive().await?;
+            let r: FromWrite = match con.receive().await {
+                Ok(r) => r,
+                Err(e) => {
+                    self.report(outcomes);
+                    return Err(e);
+                }
+            };
             if !self.note(&mut outcomes, &path, &r) {
                 settled += 1
             }
@@ -524,18 +536,14 @@ impl Connection {
                 con.send_one(&ReadyForOwnershipCheck)
             )??;
         }
-        // before republishing, so its outcomes land against a member
-        // `write_mgr` already counts as usable
-        self.report_up();
         if !r.ttl_expired && !self.degraded {
             info!("connected to resolver {:?} for write", self.resolver_addr);
-            self.con = Some(con);
-            Ok(self.set_ttl(r.ttl))
         } else {
             self.republish(&mut con, r.ttl_expired).await?;
-            self.con = Some(con);
-            Ok(self.set_ttl(r.ttl))
         }
+        self.report_up();
+        self.con = Some(con);
+        Ok(self.set_ttl(r.ttl))
     }
 
     fn handle_failed_connect(&mut self, e: anyhow::Error) {
@@ -634,6 +642,7 @@ impl Connection {
     }
 
     async fn start(
+        id: ConId,
         mut receiver: broadcast::Receiver<Arc<ToCon>>,
         resolver_addr: SocketAddr,
         resolver_auth: Auth,
@@ -649,6 +658,7 @@ impl Connection {
         let mut stop = stop.fuse();
         let now = Instant::now();
         let mut t = Self {
+            id,
             resolver_addr,
             resolver_auth,
             write_addr,
@@ -661,13 +671,13 @@ impl Connection {
             security_context: None,
             tls,
             con: None,
-            degraded: false,
+            degraded: true,
             active: false,
             heartbeat: time::interval_at(now + HB, HB),
             disconnect: time::interval_at(now + LINGER, LINGER),
             events,
             refused: AHashMap::default(),
-            reported_down: None,
+            reported_down: Some(Unavailable::Pending),
         };
         // a member added to a cluster that is already publishing has to be
         // brought up to date now; the next heartbeat is half a ttl away
@@ -733,6 +743,7 @@ impl Connection {
 
 /// One live write connection. Dropping the stop sender ends the task.
 struct Live {
+    id: ConId,
     addr: SocketAddr,
     auth: Auth,
     _stop: oneshot::Sender<()>,
@@ -756,7 +767,7 @@ fn reconcile(
     live.retain(|l| {
         let keep = referral.addrs.iter().any(|(a, auth)| *a == l.addr && *auth == l.auth);
         if !keep {
-            agg.member_left(l.addr);
+            agg.member_left(l.id);
         }
         keep
     });
@@ -765,10 +776,10 @@ fn reconcile(
             continue;
         }
         let (stop, stop_rx) = oneshot::channel();
-        live.push(Live { addr: *addr, auth: auth.clone(), _stop: stop });
+        let id = ConId::new();
+        live.push(Live { id, addr: *addr, auth: auth.clone(), _stop: stop });
         let addr = *addr;
-        // a member is usable until it says otherwise
-        agg.members.remove(&addr);
+        agg.unavailable.insert(id, Unavailable::Pending);
         let auth = auth.clone();
         let desired_auth = desired_auth.clone();
         let secrets = secrets.clone();
@@ -778,6 +789,7 @@ fn reconcile(
         let con_events = con_events.clone();
         task::spawn(async move {
             Connection::start(
+                id,
                 receiver,
                 addr,
                 auth,
@@ -801,10 +813,10 @@ fn reconcile(
 /// be decided by a single connection.
 struct Aggregate {
     /// members that are not usable, and why. Absent means usable.
-    members: AHashMap<SocketAddr, PublishError>,
+    unavailable: AHashMap<ConId, Unavailable>,
     /// paths some member refused, and which members refused them. Empty in
     /// the healthy case.
-    refused: AHashMap<Path, AHashMap<SocketAddr, PublishError>>,
+    refused: AHashMap<Path, AHashMap<ConId, PublishError>>,
     /// the global condition as of the last report. When this moves, every
     /// path's condition moves with it.
     last_global: PublishErrors,
@@ -823,13 +835,13 @@ impl Aggregate {
             Some(r) => r,
         };
         let mut usable_refusals = 0;
-        for (addr, e) in refused.iter() {
+        for (id, e) in refused.iter() {
             errors.insert(*e);
-            if !self.members.contains_key(addr) {
+            if !self.unavailable.contains_key(id) {
                 usable_refusals += 1
             }
         }
-        if usable_refusals >= live.saturating_sub(self.members.len()) {
+        if usable_refusals >= live.saturating_sub(self.unavailable.len()) {
             errors.insert(PublishError::NotPublished)
         }
         errors
@@ -839,10 +851,12 @@ impl Aggregate {
     /// plus `NotPublished` if none of them is left.
     fn global(&self, live: usize) -> PublishErrors {
         let mut errors = PublishErrors::default();
-        for e in self.members.values() {
-            errors.insert(*e)
+        for state in self.unavailable.values() {
+            if let Unavailable::Failed(e) = state {
+                errors.insert(*e)
+            }
         }
-        if live == 0 || (!errors.is_empty() && self.members.len() >= live) {
+        if self.unavailable.len() >= live {
             errors.insert(PublishError::NotPublished)
         }
         errors
@@ -850,10 +864,10 @@ impl Aggregate {
 
     /// Forget a member that has left the cluster, refusals included: only a
     /// current member can be one that could have accepted a path.
-    fn member_left(&mut self, addr: SocketAddr) {
-        self.members.remove(&addr);
+    fn member_left(&mut self, id: ConId) {
+        self.unavailable.remove(&id);
         self.refused.retain(|_, by| {
-            by.remove(&addr);
+            by.remove(&id);
             !by.is_empty()
         });
     }
@@ -942,19 +956,26 @@ impl Aggregate {
         self.send(batch)
     }
 
-    fn handle(&mut self, ev: ConEvent, live: usize) {
+    fn handle(&mut self, ev: ConEvent, live: &[Live]) {
+        let id = match &ev {
+            ConEvent::Up(id) | ConEvent::Down(id, _) | ConEvent::Outcome(id, _) => *id,
+        };
+        if !live.iter().any(|l| l.id == id) {
+            return;
+        }
+        let live = live.len();
         match ev {
-            ConEvent::Up(addr) => {
+            ConEvent::Up(id) => {
                 let before = self.snapshot(live);
-                self.members.remove(&addr);
+                self.unavailable.remove(&id);
                 self.settle(before, live)
             }
-            ConEvent::Down(addr, reason) => {
+            ConEvent::Down(id, reason) => {
                 let before = self.snapshot(live);
-                self.members.insert(addr, reason);
+                self.unavailable.insert(id, Unavailable::Failed(reason));
                 self.settle(before, live)
             }
-            ConEvent::Outcome(addr, mut outcomes) => {
+            ConEvent::Outcome(id, mut outcomes) => {
                 let global = self.global(live);
                 let mut batch = WRITE_EVENTS.take();
                 let published = self.published.clone();
@@ -972,11 +993,11 @@ impl Aggregate {
                             self.refused
                                 .entry(path.clone())
                                 .or_insert_with(AHashMap::default)
-                                .insert(addr, e);
+                                .insert(id, e);
                         }
                         None => {
                             if let Some(r) = self.refused.get_mut(&path) {
-                                r.remove(&addr);
+                                r.remove(&id);
                                 if r.is_empty() {
                                     self.refused.remove(&path);
                                 }
@@ -1008,7 +1029,7 @@ async fn write_mgr(
     let (sender, _) = broadcast::channel(100);
     let (con_events, mut con_events_rx) = mpsc::unbounded();
     let mut agg = Aggregate {
-        members: AHashMap::default(),
+        unavailable: AHashMap::default(),
         refused: AHashMap::default(),
         last_global: PublishErrors::default(),
         published: published.clone(),
@@ -1045,7 +1066,7 @@ async fn write_mgr(
             ev = con_events_rx.next().fuse() => match ev {
                 None => break,
                 Some(ev) => {
-                    agg.handle(ev, live.len());
+                    agg.handle(ev, &live);
                     continue
                 }
             },
@@ -1140,5 +1161,274 @@ impl WriteClient {
         let (tx, rx) = oneshot::channel();
         let _ = self.0.unbounded_send((batch, tx));
         rx
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::net::TcpListener;
+
+    struct Cluster {
+        agg: Aggregate,
+        live: LPooled<Vec<Live>>,
+        sender: broadcast::Sender<Arc<ToCon>>,
+        con_events: mpsc::UnboundedSender<ConEvent>,
+        con_events_rx: mpsc::UnboundedReceiver<ConEvent>,
+        path: Path,
+    }
+
+    impl Cluster {
+        fn new() -> Self {
+            let path = Path::from("/test");
+            let published: Published = Arc::new(RwLock::new(IndexMap::default()));
+            published.write().insert(path.clone(), ToWrite::Publish(path.clone()));
+            let (sender, _) = broadcast::channel(10);
+            let (con_events, con_events_rx) = mpsc::unbounded();
+            Self {
+                agg: Aggregate {
+                    unavailable: AHashMap::default(),
+                    refused: AHashMap::default(),
+                    last_global: PublishErrors::default(),
+                    published,
+                    events: None,
+                },
+                live: LPooled::take(),
+                sender,
+                con_events,
+                con_events_rx,
+                path,
+            }
+        }
+
+        fn reconcile(&mut self, addrs: &[SocketAddr]) {
+            let before = self.agg.snapshot(self.live.len());
+            let referral = Referral {
+                path: Path::from("/"),
+                ttl: None,
+                addrs: GPooled::orphan(
+                    addrs.iter().map(|addr| (*addr, Auth::Anonymous)).collect(),
+                ),
+            };
+            let published = self.agg.published.clone();
+            reconcile(
+                &mut self.live,
+                &referral,
+                &self.sender,
+                &published,
+                &DesiredAuth::Anonymous,
+                &Arc::new(RwLock::new(AHashMap::default())),
+                addr(0),
+                PublisherPriority::Normal,
+                &None,
+                &self.con_events,
+                &mut self.agg,
+            );
+            self.agg.settle(before, self.live.len());
+        }
+
+        fn handle(&mut self, event: ConEvent) {
+            self.agg.handle(event, &self.live)
+        }
+
+        fn outcome(&self, id: ConId, error: Option<PublishError>) -> ConEvent {
+            let mut outcomes = OUTCOMES.take();
+            outcomes.push((self.path.clone(), error));
+            ConEvent::Outcome(id, outcomes)
+        }
+
+        fn errors(&self) -> PublishErrors {
+            let live = self.live.len();
+            self.agg.condition(&self.path, live, self.agg.global(live))
+        }
+    }
+
+    fn addr(member: u16) -> SocketAddr {
+        SocketAddr::from(([127, 0, 0, 1], member))
+    }
+
+    #[test]
+    fn settled_states_match_acceptance() {
+        let mut cluster = Cluster::new();
+        let ids = [(); 7].map(|_| ConId::new());
+        for live in 0..=ids.len() {
+            for mut state in 0..4_usize.pow(live as u32) {
+                cluster.agg.unavailable.clear();
+                cluster.agg.refused.clear();
+                let mut accepted = false;
+                for id in ids.iter().take(live) {
+                    let outcome = state % 4;
+                    state /= 4;
+                    if outcome >= 2 {
+                        cluster.agg.unavailable.insert(
+                            *id,
+                            Unavailable::Failed(PublishError::ResolverUnreachable),
+                        );
+                    }
+                    if outcome % 2 == 1 {
+                        cluster
+                            .agg
+                            .refused
+                            .entry(cluster.path.clone())
+                            .or_default()
+                            .insert(*id, PublishError::Denied);
+                    }
+                    accepted |= outcome == 0;
+                }
+                let errors =
+                    cluster.agg.condition(&cluster.path, live, cluster.agg.global(live));
+                assert_eq!(errors.contains(PublishError::NotPublished), !accepted);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn adding_a_member_waits_for_its_publish_outcome() {
+        let mut cluster = Cluster::new();
+        cluster.reconcile(&[addr(1)]);
+        let first = cluster.live[0].id;
+        cluster.handle(cluster.outcome(first, Some(PublishError::Denied)));
+        cluster.handle(ConEvent::Up(first));
+        let refused = cluster.errors();
+        assert!(refused.contains(PublishError::NotPublished));
+
+        cluster.reconcile(&[addr(1), addr(2)]);
+        assert_eq!(cluster.errors(), refused);
+        let added = cluster.live[1].id;
+        cluster.handle(cluster.outcome(added, None));
+        assert_eq!(cluster.errors(), refused);
+        cluster.handle(ConEvent::Up(added));
+        assert_eq!(cluster.errors(), PublishError::Denied.into());
+    }
+
+    #[tokio::test]
+    async fn refusing_members_never_report_acceptance_on_recovery() {
+        let mut cluster = Cluster::new();
+        cluster.reconcile(&[addr(1), addr(2)]);
+        let first = cluster.live[0].id;
+        let second = cluster.live[1].id;
+        cluster.handle(cluster.outcome(first, Some(PublishError::Denied)));
+        cluster.handle(ConEvent::Up(first));
+        for unavailable in
+            [Unavailable::Pending, Unavailable::Failed(PublishError::ResolverUnreachable)]
+        {
+            cluster.agg.unavailable.insert(second, unavailable);
+            assert!(cluster.errors().contains(PublishError::NotPublished));
+            cluster.handle(cluster.outcome(second, Some(PublishError::Denied)));
+            assert!(cluster.errors().contains(PublishError::NotPublished));
+            cluster.handle(ConEvent::Up(second));
+            assert!(cluster.errors().contains(PublishError::NotPublished));
+            assert!(cluster.errors().contains(PublishError::Denied));
+            assert!(!cluster.errors().contains(PublishError::ResolverUnreachable));
+        }
+    }
+
+    #[tokio::test]
+    async fn retired_connection_events_cannot_affect_its_replacement() {
+        let mut cluster = Cluster::new();
+        cluster.reconcile(&[addr(1), addr(2)]);
+        let first = cluster.live[0].id;
+        let retired = cluster.live[1].id;
+        cluster.handle(ConEvent::Up(first));
+        cluster.handle(ConEvent::Up(retired));
+        cluster.reconcile(&[addr(1)]);
+        cluster.reconcile(&[addr(1), addr(2)]);
+        let replacement = cluster.live[1].id;
+        assert_ne!(replacement, retired);
+        for event in [
+            cluster.outcome(retired, Some(PublishError::Denied)),
+            ConEvent::Down(retired, PublishError::ResolverUnreachable),
+            ConEvent::Up(retired),
+            cluster.outcome(retired, None),
+        ] {
+            cluster.handle(event);
+            assert!(cluster.errors().is_empty());
+            assert_eq!(cluster.agg.unavailable.len(), 1);
+            assert_eq!(cluster.agg.unavailable[&replacement], Unavailable::Pending);
+        }
+    }
+
+    async fn accept(listener: &TcpListener) -> Result<Channel> {
+        let (mut stream, _) = listener.accept().await?;
+        assert_eq!(channel::read_raw::<u64, _, 1024>(&mut stream).await?, 3);
+        channel::write_raw(&mut stream, &3u64).await?;
+        let hello = channel::read_raw::<ClientHello, _, 1024>(&mut stream).await?;
+        assert!(matches!(hello, ClientHello::WriteOnly(_)));
+        channel::write_raw(
+            &mut stream,
+            &ServerHelloWrite {
+                ttl: TTL,
+                ttl_expired: false,
+                auth: AuthWrite::Anonymous,
+                resolver_id: listener.local_addr()?,
+                refused: None,
+            },
+        )
+        .await?;
+        Ok(Channel::new::<ClientCtx, _>(None, stream))
+    }
+
+    #[tokio::test]
+    async fn a_new_connection_reports_up_only_after_republish() -> Result<()> {
+        time::timeout(Duration::from_secs(5), async {
+            for reply in [FromWrite::Published, FromWrite::Denied] {
+                let listener = TcpListener::bind(addr(0)).await?;
+                let mut cluster = Cluster::new();
+                cluster.reconcile(&[listener.local_addr()?]);
+                let mut con = accept(&listener).await?;
+                assert_eq!(
+                    con.receive::<ToWrite>().await?,
+                    ToWrite::Publish(cluster.path.clone())
+                );
+                assert!(cluster.con_events_rx.try_recv().is_err());
+                assert!(cluster.errors().contains(PublishError::NotPublished));
+                con.send_one(&reply).await?;
+                loop {
+                    let event = cluster.con_events_rx.next().await.unwrap();
+                    let up = matches!(event, ConEvent::Up(_));
+                    cluster.handle(event);
+                    if up {
+                        break;
+                    }
+                    assert!(cluster.errors().contains(PublishError::NotPublished));
+                }
+                assert_eq!(
+                    cluster.errors().contains(PublishError::NotPublished),
+                    reply == FromWrite::Denied
+                );
+            }
+            Ok(())
+        })
+        .await?
+    }
+
+    #[tokio::test]
+    async fn interrupted_republish_reports_the_replies_it_received() -> Result<()> {
+        time::timeout(Duration::from_secs(5), async {
+            let listener = TcpListener::bind(addr(0)).await?;
+            let mut cluster = Cluster::new();
+            let second = Path::from("/second");
+            cluster
+                .agg
+                .published
+                .write()
+                .insert(second.clone(), ToWrite::Publish(second));
+            cluster.reconcile(&[listener.local_addr()?]);
+            let mut con = accept(&listener).await?;
+            assert_eq!(
+                con.receive::<ToWrite>().await?,
+                ToWrite::Publish(cluster.path.clone())
+            );
+            let _: ToWrite = con.receive().await?;
+            con.send_one(&FromWrite::Denied).await?;
+            drop(con);
+            let event = cluster.con_events_rx.next().await.unwrap();
+            assert!(matches!(event, ConEvent::Outcome(_, _)));
+            cluster.handle(event);
+            assert!(cluster.errors().contains(PublishError::Denied));
+            assert!(cluster.errors().contains(PublishError::NotPublished));
+            Ok(())
+        })
+        .await?
     }
 }
