@@ -59,7 +59,7 @@ hdrhistogram = "7"
 humantime = "2"
 humantime-serde = "1"
 if-addrs = "0.15"
-immutable-chunkmap = { version = "2.1.0", features = ["pool", "serde"] }
+immutable-chunkmap = { version = "2.1.4", features = ["pool", "serde"] }
 indexmap = "2"
 keyring = "3"
 log = "0.4"
