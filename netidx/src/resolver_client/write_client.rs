@@ -911,7 +911,9 @@ impl Aggregate {
             let errors = self.condition(path, live, global);
             self.emit(&mut batch, WriteEvent { path: path.clone(), errors })
         }
-        self.send(batch)
+        if batch.len() > 0 {
+            self.send(batch)
+        }
     }
 
     /// The condition of every refused path, to compare `settle` against.
