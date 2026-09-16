@@ -39,6 +39,32 @@ pub trait FromValue {
     }
 }
 
+/// A struct value is an array of `[name, value]` pairs. The scan starts at
+/// `cursor` and wraps, so fields read in wire order (sorted, as graphix and
+/// the derives write them) are each found in one step.
+pub fn derive_struct_field<'a>(
+    fields: &'a [Value],
+    cursor: &mut usize,
+    name: &str,
+) -> Result<Option<&'a Value>> {
+    let n = fields.len();
+    for k in 0..n {
+        let i = (*cursor + k) % n;
+        match &fields[i] {
+            Value::Array(pair) if pair.len() == 2 => match &pair[0] {
+                Value::String(s) if s.as_str() == name => {
+                    *cursor = i + 1;
+                    return Ok(Some(&pair[1]));
+                }
+                Value::String(_) => (),
+                v => bail!("struct field name must be a string, got {v}"),
+            },
+            v => bail!("expected a struct field, got {v}"),
+        }
+    }
+    Ok(None)
+}
+
 impl FromValue for Value {
     fn from_value(v: Value) -> Result<Self> {
         Ok(v)

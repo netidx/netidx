@@ -833,69 +833,43 @@ fn into_value_body(type_name: &Ident, data: &Data) -> TokenStream {
     }
 }
 
-/// Generate merge-join extraction code for named fields.
-/// Returns (field_extraction_stmts, construct_field_exprs, defaulted_field_exprs).
-/// Caller must set up `__iter` as a peekable iterator over sorted (ArcStr, Value) pairs.
-fn from_value_named_field_extraction(
+/// Decode the named fields of `ctor` from the struct value `src`.
+fn from_value_named_fields(
+    ctor: TokenStream,
     fields: &syn::FieldsNamed,
-) -> (Vec<TokenStream>, Vec<TokenStream>, Vec<TokenStream>) {
+    src: TokenStream,
+) -> TokenStream {
     let sorted = sorted_named_fields(fields);
-    let extractions: Vec<_> = sorted
-        .iter()
-        .enumerate()
-        .map(|(i, (wire, _, is_default))| {
-            let binding = format_ident!("__field_{}", i);
-            let is_default = *is_default;
-            let missing_arm = if is_default {
-                quote! { break std::default::Default::default() }
-            } else {
-                quote! { anyhow::bail!("missing field '{}'", #wire) }
+    let extractions = sorted.iter().map(|(wire, fident, is_default)| {
+        let missing = if *is_default {
+            quote! { std::default::Default::default() }
+        } else {
+            quote! { anyhow::bail!("missing field '{}'", #wire) }
+        };
+        quote! {
+            let #fident = match netidx_value::derive_struct_field(
+                &__fields, &mut __cursor, #wire
+            )? {
+                Some(v) => netidx_value::FromValue::from_value(v.clone())?,
+                None => #missing,
             };
-            quote! {
-                let #binding = loop {
-                    match __iter.peek() {
-                        Some((k, _)) if k.as_str() < #wire => { __iter.next(); }
-                        Some((k, _)) if k.as_str() == #wire => {
-                            break netidx_value::FromValue::from_value(
-                                __iter.next().unwrap().1,
-                            )?;
-                        }
-                        _ => { #missing_arm }
-                    }
-                };
-            }
-        })
-        .collect();
-    let construct_fields: Vec<_> = sorted
-        .iter()
-        .enumerate()
-        .map(|(i, (_, fident, _))| {
-            let binding = format_ident!("__field_{}", i);
-            quote! { #fident: #binding }
-        })
-        .collect();
-    let defaulted: Vec<_> = fields
+        }
+    });
+    let construct = sorted.iter().map(|(_, fident, _)| fident);
+    let skipped = fields
         .named
         .iter()
         .filter(|f| f.attrs.iter().any(|a| is_value_attr(a, "skip")))
         .map(|f| {
             let fident = f.ident.as_ref().unwrap();
             quote! { #fident: std::default::Default::default() }
-        })
-        .collect();
-    (extractions, construct_fields, defaulted)
-}
-
-fn from_value_named_struct(name: &Ident, fields: &syn::FieldsNamed) -> TokenStream {
-    let (extractions, construct_fields, defaulted) =
-        from_value_named_field_extraction(fields);
+        });
     quote! {
-        let mut __pairs: Vec<(netidx_value::arcstr::ArcStr, netidx_value::Value)> =
-            v.cast_to()?;
-        __pairs.sort_by(|(a, _), (b, _)| a.as_str().cmp(b.as_str()));
-        let mut __iter = __pairs.into_iter().peekable();
+        let __fields =
+            <netidx_value::ValArray as netidx_value::FromValue>::from_value(#src)?;
+        let mut __cursor = 0usize;
         #(#extractions)*
-        Ok(#name { #(#construct_fields,)* #(#defaulted,)* })
+        Ok(#ctor { #(#construct,)* #(#skipped,)* })
     }
 }
 
@@ -921,7 +895,9 @@ fn from_value_unnamed_struct(name: &Ident, fields: &syn::FieldsUnnamed) -> Token
 fn from_value_body(name: &Ident, data: &Data) -> TokenStream {
     match data {
         Data::Struct(st) => match &st.fields {
-            Fields::Named(fields) => from_value_named_struct(name, fields),
+            Fields::Named(fields) => {
+                from_value_named_fields(quote! { #name }, fields, quote! { v })
+            }
             Fields::Unnamed(fields) => from_value_unnamed_struct(name, fields),
             Fields::Unit => panic!("unit structs are not supported by FromValue"),
         },
@@ -964,24 +940,16 @@ fn from_value_body(name: &Ident, data: &Data) -> TokenStream {
                         match &v.fields {
                             Fields::Unit => unreachable!(),
                             Fields::Named(fields) => {
-                                let (extractions, construct_fields, defaulted) =
-                                    from_value_named_field_extraction(fields);
-                                quote! {
-                                    #vname => {
-                                        let __data = __arr.get(1).cloned()
-                                            .ok_or_else(|| anyhow::anyhow!(
-                                                "expected variant data for {}", #vname
-                                            ))?;
-                                        let mut __pairs: Vec<(
-                                            netidx_value::arcstr::ArcStr,
-                                            netidx_value::Value,
-                                        )> = __data.cast_to()?;
-                                        __pairs.sort_by(|(a, _), (b, _)| a.as_str().cmp(b.as_str()));
-                                        let mut __iter = __pairs.into_iter().peekable();
-                                        #(#extractions)*
-                                        Ok(#name::#ident { #(#construct_fields,)* #(#defaulted,)* })
-                                    }
-                                }
+                                let body = from_value_named_fields(
+                                    quote! { #name::#ident },
+                                    fields,
+                                    quote! {
+                                        __arr.get(1).cloned().ok_or_else(|| anyhow::anyhow!(
+                                            "expected variant data for {}", #vname
+                                        ))?
+                                    },
+                                );
+                                quote! { #vname => { #body } }
                             }
                             Fields::Unnamed(fields) if fields.unnamed.len() == 1 => {
                                 check_no_tuple_field_attrs(fields);
@@ -1044,7 +1012,8 @@ fn from_value_body(name: &Ident, data: &Data) -> TokenStream {
                 };
                 quote! {
                     #string_check
-                    let __arr: Vec<netidx_value::Value> = v.cast_to()?;
+                    let __arr =
+                        <netidx_value::ValArray as netidx_value::FromValue>::from_value(v)?;
                     if __arr.is_empty() {
                         anyhow::bail!("empty variant array for {}", #enum_name);
                     }

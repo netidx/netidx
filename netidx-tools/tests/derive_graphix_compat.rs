@@ -245,3 +245,28 @@ fn from_value_wrong_shape() {
     // Unit enum expects string, give it an array
     assert!(UnitEnum::from_value(Value::from([Value::I64(1)])).is_err());
 }
+
+#[test]
+fn from_value_field_order() -> Result<()> {
+    let expected = NamedStruct { y: "hi".into(), x: 42 };
+    let unsorted: Value = [
+        (ArcStr::from("y"), Value::from("hi")),
+        (ArcStr::from("zeta"), Value::I64(1)),
+        (ArcStr::from("x"), Value::I64(42)),
+    ]
+    .into();
+    assert_eq!(NamedStruct::from_value(unsorted)?, expected);
+    let extra: Value = [
+        (ArcStr::from("a"), Value::Null),
+        (ArcStr::from("x"), Value::I64(42)),
+        (ArcStr::from("xx"), Value::Null),
+        (ArcStr::from("y"), Value::from("hi")),
+    ]
+    .into();
+    assert_eq!(NamedStruct::from_value(extra)?, expected);
+    let missing: Value = [(ArcStr::from("y"), Value::from("hi"))].into();
+    assert!(NamedStruct::from_value(missing).is_err());
+    let not_pairs: Value = [Value::I64(1), Value::I64(2)].into();
+    assert!(NamedStruct::from_value(not_pairs).is_err());
+    Ok(())
+}

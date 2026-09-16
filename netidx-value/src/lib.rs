@@ -103,6 +103,8 @@ mod typ;
 pub use abstract_type::Abstract;
 pub use array::ValArray;
 pub use convert::FromValue;
+#[doc(hidden)]
+pub use convert::derive_struct_field;
 pub use error::ValError;
 pub use pbuf::PBytes;
 pub use print::{NakedValue, printf};
