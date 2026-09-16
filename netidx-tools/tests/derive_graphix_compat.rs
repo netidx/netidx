@@ -52,6 +52,14 @@ enum MixedEnum {
 }
 
 #[derive(Debug, Clone, PartialEq, IntoValue, FromValue)]
+struct SmallInts {
+    a: u8,
+    b: i8,
+    c: u16,
+    d: i16,
+}
+
+#[derive(Debug, Clone, PartialEq, IntoValue, FromValue)]
 enum NullPayload {
     Close(()),
     Open(i64),
@@ -139,6 +147,15 @@ async fn mixed_enum() -> Result<()> {
     check(MixedEnum::Point(1.0, 2.0), "`Point(1.0, 2.0)").await?;
     check(MixedEnum::Single(42), "`Single(42)").await?;
     check(MixedEnum::None, "`None").await
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn small_ints() -> Result<()> {
+    check(
+        SmallInts { a: 200, b: -100, c: 60000, d: -30000 },
+        "{ a: u8:200, b: i8:-100, c: u16:60000, d: i16:-30000 }",
+    )
+    .await
 }
 
 #[tokio::test(flavor = "current_thread")]

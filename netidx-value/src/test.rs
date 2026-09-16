@@ -675,3 +675,16 @@ fn duration_units_round_trip() {
     }
     assert!("duration:3.w".parse::<Value>().is_err());
 }
+
+#[test]
+fn small_ints_keep_their_width() {
+    assert_eq!(Value::from(7u8), Value::U8(7));
+    assert_eq!(Value::from(-7i8), Value::I8(-7));
+    assert_eq!(Value::from(300u16), Value::U16(300));
+    assert_eq!(Value::from(-300i16), Value::I16(-300));
+    assert_eq!(Value::U16(300).get_as::<u32>(), Some(300));
+    assert_eq!(Value::I8(-7).get_as::<i64>(), Some(-7));
+    assert_eq!(Value::I16(-300).cast_to::<i64>().unwrap(), -300);
+    assert_eq!(Value::U8(7).cast_to::<u16>().unwrap(), 7);
+    assert!(Value::U16(300).cast_to::<u8>().is_err());
+}

@@ -89,6 +89,10 @@ impl FromValue for u8 {
 
     fn get(v: Value) -> Option<Self> {
         match v {
+            Value::U8(v) => Some(v as u8),
+            Value::I8(v) => Some(v as u8),
+            Value::U16(v) => Some(v as u8),
+            Value::I16(v) => Some(v as u8),
             Value::U32(v) | Value::V32(v) => Some(v as u8),
             Value::U64(v) | Value::V64(v) => Some(v as u8),
             Value::I32(v) | Value::Z32(v) => Some(v as u8),
@@ -100,7 +104,7 @@ impl FromValue for u8 {
 
 impl From<u8> for Value {
     fn from(v: u8) -> Value {
-        Value::U32(v as u32)
+        Value::U8(v)
     }
 }
 
@@ -116,6 +120,10 @@ impl FromValue for i8 {
 
     fn get(v: Value) -> Option<Self> {
         match v {
+            Value::U8(v) => Some(v as i8),
+            Value::I8(v) => Some(v as i8),
+            Value::U16(v) => Some(v as i8),
+            Value::I16(v) => Some(v as i8),
             Value::U32(v) | Value::V32(v) => Some(v as i8),
             Value::U64(v) | Value::V64(v) => Some(v as i8),
             Value::I32(v) | Value::Z32(v) => Some(v as i8),
@@ -127,7 +135,7 @@ impl FromValue for i8 {
 
 impl From<i8> for Value {
     fn from(v: i8) -> Value {
-        Value::I32(v as i32)
+        Value::I8(v)
     }
 }
 
@@ -139,6 +147,10 @@ impl FromValue for u16 {
 
     fn get(v: Value) -> Option<Self> {
         match v {
+            Value::U8(v) => Some(v as u16),
+            Value::I8(v) => Some(v as u16),
+            Value::U16(v) => Some(v as u16),
+            Value::I16(v) => Some(v as u16),
             Value::U32(v) | Value::V32(v) => Some(v as u16),
             Value::U64(v) | Value::V64(v) => Some(v as u16),
             Value::I32(v) | Value::Z32(v) => Some(v as u16),
@@ -150,7 +162,7 @@ impl FromValue for u16 {
 
 impl From<u16> for Value {
     fn from(v: u16) -> Value {
-        Value::U32(v as u32)
+        Value::U16(v)
     }
 }
 
@@ -166,6 +178,10 @@ impl FromValue for i16 {
 
     fn get(v: Value) -> Option<Self> {
         match v {
+            Value::U8(v) => Some(v as i16),
+            Value::I8(v) => Some(v as i16),
+            Value::U16(v) => Some(v as i16),
+            Value::I16(v) => Some(v as i16),
             Value::U32(v) | Value::V32(v) => Some(v as i16),
             Value::U64(v) | Value::V64(v) => Some(v as i16),
             Value::I32(v) | Value::Z32(v) => Some(v as i16),
@@ -177,13 +193,17 @@ impl FromValue for i16 {
 
 impl From<i16> for Value {
     fn from(v: i16) -> Value {
-        Value::I32(v as i32)
+        Value::I16(v)
     }
 }
 
 impl FromValue for u32 {
     fn from_value(v: Value) -> Result<Self> {
         match v {
+            Value::U8(v) => Ok(v as u32),
+            Value::I8(v) => Ok(v as u32),
+            Value::U16(v) => Ok(v as u32),
+            Value::I16(v) => Ok(v as u32),
             Value::U32(v) | Value::V32(v) => Ok(v),
             Value::U64(v) | Value::V64(v) => Ok(v as u32),
             Value::I32(v) | Value::Z32(v) => Ok(v as u32),
@@ -201,6 +221,10 @@ impl FromValue for u32 {
 
     fn get(v: Value) -> Option<Self> {
         match v {
+            Value::U8(v) => Some(v as u32),
+            Value::I8(v) => Some(v as u32),
+            Value::U16(v) => Some(v as u32),
+            Value::I16(v) => Some(v as u32),
             Value::U32(v) | Value::V32(v) => Some(v),
             Value::U64(v) | Value::V64(v) => Some(v as u32),
             Value::I32(v) | Value::Z32(v) => Some(v as u32),
@@ -219,6 +243,10 @@ impl From<u32> for Value {
 impl FromValue for i32 {
     fn from_value(v: Value) -> Result<Self> {
         match v {
+            Value::U8(v) => Ok(v as i32),
+            Value::I8(v) => Ok(v as i32),
+            Value::U16(v) => Ok(v as i32),
+            Value::I16(v) => Ok(v as i32),
             Value::I32(v) | Value::Z32(v) => Ok(v),
             Value::U32(v) | Value::V32(v) => Ok(v as i32),
             Value::U64(v) | Value::V64(v) => Ok(v as i32),
@@ -236,6 +264,10 @@ impl FromValue for i32 {
 
     fn get(v: Value) -> Option<Self> {
         match v {
+            Value::U8(v) => Some(v as i32),
+            Value::I8(v) => Some(v as i32),
+            Value::U16(v) => Some(v as i32),
+            Value::I16(v) => Some(v as i32),
             Value::I32(v) | Value::Z32(v) => Some(v),
             Value::U32(v) | Value::V32(v) => Some(v as i32),
             Value::U64(v) | Value::V64(v) => Some(v as i32),
@@ -254,6 +286,10 @@ impl From<i32> for Value {
 impl FromValue for u64 {
     fn from_value(v: Value) -> Result<Self> {
         match v {
+            Value::U8(v) => Ok(v as u64),
+            Value::I8(v) => Ok(v as u64),
+            Value::U16(v) => Ok(v as u64),
+            Value::I16(v) => Ok(v as u64),
             Value::U64(v) | Value::V64(v) => Ok(v),
             Value::U32(v) | Value::V32(v) => Ok(v as u64),
             Value::I32(v) | Value::Z32(v) => Ok(v as u64),
@@ -271,6 +307,10 @@ impl FromValue for u64 {
 
     fn get(v: Value) -> Option<Self> {
         match v {
+            Value::U8(v) => Some(v as u64),
+            Value::I8(v) => Some(v as u64),
+            Value::U16(v) => Some(v as u64),
+            Value::I16(v) => Some(v as u64),
             Value::U64(v) | Value::V64(v) => Some(v),
             Value::U32(v) | Value::V32(v) => Some(v as u64),
             Value::I32(v) | Value::Z32(v) => Some(v as u64),
@@ -295,6 +335,10 @@ impl From<usize> for Value {
 impl FromValue for usize {
     fn from_value(v: Value) -> Result<Self> {
         match v {
+            Value::U8(v) => Ok(v as usize),
+            Value::I8(v) => Ok(v as usize),
+            Value::U16(v) => Ok(v as usize),
+            Value::I16(v) => Ok(v as usize),
             Value::U64(v) | Value::V64(v) => Ok(v as usize),
             Value::U32(v) | Value::V32(v) => Ok(v as usize),
             Value::I32(v) | Value::Z32(v) => Ok(v as usize),
@@ -312,6 +356,10 @@ impl FromValue for usize {
 
     fn get(v: Value) -> Option<Self> {
         match v {
+            Value::U8(v) => Some(v as usize),
+            Value::I8(v) => Some(v as usize),
+            Value::U16(v) => Some(v as usize),
+            Value::I16(v) => Some(v as usize),
             Value::U64(v) | Value::V64(v) => Some(v as usize),
             Value::U32(v) | Value::V32(v) => Some(v as usize),
             Value::I32(v) | Value::Z32(v) => Some(v as usize),
@@ -324,6 +372,10 @@ impl FromValue for usize {
 impl FromValue for i64 {
     fn from_value(v: Value) -> Result<Self> {
         match v {
+            Value::U8(v) => Ok(v as i64),
+            Value::I8(v) => Ok(v as i64),
+            Value::U16(v) => Ok(v as i64),
+            Value::I16(v) => Ok(v as i64),
             Value::I64(v) | Value::Z64(v) => Ok(v),
             Value::U32(v) | Value::V32(v) => Ok(v as i64),
             Value::U64(v) | Value::V64(v) => Ok(v as i64),
@@ -341,6 +393,10 @@ impl FromValue for i64 {
 
     fn get(v: Value) -> Option<Self> {
         match v {
+            Value::U8(v) => Some(v as i64),
+            Value::I8(v) => Some(v as i64),
+            Value::U16(v) => Some(v as i64),
+            Value::I16(v) => Some(v as i64),
             Value::I64(v) | Value::Z64(v) => Some(v),
             Value::U32(v) | Value::V32(v) => Some(v as i64),
             Value::U64(v) | Value::V64(v) => Some(v as i64),
