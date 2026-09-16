@@ -52,6 +52,12 @@ enum MixedEnum {
 }
 
 #[derive(Debug, Clone, PartialEq, IntoValue, FromValue)]
+enum NullPayload {
+    Close(()),
+    Open(i64),
+}
+
+#[derive(Debug, Clone, PartialEq, IntoValue, FromValue)]
 struct WithAttrs {
     a: i64,
     #[value(rename = "bravo")]
@@ -133,6 +139,12 @@ async fn mixed_enum() -> Result<()> {
     check(MixedEnum::Point(1.0, 2.0), "`Point(1.0, 2.0)").await?;
     check(MixedEnum::Single(42), "`Single(42)").await?;
     check(MixedEnum::None, "`None").await
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn null_payload() -> Result<()> {
+    check(NullPayload::Close(()), "`Close(null)").await?;
+    check(NullPayload::Open(3), "`Open(3)").await
 }
 
 #[tokio::test(flavor = "current_thread")]

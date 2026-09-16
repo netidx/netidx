@@ -657,6 +657,28 @@ impl From<bool> for Value {
     }
 }
 
+impl FromValue for () {
+    fn from_value(v: Value) -> Result<Self> {
+        match v {
+            Value::Null => Ok(()),
+            v => bail!("expected null, got {v}"),
+        }
+    }
+
+    fn get(v: Value) -> Option<Self> {
+        match v {
+            Value::Null => Some(()),
+            _ => None,
+        }
+    }
+}
+
+impl From<()> for Value {
+    fn from(_: ()) -> Value {
+        Value::Null
+    }
+}
+
 impl FromValue for ValArray {
     fn from_value(v: Value) -> Result<Self> {
         match v {
