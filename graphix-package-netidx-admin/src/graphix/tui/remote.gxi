@@ -1,4 +1,4 @@
-use package::Question;
+use package::ceremony::Question;
 use tui::overlay::{self, Layer};
 
 /// The admin-domain tab: the landing screen (the known admin

@@ -1,6 +1,7 @@
-use package::{
-  AdminError, LocalUnit, ServiceOp, UnitDef, UnitEnvironment, UnitRestart,
-  UnitState, UnitTrigger, control_units, install_unit, list_units, remove_unit,
+use package::AdminError;
+use package::units::{
+  LocalUnit, ServiceOp, UnitDef, UnitEnvironment, UnitRestart, UnitState,
+  UnitTrigger, control_units, install_unit, list_units, remove_unit,
   unit_template
 };
 use super::{Confirm, Toast, admin_text, confirm_layers, toast_layers};

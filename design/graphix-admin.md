@@ -100,6 +100,17 @@ top-level module by construction, and a package that can in theory be
 mixed with any other package doesn't get to claim a name as generic as
 `admin` (Eric, 2026-08-18).
 
+The interface is one module per administrative function — `ceremony`,
+`certs`, `servers`, `perms`, `id_map`, `admins`, `discovery`, `install`,
+`units`, `ca` — each a `.gxi`/`.gx` pair beside `mod.gxi`. The root holds
+only the vocabulary every module shares (`AdminError`, `Fingerprint`,
+`Target`, the CA identity types) and the session entry points `local`,
+`connect` and `change_password_at`. A type two modules need lives in the
+one that owns it and the other imports it (`servers::PeerResult`,
+`units::ServiceOp`, `perms::RecordedEdit`); nothing is hoisted to the
+root for convenience. Builtins register under flat Rust names, so the
+module layout is a Graphix-side decision only.
+
 Platform: the crate compiles everywhere. Unix-only surface
 (daemon/local-socket/CA ops) is declared in the `.gxi` unconditionally
 and returns a typed `` `Unsupported `` error at runtime on other

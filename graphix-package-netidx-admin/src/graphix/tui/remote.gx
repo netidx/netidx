@@ -1,4 +1,5 @@
-use package::{Fingerprint, Target, change_password_at, connect, info, questions, result};
+use package::{Fingerprint, Target, change_password_at, connect, info};
+use package::ceremony::{questions, result};
 use super::{Toast, admin_text, toast_layers};
 use super::landing::{self, Connected};
 use super::panels::{self, CloseReason};

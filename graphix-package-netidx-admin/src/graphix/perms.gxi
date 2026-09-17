@@ -1,0 +1,34 @@
+use super::{AdminError, Target};
+
+/// One permission entry: the entity's permission bits at a path.
+type PermEntry = { path: string, entity: string, bits: string };
+
+/// A recorded CA state edit: the version it produced and whether it
+/// changed anything (asking for something already true is not an error).
+type RecordedEdit = { version: u64, changed: bool };
+
+/// Resolver cluster base paths known to the CA.
+val list_resolver_clusters: fn(t: Target) -> Result<Array<string>, AdminError>;
+
+/// The permissions of the resolver cluster mounted at `#at`, one entry
+/// per (path, entity), sorted.
+val show_perms: fn(#at: string, t: Target) -> Result<Array<PermEntry>, AdminError>;
+
+/// Set (insert or replace) an entity's permission bits at a path in
+/// the cluster mounted at `#at`.
+val set_perm: fn(
+  #at: string,
+  #path: string,
+  #entity: string,
+  #bits: string,
+  t: Target
+) -> Result<RecordedEdit, AdminError>;
+
+/// Remove an entity's entry at a path. An entry that was already
+/// absent is reported (`changed: false`), not refused.
+val remove_perm: fn(
+  #at: string,
+  #path: string,
+  #entity: string,
+  t: Target
+) -> Result<RecordedEdit, AdminError>;

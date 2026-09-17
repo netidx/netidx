@@ -1,14 +1,24 @@
-use package::{
-  AdminError, AdminInfo, IssuedEntry, PendingDelegation, PermEntry, Policy,
-  QueueItem, ReadGate, RecordedEdit, ServerInfo, ServiceOp, ServiceServer,
-  ServiceUnit, SlotKind, Target, UnitState, add_role_admin, approve,
-  approve_delegation, approve_renewals, change_password, deny,
-  deny_delegation, info, issued, list_admins, list_pending_delegations,
-  list_queue, list_resolver_clusters, list_servers, list_service_servers,
-  questions, reconcile_ca, remove_admin, remove_perm, remove_server,
-  reset_password, result, revoke, service_control, set_admin_policy,
-  set_perm, set_read_gate, show_perms
+use package::{AdminError, Target, info};
+use package::admins::{
+  AdminInfo, Policy, SlotKind, add_role_admin, change_password, list_admins,
+  remove_admin, reset_password, set_admin_policy
 };
+use package::ceremony::{questions, result};
+use package::certs::{
+  IssuedEntry, QueueItem, approve, approve_renewals, deny, issued, list_queue,
+  revoke
+};
+use package::perms::{
+  PermEntry, RecordedEdit, list_resolver_clusters, remove_perm, set_perm,
+  show_perms
+};
+use package::servers::{
+  PendingDelegation, ReadGate, ServerInfo, ServiceServer, ServiceUnit,
+  approve_delegation, deny_delegation, list_pending_delegations, list_servers,
+  list_service_servers, reconcile_ca, remove_server, service_control,
+  set_read_gate
+};
+use package::units::{ServiceOp, UnitState};
 use super::{Confirm, Toast, admin_text, confirm_layers, toast_layers};
 use tui::{line, style};
 use tui::block::{self, *};

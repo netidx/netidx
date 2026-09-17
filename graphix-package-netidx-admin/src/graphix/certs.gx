@@ -1,0 +1,6 @@
+let list_queue = |t: Target| -> Ceremony<Array<QueueItem>> 'netidx_admin_list_queue;
+let approve = |#groups: [Array<string>, null] = null, #no_id_map: [bool, null] = null, #code: string, t: Target| -> Ceremony<ApproveOutcome> 'netidx_admin_approve;
+let approve_renewals = |t: Target| -> Ceremony<Array<RenewalResult>> 'netidx_admin_approve_renewals;
+let deny = |#reason: [string, null] = null, #code: string, t: Target| -> Ceremony<string> 'netidx_admin_deny;
+let issued = |#include_revoked: [bool, null] = null, #name_filter: [string, null] = null, t: Target| -> Ceremony<Array<IssuedEntry>> 'netidx_admin_issued;
+let revoke = |#glyph: [string, null] = null, #reason: [string, null] = null, selector: string, t: Target| -> Ceremony<RevokeOutcome> 'netidx_admin_revoke

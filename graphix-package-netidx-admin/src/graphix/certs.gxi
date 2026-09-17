@@ -1,0 +1,86 @@
+use super::{Fingerprint, Target};
+use super::ceremony::Ceremony;
+use super::servers::PeerResult;
+
+/// A pending enrollment-queue entry, keyed by its code — recomputed
+/// locally from the CSR, never trusted from the wire. A null code means
+/// the queued CSR doesn't parse; it can only be denied.
+type QueueItem = {
+  code: [Fingerprint, null],
+  kind: string,
+  requested_name: string,
+  requested_validity: duration,
+  age_secs: u64,
+  peer: string,
+  verified_renewal: bool,
+  enroll_listen: [string, null],
+  requested_roles: Array<string>,
+  cluster_base: [string, null],
+  replaces_serial: [u64, null]
+};
+
+/// The outcome of approving one request.
+type ApproveOutcome = {
+  requested_name: string,
+  enroll_listen: [string, null],
+  id_map_groups: Array<string>,
+  warnings: Array<string>
+};
+
+/// One verified renewal's result from the code-free batch.
+type RenewalResult = { requested_name: string, error: [string, null] };
+
+/// One issued certificate, from the CA's records.
+type IssuedEntry = {
+  serial: u64,
+  name: string,
+  spki_fp: string,
+  not_after_unix: u64,
+  revoked: bool
+};
+
+/// The outcome of a revocation.
+type RevokeOutcome = {
+  revoked: Array<IssuedEntry>,
+  warnings: Array<string>,
+  operation_id: [string, null],
+  peers: Array<PeerResult>
+};
+
+/// The pending enrollment queue, each row keyed by its code. Requires
+/// a connected (remote) target; re-list per `t` delivery.
+val list_queue: fn(t: Target) -> Ceremony<Array<QueueItem>>;
+
+/// Approve the queued request whose recomputed code matches. Passing
+/// `#groups` skips the id-map-groups question; a server enrollment or
+/// `#no_id_map` forces empty groups.
+val approve: fn(
+  ?#groups: [Array<string>, null],
+  ?#no_id_map: [bool, null],
+  #code: string,
+  t: Target
+) -> Ceremony<ApproveOutcome>;
+
+/// Approve every verified renewal — code-free by construction (a
+/// verified renewal is cryptographic proof of possession).
+val approve_renewals: fn(t: Target) -> Ceremony<Array<RenewalResult>>;
+
+/// Deny the queued request whose code matches; returns the denied name.
+val deny: fn(?#reason: [string, null], #code: string, t: Target) -> Ceremony<string>;
+
+/// The CA's issued certificates.
+val issued: fn(
+  ?#include_revoked: [bool, null],
+  ?#name_filter: [string, null],
+  t: Target
+) -> Ceremony<Array<IssuedEntry>>;
+
+/// Revoke by serial or name. `selector` is a serial number or an
+/// identity name; a name that matches several certs with different
+/// keys needs `#glyph` to assert which.
+val revoke: fn(
+  ?#glyph: [string, null],
+  ?#reason: [string, null],
+  selector: string,
+  t: Target
+) -> Ceremony<RevokeOutcome>;

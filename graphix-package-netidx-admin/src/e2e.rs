@@ -47,10 +47,10 @@ async fn ceremonies_against_a_live_domain() -> Result<()> {
     let prog = format!(
         r#"{{
   let c = netidx_admin::connect(#admin: "{admin}", "{listen}");
-  let ev = netidx_admin::events(c);
+  let ev = netidx_admin::ceremony::events(c);
   let answers = select ev {{
-    `ConfirmIdentity(q) => netidx_admin::answer(q.id, `Confirm(true)),
-    `Secret(q) => netidx_admin::answer(q.id, `Secret("{pw}")),
+    `ConfirmIdentity(q) => netidx_admin::ceremony::answer(q.id, `Confirm(true)),
+    `Secret(q) => netidx_admin::ceremony::answer(q.id, `Secret("{pw}")),
     _ => never()
   }};
   select ev {{
@@ -72,17 +72,17 @@ async fn ceremonies_against_a_live_domain() -> Result<()> {
     let prog = format!(
         r#"{{
   let c = netidx_admin::connect(#admin: "{admin}", #password: "{pw}", "{listen}");
-  let ev = netidx_admin::events(c);
+  let ev = netidx_admin::ceremony::events(c);
   let answers = select ev {{
-    `ConfirmIdentity(q) => netidx_admin::answer(q.id, `Confirm(true)),
+    `ConfirmIdentity(q) => netidx_admin::ceremony::answer(q.id, `Confirm(true)),
     _ => never()
   }};
   let t = select ev {{
     `Done(r) => r$,
     _ => never()
   }};
-  let admins = netidx_admin::list_admins(t);
-  let queue = select netidx_admin::events(netidx_admin::list_queue(t)) {{
+  let admins = netidx_admin::admins::list_admins(t);
+  let queue = select netidx_admin::ceremony::events(netidx_admin::certs::list_queue(t)) {{
     `Done(r) => r,
     _ => never()
   }};
@@ -125,20 +125,20 @@ async fn reset_password_routes_to_change_password_at() -> Result<()> {
     let d = TestAdminDomain::start().await?;
     let prog = format!(
         r#"{{
-  let confirm = |ev: netidx_admin::Event<'a>| select ev {{
-    `ConfirmIdentity(q) => netidx_admin::answer(q.id, `Confirm(true)),
+  let confirm = |ev: netidx_admin::ceremony::Event<'a>| select ev {{
+    `ConfirmIdentity(q) => netidx_admin::ceremony::answer(q.id, `Confirm(true)),
     _ => never()
   }};
   let c = netidx_admin::connect(#admin: "{admin}", #password: "{pw}", "{listen}");
-  let ev = netidx_admin::events(c);
+  let ev = netidx_admin::ceremony::events(c);
   confirm(ev);
   let glyph: [netidx_admin::Fingerprint, null] = null;
   glyph <- select ev {{
     `ConfirmIdentity(q) => q.identity.fingerprint,
     _ => never()
   }};
-  let t = netidx_admin::result(c)$;
-  let policy: netidx_admin::Policy = {{
+  let t = netidx_admin::ceremony::result(c)$;
+  let policy: netidx_admin::admins::Policy = {{
     allowed_san: [],
     max_validity: duration:3600.s,
     id_map_groups: [],
@@ -148,16 +148,16 @@ async fn reset_password_routes_to_change_password_at() -> Result<()> {
     may_manage_admins: false,
     service_control_scopes: []
   }};
-  let one_time = netidx_admin::add_role_admin("alice", policy, t)$;
+  let one_time = netidx_admin::admins::add_role_admin("alice", policy, t)$;
   let refused = netidx_admin::connect(#admin: "alice", #password: one_time, "{listen}");
-  confirm(netidx_admin::events(refused));
+  confirm(netidx_admin::ceremony::events(refused));
   let must_change: string = never();
   {{
     catch(e) select (e.0).error {{
       `PasswordChangeRequired(name) => must_change <- name,
       _ => never()
     }};
-    netidx_admin::result(refused)?
+    netidx_admin::ceremony::result(refused)?
   }};
   let changed = netidx_admin::change_password_at(
     #admin: must_change,
@@ -166,16 +166,16 @@ async fn reset_password_routes_to_change_password_at() -> Result<()> {
     #new_password: "a-brand-new-password",
     must_change ~ "{listen}"
   );
-  confirm(netidx_admin::events(changed));
-  let done = netidx_admin::result(changed)$;
+  confirm(netidx_admin::ceremony::events(changed));
+  let done = netidx_admin::ceremony::result(changed)$;
   let again = netidx_admin::connect(
     #admin: "alice",
     #password: "a-brand-new-password",
     #glyph: done ~ glyph,
     done ~ "{listen}"
   );
-  confirm(netidx_admin::events(again));
-  select netidx_admin::info(netidx_admin::result(again)$) {{
+  confirm(netidx_admin::ceremony::events(again));
+  select netidx_admin::info(netidx_admin::ceremony::result(again)$) {{
     `Remote({{ admin, identity, .. }}) => "[admin]@[identity.domain]",
     `Local(_) => "local"
   }}

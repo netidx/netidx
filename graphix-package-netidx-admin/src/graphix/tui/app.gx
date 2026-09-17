@@ -1,4 +1,4 @@
-use package::Question;
+use package::ceremony::Question;
 use super::{local, pump, remote};
 use tui::{line, style};
 use tui::input_handler::{self, *};

@@ -56,7 +56,7 @@ run!(
 const CONNECT_REFUSED: &str = r#"
 {
   let c = netidx_admin::connect("127.0.0.1:1");
-  select netidx_admin::events(c) {
+  select netidx_admin::ceremony::events(c) {
     `Done(r) => r,
     _ => never()
   }
@@ -75,7 +75,7 @@ run!(
 // assertion.
 run!(
     discover_produces,
-    r#"netidx_admin::discover(#timeout: duration:0.25s, true)"#,
+    r#"netidx_admin::discovery::discover(#timeout: duration:0.25s, true)"#,
     |v: Result<&Value>| { matches!(v, Ok(Value::Array(_)) | Ok(Value::Error(_))) };
     FuseExpect::None
 );
@@ -84,7 +84,7 @@ run!(
 // mint site with a value, not a ceremony.
 graphix_package_core::run_with_tempdir! {
     name: remote_op_on_local_target_errors,
-    code: "netidx_admin::list_queue(netidx_admin::local(#cfg_path: \"{}\", true)$)",
+    code: "netidx_admin::certs::list_queue(netidx_admin::local(#cfg_path: \"{}\", true)$)",
     setup: |dir| {
         let p = dir.path().join("admin-server.json");
         std::fs::write(&p, "{{}}").unwrap();

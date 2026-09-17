@@ -1,0 +1,220 @@
+use super::AdminError;
+use super::ceremony::Ceremony;
+
+/// Which role template produced an install on this host.
+type InstallRole = [`Ca, `Workstation, `Resolver, `Publisher];
+
+/// An install's OS service, as the service manager reports it.
+type ServiceState = [`Active, `Inactive, `NotInstalled];
+
+/// Where an install's config and record live: the user's config
+/// directory or the system's.
+type Scope = [`User, `System];
+
+/// The CA tooling an install owns: its CA directory and the
+/// admin-server config serving it (null for an offline CA).
+type LocalCa = { ca_dir: string, cfg: [string, null] };
+
+/// One install recorded on this host: its role, base path and
+/// data-plane auth, the admin domain it founded or joined (null for a
+/// standalone install), every admin server it knows, when it was
+/// installed, its OS service's state, its scope and config root, the
+/// CA it owns if any, and whether this host holds a TLS identity the
+/// admin domain's CA could renew.
+type Install = {
+  role: InstallRole,
+  base: string,
+  auth: string,
+  admin_domain: [{ domain: string, fingerprint: string }, null],
+  admin_servers: Array<string>,
+  created_unix: u64,
+  service: ServiceState,
+  scope: Scope,
+  config_dir: string,
+  local_ca: [LocalCa, null],
+  renewable: bool
+};
+
+/// Every install recorded on this host, user scope first. Re-detects
+/// per `trigger`.
+val installs: fn(trigger: Any) -> Result<Array<Install>, AdminError>;
+
+/// The base path of the resolver this host runs, from its resolver
+/// config, or null when it runs none. Re-reads per `trigger`.
+val local_resolver_base: fn(trigger: Any) -> [string, null];
+
+/// One edit a reconcile with the admin domain would make to this
+/// host's configs.
+type Change = [`Add(string), `Del(string), `Reauth(string)];
+
+/// How an install's configs compare with the admin domain's map.
+type Sync = [`InSync, `OutOfSync(Array<Change>)];
+
+/// Check a joined install's configs against the admin domain — the
+/// quiet half of `update`. Re-checks per `role` delivery.
+val sync_check: fn(#config_root: string, role: InstallRole) -> Result<Sync, AdminError>;
+
+/// What installing a role did: a preview (nothing written), an
+/// install, or a CA left waiting for its external PKI's signature. The
+/// service is the OS service the role needs registered at that scope,
+/// null when none.
+type InstallOutcome = [
+  `Preview({ service: [Scope, null] }),
+  `Installed({ service: [Scope, null] }),
+  `CaAwaitingSignature({ csr: string })
+];
+
+/// Install a role on this host — the guided flow: its questions
+/// arrive as events. `#dry_run` shows the plan and writes nothing.
+val install: fn(#role: InstallRole, #dry_run: bool, trigger: Any) -> Ceremony<InstallOutcome>;
+
+/// Graduate this local-only workstation onto an admin domain,
+/// enrolling a TLS identity. `#dry_run` previews.
+val join: fn(#dry_run: bool, trigger: Any) -> Ceremony<null>;
+
+/// A resolver this host's map offers as a parent: its admin server,
+/// its resolver endpoint, and its cluster's base path.
+type ParentCandidate = { admin: string, resolver: string, base: string };
+
+/// The parents this resolver could attach under, from its admin
+/// domain's map; empty when the map is unreachable. Re-reads per
+/// `trigger`.
+val parent_candidates: fn(#config_root: string, trigger: Any) -> Result<Array<ParentCandidate>, AdminError>;
+
+/// The subtree this resolver now owns under its parent.
+type AddParentOutcome = { proposed_path: string };
+
+/// Attach this resolver under a parent by delegation: `#parent` is the
+/// parent's admin-server address (host or host:port); `#resolvers`
+/// names the parent resolvers picked from the candidates, or null when
+/// the parent is not in this host's map; `#path` is the subtree.
+val add_parent: fn(
+  #config_root: string,
+  #parent: string,
+  #resolvers: [Array<string>, null],
+  #path: string,
+  trigger: Any
+) -> Ceremony<AddParentOutcome>;
+
+/// What a finished restore leaves: the role now installed, the OS
+/// service it still needs (null when none), and the CA hierarchy
+/// reconciliation a relocated resolver forced.
+type RestoreOutcome = { role: InstallRole, service: [Scope, null], reconciled: [string, null] };
+
+/// A restore parked between its two steps. Only `restore_stage` mints
+/// one; `restore_finish` consumes it.
+type Staged;
+
+/// The OS service a restored CA must run under before its co-located
+/// identities can re-enroll.
+type ServiceIntent = { name: string, for_user: [string, null] };
+
+/// Where a restore stands after staging: finished in one go, or parked
+/// until the CA's service is registered at `scope`.
+type RestoreStaged = [
+  `Finish(RestoreOutcome),
+  `ServiceThenFinish({ scope: Scope, service: ServiceIntent, staged: Staged })
+];
+
+/// Restore a backup bundle onto this host. With `#bundle` null the
+/// ceremony asks for the bundle directory. A bundle with a CA stages,
+/// hands back the service the CA needs, and waits for `restore_finish`.
+val restore_stage: fn(#bundle: [string, null], trigger: Any) -> Ceremony<RestoreStaged>;
+
+/// Finish a staged restore once its CA's service runs: re-enroll the
+/// co-located identities.
+val restore_finish: fn(staged: Staged) -> Ceremony<RestoreOutcome>;
+
+/// What an uninstall removed and kept.
+type UninstallReport = {
+  service_was_installed: bool,
+  removed: Array<string>,
+  kept: Array<{ path: string, why: string }>,
+  ca_destroyed: [string, null]
+};
+
+/// What uninstalling did: nothing was installed at that scope; the
+/// teardown ran; or an elevated step must run first — the whole
+/// teardown, or only the system-scope service a user-scope install
+/// registered (uninstall again after it). `argv` is the `netidx`
+/// invocation the elevated step runs.
+type UninstallOutcome = [
+  `Nothing,
+  `Removed(UninstallReport),
+  `Escalate({ scope: Scope, covers: [`Everything, `SystemServiceOnly], argv: Array<string>, plan: UninstallReport })
+];
+
+/// Tear down the install at `#scope` under `#config_dir`: its OS
+/// service and its configuration; `#remove_ca` also destroys the CA
+/// directory, irreversibly.
+val uninstall: fn(#scope: Scope, #config_dir: string, #remove_ca: bool, trigger: Any) -> Ceremony<UninstallOutcome>;
+
+/// A service registration: done in-process (the summary line), or a
+/// `netidx` invocation to run privileged — `what` names the step for
+/// the operator, `argv` is the invocation, and `name`/`for_user`
+/// identify the service to verify afterwards.
+type ServiceRegistration = [
+  `Registered(string),
+  `Privileged({ what: string, argv: Array<string>, name: string, for_user: string })
+];
+
+/// Register this host's OS service at `#scope` (`#name` defaults to
+/// netidx, `#for_user` to the current user). User scope runs in-process;
+/// system scope needs root and the terminal, so it hands back the
+/// invocation — run it through `escalate_command` and
+/// `tui::run_in_terminal`, then `verify_system_service`.
+val install_service: fn(#scope: Scope, #name: [string, null], #for_user: [string, null], trigger: Any) -> Result<ServiceRegistration, AdminError>;
+
+/// A program and its arguments.
+type Command = { program: string, args: Array<string> };
+
+/// The command that performs the `netidx` invocation `args` as root on
+/// a released terminal: a shell that execs it directly when already
+/// root, under sudo when the operator may (a cached credential first,
+/// else one prompt), else under su with root's password. Unix only.
+val escalate_command: fn(args: Array<string>, trigger: Any) -> Result<Command, AdminError>;
+
+/// Judge a privileged service registration by the service manager's
+/// state, not the child's exit code: only a running service is success.
+/// `code` is the child's exit code; the result is the summary line.
+val verify_system_service: fn(#name: string, #for_user: string, code: i64) -> Result<string, AdminError>;
+
+/// What one renewal pass did: a one-line summary (null when nothing
+/// was due), the certificates renewed, those awaiting an admin's
+/// approval, and those that failed with why.
+type RenewReport = {
+  summary: [string, null],
+  renewed: Array<string>,
+  awaiting_approval: Array<string>,
+  failed: Array<{ cert: string, why: string }>
+};
+
+/// Renew this host's TLS certificates from the admin domain's CA now.
+val renew: fn(trigger: Any) -> Ceremony<RenewReport>;
+
+/// What `update` did: nothing, or the edits it applied with the
+/// reconcile's warnings and what must be restarted for them to take
+/// effect.
+type UpdateOutcome = [
+  `UpToDate,
+  `Applied({ changes: Array<Change>, warnings: Array<string>, restart_hint: string })
+];
+
+/// Reconcile a joined install's configs with the admin domain's map
+/// and apply the edits.
+val update: fn(#config_root: string, role: InstallRole) -> Ceremony<UpdateOutcome>;
+
+/// A backup bundle as written.
+type BackupOutcome = {
+  target: string,
+  role: InstallRole,
+  components: Array<string>,
+  files: u64,
+  bytes: u64,
+  identities_to_reenroll: u64,
+  manifest_sha256: string
+};
+
+/// Back up the complete managed installation at `#config_root`. With
+/// `#target` null the ceremony asks where to write the bundle.
+val backup: fn(#config_root: string, #target: [string, null], scope: Scope) -> Ceremony<BackupOutcome>;

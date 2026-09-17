@@ -1,0 +1,144 @@
+use super::{AdminError, Fingerprint, Target};
+use super::ceremony::Ceremony;
+use super::units::{ServiceOp, UnitState};
+
+/// One admin server's push/propagation result. A null error means it
+/// was updated.
+type PeerResult = { server: string, addr: string, error: [string, null] };
+
+/// How one piece of a server's state compares to what the CA recorded.
+type Agreement = [
+  `Current({ version: u64 }),
+  `Behind({ reported: [u64, null], want: u64 }),
+  `Unrecorded,
+  `Ahead({ reported: u64, ca: u64 })
+];
+
+/// One server's agreement with the CA, per kind of state. A null
+/// agreement means that kind of state doesn't apply to this server.
+type ServerDrift = {
+  server: string,
+  addr: string,
+  perms: [Agreement, null],
+  id_map: [Agreement, null],
+  config: [Agreement, null],
+  config_drift: bool
+};
+
+/// Every registered server's agreement with the CA, in stable server-id
+/// order. Re-queries per `t` delivery — sample to refresh:
+/// `drift(tick ~ t)`.
+val drift: fn(t: Target) -> Result<Array<ServerDrift>, AdminError>;
+
+/// One registered admin server. `read_gate` is null for a server that
+/// runs no resolver or has not reported yet.
+type ServerInfo = {
+  id: string,
+  addr: string,
+  roles: Array<string>,
+  state: string,
+  resolver: [string, null],
+  cluster_base: [string, null],
+  cluster_state: [string, null],
+  ca: bool,
+  read_gate: [ReadGate, null]
+};
+
+/// A resolver member's read gate as it reports it: answering read
+/// clients, refusing them until an admin opens the gate, or refusing
+/// them until an instant (a member that joined a serving cluster
+/// waits for publishers to find it).
+type ReadGate = [`Open, `Shut, `Until(datetime)];
+
+/// The outcome of removing a server from the admin domain.
+type RemoveServerOutcome = {
+  version: u64,
+  operation_id: [string, null],
+  revoked: u64,
+  removed: bool,
+  affected_clusters: Array<string>,
+  peers: Array<PeerResult>,
+  crl_peers: Array<PeerResult>,
+  gated: [PeerResult, null]
+};
+
+/// The outcome of a CA-wide reconcile push.
+type ReconcileOutcome = { operation: string, peers: Array<PeerResult> };
+
+/// Every registered admin server.
+val list_servers: fn(t: Target) -> Ceremony<Array<ServerInfo>>;
+
+/// Remove a server from the admin domain by its id (revokes its certs
+/// and pushes the removal domain-wide).
+val remove_server: fn(id: string, t: Target) -> Ceremony<RemoveServerOutcome>;
+
+/// Push the CA's state to every registered server.
+val reconcile_ca: fn(t: Target) -> Ceremony<ReconcileOutcome>;
+
+/// Open or shut one resolver member's read gate. `ShutFor` shuts it
+/// now and opens it that long from now. The ceremony warns (a `Warn`
+/// event) about what the change risks, given the member's current gate.
+val set_read_gate: fn(
+  #server: string,
+  gate: [ReadGate, `ShutFor(duration)],
+  t: Target
+) -> Ceremony<null>;
+
+/// A pending delegation request from a child resolver hierarchy.
+type PendingDelegation = {
+  code: Fingerprint,
+  proposed_path: string,
+  parent_base: string,
+  child_base: string,
+  parent: Array<string>,
+  child: Array<string>,
+  approved: bool,
+  age_secs: u64,
+  peer: string
+};
+
+/// The outcome of approving a delegation.
+type DelegationDecision = { proposed_path: string, peers: Array<PeerResult> };
+
+/// Pending delegation requests from child resolver hierarchies.
+val list_pending_delegations: fn(t: Target) -> Ceremony<Array<PendingDelegation>>;
+
+/// Approve the pending delegation whose code matches.
+val approve_delegation: fn(#code: string, t: Target) -> Ceremony<DelegationDecision>;
+
+/// Deny the pending delegation whose code matches.
+val deny_delegation: fn(
+  ?#reason: [string, null],
+  #code: string,
+  t: Target
+) -> Ceremony<PendingDelegation>;
+
+/// One admin server whose activation units the operator can control:
+/// its id (what a control op targets), its address, its resolver
+/// cluster's base path (the authorization scope), and its roles.
+type ServiceServer = { id: string, addr: string, base: string, roles: Array<string> };
+
+/// The display fields of a unit's definition.
+type ServiceUnitDef = { exe: string, args: Array<string>, trigger: string, restart: string };
+
+/// One activation unit on a server, with its definition when the
+/// supervisor has one on disk for it.
+type ServiceUnit = {
+  unit: string,
+  state: UnitState,
+  definition: [ServiceUnitDef, null]
+};
+
+/// Every registered admin server running a resolver, from the CA's
+/// map — the pick list for service control.
+val list_service_servers: fn(t: Target) -> Ceremony<Array<ServiceServer>>;
+
+/// Apply `#op` to `#units` (empty: every unit) on the admin server
+/// `#server`, and return that server's per-unit states. The CA
+/// enforces the caller's service-control scopes.
+val service_control: fn(
+  #units: Array<string>,
+  #op: ServiceOp,
+  #server: string,
+  t: Target
+) -> Ceremony<Array<ServiceUnit>>;

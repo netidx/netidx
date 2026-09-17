@@ -1,0 +1,64 @@
+use super::AdminError;
+use super::ceremony::Ceremony;
+use super::install::Scope;
+
+/// The credential state of a CA this host owns: whether the
+/// auto-approve slot exists and is wired into the daemon config,
+/// whether the recovery-password slot exists, and whether the CA is
+/// signed by an external PKI and has its certificate installed.
+type CaCredentials = {
+  auto_approve_present: bool,
+  auto_approve_wired: bool,
+  recovery_present: bool,
+  external_signed: bool,
+  external_installed: bool
+};
+
+/// Read a local CA's credential state — over the daemon's control
+/// socket when it runs, from its files otherwise. Re-reads per
+/// `ca_dir` delivery. Unix only.
+val ca_credentials: fn(#cfg: [string, null], ca_dir: string) -> Result<CaCredentials, AdminError>;
+
+/// How an offline auto-approve setup wired the credential into the
+/// CA's config.
+type AutorenewWiring = [`Updated(string), `NoCaConfig, `Failed(string)];
+
+/// What `auto_approve` did: the running daemon swapped the credential
+/// in place, or it was minted offline.
+type AutoApproveOutcome = [
+  `HotSwapped({ warning: [string, null] }),
+  `Offline({ rotate: bool, keytab: string, wiring: AutorenewWiring })
+];
+
+/// Enable (or with `#rotate` true, rotate) the local CA's auto-approve
+/// credential, which lets its admin server renew the admin domain's
+/// certificates without an admin approving each one. Unix only.
+val auto_approve: fn(#rotate: bool, #cfg: [string, null], ca_dir: string) -> Ceremony<AutoApproveOutcome>;
+
+/// Whether the recovery password was minted by the running daemon or
+/// offline. The password itself arrives as a `OneTimeSecret` event.
+type RecoveryRotateOutcome = [`HotSwapped, `Offline];
+
+/// Mint a fresh CA recovery password, retiring the old one. Unix only.
+val recovery_rotate: fn(#cfg: [string, null], ca_dir: string) -> Ceremony<RecoveryRotateOutcome>;
+
+/// Write a subordinate-CA CSR for the external PKI to sign; the result
+/// is the CSR's path. Unix only.
+val external_csr: fn(ca_dir: string) -> Ceremony<string>;
+
+/// What installing an externally-signed certificate did: the CA's
+/// first install (its admin server is configured at `cfg_path` and
+/// needs an OS service at `service_scope` when not null), an offline
+/// CA's, a renewal the stopped daemon serves at its next start, or a
+/// renewal the running daemon took in place.
+type ExternalInstallOutcome = [
+  `FirstInstall({ cfg_path: string, service_scope: [Scope, null] }),
+  `OfflineCa,
+  `Renewal,
+  `HotRenewed({ ca_fingerprint: string })
+];
+
+/// Install the externally-signed CA certificate the PKI returned. With
+/// `#signed` null the ceremony asks for its path (and for the PKI's
+/// root certificate, optional). Unix only.
+val external_install: fn(#signed: [string, null], #root: [string, null], ca_dir: string) -> Ceremony<ExternalInstallOutcome>;

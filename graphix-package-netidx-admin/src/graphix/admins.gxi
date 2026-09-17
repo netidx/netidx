@@ -1,0 +1,57 @@
+use super::{AdminError, Target};
+use super::ceremony::Ceremony;
+
+/// Whether an admin keyslot can recover the CA key (`Signing`) or only
+/// authenticate a scoped role admin (`Role`).
+type SlotKind = [`Signing, `Role];
+
+/// What the admin server will do on an admin's behalf. Roles are
+/// named `Ca`, `Resolver`, or `IdMap`.
+type Policy = {
+  allowed_san: Array<string>,
+  max_validity: duration,
+  id_map_groups: Array<string>,
+  server_enroll_scopes: Array<string>,
+  server_enroll_roles: Array<string>,
+  perms_edit_scopes: Array<string>,
+  may_manage_admins: bool,
+  service_control_scopes: Array<string>
+};
+
+/// One admin keyslot's public facts, from the roster.
+type AdminInfo = {
+  slot_id: string,
+  admin: string,
+  kind: SlotKind,
+  policy: Policy,
+  must_change: bool
+};
+
+/// The admin roster: every keyslot's public facts.
+val list_admins: fn(t: Target) -> Result<Array<AdminInfo>, AdminError>;
+
+/// Mint a role admin with the given policy. Returns the ONE-TIME
+/// password — shown once, never persisted; convey it to its owner.
+val add_role_admin: fn(
+  name: string,
+  policy: Policy,
+  t: Target
+) -> Result<string, AdminError>;
+
+/// Reset an admin's password. Returns the ONE-TIME replacement password.
+val reset_password: fn(name: string, t: Target) -> Result<string, AdminError>;
+
+/// Replace an admin's policy.
+val set_admin_policy: fn(
+  name: string,
+  policy: Policy,
+  t: Target
+) -> Result<null, AdminError>;
+
+/// Remove an admin's keyslot.
+val remove_admin: fn(name: string, t: Target) -> Result<null, AdminError>;
+
+/// Change the authenticated admin's own password. With `#new_password`
+/// null the ceremony asks for it (and its confirmation). The credential
+/// the target was opened with is gone afterwards — connect again.
+val change_password: fn(?#new_password: [string, null], t: Target) -> Ceremony<null>;

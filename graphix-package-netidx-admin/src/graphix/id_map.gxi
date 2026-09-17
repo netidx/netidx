@@ -1,0 +1,47 @@
+use super::{AdminError, Target};
+use super::perms::RecordedEdit;
+
+/// One identity in the id-map.
+type Identity = { name: string, primary_group: string, groups: Array<string> };
+
+/// The id-map as the CA holds it.
+type IdMap = {
+  default_group: [string, null],
+  groups: Array<string>,
+  identities: Array<Identity>
+};
+
+/// The id-map as the CA holds it.
+val show: fn(t: Target) -> Result<IdMap, AdminError>;
+
+/// Create a group.
+val add_group: fn(name: string, t: Target) -> Result<RecordedEdit, AdminError>;
+
+/// Remove a group.
+val remove_group: fn(name: string, t: Target) -> Result<RecordedEdit, AdminError>;
+
+/// Register an identity with a primary group (and optional extra
+/// groups).
+val add_user: fn(
+  ?#groups: [Array<string>, null],
+  san: string,
+  primary_group: string,
+  t: Target
+) -> Result<RecordedEdit, AdminError>;
+
+/// Remove an identity.
+val remove_user: fn(san: string, t: Target) -> Result<RecordedEdit, AdminError>;
+
+/// Add an identity to a group.
+val add_member: fn(
+  san: string,
+  group: string,
+  t: Target
+) -> Result<RecordedEdit, AdminError>;
+
+/// Remove an identity from a group.
+val remove_member: fn(
+  san: string,
+  group: string,
+  t: Target
+) -> Result<RecordedEdit, AdminError>;

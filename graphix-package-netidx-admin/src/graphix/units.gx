@@ -1,0 +1,6 @@
+let units_dir = |trigger: Any| -> [string, null] 'netidx_admin_units_dir;
+let list_units = |#units_dir: string, trigger: Any| -> Result<Array<LocalUnit>, AdminError> 'netidx_admin_list_units;
+let control_units = |#units_dir: string, #unit: [string, null], op: ServiceOp| -> Result<Array<LocalUnit>, AdminError> 'netidx_admin_control_units;
+let install_unit = |#units_dir: string, #name: string, def: UnitDef| -> Result<bool, AdminError> 'netidx_admin_install_unit;
+let remove_unit = |#units_dir: string, name: string| -> Result<bool, AdminError> 'netidx_admin_remove_unit;
+let unit_template = |trigger: Any| -> UnitDef 'netidx_admin_unit_template

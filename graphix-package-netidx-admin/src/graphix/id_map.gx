@@ -1,0 +1,7 @@
+let show = |t: Target| -> Result<IdMap, AdminError> 'netidx_admin_show_id_map;
+let add_group = |name: string, t: Target| -> Result<RecordedEdit, AdminError> 'netidx_admin_id_map_add_group;
+let remove_group = |name: string, t: Target| -> Result<RecordedEdit, AdminError> 'netidx_admin_id_map_remove_group;
+let add_user = |#groups: [Array<string>, null] = null, san: string, primary_group: string, t: Target| -> Result<RecordedEdit, AdminError> 'netidx_admin_id_map_add_user;
+let remove_user = |san: string, t: Target| -> Result<RecordedEdit, AdminError> 'netidx_admin_id_map_remove_user;
+let add_member = |san: string, group: string, t: Target| -> Result<RecordedEdit, AdminError> 'netidx_admin_id_map_add_member;
+let remove_member = |san: string, group: string, t: Target| -> Result<RecordedEdit, AdminError> 'netidx_admin_id_map_remove_member

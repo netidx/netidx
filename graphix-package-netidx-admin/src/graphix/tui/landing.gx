@@ -1,4 +1,5 @@
-use package::{AdminError, discover_domains, identity_at, local_domain};
+use package::AdminError;
+use package::discovery::{discover_domains, identity_at, local_domain};
 use super::{admin_text, fingerprint_lines, glyph};
 use tui::{line, span, style};
 use tui::block::{self, *};

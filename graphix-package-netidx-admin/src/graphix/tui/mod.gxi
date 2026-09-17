@@ -1,6 +1,6 @@
-use super::{
-    AdminDomain, AdminError, Answer, answer, CaIdentity, FieldInfo, Fingerprint,
-    identicon, OneTimeSecretKind, Question, QuestionId, Stage
+use super::{AdminDomain, AdminError, CaIdentity, Fingerprint, identicon};
+use super::ceremony::{
+  Answer, FieldInfo, OneTimeSecretKind, Question, QuestionId, Stage, answer
 };
 use tui::{line, span, style};
 use tui::overlay::{self, layer, Layer};

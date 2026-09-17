@@ -45,7 +45,7 @@ use tui::layout::{{self, *}};
 use tui::overlay::{{self, *}};
 use tui::text::{{self, *}};
 
-let q: netidx_admin::Question = never();
+let q: netidx_admin::ceremony::Question = never();
 let r = netidx_admin::tui::remote::remote(#q: &q, #server: "{listen}");
 let p = netidx_admin::tui::pump(q);
 let layers = array::concat(r.layers, p.layers);
@@ -132,11 +132,11 @@ use tui::overlay::{{self, *}};
 use tui::paragraph::{{self, *}};
 
 let c = netidx_admin::connect(#admin: "{admin}", "{listen}");
-let p = netidx_admin::tui::pump(netidx_admin::questions(c));
+let p = netidx_admin::tui::pump(netidx_admin::ceremony::questions(c));
 let status = "waiting";
 {{
   catch(e) status <- e ~ "failed";
-  let t = netidx_admin::result(c)?;
+  let t = netidx_admin::ceremony::result(c)?;
   status <- t ~ "connected"
 }};
 let result = overlay(#layers: &p.layers, paragraph(&"base"))

@@ -1,0 +1,4 @@
+let discover = |#timeout: [duration, null] = null, trigger: Any| -> Result<Array<Discovered>, AdminError> 'netidx_admin_discover;
+let discover_domains = |#timeout: [duration, null] = null, trigger: Any| -> Result<Discovery, AdminError> 'netidx_admin_discover_domains;
+let identity_at = |#timeout: [duration, null] = null, server: string| -> Result<CaIdentity, AdminError> 'netidx_admin_identity_at;
+let local_domain = |trigger: Any| -> [{ domain: string, fingerprint: string, addr: [string, null] }, null] 'netidx_admin_local_domain

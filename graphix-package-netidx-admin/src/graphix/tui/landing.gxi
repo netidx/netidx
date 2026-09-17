@@ -1,4 +1,5 @@
-use package::{Fingerprint, Question};
+use package::Fingerprint;
+use package::ceremony::Question;
 use tui::overlay::Layer;
 
 /// One saved admin domain — a CA identity (its fingerprint text)

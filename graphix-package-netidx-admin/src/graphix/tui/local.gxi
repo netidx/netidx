@@ -1,4 +1,4 @@
-use package::Question;
+use package::ceremony::Question;
 use tui::overlay::Layer;
 
 /// The Local tab's surface: its view and status line, the key

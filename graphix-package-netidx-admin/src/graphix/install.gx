@@ -1,0 +1,16 @@
+let installs = |trigger: Any| -> Result<Array<Install>, AdminError> 'netidx_admin_installs;
+let local_resolver_base = |trigger: Any| -> [string, null] 'netidx_admin_local_resolver_base;
+let sync_check = |#config_root: string, role: InstallRole| -> Result<Sync, AdminError> 'netidx_admin_sync_check;
+let install = |#role: InstallRole, #dry_run: bool, trigger: Any| -> Ceremony<InstallOutcome> 'netidx_admin_install;
+let join = |#dry_run: bool, trigger: Any| -> Ceremony<null> 'netidx_admin_join;
+let parent_candidates = |#config_root: string, trigger: Any| -> Result<Array<ParentCandidate>, AdminError> 'netidx_admin_parent_candidates;
+let add_parent = |#config_root: string, #parent: string, #resolvers: [Array<string>, null], #path: string, trigger: Any| -> Ceremony<AddParentOutcome> 'netidx_admin_add_parent;
+let restore_stage = |#bundle: [string, null], trigger: Any| -> Ceremony<RestoreStaged> 'netidx_admin_restore_stage;
+let restore_finish = |staged: Staged| -> Ceremony<RestoreOutcome> 'netidx_admin_restore_finish;
+let uninstall = |#scope: Scope, #config_dir: string, #remove_ca: bool, trigger: Any| -> Ceremony<UninstallOutcome> 'netidx_admin_uninstall;
+let install_service = |#scope: Scope, #name: [string, null], #for_user: [string, null], trigger: Any| -> Result<ServiceRegistration, AdminError> 'netidx_admin_install_service;
+let escalate_command = |args: Array<string>, trigger: Any| -> Result<Command, AdminError> 'netidx_admin_escalate_command;
+let verify_system_service = |#name: string, #for_user: string, code: i64| -> Result<string, AdminError> 'netidx_admin_verify_system_service;
+let renew = |trigger: Any| -> Ceremony<RenewReport> 'netidx_admin_renew;
+let update = |#config_root: string, role: InstallRole| -> Ceremony<UpdateOutcome> 'netidx_admin_update;
+let backup = |#config_root: string, #target: [string, null], scope: Scope| -> Ceremony<BackupOutcome> 'netidx_admin_backup

@@ -1,13 +1,17 @@
-use package::{
-  AdminError, CaCredentials, Change, Install, InstallRole, LocalCa,
-  ParentCandidate, Scope, ServiceState, Staged, Target, add_parent,
-  auto_approve, backup, ca_credentials, escalate_command, external_csr,
-  external_install, install, install_service, installs, join,
-  local as local_target, local_resolver_base, parent_candidates,
-  parse_fingerprint, questions, recovery_rotate, renew, restore_finish,
-  restore_stage, result, sync_check, uninstall, units_dir, update,
+use package::{AdminError, Target, local as local_target, parse_fingerprint};
+use package::ca::{
+  CaCredentials, auto_approve, ca_credentials, external_csr, external_install,
+  recovery_rotate
+};
+use package::ceremony::{questions, result};
+use package::install::{
+  Change, Install, InstallRole, LocalCa, ParentCandidate, Scope, ServiceState,
+  Staged, add_parent, backup, escalate_command, install, install_service,
+  installs, join, local_resolver_base, parent_candidates, renew,
+  restore_finish, restore_stage, sync_check, uninstall, update,
   verify_system_service
 };
+use package::units::units_dir;
 use super::{
   Confirm, Toast, admin_text, confirm_layers, fingerprint_lines, glyph,
   toast_layers
