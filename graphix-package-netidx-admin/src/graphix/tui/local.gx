@@ -1,17 +1,16 @@
 use package::{AdminError, Target, local as local_target, parse_fingerprint};
 use package::ca::{
-  CaCredentials, auto_approve, ca_credentials, external_csr, external_install,
+  self, CaCredentials, auto_approve, external_csr, external_install,
   recovery_rotate
 };
 use package::ceremony::{questions, result};
 use package::install::{
-  Change, Install, InstallRole, LocalCa, ParentCandidate, Scope, ServiceState,
-  Staged, add_parent, backup, escalate_command, install, install_service,
-  installs, join, local_resolver_base, parent_candidates, renew,
-  restore_finish, restore_stage, sync_check, uninstall, update,
-  verify_system_service
+  self, Change, Install, InstallRole, LocalCa, ParentCandidate, Scope,
+  ServiceState, Staged, add_parent, backup, escalate_command, install_service,
+  join, local_resolver_base, parent_candidates, renew, restore_finish,
+  restore_stage, sync_check, uninstall, update, verify_system_service
 };
-use package::units::units_dir;
+use package::units;
 use super::{
   Confirm, Toast, admin_text, confirm_layers, fingerprint_lines, glyph,
   toast_layers
@@ -166,9 +165,9 @@ let local = |#q: &Question| -> Local {
   let detected: [Array<Install>, null] = null;
   {
     catch(e) fail("Detecting installs failed", (e.0).error);
-    detected <- installs(refresh)?
+    detected <- install::list(refresh)?
   };
-  let units: [string, null] = units_dir(refresh);
+  let units: [string, null] = units::dir(refresh);
   let own_base: [string, null] = local_resolver_base(refresh);
   let sel = 0;
   let n_installs = select detected {
@@ -213,7 +212,7 @@ let local = |#q: &Question| -> Local {
         let p: Probe = `Probing;
         {
           catch(e) p <- `Failed(admin_text((e.0).error));
-          p <- `Ready(ca_credentials(#cfg: lca.cfg, lca.ca_dir)?)
+          p <- `Ready(ca::credentials(#cfg: lca.cfg, lca.ca_dir)?)
         };
         p
       }
@@ -784,7 +783,7 @@ let local = |#q: &Question| -> Local {
   };
   // ── the lifecycle ceremonies ──
   let install_c = select run {
-    `Install(role, dry) => install(#role: role, #dry_run: dry, role),
+    `Install(role, dry) => install::install(#role: role, #dry_run: dry, role),
     _ => never()
   };
   let join_c = select run {

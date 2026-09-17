@@ -66,11 +66,11 @@ type RemoveServerOutcome = {
 type ReconcileOutcome = { operation: string, peers: Array<PeerResult> };
 
 /// Every registered admin server.
-val list_servers: fn(t: Target) -> Ceremony<Array<ServerInfo>>;
+val list: fn(t: Target) -> Ceremony<Array<ServerInfo>>;
 
 /// Remove a server from the admin domain by its id (revokes its certs
 /// and pushes the removal domain-wide).
-val remove_server: fn(id: string, t: Target) -> Ceremony<RemoveServerOutcome>;
+val remove: fn(id: string, t: Target) -> Ceremony<RemoveServerOutcome>;
 
 /// Push the CA's state to every registered server.
 val reconcile_ca: fn(t: Target) -> Ceremony<ReconcileOutcome>;

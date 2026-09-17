@@ -1,22 +1,17 @@
 use package::{AdminError, Target, info};
 use package::admins::{
-  AdminInfo, Policy, SlotKind, add_role_admin, change_password, list_admins,
-  remove_admin, reset_password, set_admin_policy
+  self, AdminInfo, Policy, SlotKind, change_password, reset_password
 };
 use package::ceremony::{questions, result};
 use package::certs::{
   IssuedEntry, QueueItem, approve, approve_renewals, deny, issued, list_queue,
   revoke
 };
-use package::perms::{
-  PermEntry, RecordedEdit, list_resolver_clusters, remove_perm, set_perm,
-  show_perms
-};
+use package::perms::{self, PermEntry, RecordedEdit, list_resolver_clusters};
 use package::servers::{
-  PendingDelegation, ReadGate, ServerInfo, ServiceServer, ServiceUnit,
-  approve_delegation, deny_delegation, list_pending_delegations, list_servers,
-  list_service_servers, reconcile_ca, remove_server, service_control,
-  set_read_gate
+  self, PendingDelegation, ReadGate, ServerInfo, ServiceServer, ServiceUnit,
+  approve_delegation, deny_delegation, list_pending_delegations,
+  list_service_servers, reconcile_ca, service_control, set_read_gate
 };
 use package::units::{ServiceOp, UnitState};
 use super::{Confirm, Toast, admin_text, confirm_layers, toast_layers};
@@ -362,7 +357,7 @@ let panels = |
     _ => never()
   };
   let servers_c = select load {
-    x@ `Servers => list_servers(x ~ target),
+    x@ `Servers => servers::list(x ~ target),
     _ => never()
   };
   let certs_c = select load {
@@ -370,7 +365,7 @@ let panels = |
     _ => never()
   };
   let roster_r = select load {
-    x@ `Roster => list_admins(x ~ target),
+    x@ `Roster => admins::list(x ~ target),
     _ => never()
   };
   let units_c = select load {
@@ -383,7 +378,7 @@ let panels = |
   let perms_r = select load {
     x@ `Perms => select x ~ perms_at {
       null as _ => never(),
-      at => show_perms(#at: at, x ~ target)
+      at => perms::show(#at: at, x ~ target)
     },
     _ => never()
   };
@@ -567,11 +562,11 @@ let panels = |
     _ => never()
   };
   let rmadmin_r = select run {
-    `RemoveAdmin(name) => remove_admin(name, name ~ target),
+    `RemoveAdmin(name) => admins::remove(name, name ~ target),
     _ => never()
   };
   let rmserver_c = select run {
-    `RemoveServer(id) => remove_server(id, id ~ target),
+    `RemoveServer(id) => servers::remove(id, id ~ target),
     _ => never()
   };
   let reconcile_c = select run {
@@ -589,22 +584,22 @@ let panels = |
   let setperm_r = select run {
     `SetPerm(e) => select e ~ perms_at {
       null as _ => never(),
-      at => set_perm(#at: at, #path: e.path, #entity: e.entity, #bits: e.bits, e ~ target)
+      at => perms::set(#at: at, #path: e.path, #entity: e.entity, #bits: e.bits, e ~ target)
     },
     _ => never()
   };
   let addadmin_r = select run {
-    `AddAdmin(a) => add_role_admin(a.name, a.policy, a ~ target),
+    `AddAdmin(a) => admins::add(a.name, a.policy, a ~ target),
     _ => never()
   };
   let setpolicy_r = select run {
-    `SetPolicy(a) => set_admin_policy(a.name, a.policy, a ~ target),
+    `SetPolicy(a) => admins::set_policy(a.name, a.policy, a ~ target),
     _ => never()
   };
   let rmperm_r = select run {
     `RemovePerm(e) => select e ~ perms_at {
       null as _ => never(),
-      at => remove_perm(#at: at, #path: e.path, #entity: e.entity, e ~ target)
+      at => perms::remove(#at: at, #path: e.path, #entity: e.entity, e ~ target)
     },
     _ => never()
   };

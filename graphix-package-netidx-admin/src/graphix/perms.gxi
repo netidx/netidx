@@ -12,11 +12,11 @@ val list_resolver_clusters: fn(t: Target) -> Result<Array<string>, AdminError>;
 
 /// The permissions of the resolver cluster mounted at `#at`, one entry
 /// per (path, entity), sorted.
-val show_perms: fn(#at: string, t: Target) -> Result<Array<PermEntry>, AdminError>;
+val show: fn(#at: string, t: Target) -> Result<Array<PermEntry>, AdminError>;
 
 /// Set (insert or replace) an entity's permission bits at a path in
 /// the cluster mounted at `#at`.
-val set_perm: fn(
+val set: fn(
   #at: string,
   #path: string,
   #entity: string,
@@ -26,7 +26,7 @@ val set_perm: fn(
 
 /// Remove an entity's entry at a path. An entry that was already
 /// absent is reported (`changed: false`), not refused.
-val remove_perm: fn(
+val remove: fn(
   #at: string,
   #path: string,
   #entity: string,

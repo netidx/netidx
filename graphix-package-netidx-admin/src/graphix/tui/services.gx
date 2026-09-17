@@ -1,8 +1,7 @@
 use package::AdminError;
 use package::units::{
-  LocalUnit, ServiceOp, UnitDef, UnitEnvironment, UnitRestart, UnitState,
-  UnitTrigger, control_units, install_unit, list_units, remove_unit,
-  unit_template
+  self, LocalUnit, ServiceOp, UnitDef, UnitEnvironment, UnitRestart, UnitState,
+  UnitTrigger
 };
 use super::{Confirm, Toast, admin_text, confirm_layers, toast_layers};
 use tui::{line, span, style};
@@ -230,7 +229,7 @@ let services = |#units_dir: string, #on_close: fn(e: Any) -> null, open: Any| ->
   let rows: [Array<LocalUnit>, null] = null;
   {
     catch(e) fail("Listing the units failed", (e.0).error);
-    rows <- list_units(#units_dir: units_dir, load)?
+    rows <- units::list(#units_dir: units_dir, load)?
   };
   let sel = 0;
   let last = max(0, opt_len(rows) - 1);
@@ -242,7 +241,7 @@ let services = |#units_dir: string, #on_close: fn(e: Any) -> null, open: Any| ->
   let run = never<Act>();
   // ── the unit form: create seeds the template, edit the unit's own
   // definition ──
-  let template = unit_template(open);
+  let template = units::template(open);
   let form_open = false;
   let form_title = "";
   let form_fields = never<Array<Field>>();
@@ -347,15 +346,15 @@ let services = |#units_dir: string, #on_close: fn(e: Any) -> null, open: Any| ->
   };
   // ── the actions and their outcomes ──
   let control_r = select run {
-    `Control(c) => control_units(#units_dir: units_dir, #unit: c.unit, c.op),
+    `Control(c) => units::control(#units_dir: units_dir, #unit: c.unit, c.op),
     _ => never()
   };
   let install_r = select run {
-    `Install(i) => install_unit(#units_dir: units_dir, #name: i.name, i.def),
+    `Install(i) => units::install(#units_dir: units_dir, #name: i.name, i.def),
     _ => never()
   };
   let remove_r = select run {
-    `Delete(name) => remove_unit(#units_dir: units_dir, name),
+    `Delete(name) => units::remove(#units_dir: units_dir, name),
     _ => never()
   };
   let reload_text = |reloaded: bool| -> string select reloaded {

@@ -37,7 +37,7 @@ type Install = {
 
 /// Every install recorded on this host, user scope first. Re-detects
 /// per `trigger`.
-val installs: fn(trigger: Any) -> Result<Array<Install>, AdminError>;
+val list: fn(trigger: Any) -> Result<Array<Install>, AdminError>;
 
 /// The base path of the resolver this host runs, from its resolver
 /// config, or null when it runs none. Re-reads per `trigger`.

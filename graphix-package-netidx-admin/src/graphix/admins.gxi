@@ -28,11 +28,11 @@ type AdminInfo = {
 };
 
 /// The admin roster: every keyslot's public facts.
-val list_admins: fn(t: Target) -> Result<Array<AdminInfo>, AdminError>;
+val list: fn(t: Target) -> Result<Array<AdminInfo>, AdminError>;
 
 /// Mint a role admin with the given policy. Returns the ONE-TIME
 /// password — shown once, never persisted; convey it to its owner.
-val add_role_admin: fn(
+val add: fn(
   name: string,
   policy: Policy,
   t: Target
@@ -42,14 +42,14 @@ val add_role_admin: fn(
 val reset_password: fn(name: string, t: Target) -> Result<string, AdminError>;
 
 /// Replace an admin's policy.
-val set_admin_policy: fn(
+val set_policy: fn(
   name: string,
   policy: Policy,
   t: Target
 ) -> Result<null, AdminError>;
 
 /// Remove an admin's keyslot.
-val remove_admin: fn(name: string, t: Target) -> Result<null, AdminError>;
+val remove: fn(name: string, t: Target) -> Result<null, AdminError>;
 
 /// Change the authenticated admin's own password. With `#new_password`
 /// null the ceremony asks for it (and its confirmation). The credential

@@ -81,7 +81,7 @@ async fn ceremonies_against_a_live_domain() -> Result<()> {
     `Done(r) => r$,
     _ => never()
   }};
-  let admins = netidx_admin::admins::list_admins(t);
+  let admins = netidx_admin::admins::list(t);
   let queue = select netidx_admin::ceremony::events(netidx_admin::certs::list_queue(t)) {{
     `Done(r) => r,
     _ => never()
@@ -148,7 +148,7 @@ async fn reset_password_routes_to_change_password_at() -> Result<()> {
     may_manage_admins: false,
     service_control_scopes: []
   }};
-  let one_time = netidx_admin::admins::add_role_admin("alice", policy, t)$;
+  let one_time = netidx_admin::admins::add("alice", policy, t)$;
   let refused = netidx_admin::connect(#admin: "alice", #password: one_time, "{listen}");
   confirm(netidx_admin::ceremony::events(refused));
   let must_change: string = never();

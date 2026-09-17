@@ -17,7 +17,7 @@ type CaCredentials = {
 /// Read a local CA's credential state — over the daemon's control
 /// socket when it runs, from its files otherwise. Re-reads per
 /// `ca_dir` delivery. Unix only.
-val ca_credentials: fn(#cfg: [string, null], ca_dir: string) -> Result<CaCredentials, AdminError>;
+val credentials: fn(#cfg: [string, null], ca_dir: string) -> Result<CaCredentials, AdminError>;
 
 /// How an offline auto-approve setup wired the credential into the
 /// CA's config.

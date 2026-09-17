@@ -1,6 +1,6 @@
 let drift = |t: Target| -> Result<Array<ServerDrift>, AdminError> 'netidx_admin_drift;
-let list_servers = |t: Target| -> Ceremony<Array<ServerInfo>> 'netidx_admin_list_servers;
-let remove_server = |id: string, t: Target| -> Ceremony<RemoveServerOutcome> 'netidx_admin_remove_server;
+let list = |t: Target| -> Ceremony<Array<ServerInfo>> 'netidx_admin_list_servers;
+let remove = |id: string, t: Target| -> Ceremony<RemoveServerOutcome> 'netidx_admin_remove_server;
 let reconcile_ca = |t: Target| -> Ceremony<ReconcileOutcome> 'netidx_admin_reconcile_ca;
 let set_read_gate = |#server: string, gate: [ReadGate, `ShutFor(duration)], t: Target| -> Ceremony<null> 'netidx_admin_set_read_gate;
 let list_pending_delegations = |t: Target| -> Ceremony<Array<PendingDelegation>> 'netidx_admin_list_pending_delegations;

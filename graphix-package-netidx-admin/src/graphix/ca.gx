@@ -1,4 +1,4 @@
-let ca_credentials = |#cfg: [string, null], ca_dir: string| -> Result<CaCredentials, AdminError> 'netidx_admin_ca_credentials;
+let credentials = |#cfg: [string, null], ca_dir: string| -> Result<CaCredentials, AdminError> 'netidx_admin_ca_credentials;
 let auto_approve = |#rotate: bool, #cfg: [string, null], ca_dir: string| -> Ceremony<AutoApproveOutcome> 'netidx_admin_auto_approve;
 let recovery_rotate = |#cfg: [string, null], ca_dir: string| -> Ceremony<RecoveryRotateOutcome> 'netidx_admin_recovery_rotate;
 let external_csr = |ca_dir: string| -> Ceremony<string> 'netidx_admin_external_csr;

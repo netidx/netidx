@@ -1,4 +1,4 @@
-let installs = |trigger: Any| -> Result<Array<Install>, AdminError> 'netidx_admin_installs;
+let list = |trigger: Any| -> Result<Array<Install>, AdminError> 'netidx_admin_installs;
 let local_resolver_base = |trigger: Any| -> [string, null] 'netidx_admin_local_resolver_base;
 let sync_check = |#config_root: string, role: InstallRole| -> Result<Sync, AdminError> 'netidx_admin_sync_check;
 let install = |#role: InstallRole, #dry_run: bool, trigger: Any| -> Ceremony<InstallOutcome> 'netidx_admin_install;

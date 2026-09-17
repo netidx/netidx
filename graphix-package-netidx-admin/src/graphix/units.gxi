@@ -8,7 +8,7 @@ type ServiceOp = [`Start, `Stop, `Restart, `Status];
 
 /// The local activation supervisor's unit directory, or null when this
 /// host has none. Re-reads per `trigger`.
-val units_dir: fn(trigger: Any) -> [string, null];
+val dir: fn(trigger: Any) -> [string, null];
 
 /// What starts an activation unit: the supervisor coming up, or a
 /// subscription to any of these paths.
@@ -53,21 +53,21 @@ type LocalUnit = {
 
 /// Every unit this host's unit directory defines or its supervisor
 /// runs. Re-lists per `trigger`.
-val list_units: fn(#units_dir: string, trigger: Any) -> Result<Array<LocalUnit>, AdminError>;
+val list: fn(#units_dir: string, trigger: Any) -> Result<Array<LocalUnit>, AdminError>;
 
 /// Apply `op` to one unit (`#unit`) or every unit (null) through this
 /// host's supervisor; the result is what it reports for them
 /// afterwards (definitions null). Errors when no supervisor answers.
-val control_units: fn(#units_dir: string, #unit: [string, null], op: ServiceOp) -> Result<Array<LocalUnit>, AdminError>;
+val control: fn(#units_dir: string, #unit: [string, null], op: ServiceOp) -> Result<Array<LocalUnit>, AdminError>;
 
 /// Write (create or replace) the unit `#name` after checking the
 /// whole set for trigger conflicts, and tell a running supervisor to
 /// re-read the directory; true when one was listening.
-val install_unit: fn(#units_dir: string, #name: string, def: UnitDef) -> Result<bool, AdminError>;
+val install: fn(#units_dir: string, #name: string, def: UnitDef) -> Result<bool, AdminError>;
 
 /// Remove the unit `name` and reload; true when a supervisor was
 /// listening.
-val remove_unit: fn(#units_dir: string, name: string) -> Result<bool, AdminError>;
+val remove: fn(#units_dir: string, name: string) -> Result<bool, AdminError>;
 
 /// The starter definition a create flow seeds its form with.
-val unit_template: fn(trigger: Any) -> UnitDef;
+val template: fn(trigger: Any) -> UnitDef;
