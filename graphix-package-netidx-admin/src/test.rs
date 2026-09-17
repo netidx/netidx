@@ -1,7 +1,8 @@
+use crate::FingerprintV;
 use anyhow::Result;
 use graphix_package_core::{run, testing::FuseExpect};
 use netidx_admin_proto::fingerprint::Fingerprint;
-use netidx_value::Value;
+use netidx_value::{FromValue, Value};
 use std::sync::LazyLock;
 
 /// A real fingerprint (of fixed bytes) so tests exercise the canonical
@@ -20,15 +21,8 @@ run!(
     parse_roundtrip,
     format!(r#"netidx_admin::parse_fingerprint("{}")"#, FP.text()),
     |v: Result<&Value>| {
-        match v {
-            Ok(Value::Array(pairs)) => pairs.iter().any(|p| match p {
-                Value::Array(kv) => {
-                    kv[0] == Value::from("code") && kv[1] == Value::from(FP.text())
-                }
-                _ => false,
-            }),
-            _ => false,
-        }
+        matches!(v, Ok(v) if FingerprintV::from_value(v.clone())
+            .is_ok_and(|fp| fp.code == FP.text()))
     }
 );
 

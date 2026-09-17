@@ -15,7 +15,6 @@ use crate::{
     ops::opt_string,
 };
 use anyhow::{Context, Result};
-use arcstr::ArcStr;
 use graphix_package_core::{
     CachedArgsAsync, CachedVals, EvalCachedAsync, unit_image_state,
 };
@@ -377,23 +376,10 @@ struct ServiceIntentV {
     for_user: Option<String>,
 }
 
-fn restore_staged_value(
-    scope: ServiceScope,
-    service: ServiceIntentV,
-    staged: bundle::Staged,
-) -> Value {
-    let staged = STAGED_WRAPPER.wrap(StagedValue(Arc::new(Mutex::new(Some(staged)))));
-    let payload: Value = [
-        (ArcStr::from("scope"), Value::from(ScopeV::from(scope))),
-        (ArcStr::from("service"), Value::from(service)),
-        (ArcStr::from("staged"), staged),
-    ]
-    .into_iter()
-    .collect::<Vec<_>>()
-    .into();
-    Value::Array(netidx_value::ValArray::from_iter_exact(
-        [Value::from("ServiceThenFinish"), payload].into_iter(),
-    ))
+#[derive(Debug, IntoValue)]
+enum RestoreStagedV {
+    Finish(RestoreOutcomeV),
+    ServiceThenFinish { scope: ScopeV, service: ServiceIntentV, staged: Value },
 }
 
 #[derive(Debug)]
@@ -408,24 +394,23 @@ impl LocalOp for RestoreStageOp {
             Box::pin(async move {
                 let input = RestoreInput { bundle: bundle_dir, ..Default::default() };
                 let staged = bundle::restore_stage(ans, &input).await?;
-                match staged.next {
+                Ok(match staged.next {
                     bundle::Next::Finish => {
                         let out = bundle::restore_finish(ans, staged).await?;
-                        Ok(Value::Array(netidx_value::ValArray::from_iter_exact(
-                            [Value::from("Finish"), RestoreOutcomeV::from(out).into()]
-                                .into_iter(),
-                        )))
+                        RestoreStagedV::Finish(out.into())
                     }
                     bundle::Next::ServiceThenFinish(scope) => {
                         let (name, for_user) =
                             bundle::restored_service(&staged.manifest, None, None);
-                        Ok(restore_staged_value(
-                            scope,
-                            ServiceIntentV { name, for_user },
-                            staged,
-                        ))
+                        RestoreStagedV::ServiceThenFinish {
+                            scope: scope.into(),
+                            service: ServiceIntentV { name, for_user },
+                            staged: STAGED_WRAPPER
+                                .wrap(StagedValue(Arc::new(Mutex::new(Some(staged))))),
+                        }
                     }
                 }
+                .into())
             })
         }))
     }

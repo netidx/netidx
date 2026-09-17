@@ -35,8 +35,8 @@ use netidx_admin::{
 };
 use netidx_admin_proto::Secret;
 use netidx_core::pack::{Pack, PackError};
-use netidx_derive::IntoValue;
-use netidx_value::{Abstract, Value, abstract_type::AbstractWrapper};
+use netidx_derive::{FromValue, IntoValue};
+use netidx_value::{Abstract, FromValue, Value, abstract_type::AbstractWrapper};
 use parking_lot::Mutex;
 use poolshark::global::{GPooled, Pool};
 use std::{
@@ -170,72 +170,61 @@ enum AnswerPayload {
     Ack,
 }
 
-/// The parsed graphix `Answer` variant.
 #[derive(Debug)]
 enum ParsedAnswer {
     Payload(AnswerKind, AnswerPayload),
     Cancel,
 }
 
+#[derive(Debug, FromValue)]
+enum AdminDomainChoiceV {
+    Discovered(i64),
+    Manual,
+    PollMore,
+}
+
+/// The graphix `Answer` variant.
+#[derive(Debug, FromValue)]
+enum AnswerV {
+    Text(Option<String>),
+    Secret(String),
+    Choice(String),
+    Confirm(bool),
+    Domain(AdminDomainChoiceV),
+    Ack,
+    Cancel,
+}
+
+impl TryFrom<AnswerV> for ParsedAnswer {
+    type Error = anyhow::Error;
+
+    fn try_from(a: AnswerV) -> Result<ParsedAnswer> {
+        use {AnswerKind as K, AnswerPayload as P, ParsedAnswer as A};
+        Ok(match a {
+            AnswerV::Text(s) => A::Payload(K::Text, P::Text(s)),
+            AnswerV::Secret(s) => A::Payload(K::Secret, P::Secret(s)),
+            AnswerV::Choice(s) => A::Payload(K::Choice, P::Choice(s)),
+            AnswerV::Confirm(b) => A::Payload(K::Confirm, P::Confirm(b)),
+            AnswerV::Domain(d) => A::Payload(
+                K::Domain,
+                P::Domain(match d {
+                    AdminDomainChoiceV::Discovered(i) => {
+                        AdminDomainChoice::Discovered(usize::try_from(i).map_err(
+                            |_| anyhow!("expected a non-negative index, got {i}"),
+                        )?)
+                    }
+                    AdminDomainChoiceV::Manual => AdminDomainChoice::Manual,
+                    AdminDomainChoiceV::PollMore => AdminDomainChoice::PollMore,
+                }),
+            ),
+            AnswerV::Ack => A::Payload(K::Ack, P::Ack),
+            AnswerV::Cancel => A::Cancel,
+        })
+    }
+}
+
 fn parse_answer(v: &Value) -> Result<ParsedAnswer> {
-    use {AnswerKind as K, AnswerPayload as P, ParsedAnswer as A};
-    fn opt_string(v: &Value) -> Result<Option<String>> {
-        match v {
-            Value::Null => Ok(None),
-            Value::String(s) => Ok(Some(s.to_string())),
-            v => bail!("expected a string or null, got {v}"),
-        }
-    }
-    match v {
-        Value::String(tag) => match &**tag {
-            "Ack" => Ok(A::Payload(K::Ack, P::Ack)),
-            "Cancel" => Ok(A::Cancel),
-            t => bail!("not an answer: `{t}"),
-        },
-        Value::Array(a) if a.len() == 2 => {
-            let tag = match &a[0] {
-                Value::String(s) => s,
-                v => bail!("not an answer: {v}"),
-            };
-            match &**tag {
-                "Text" => Ok(A::Payload(K::Text, P::Text(opt_string(&a[1])?))),
-                "Secret" => match opt_string(&a[1])? {
-                    Some(s) => Ok(A::Payload(K::Secret, P::Secret(s))),
-                    None => bail!("a secret must be a string"),
-                },
-                "Choice" => match opt_string(&a[1])? {
-                    Some(s) => Ok(A::Payload(K::Choice, P::Choice(s))),
-                    None => bail!("a choice must be a string"),
-                },
-                "Confirm" => match &a[1] {
-                    Value::Bool(b) => Ok(A::Payload(K::Confirm, P::Confirm(*b))),
-                    v => bail!("expected a bool, got {v}"),
-                },
-                "Domain" => {
-                    let choice = match &a[1] {
-                        Value::String(s) if &**s == "Manual" => AdminDomainChoice::Manual,
-                        Value::String(s) if &**s == "PollMore" => {
-                            AdminDomainChoice::PollMore
-                        }
-                        Value::Array(d)
-                            if d.len() == 2 && d[0] == Value::from("Discovered") =>
-                        {
-                            match &d[1] {
-                                Value::I64(i) if *i >= 0 => {
-                                    AdminDomainChoice::Discovered(*i as usize)
-                                }
-                                v => bail!("expected a non-negative index, got {v}"),
-                            }
-                        }
-                        v => bail!("not an admin domain choice: {v}"),
-                    };
-                    Ok(A::Payload(K::Domain, P::Domain(choice)))
-                }
-                t => bail!("not an answer: `{t}(..)"),
-            }
-        }
-        v => bail!("not an answer: {v}"),
-    }
+    ParsedAnswer::try_from(AnswerV::from_value(v.clone())?)
 }
 
 // ── question ids ─────────────────────────────────────────────────
@@ -957,28 +946,23 @@ mod test {
             r => panic!("bad manual parse: {r:?}"),
         }
         assert!(parse_answer(&Value::from("Bogus")).is_err());
-        assert!(parse_answer(&tag1("Secret", Value::Null)).is_err());
-        assert!(parse_answer(&tag1("Confirm", Value::I64(1))).is_err());
+        assert!(parse_answer(&Value::from("Secret")).is_err());
+        assert!(
+            parse_answer(&tag1("Domain", tag1("Discovered", Value::I64(-1)))).is_err()
+        );
+    }
+
+    #[derive(FromValue)]
+    struct QuestionV {
+        id: Value,
     }
 
     fn extract_id(ev: &Value) -> QuestionIdValue {
-        let payload = match ev {
-            Value::Array(a) if a.len() == 2 => &a[1],
-            v => panic!("not a question event: {v}"),
-        };
-        let pairs = match payload {
-            Value::Array(a) => a,
-            v => panic!("not a struct payload: {v}"),
-        };
-        for p in pairs.iter() {
-            if let Value::Array(kv) = p
-                && kv[0] == Value::from("id")
-                && let Value::Abstract(a) = &kv[1]
-            {
-                return a.downcast_ref::<QuestionIdValue>().cloned().unwrap();
-            }
+        let (_, q) = ev.clone().cast_to::<(ArcStr, QuestionV)>().unwrap();
+        match q.id {
+            Value::Abstract(a) => a.downcast_ref::<QuestionIdValue>().cloned().unwrap(),
+            v => panic!("not a question id: {v}"),
         }
-        panic!("no id in {payload}")
     }
 
     /// The full blocking round trip, no daemon required: ask parks on

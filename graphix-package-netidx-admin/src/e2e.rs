@@ -7,7 +7,8 @@ use anyhow::{Context, Result, bail};
 use graphix_package_core::testing;
 use graphix_rt::GXEvent;
 use netidx_admin::testing::TestAdminDomain;
-use netidx_value::Value;
+use netidx_derive::FromValue;
+use netidx_value::{FromValue, Value};
 use std::time::Duration;
 
 /// Compile one graphix block against the package and wait for its value.
@@ -91,30 +92,24 @@ async fn ceremonies_against_a_live_domain() -> Result<()> {
         listen = d.listen,
         pw = d.password,
     );
-    let v = run_program(prog, 60).await?;
-    let fields = match &v {
-        Value::Array(fields) => fields,
-        v => bail!("expected a struct, got {v}"),
-    };
-    let get = |name: &str| {
-        fields.iter().find_map(|p| match p {
-            Value::Array(kv) if matches!(&kv[0], Value::String(s) if &**s == name) => {
-                Some(kv[1].clone())
-            }
-            _ => None,
-        })
-    };
-    match get("admins") {
-        Some(Value::Array(rows)) => {
+    #[derive(FromValue)]
+    struct AdminsQueue {
+        admins: Value,
+        queue: Value,
+    }
+    let AdminsQueue { admins, queue } =
+        AdminsQueue::from_value(run_program(prog, 60).await?)?;
+    match admins {
+        Value::Array(rows) => {
             assert!(!rows.is_empty(), "roster empty");
-            let root = format!("{}", Value::Array(rows.clone()));
+            let root = format!("{}", Value::Array(rows));
             assert!(root.contains("root"), "no root admin in {root}");
         }
-        v => bail!("bad admins: {v:?}"),
+        v => bail!("bad admins: {v}"),
     }
-    match get("queue") {
-        Some(Value::Array(rows)) => assert!(rows.is_empty(), "fresh queue not empty"),
-        v => bail!("bad queue: {v:?}"),
+    match queue {
+        Value::Array(rows) => assert!(rows.is_empty(), "fresh queue not empty"),
+        v => bail!("bad queue: {v}"),
     }
     Ok(())
 }
