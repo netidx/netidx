@@ -33,6 +33,7 @@ let upsert = |book: Book, domain: string, addr: string, fp: string| -> Book
 
 let landing = |
   #q: &Question,
+  #book_dir: [string, null],
   #connected: &[Connected, null],
   #on_connect: fn(c: Connect) -> null,
   #on_manual: fn(e: Any) -> null
@@ -41,13 +42,9 @@ let landing = |
   let selstyle = style(#add_modifier: [`Reversed]);
   let bold = style(#add_modifier: [`Bold]);
   // ── the bookmarks file ──
-  let path: [string, null] = select sys::dirs::config_dir() {
+  let path: [string, null] = select book_dir {
     null as _ => null,
-    d => sys::join_path(d, "netidx-admin-tui", "admin-domains.json")
-  };
-  let dir: [string, null] = select sys::dirs::config_dir() {
-    null as _ => null,
-    d => sys::join_path(d, "netidx-admin-tui")
+    d => sys::join_path(d, "admin-domains.json")
   };
   let known: Book = { domains: [] };
   let notice: [string, null] = null;
@@ -75,7 +72,7 @@ let landing = |
   {
     catch(e) notice <- "could not save the admin domain list: [(e.0).error]";
     seq save {
-      let d = select dir {
+      let d = select book_dir {
         null as _ => never(),
         d => d
       };

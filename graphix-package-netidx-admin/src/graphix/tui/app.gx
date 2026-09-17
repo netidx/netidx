@@ -13,7 +13,11 @@ let app = |#server: string = ""| -> tui::Tui {
   let q = never<Question>();
   let p = pump(q);
   let loc = local::local(#q: &q);
-  let rem = remote::remote(#q: &q, #server: server);
+  let book_dir: [string, null] = select sys::dirs::config_dir() {
+    null as _ => null,
+    d => sys::join_path(d, "netidx-admin-tui")
+  };
+  let rem = remote::remote(#q: &q, #book_dir: book_dir, #server: server);
   let tab = select server {
     "" => 0,
     _ => 1

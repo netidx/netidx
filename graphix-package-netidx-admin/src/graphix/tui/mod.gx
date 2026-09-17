@@ -273,7 +273,7 @@ let pump = |q: Question| -> Pump {
   };
   let handle = |e: tui::input_handler::Event| -> [`Stop, `Continue] select e {
     ev@ `Key(k) => select k.kind {
-      `Press => select active {
+      `Press => select k ~ active {
         null as _ => `Continue,
         `Text(_) => text_keys(ev, k),
         `Secret(_) => text_keys(ev, k),

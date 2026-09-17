@@ -8,7 +8,11 @@ use crossterm::event::{Event, KeyCode, KeyEvent};
 use graphix_package_tui::testing::TuiTestHarness;
 use netidx_admin::testing::TestAdminDomain;
 use netidx_value::Value;
-use std::time::{Duration, Instant};
+use std::{
+    path::Path,
+    time::{Duration, Instant},
+};
+use tempfile::TempDir;
 
 fn key(code: KeyCode) -> Event {
     Event::Key(KeyEvent::new(code, crossterm::event::KeyModifiers::NONE))
@@ -37,7 +41,8 @@ async fn answer_text(h: &mut TuiTestHarness, label: &str, s: &str) -> Result<()>
 }
 
 /// The remote tab's app-main composition: the tab under the shared pump.
-fn remote_tab_program(listen: &str) -> String {
+fn remote_tab_program(listen: &str, book_dir: &Path) -> String {
+    let book = book_dir.display();
     format!(
         r#"
 use tui::input_handler::{{self, *}};
@@ -46,11 +51,12 @@ use tui::overlay::{{self, *}};
 use tui::text::{{self, *}};
 
 let q: netidx_admin::ceremony::Question = never();
-let r = netidx_admin::tui::remote::remote(#q: &q, #server: "{listen}");
+let r = netidx_admin::tui::remote::remote(#q: &q, #book_dir: "{book}", #server: "{listen}");
 let p = netidx_admin::tui::pump(q);
+let handle = |e: Event| -> [`Stop, `Continue] r.handle(e);
 let layers = array::concat(r.layers, p.layers);
 let result = overlay(#layers: &layers,
-  input_handler(#handle: &r.handle,
+  input_handler(#handle: &handle,
     &layout(#direction: &`Vertical, &[
       child(#constraint: `Min(1), r.view),
       child(#constraint: `Length(1), text(&[r.status]))
@@ -200,7 +206,8 @@ let result = overlay(#layers: &p.layers, paragraph(&"base"))
 #[tokio::test(flavor = "multi_thread")]
 async fn remote_tab_drives_the_panels() -> Result<()> {
     let d = TestAdminDomain::start().await?;
-    let prog = remote_tab_program(&d.listen.to_string());
+    let book = TempDir::new()?;
+    let prog = remote_tab_program(&d.listen.to_string(), book.path());
     let mut h =
         TuiTestHarness::with_register(&prog, crate::TEST_REGISTER, 100, 30).await?;
     connect_via_modals(&mut h, &d.admin, &d.password).await?;
@@ -246,7 +253,8 @@ async fn remote_tab_drives_the_panels() -> Result<()> {
 async fn remote_tab_routes_a_reset_password() -> Result<()> {
     let d = TestAdminDomain::start().await?;
     let one_time = d.mint_role_admin("alice").await?;
-    let prog = remote_tab_program(&d.listen.to_string());
+    let book = TempDir::new()?;
+    let prog = remote_tab_program(&d.listen.to_string(), book.path());
     let mut h =
         TuiTestHarness::with_register(&prog, crate::TEST_REGISTER, 100, 30).await?;
     connect_via_modals(&mut h, "alice", &one_time).await?;
@@ -298,7 +306,8 @@ async fn remote_tab_routes_a_reset_password() -> Result<()> {
 #[tokio::test(flavor = "multi_thread")]
 async fn remote_tab_opens_the_services_and_perms_screens() -> Result<()> {
     let d = TestAdminDomain::start().await?;
-    let prog = remote_tab_program(&d.listen.to_string());
+    let book = TempDir::new()?;
+    let prog = remote_tab_program(&d.listen.to_string(), book.path());
     let mut h =
         TuiTestHarness::with_register(&prog, crate::TEST_REGISTER, 100, 30).await?;
     connect_via_modals(&mut h, &d.admin, &d.password).await?;
@@ -352,8 +361,7 @@ async fn remote_tab_opens_the_services_and_perms_screens() -> Result<()> {
 }
 
 /// The landing screen: with no address passed the tab starts on the
-/// registry — empty here, the bookmarks live under the test's config
-/// redirect — and `c` reaches connect-by-address. A session established
+/// registry — empty, the test owns its bookmarks directory — and `c` reaches connect-by-address. A session established
 /// there is remembered to the bookmarks file and, back on the landing
 /// after a disconnect, re-verified at its address and listed; Enter on
 /// it connects with the saved fingerprint and the cached session, so
@@ -361,7 +369,8 @@ async fn remote_tab_opens_the_services_and_perms_screens() -> Result<()> {
 #[tokio::test(flavor = "multi_thread")]
 async fn landing_remembers_and_reverifies_a_domain() -> Result<()> {
     let d = TestAdminDomain::start().await?;
-    let prog = remote_tab_program("");
+    let book = TempDir::new()?;
+    let prog = remote_tab_program("", book.path());
     let mut h =
         TuiTestHarness::with_register(&prog, crate::TEST_REGISTER, 100, 30).await?;
     wait_render(&mut h, Duration::from_secs(60), "the empty landing", |lines| {
@@ -380,9 +389,7 @@ async fn landing_remembers_and_reverifies_a_domain() -> Result<()> {
     })
     .await?;
     // the session was recorded
-    let book = std::path::PathBuf::from(std::env::var("XDG_CONFIG_HOME")?)
-        .join("netidx-admin-tui")
-        .join("admin-domains.json");
+    let book = book.path().join("admin-domains.json");
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         if let Ok(text) = std::fs::read_to_string(&book)
@@ -423,7 +430,8 @@ async fn landing_remembers_and_reverifies_a_domain() -> Result<()> {
 #[tokio::test(flavor = "multi_thread")]
 async fn roster_adds_and_edits_an_admin() -> Result<()> {
     let d = TestAdminDomain::start().await?;
-    let prog = remote_tab_program(&d.listen.to_string());
+    let book = TempDir::new()?;
+    let prog = remote_tab_program(&d.listen.to_string(), book.path());
     let mut h =
         TuiTestHarness::with_register(&prog, crate::TEST_REGISTER, 100, 34).await?;
     connect_via_modals(&mut h, &d.admin, &d.password).await?;
@@ -496,13 +504,14 @@ async fn roster_adds_and_edits_an_admin() -> Result<()> {
         lines.iter().any(|l| l.contains("max validity 36h"))
     })
     .await?;
-    // a second edit of the same admin must open the form again; the
-    // form keeps its focus, so the validity field is still current
+    // a second edit of the same admin opens the form again, focused on
+    // its first field
     h.dispatch_event(key(KeyCode::Char('e'))).await?;
     wait_render(&mut h, Duration::from_secs(60), "the edit form again", |lines| {
         lines.iter().any(|l| l.contains("Edit bob's policy"))
     })
     .await?;
+    h.dispatch_event(key(KeyCode::Tab)).await?;
     for _ in 0..40 {
         h.dispatch_event(key(KeyCode::Backspace)).await?;
     }

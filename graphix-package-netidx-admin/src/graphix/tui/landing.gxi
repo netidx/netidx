@@ -27,7 +27,8 @@ type Landing = {
 };
 
 /// The admin-domain tab's landing screen: the registry of known admin
-/// domains — the bookmarks file in this program's config directory,
+/// domains — the bookmarks file `admin-domains.json` under `#book_dir`
+/// (null: nothing is loaded or saved),
 /// seeded with this host's own domain from its install record —
 /// re-verified on entry by fetching each saved address's identity and
 /// matching the saved fingerprint, so a reused address on another
@@ -38,6 +39,7 @@ type Landing = {
 /// key. Questions go to the app's bus `#q` like every other screen's.
 val landing: fn(
   #q: &Question,
+  #book_dir: [string, null],
   #connected: &[Connected, null],
   #on_connect: fn(c: Connect) -> null,
   #on_manual: fn(e: Any) -> null

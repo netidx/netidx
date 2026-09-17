@@ -1294,7 +1294,7 @@ let local = |#q: &Question| -> Local {
   };
   let handle = |e: Event| -> [`Stop, `Continue] select e {
     ev@ `Key(k) => select k.kind {
-      `Press => select screen {
+      `Press => select k ~ screen {
         `Admin => pan.handle(ev),
         `Services => svc.handle(ev),
         `Home => select k ~ fresh {

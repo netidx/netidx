@@ -14,7 +14,7 @@ use tui::text::{self, *};
 
 type Screen = [`Landing, `Connect, `Panels];
 
-let remote = |#q: &Question, #server: string = ""| -> Remote {
+let remote = |#q: &Question, #book_dir: [string, null], #server: string = ""| -> Remote {
   let hint = style(#fg: `DarkGray);
   let selstyle = style(#add_modifier: [`Reversed]);
   // ── connection state ──
@@ -36,6 +36,7 @@ let remote = |#q: &Question, #server: string = ""| -> Remote {
   let connected: [Connected, null] = null;
   let land = landing::landing(
     #q: q,
+    #book_dir: book_dir,
     #connected: &connected,
     #on_connect: |c: landing::Connect| -> null {
       connect_glyph <- c.glyph;
@@ -120,7 +121,7 @@ let remote = |#q: &Question, #server: string = ""| -> Remote {
   );
   let handle = |e: Event| -> [`Stop, `Continue] select e {
     ev@ `Key(k) => select k.kind {
-      `Press => select screen {
+      `Press => select k ~ screen {
         `Landing => land.handle(ev),
         `Connect => connect_keys(ev, k),
         `Panels => pan.handle(ev)

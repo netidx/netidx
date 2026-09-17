@@ -1114,7 +1114,7 @@ let panels = |
   };
   let handle = |e: Event| -> [`Stop, `Continue] select e {
     ev@ `Key(k) => select k.kind {
-      `Press => select screen {
+      `Press => select k ~ screen {
         `Menu => menu_keys(k),
         `Panel(p) => panel_keys(k, p),
         `ServerPick => pick_keys(k),
