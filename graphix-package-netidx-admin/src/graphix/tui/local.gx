@@ -340,28 +340,28 @@ let local = |#q: &Question| -> Local {
   let restore_staged: [Staged, null] = null;
   let finish_restore = |t: Any| -> null {
     select t ~ restore_staged {
-      null as _ => toast <- { title: "No restore to finish", lines: ["No staged restore is waiting."], error: true },
+      null as _ => toast <- t ~ { title: "No restore to finish", lines: ["No staged restore is waiting."], error: true },
       _ => run <- t ~ `FinishRestore
     };
     null
   };
   // ── keys ──
   let home_keys = |k: KeyEvent| -> [`Stop, `Continue] select k.code {
-    `Up | `Char("k") => { menu_sel <- max(0, (k ~ menu_sel) - 1); `Stop },
+    `Up | `Char("k") => { menu_sel <- k ~ max(0, menu_sel - 1); `Stop },
     `Down | `Char("j") => {
-      menu_sel <- min(max(0, (k ~ n_items) - 1), (k ~ menu_sel) + 1);
+      menu_sel <- k ~ min(max(0, n_items - 1), menu_sel + 1);
       `Stop
     },
-    `Left => { sel <- max(0, (k ~ sel) - 1); menu_sel <- k ~ 0; `Stop },
+    `Left => { sel <- k ~ max(0, sel - 1); menu_sel <- k ~ 0; `Stop },
     `Right => {
-      sel <- min(max(0, (k ~ n_installs) - 1), (k ~ sel) + 1);
+      sel <- k ~ min(max(0, n_installs - 1), sel + 1);
       menu_sel <- k ~ 0;
       `Stop
     },
     kk@ `Enter => {
-      select kk ~ items {
-        [] => never(),
-        xs => chosen <- (xs[min(kk ~ menu_sel, array::len(xs) - 1)]$).act
+      select kk ~ (items, menu_sel) {
+        ([], _) => never(),
+        (xs, i) => chosen <- (xs[min(i, array::len(xs) - 1)]$).act
       };
       `Stop
     },
@@ -385,14 +385,14 @@ let local = |#q: &Question| -> Local {
     _ => `Continue
   };
   let fresh_keys = |k: KeyEvent| -> [`Stop, `Continue] select k.code {
-    `Up | `Char("k") => { role_sel <- max(0, (k ~ role_sel) - 1); `Stop },
+    `Up | `Char("k") => { role_sel <- k ~ max(0, role_sel - 1); `Stop },
     `Down | `Char("j") => {
-      role_sel <- min(array::len(fresh_choices) - 1, (k ~ role_sel) + 1);
+      role_sel <- k ~ min(array::len(fresh_choices) - 1, role_sel + 1);
       `Stop
     },
-    kk@ `Enter => { chosen <- (fresh_choices[kk ~ role_sel]$).act; `Stop },
+    kk@ `Enter => { chosen <- kk ~ (fresh_choices[role_sel]$).act; `Stop },
     kk@ `Char("p") => {
-      select (fresh_choices[kk ~ role_sel]$).act {
+      select kk ~ (fresh_choices[role_sel]$).act {
         `Install(role, _) => chosen <- `Install(role, true),
         _ => never()
       };
@@ -406,18 +406,11 @@ let local = |#q: &Question| -> Local {
   // own permissions ──
   let admin_req = never<{ cfg: string, panel: [`Roster, `Perms] }>();
   admin_req <- select run {
-    x@ `Admins => select x ~ lca {
+    x@ `Admins | x@ `Perms => select x ~ lca {
       null as _ => never(),
       l => select l.cfg {
         null as _ => never(),
-        c => { cfg: c, panel: `Roster }
-      }
-    },
-    x@ `Perms => select x ~ lca {
-      null as _ => never(),
-      l => select l.cfg {
-        null as _ => never(),
-        c => { cfg: c, panel: `Perms }
+        c => { cfg: c, panel: select x { `Admins => `Roster, `Perms => `Perms } }
       }
     },
     _ => never()
@@ -729,10 +722,8 @@ let local = |#q: &Question| -> Local {
       }
     }
   };
-  seq svc_ok {
-    toast <- { title: "OS service registered", lines: [svc_ok], error: false };
-    refresh <- svc_ok
-  };
+  toast <- { title: "OS service registered", lines: [svc_ok], error: false };
+  refresh <- svc_ok;
   let priv_cmd = escalate_command(priv_req.argv, priv_req);
   let suspended = false;
   let priv_exit = never<i64>();
@@ -1012,10 +1003,10 @@ let local = |#q: &Question| -> Local {
   let ca_handle = |e: Event| -> [`Stop, `Continue] select e {
     `Key(k) => select k.kind {
       `Press => select k.code {
-        `Up | `Char("k") => { ca_sel <- max(0, (k ~ ca_sel) - 1); `Stop },
-        `Down | `Char("j") => { ca_sel <- min(1, (k ~ ca_sel) + 1); `Stop },
+        `Up | `Char("k") => { ca_sel <- k ~ max(0, ca_sel - 1); `Stop },
+        `Down | `Char("j") => { ca_sel <- k ~ min(1, ca_sel + 1); `Stop },
         kk@ `Enter => {
-          run <- `UninstallWith((kk ~ ca_sel) == 1);
+          run <- kk ~ `UninstallWith(ca_sel == 1);
           ca_ask <- kk ~ false;
           `Stop
         },
@@ -1069,24 +1060,21 @@ let local = |#q: &Question| -> Local {
   let parent_handle = |e: Event| -> [`Stop, `Continue] select e {
     `Key(k) => select k.kind {
       `Press => select k.code {
-        `Up | `Char("k") => { parent_sel <- max(0, (k ~ parent_sel) - 1); `Stop },
+        `Up | `Char("k") => { parent_sel <- k ~ max(0, parent_sel - 1); `Stop },
         `Down | `Char("j") => {
-          parent_sel <- min(array::len(k ~ parent_cands_or_empty), (k ~ parent_sel) + 1);
+          parent_sel <- k ~ min(array::len(parent_cands_or_empty), parent_sel + 1);
           `Stop
         },
         kk@ `Enter => {
-          let i = kk ~ parent_sel;
-          select kk ~ parent_cands_or_empty {
-            cs => select array::len(cs) {
-              n if i < n => {
-                let c = cs[i]$;
-                parent_pick <- [c.resolver];
-                parent_fields <- [{ label: "parent admin server", value: c.admin }, { label: "subtree path", value: "" }]
-              },
-              _ => {
-                parent_pick <- cs ~ null;
-                parent_fields <- cs ~ [{ label: "parent admin server", value: "" }, { label: "subtree path", value: "" }]
-              }
+          select kk ~ (parent_cands_or_empty, parent_sel) {
+            (cs, i) if i < array::len(cs) => {
+              let c = cs[i]$;
+              parent_pick <- [c.resolver];
+              parent_fields <- [{ label: "parent admin server", value: c.admin }, { label: "subtree path", value: "" }]
+            },
+            (cs, _) => {
+              parent_pick <- cs ~ null;
+              parent_fields <- cs ~ [{ label: "parent admin server", value: "" }, { label: "subtree path", value: "" }]
             }
           };
           parent_open <- kk ~ false;

@@ -28,9 +28,9 @@ let app = |#server: string = ""| -> tui::Tui {
     `Key(k) => select k.kind {
       `Press => select k.code {
         `Tab => {
-          tab <- select k ~ loc.installed {
-            true => ((k ~ tab) + 1) % 2,
-            false => k ~ 0
+          tab <- k ~ select loc.installed {
+            true => (tab + 1) % 2,
+            false => 0
           };
           `Stop
         },

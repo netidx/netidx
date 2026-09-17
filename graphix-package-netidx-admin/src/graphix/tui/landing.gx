@@ -155,28 +155,23 @@ let landing = |
   let handle = |e: Event| -> [`Stop, `Continue] select e {
     `Key(k) => select k.kind {
       `Press => select k.code {
-        `Up | `Char("k") => { sel <- max(0, (k ~ sel) - 1); `Stop },
+        `Up | `Char("k") => { sel <- k ~ max(0, sel - 1); `Stop },
         `Down | `Char("j") => {
-          sel <- min(max(0, array::len(k ~ visible) - 1), (k ~ sel) + 1);
+          sel <- k ~ min(max(0, array::len(visible) - 1), sel + 1);
           `Stop
         },
         kk@ `Char("d") => { discover_at <- kk; `Stop },
         kk@ `Char("c") => { on_manual(kk); `Stop },
         kk@ `Char("r") => { poll <- kk; `Stop },
         kk@ `Enter => {
-          select kk ~ toast {
-            null as _ => {
-              let i = kk ~ sel;
-              select kk ~ visible {
-                [] => never(),
-                rows => {
-                  let row = rows[min(i, array::len(rows) - 1)]$;
-                  on_connect({
-                    server: row.addr,
-                    glyph: package::parse_fingerprint(row.known.fingerprint)$
-                  })
-                }
-              }
+          select kk ~ (toast, visible, sel) {
+            (null, [], _) => never(),
+            (null, rows, i) => {
+              let row = rows[min(i, array::len(rows) - 1)]$;
+              on_connect({
+                server: row.addr,
+                glyph: package::parse_fingerprint(row.known.fingerprint)$
+              })
             },
             _ => toast <- null
           };

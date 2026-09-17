@@ -861,13 +861,13 @@ let panels = |
     _ => 0
   };
   let menu_keys = |k: KeyEvent| -> [`Stop, `Continue] select k.code {
-    `Up | `Char("k") => { menu_sel <- max(0, (k ~ menu_sel) - 1); `Stop },
+    `Up | `Char("k") => { menu_sel <- k ~ max(0, menu_sel - 1); `Stop },
     `Down | `Char("j") => {
-      menu_sel <- min(array::len(menu_entries) - 1, (k ~ menu_sel) + 1);
+      menu_sel <- k ~ min(array::len(menu_entries) - 1, menu_sel + 1);
       `Stop
     },
     kk@ `Enter => {
-      let p = (menu_entries[kk ~ menu_sel]$).kind;
+      let p = kk ~ (menu_entries[menu_sel]$).kind;
       select p {
         `Services => { screen <- p ~ `ServerPick; pick <- p ~ `Servers },
         `Perms => { screen <- p ~ `ClusterPick; pick <- p ~ `Clusters },
@@ -881,32 +881,27 @@ let panels = |
     _ => `Continue
   };
   let pick_keys = |k: KeyEvent| -> [`Stop, `Continue] select k.code {
-    `Up | `Char("k") => { pick_sel <- max(0, (k ~ pick_sel) - 1); `Stop },
-    `Down | `Char("j") => { pick_sel <- min(k ~ pick_last, (k ~ pick_sel) + 1); `Stop },
+    `Up | `Char("k") => { pick_sel <- k ~ max(0, pick_sel - 1); `Stop },
+    `Down | `Char("j") => { pick_sel <- k ~ min(pick_last, pick_sel + 1); `Stop },
     kk@ `Esc => { screen <- kk ~ `Menu; `Stop },
     kk@ `Enter => {
-      let i = kk ~ pick_sel;
-      select kk ~ (screen, svc_servers, clusters) {
-        (`ServerPick, rows, _) => select rows {
+      select kk ~ (screen, svc_servers, clusters, pick_sel) {
+        (`ServerPick, rows, _, i) => select rows {
           null as _ => never(),
-          rows => select array::len(rows) {
-            0 => never(),
-            n => {
-              service_server <- rows[min(i, n - 1)]$;
-              screen <- kk ~ `Panel(`Services);
-              load <- kk ~ `Services
-            }
+          [] => never(),
+          rows => {
+            service_server <- rows[min(i, array::len(rows) - 1)]$;
+            screen <- kk ~ `Panel(`Services);
+            load <- kk ~ `Services
           }
         },
-        (`ClusterPick, _, bases) => select bases {
+        (`ClusterPick, _, bases, i) => select bases {
           null as _ => never(),
-          bases => select array::len(bases) {
-            0 => never(),
-            n => {
-              perms_at <- bases[min(i, n - 1)]$;
-              screen <- kk ~ `Panel(`Perms);
-              load <- kk ~ `Perms
-            }
+          [] => never(),
+          bases => {
+            perms_at <- bases[min(i, array::len(bases) - 1)]$;
+            screen <- kk ~ `Panel(`Perms);
+            load <- kk ~ `Perms
           }
         },
         _ => never()
@@ -974,7 +969,7 @@ let panels = |
             policy_title <- "Edit [a.admin]'s policy";
             policy_target <- `Edit(a.admin);
             policy_fields_in <- policy_fields(a.policy);
-            policy_open <- true
+            policy_open <- a ~ true
           }
         }
       };
@@ -1014,7 +1009,7 @@ let panels = |
             lines: ["[s.id] runs no resolver, so it has no read gate to set."],
             error: true
           },
-          _ => { gate_for <- s; gate_sel <- 0 }
+          _ => { gate_for <- s; gate_sel <- s ~ 0 }
         }
       };
       `Stop
@@ -1102,9 +1097,9 @@ let panels = |
       `Stop
     },
     kk@ `Char("r") => { load <- kk ~ p; `Stop },
-    `Up | `Char("k") => { row_sel <- max(0, (k ~ row_sel) - 1); `Stop },
+    `Up | `Char("k") => { row_sel <- k ~ max(0, row_sel - 1); `Stop },
     `Down | `Char("j") => {
-      row_sel <- min(k ~ panel_last, (k ~ row_sel) + 1);
+      row_sel <- k ~ min(panel_last, row_sel + 1);
       `Stop
     },
     _ => select p {
@@ -1133,13 +1128,13 @@ let panels = |
   let gate_handle = |e: Event| -> [`Stop, `Continue] select e {
     `Key(k) => select k.kind {
       `Press => select k.code {
-        `Up | `Char("k") => { gate_sel <- max(0, (k ~ gate_sel) - 1); `Stop },
+        `Up | `Char("k") => { gate_sel <- k ~ max(0, gate_sel - 1); `Stop },
         `Down | `Char("j") => {
-          gate_sel <- min(array::len(gate_choices) - 1, (k ~ gate_sel) + 1);
+          gate_sel <- k ~ min(array::len(gate_choices) - 1, gate_sel + 1);
           `Stop
         },
         kk@ `Enter => {
-          let g = (gate_choices[kk ~ gate_sel]$).gate;
+          let g = kk ~ (gate_choices[gate_sel]$).gate;
           let at = kk ~ now;
           select kk ~ gate_for {
             null as _ => never(),

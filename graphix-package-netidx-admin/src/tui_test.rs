@@ -419,7 +419,7 @@ async fn landing_remembers_and_reverifies_a_domain() -> Result<()> {
 /// The roster's policy editor: `a` opens the form, a new role admin is
 /// minted with the policy typed into it (the one-time password toasted),
 /// and `e` on that admin edits the policy in place — the detail pane
-/// shows the new validity.
+/// shows the new validity, and a second edit opens the form again.
 #[tokio::test(flavor = "multi_thread")]
 async fn roster_adds_and_edits_an_admin() -> Result<()> {
     let d = TestAdminDomain::start().await?;
@@ -494,6 +494,27 @@ async fn roster_adds_and_edits_an_admin() -> Result<()> {
     h.dispatch_event(key(KeyCode::Enter)).await?;
     wait_render(&mut h, Duration::from_secs(60), "the edited validity", |lines| {
         lines.iter().any(|l| l.contains("max validity 36h"))
+    })
+    .await?;
+    // a second edit of the same admin must open the form again; the
+    // form keeps its focus, so the validity field is still current
+    h.dispatch_event(key(KeyCode::Char('e'))).await?;
+    wait_render(&mut h, Duration::from_secs(60), "the edit form again", |lines| {
+        lines.iter().any(|l| l.contains("Edit bob's policy"))
+    })
+    .await?;
+    for _ in 0..40 {
+        h.dispatch_event(key(KeyCode::Backspace)).await?;
+    }
+    type_text(&mut h, "60h").await?;
+    h.dispatch_event(key(KeyCode::Enter)).await?;
+    wait_render(&mut h, Duration::from_secs(60), "the second policy toast", |lines| {
+        lines.iter().any(|l| l.contains("Policy updated"))
+    })
+    .await?;
+    h.dispatch_event(key(KeyCode::Enter)).await?;
+    wait_render(&mut h, Duration::from_secs(60), "the twice-edited validity", |lines| {
+        lines.iter().any(|l| l.contains("max validity 60h"))
     })
     .await?;
     Ok(())

@@ -286,8 +286,8 @@ let services = |#units_dir: string, #on_close: fn(e: Any) -> null, open: Any| ->
   let handle = |e: Event| -> [`Stop, `Continue] select e {
     `Key(k) => select k.kind {
       `Press => select k.code {
-        `Up | `Char("k") => { sel <- max(0, (k ~ sel) - 1); `Stop },
-        `Down | `Char("j") => { sel <- min(k ~ last, (k ~ sel) + 1); `Stop },
+        `Up | `Char("k") => { sel <- k ~ max(0, sel - 1); `Stop },
+        `Down | `Char("j") => { sel <- k ~ min(last, sel + 1); `Stop },
         kk@ `Char("s") => { control(kk, `Start); `Stop },
         kk@ `Char("t") => {
           select kk ~ selected {
@@ -303,7 +303,7 @@ let services = |#units_dir: string, #on_close: fn(e: Any) -> null, open: Any| ->
         kk@ `Char("c") => {
           form_title <- kk ~ "New unit";
           creating <- kk ~ true;
-          form_fields <- array::push_front(def_fields(kk ~ template), { label: "name", value: "" });
+          form_fields <- kk ~ array::push_front(def_fields(template), { label: "name", value: "" });
           form_open <- kk ~ true;
           `Stop
         },

@@ -247,8 +247,8 @@ let pump = |q: Question| -> Pump {
     };
   let list_keys = |k: tui::input_handler::KeyEvent, last: i64|
     -> [`Stop, `Continue] select k.code {
-      `Up | `Char("k") => { sel <- max(0, (k ~ sel) - 1); `Stop },
-      `Down | `Char("j") => { sel <- min(k ~ last, (k ~ sel) + 1); `Stop },
+      `Up | `Char("k") => { sel <- k ~ max(0, sel - 1); `Stop },
+      `Down | `Char("j") => { sel <- k ~ min(last, sel + 1); `Stop },
       kk@ `Enter => { enter(kk); `Stop },
       kk@ `Esc => { cancel(kk); `Stop },
       _ => `Continue
