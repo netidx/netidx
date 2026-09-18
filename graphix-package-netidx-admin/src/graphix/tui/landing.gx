@@ -78,7 +78,7 @@ let landing = |
   // at load, after every change to the set, and on demand ──
   let verify: Any = known;
   let polling = false;
-  let states: Array<Poll> = seqq verify {
+  let states: Array<Poll> = seqq sys::time::after_idle(duration:250.ms, verify) {
     polling <- true;
     let st = array::map(known.domains, |k: Known| -> Poll {
       let verified = array::filter_map(k.addrs, |a: string| -> [string, null] select identity_at(a) {
