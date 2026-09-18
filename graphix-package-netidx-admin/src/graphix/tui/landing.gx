@@ -14,14 +14,14 @@ type Poll = [`Present(string), `Absent];
 // record a domain under its fingerprint: a new address joins the
 // saved ones, a changed name replaces the saved one
 let upsert = |book: Book, domain: string, addr: string, fp: string| -> Book
-  select array::find(book.domains, |k: Known| k.fingerprint == fp) {
+  select array::find(book.domains, |k| k.fingerprint == fp) {
     null as _ => { domains: array::push(book.domains, { domain, fingerprint: fp, addrs: [addr] }) },
     _ => {
-      domains: array::map(book.domains, |k: Known| -> Known select k.fingerprint == fp {
+      domains: array::map(book.domains, |k| select k.fingerprint == fp {
         true => {
           domain,
           fingerprint: fp,
-          addrs: select array::find(k.addrs, |a: string| a == addr) {
+          addrs: select array::find(k.addrs, |a| a == addr) {
             null as _ => array::push(k.addrs, addr),
             _ => k.addrs
           }
@@ -42,12 +42,12 @@ let landing = |
   let selstyle = style(#add_modifier: [`Reversed]);
   let bold = style(#add_modifier: [`Bold]);
   // ── the bookmarks file ──
-  let path: [string, null] = select book_dir {
+  let path = select book_dir {
     null as _ => null,
     d => sys::join_path(d, "admin-domains.json")
   };
   let book_path = opt::or_never(path);
-  let known: Book = { domains: [] };
+  let known = { domains: [] };
   let notice: [string, null] = null;
   let file = sys::fs::is_file(book_path)$;
   {
@@ -78,10 +78,10 @@ let landing = |
   // at load, after every change to the set, and on demand ──
   let verify: Any = known;
   let polling = false;
-  let states: Array<Poll> = seqq sys::time::after_idle(duration:250.ms, verify) {
+  let states = seqq sys::time::after_idle(duration:250.ms, verify) {
     polling <- true;
-    let st = array::map(known.domains, |k: Known| -> Poll {
-      let verified = array::filter_map(k.addrs, |a: string| -> [string, null] select identity_at(a) {
+    let st = array::map(known.domains, |k| {
+      let verified = array::filter_map(k.addrs, |a| select identity_at(a) {
         error as _ => null,
         id if id.fingerprint.code == k.fingerprint => a,
         _ => null
@@ -94,9 +94,9 @@ let landing = |
     polling <- false;
     st
   };
-  let visible: Array<{ known: Known, addr: string }> = array::filter_map(
+  let visible = array::filter_map(
     array::zip(known.domains, states),
-    |(k, st): (Known, Poll)| -> [{ known: Known, addr: string }, null] select st {
+    |(k, st)| select st {
       `Present(addr) => { known: k, addr },
       `Absent => null
     }
@@ -110,7 +110,7 @@ let landing = |
     }
   };
   // ── discovery: what verified is recorded ──
-  let discover_at: Any = never();
+  let discover_at = never();
   let toast: [{ title: string, lines: Array<string> }, null] = null;
   {
     catch(e) toast <- { title: "Discovery failed", lines: [admin_text((e.0).error)] };
@@ -120,10 +120,10 @@ let landing = |
         null as _ => null,
         id => { domain: r.domain, servers: r.servers, fp: id.fingerprint.code }
       });
-      known <- array::fold(verified, known, |book: Book, v| array::fold(
+      known <- array::fold(verified, known, |book, v| array::fold(
         v.servers,
         book,
-        |b: Book, s: string| upsert(b, v.domain, s, v.fp)
+        |b, s| upsert(b, v.domain, s, v.fp)
       ));
       save <- found;
       toast <- select array::len(found.diagnosis) {
@@ -137,7 +137,7 @@ let landing = |
   };
   // ── keys ──
   let sel = 0;
-  let handle = |e: Event| -> [`Stop, `Continue] select e {
+  let handle = |e: Event| select e {
     `Key(k) => select k.kind {
       `Press => select k.code {
         `Up | `Char("k") => { sel <- k ~ max(0, sel - 1); `Stop },
@@ -170,7 +170,7 @@ let landing = |
     _ => `Continue
   };
   // ── the view ──
-  let empty: Array<tui::Line> = select (array::len(known.domains), polling, array::len(visible)) {
+  let empty = select (array::len(known.domains), polling, array::len(visible)) {
     (0, _, _) => [line(#style: hint,
       "No saved admin domains yet. Press d to discover admin domains on the local network, or c to connect to one by address.")],
     (_, true, 0) => [line(#style: hint, "Checking saved admin domains…")],
@@ -182,7 +182,7 @@ let landing = |
     [span("[v.known.domain] ")],
     [span(#style: hint, "([v.addr])")]
   )));
-  let side: Array<tui::Line> = select visible {
+  let side = select visible {
     [] => [],
     rows => {
       let row = rows[min(sel, array::len(rows) - 1)]$;
@@ -196,11 +196,11 @@ let landing = |
       }
     }
   };
-  let notice_lines: Array<tui::Line> = select notice {
+  let notice_lines = select notice {
     null as _ => [],
     m => [line(#style: style(#fg: `Red), m)]
   };
-  let toast_lines: Array<tui::Line> = select toast {
+  let toast_lines = select toast {
     null as _ => [],
     t => array::concat([line(#style: bold, t.title)], array::map(t.lines, |l| line(l)))
   };
