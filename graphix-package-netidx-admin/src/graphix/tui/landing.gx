@@ -46,19 +46,13 @@ let landing = |
     null as _ => null,
     d => sys::join_path(d, "admin-domains.json")
   };
+  let book_path = opt::or_never(path);
   let known: Book = { domains: [] };
   let notice: [string, null] = null;
+  let file = sys::fs::is_file(book_path)$;
   {
-    catch(e) never();
-    let p = select path {
-      null as _ => never(),
-      p => p
-    };
-    let file = sys::fs::is_file(p)?;
-    {
-      catch(e) notice <- "could not load the admin domain list: [(e.0).error]";
-      known <- json::read(sys::fs::read_all(file)?)?
-    }
+    catch(e) notice <- "could not load the admin domain list: [(e.0).error]";
+    known <- json::read(sys::fs::read_all(file)?)?
   };
   // this host's own domain, from its install record
   select local_domain(true) {
@@ -77,11 +71,7 @@ let landing = |
         d => d
       };
       sys::fs::create_dir(#all: true, d)?;
-      let p = select path {
-        null as _ => never(),
-        p => p
-      };
-      sys::fs::write_all(#path: p, json::write_str(#pretty: true, known)?)?
+      sys::fs::write_all(#path: book_path, json::write_str(#pretty: true, known)?)?
     }
   };
   // ── verification: each saved domain, at each address, in order —
