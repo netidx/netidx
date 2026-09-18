@@ -84,7 +84,7 @@ impl AbstractVtable {
                 let t1 = t1.downcast_ref::<T>();
                 t0 == t1
             }),
-            ord: Box::new(|t0, t1| match t0.type_id().cmp(&t1.type_id()) {
+            ord: Box::new(|t0, t1| match t0.0.id.cmp(&t1.0.id) {
                 Ordering::Equal => {
                     let t0 = t0.downcast_ref::<T>().unwrap();
                     let t1 = t1.downcast_ref::<T>().unwrap();

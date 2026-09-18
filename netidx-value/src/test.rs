@@ -688,3 +688,38 @@ fn small_ints_keep_their_width() {
     assert_eq!(Value::U8(7).cast_to::<u16>().unwrap(), 7);
     assert!(Value::U16(300).cast_to::<u8>().is_err());
 }
+
+#[test]
+fn abstract_ord_across_types() {
+    use bytes::{Buf, BufMut};
+    use netidx_core::pack::{Pack, PackError};
+    use std::cmp::Ordering;
+    use uuid::Uuid;
+    macro_rules! newtype {
+        ($name:ident) => {
+            #[derive(Debug, Hash, PartialEq, Eq, PartialOrd, Ord)]
+            struct $name(i64);
+            impl Pack for $name {
+                fn encoded_len(&self) -> usize {
+                    Pack::encoded_len(&self.0)
+                }
+                fn encode(&self, buf: &mut impl BufMut) -> Result<(), PackError> {
+                    Pack::encode(&self.0, buf)
+                }
+                fn decode(buf: &mut impl Buf) -> Result<Self, PackError> {
+                    Ok($name(Pack::decode(buf)?))
+                }
+            }
+        };
+    }
+    newtype!(A);
+    newtype!(B);
+    let a = Abstract::register::<A>(Uuid::from_u128(0x4f1d_a1c0_0001)).unwrap();
+    let b = Abstract::register::<B>(Uuid::from_u128(0x4f1d_a1c0_0002)).unwrap();
+    let (va, vb) = (a.wrap(A(1)), b.wrap(B(0)));
+    assert_ne!(va.cmp(&vb), Ordering::Equal);
+    assert_eq!(va.cmp(&vb), vb.cmp(&va).reverse());
+    assert_ne!(va, vb);
+    assert_eq!(a.wrap(A(1)).cmp(&a.wrap(A(2))), Ordering::Less);
+    assert_eq!(a.wrap(A(3)), a.wrap(A(3)));
+}
