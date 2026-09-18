@@ -102,12 +102,10 @@ let landing = |
     }
   );
   // ── a session the tab established is remembered, and re-checked ──
-  select *connected {
-    null as _ => never(),
-    c => {
-      known <- upsert(c ~ known, c.domain, c.server, c.fingerprint);
-      save <- c
-    }
+  let session = opt::or_never(*connected);
+  seq session {
+    known <- upsert(known, session.domain, session.server, session.fingerprint);
+    save <- session
   };
   // ── discovery: what verified is recorded ──
   let discover_at = never();
