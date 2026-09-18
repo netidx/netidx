@@ -55,12 +55,9 @@ let landing = |
     known <- json::read(sys::fs::read_all(file)?)?
   };
   // this host's own domain, from its install record
-  select local_domain(true) {
-    null as _ => never(),
-    { domain, fingerprint, addr } => select addr {
-      null as _ => never(),
-      a => known <- upsert(a ~ known, domain, a, fingerprint)
-    }
+  let own = opt::or_never(local_domain(true));
+  seq let addr = opt::or_never(own.addr) {
+    known <- upsert(known, own.domain, addr, own.fingerprint)
   };
   let save: Any = never();
   {
@@ -102,8 +99,7 @@ let landing = |
     }
   );
   // ── a session the tab established is remembered, and re-checked ──
-  let session = opt::or_never(*connected);
-  seq session {
+  seq let session = opt::or_never(*connected) {
     known <- upsert(known, session.domain, session.server, session.fingerprint);
     save <- session
   };
