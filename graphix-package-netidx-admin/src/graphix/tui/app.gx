@@ -13,23 +13,20 @@ let app = |#server: string = ""| -> tui::Tui {
   let q = never<Question>();
   let p = pump(q);
   let loc = local::local(#q: &q);
-  let book_dir: [string, null] = select sys::dirs::config_dir() {
-    null as _ => null,
-    d => sys::join_path(d, "netidx-admin-tui")
-  };
+  let book_dir = opt::map(sys::dirs::config_dir(), |d| sys::join_path(d, "netidx-admin-tui"));
   let rem = remote::remote(#q: &q, #book_dir: book_dir, #server: server);
-  let order: Array<[`Local(local::Local), `Remote(remote::Remote)]> = select server {
+  let order = select server {
     "" => [`Local(loc), `Remote(rem)],
     _ => [`Remote(rem), `Local(loc)]
   };
   let tab = order[0]$;
   // the tab's own keys come first; what it leaves alone reaches the
   // global ones
-  let tab_handle = |e: Event| -> [`Stop, `Continue] select e ~ tab {
+  let tab_handle = |e: Event| select e ~ tab {
     `Local(t) => t.handle(e),
     `Remote(t) => t.handle(e)
   };
-  let global = |e: Event| -> [`Stop, `Continue] select e {
+  let global = |e: Event| select e {
     `Key(k) => select k.kind {
       `Press => select k.code {
         `Tab => {
@@ -46,11 +43,11 @@ let app = |#server: string = ""| -> tui::Tui {
     },
     _ => `Continue
   };
-  let selected: [i64, null] = select tab {
+  let selected = select tab {
     `Local(_) => 0,
     `Remote(_) => 1
   };
-  let body: tui::Tui = select loc.installed {
+  let body = select loc.installed {
     false => loc.view,
     true => tabs(
       #selected: &selected,
@@ -58,7 +55,7 @@ let app = |#server: string = ""| -> tui::Tui {
       &[(line("Local"), loc.view), (line("Admin Domain"), rem.view)]
     )
   };
-  let status: tui::Line = select p.progress {
+  let status = select p.progress {
     null as _ => select tab {
       `Local(t) => t.status,
       `Remote(t) => t.status

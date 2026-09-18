@@ -32,7 +32,7 @@ let glyph = |fp: Fingerprint| -> Array<tui::Line> select identicon(fp)$ {
 
 let fingerprint_lines = |fp: Fingerprint| -> Array<tui::Line> {
   let groups = str::split(#pat: " ", fp.code);
-  let chunks = array::fold(groups, [], |acc: Array<Array<string>>, g| select acc {
+  let chunks = array::fold(groups, [], |acc, g| select acc {
     [] => [[g]],
     [init.., last] => select array::len(last) {
       n if n < 4 => array::push(init, array::push(last, g)),
@@ -54,7 +54,7 @@ let admin_text = |a: AdminError| -> string select a {
 
 let toast_layers = |t: &[Toast, null]| -> Array<Layer> {
   let hint = style(#fg: `DarkGray);
-  let handle = |e: Event| -> [`Stop, `Continue] select e {
+  let handle = |e: Event| select e {
     `Key(k) => select k.kind {
       `Press => select k.code {
         `Enter | `Esc | `Char(" ") => { *t <- k ~ null; `Stop },
@@ -84,7 +84,7 @@ let toast_layers = |t: &[Toast, null]| -> Array<Layer> {
 
 let confirm_layers = |#on_confirm: fn(a: 'a) -> null, c: &[Confirm<'a>, null]| -> Array<Layer> {
   let hint = style(#fg: `DarkGray);
-  let handle = |e: Event| -> [`Stop, `Continue] select e {
+  let handle = |e: Event| select e {
     `Key(k) => select k.kind {
       `Press => select k.code {
         `Char("y") | `Enter => {
@@ -112,7 +112,7 @@ let confirm_layers = |#on_confirm: fn(a: 'a) -> null, c: &[Confirm<'a>, null]| -
   }
 };
 
-let qid = |b: Blocking| -> QuestionId select b {
+let qid = |b: Blocking| select b {
   `Text({ id, .. }) => id,
   `Secret({ id, .. }) => id,
   `Choice({ id, .. }) => id,
@@ -128,7 +128,7 @@ let pump = |q: Question| -> Pump {
   let hint = style(#fg: `DarkGray);
   let selstyle = style(#add_modifier: [`Reversed]);
   // ── presentation channels ──
-  let notes: Array<string> = [];
+  let notes = [];
   let progress: [{ stage: Stage, message: string, duration: [duration, null] }, null] = null;
   let code: [{ purpose: string, fp: Fingerprint }, null] = null;
   // ── the outstanding blocking question and its per-modal state ──
@@ -140,7 +140,7 @@ let pump = |q: Question| -> Pump {
   select q {
     `Text(t) => {
       active <- `Text(t);
-      ed <- line_edit::state(select t.default { null as _ => "", s => s });
+      ed <- line_edit::state(opt::or_default(t.default, ""));
       err <- t ~ null
     },
     `Secret(s) => {
@@ -150,16 +150,13 @@ let pump = |q: Question| -> Pump {
     },
     `Choice(c) => {
       active <- `Choice(c);
-      sel <- select c.default {
-        null as _ => 0,
-        d => select array::find_map(array::enumerate(c.choices), |(i, x)| select x {
+      sel <- opt::or_default(
+        opt::flat_map(c.default, |d| array::find_map(array::enumerate(c.choices), |(i, x)| select x {
           v if v == d => i,
           _ => null
-        }) {
-          null as _ => 0,
-          i => i
-        }
-      };
+        })),
+        0
+      );
       err <- c ~ null
     },
     `Confirm(c) => {
@@ -183,7 +180,7 @@ let pump = |q: Question| -> Pump {
     `Warn(s) => notes <- array::window(#n: 100, s ~ notes, "⚠ [s]")
   };
   // ── what Enter would submit for the current modal ──
-  let composed: [{ id: QuestionId, a: Answer }, `Required, null] = select active {
+  let composed = select active {
     null as _ => null,
     `Text({ id, required, .. }) => select ed.value {
       "" if required => `Required,
@@ -216,7 +213,7 @@ let pump = |q: Question| -> Pump {
       active <- sent ~ null
     }
   };
-  let enter = |t: Any| -> null {
+  let enter = |t| {
     select t ~ composed {
       null as _ => never(),
       `Required => err <- t ~ "a value is required",
@@ -224,36 +221,28 @@ let pump = |q: Question| -> Pump {
     };
     null
   };
-  let cancel = |t: Any| -> null {
-    select active {
-      null as _ => never(),
-      b => submit <- t ~ { id: qid(b), a: `Cancel }
-    };
+  let cancel = |t| {
+    submit <- t ~ { id: qid(opt::or_never(active)), a: `Cancel };
     null
   };
-  let confirm_answer = |t: Any, v: bool| -> null {
-    select active {
-      null as _ => never(),
-      b => submit <- t ~ { id: qid(b), a: `Confirm(v) }
-    };
+  let confirm_answer = |t, v| {
+    submit <- t ~ { id: qid(opt::or_never(active)), a: `Confirm(v) };
     null
   };
   // ── per-kind key handling ──
-  let text_keys = |ev: tui::input_handler::Event, k: tui::input_handler::KeyEvent|
-    -> [`Stop, `Continue] select k.code {
+  let text_keys = |ev, k: tui::input_handler::KeyEvent| select k.code {
       kk@ `Enter => { enter(kk); `Stop },
       kk@ `Esc => { cancel(kk); `Stop },
       _ => line_edit::handle(&ed, ev)
     };
-  let list_keys = |k: tui::input_handler::KeyEvent, last: i64|
-    -> [`Stop, `Continue] select k.code {
+  let list_keys = |k: tui::input_handler::KeyEvent, last| select k.code {
       `Up | `Char("k") => { sel <- k ~ max(0, sel - 1); `Stop },
       `Down | `Char("j") => { sel <- k ~ min(last, sel + 1); `Stop },
       kk@ `Enter => { enter(kk); `Stop },
       kk@ `Esc => { cancel(kk); `Stop },
       _ => `Continue
     };
-  let confirm_keys = |k: tui::input_handler::KeyEvent| -> [`Stop, `Continue] select k.code {
+  let confirm_keys = |k: tui::input_handler::KeyEvent| select k.code {
     `Left | `Right | `Tab => { yes <- k ~ !yes; `Stop },
     kk@ `Char("y") => { confirm_answer(kk, true); `Stop },
     kk@ `Char("n") => { confirm_answer(kk, false); `Stop },
@@ -261,17 +250,17 @@ let pump = |q: Question| -> Pump {
     kk@ `Esc => { cancel(kk); `Stop },
     _ => `Continue
   };
-  let ack_keys = |k: tui::input_handler::KeyEvent| -> [`Stop, `Continue] select k.code {
+  let ack_keys = |k: tui::input_handler::KeyEvent| select k.code {
     `Enter | `Char(" ") => { enter(k); `Stop },
     kk@ `Esc => { cancel(kk); `Stop },
     _ => `Continue
   };
-  let identity_keys = |k: tui::input_handler::KeyEvent| -> [`Stop, `Continue] select k.code {
+  let identity_keys = |k: tui::input_handler::KeyEvent| select k.code {
     `Char("a") | `Enter => { confirm_answer(k, true); `Stop },
     `Char("r") | `Char("n") | `Esc => { confirm_answer(k, false); `Stop },
     _ => `Continue
   };
-  let handle = |e: tui::input_handler::Event| -> [`Stop, `Continue] select e {
+  let handle = |e: tui::input_handler::Event| select e {
     ev@ `Key(k) => select k.kind {
       `Press => select k ~ active {
         null as _ => `Continue,
@@ -290,11 +279,11 @@ let pump = |q: Question| -> Pump {
     _ => `Continue
   };
   // ── the modal views ──
-  let err_lines: Array<tui::Line> = select err {
+  let err_lines = select err {
     null as _ => [],
     m => [line(#style: style(#fg: `Red), m)]
   };
-  let text_modal = |field: FieldInfo, mask: [string, null]| -> tui::Tui block(
+  let text_modal = |field: FieldInfo, mask| block(
     #border: &`All,
     #title: &line(field.label),
     #title_bottom: &line(#style: hint, " Enter submit · Esc cancel "),
@@ -304,7 +293,7 @@ let pump = |q: Question| -> Pump {
       child(#constraint: `Length(1), text(&err_lines))
     ])
   );
-  let choice_modal = |field: FieldInfo, choices: Array<string>| -> tui::Tui block(
+  let choice_modal = |field: FieldInfo, choices| block(
     #border: &`All,
     #title: &line(field.label),
     #title_bottom: &line(#style: hint, " ↑/↓ move · Enter select · Esc cancel "),
@@ -315,8 +304,8 @@ let pump = |q: Question| -> Pump {
           &array::map(choices, |c| line(c))))
     ])
   );
-  let confirm_modal = |field: FieldInfo| -> tui::Tui {
-    let buttons: Array<tui::Line> = select yes {
+  let confirm_modal = |field: FieldInfo| {
+    let buttons = select yes {
       true => [line("\[Yes\]   No ")],
       false => [line(" Yes   \[No\]")]
     };
@@ -330,13 +319,13 @@ let pump = |q: Question| -> Pump {
       ])
     )
   };
-  let domain_modal = |domains: Array<AdminDomain>| -> tui::Tui {
+  let domain_modal = |domains: Array<AdminDomain>| {
     let items = array::push(
       array::map(domains, |d| line(d.domain)),
       line("Search again for more admin domains"),
       line("Enter an address manually…")
     );
-    let side: Array<tui::Line> = select sel {
+    let side = select sel {
       s if s < array::len(domains) => {
         let fp = (domains[s]$).identity.fingerprint;
         array::concat(glyph(fp), fingerprint_lines(fp))
@@ -355,13 +344,13 @@ let pump = |q: Question| -> Pump {
       ])
     )
   };
-  let announce_modal = |title: string, body: string| -> tui::Tui block(
+  let announce_modal = |title, body| block(
     #border: &`All,
     #title: &line(title),
     #title_bottom: &line(#style: hint, " Enter continue · Esc cancel "),
     &paragraph(&body)
   );
-  let announce_identity_modal = |body: string, fp: Fingerprint| -> tui::Tui block(
+  let announce_identity_modal = |body, fp| block(
     #border: &`All,
     #title: &line("Verify this identity"),
     #title_bottom: &line(#style: hint, " Enter continue · Esc cancel "),
@@ -372,7 +361,7 @@ let pump = |q: Question| -> Pump {
           &array::concat(glyph(fp), fingerprint_lines(fp))))
     ])
   );
-  let confirm_identity_modal = |identity: CaIdentity| -> tui::Tui block(
+  let confirm_identity_modal = |identity: CaIdentity| block(
     #border: &`All,
     #title: &line("Confirm the CA's identity"),
     #title_bottom: &line(#style: hint, " a accept · r reject "),
@@ -384,7 +373,7 @@ let pump = |q: Question| -> Pump {
           &array::concat(glyph(identity.fingerprint), fingerprint_lines(identity.fingerprint))))
     ])
   );
-  let secret_modal = |kind: OneTimeSecretKind, password: string| -> tui::Tui {
+  let secret_modal = |kind, password| {
     let title = select kind {
       `CaRecovery => "CA recovery password — shown ONCE",
       `AdminPassword(name) => "One-time password for [name]"
@@ -401,7 +390,7 @@ let pump = |q: Question| -> Pump {
       ])
     )
   };
-  let modal: [tui::Tui, null] = select active {
+  let modal = select active {
     null as _ => null,
     `Text({ field, .. }) => text_modal(field, null),
     `Secret({ field, .. }) => text_modal(field, "•"),
@@ -413,7 +402,7 @@ let pump = |q: Question| -> Pump {
     `ConfirmIdentity({ identity, .. }) => confirm_identity_modal(identity),
     `OneTimeSecret({ kind, password, .. }) => secret_modal(kind, password)
   };
-  let layers: Array<tui::overlay::Layer> = select modal {
+  let layers = select modal {
     null as _ => [],
     w => [layer(#width: &`Percentage(70), #height: &`Percentage(70),
       input_handler(#handle: &handle, &w))]
@@ -423,6 +412,6 @@ let pump = |q: Question| -> Pump {
     notes,
     progress,
     code,
-    busy: select active { null as _ => false, _ => true }
+    busy: opt::is_some(active)
   }
 }

@@ -38,13 +38,13 @@ let remote = |#q: &Question, #book_dir: [string, null], #server: string = ""| ->
     #q: q,
     #book_dir: book_dir,
     #connected: &connected,
-    #on_connect: |c: landing::Connect| -> null {
+    #on_connect: |c| {
       connect_glyph <- c.glyph;
       connect_to <- c.server;
       screen <- c ~ `Connect;
       null
     },
-    #on_manual: |e: Any| -> null { screen <- e ~ `Connect; null }
+    #on_manual: |e| { screen <- e ~ `Connect; null }
   );
   // the CA fingerprint the operator confirmed during this connect, so
   // a follow-on ceremony against the same server skips the gesture
@@ -93,7 +93,7 @@ let remote = |#q: &Question, #book_dir: [string, null], #server: string = ""| ->
       }
     }
   };
-  let connect_keys = |ev: Event, k: KeyEvent| -> [`Stop, `Continue] select k.code {
+  let connect_keys = |ev, k: KeyEvent| select k.code {
     kk@ `Enter => {
       select kk ~ ed.value {
         "" => never(),
@@ -110,7 +110,7 @@ let remote = |#q: &Question, #book_dir: [string, null], #server: string = ""| ->
   let pan = panels::panels(
     #q: q,
     #entry: `Menu,
-    #on_close: |why: CloseReason| -> null {
+    #on_close: |why| {
       screen <- select why {
         `Back => `Landing,
         `SessionLost => `Connect
@@ -119,7 +119,7 @@ let remote = |#q: &Question, #book_dir: [string, null], #server: string = ""| ->
     },
     target
   );
-  let handle = |e: Event| -> [`Stop, `Continue] select e {
+  let handle = |e: Event| select e {
     ev@ `Key(k) => select k.kind {
       `Press => select k ~ screen {
         `Landing => land.handle(ev),
@@ -130,7 +130,7 @@ let remote = |#q: &Question, #book_dir: [string, null], #server: string = ""| ->
     },
     _ => `Continue
   };
-  let conn_err_lines: Array<tui::Line> = select conn_err {
+  let conn_err_lines = select conn_err {
     null as _ => [],
     m => [line(#style: style(#fg: `Red), m)]
   };
@@ -145,12 +145,12 @@ let remote = |#q: &Question, #book_dir: [string, null], #server: string = ""| ->
       child(#constraint: `Length(1), text(&conn_err_lines))
     ])
   );
-  let body: tui::Tui = select screen {
+  let body = select screen {
     `Landing => land.view,
     `Connect => connect_view,
     `Panels => pan.view
   };
-  let status: tui::Line = select screen {
+  let status = select screen {
     `Landing => land.status,
     `Connect => line(#style: hint, " type an address · Enter connect · Esc back "),
     `Panels => pan.status

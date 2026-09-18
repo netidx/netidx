@@ -28,12 +28,12 @@ let warn = style(#fg: `Yellow);
 let bad = style(#fg: `Red);
 let selstyle = style(#add_modifier: [`Reversed]);
 
-let opt_len = |o: [Array<'a>, null]| -> i64 select o {
+let opt_len = |o: [Array<'a>, null]| select o {
   null as _ => 0,
   xs => array::len(xs)
 };
 
-let fmt_op = |op: ServiceOp| -> string select op {
+let fmt_op = |op: ServiceOp| select op {
   `Start => "Started",
   `Stop => "Stopped",
   `Restart => "Restarted",
@@ -42,7 +42,7 @@ let fmt_op = |op: ServiceOp| -> string select op {
 
 // a unit's state as a word, and how to color it: the supervisor's
 // report when it has one, else what the mismatch means
-let state_word = |s: [UnitState, null], defined: bool| -> (string, tui::Style) select s {
+let state_word = |s: [UnitState, null], defined| select s {
   `Running(_) => ("running", good),
   `Stopped => ("stopped", warn),
   `Died => ("died", bad),
@@ -53,7 +53,7 @@ let state_word = |s: [UnitState, null], defined: bool| -> (string, tui::Style) s
   }
 };
 
-let fmt_trigger = |t: UnitTrigger| -> string select t {
+let fmt_trigger = |t: UnitTrigger| select t {
   `OnStart => "OnStart",
   `OnAccess(paths) => {
     let ps = str::join(#sep: ", ", paths);
@@ -61,16 +61,16 @@ let fmt_trigger = |t: UnitTrigger| -> string select t {
   }
 };
 
-let fmt_restart = |r: UnitRestart| -> string select r {
+let fmt_restart = |r: UnitRestart| select r {
   `No => "no",
   `Yes => "yes",
   `RateLimited(s) => "rate-limited ([s]s)"
 };
 
-let fmt_vars = |vs: Array<EnvVar>| -> string
-  str::join(#sep: ", ", array::map(vs, |v: EnvVar| "[v.name]=[v.value]"));
+let fmt_vars = |vs: Array<EnvVar>|
+  str::join(#sep: ", ", array::map(vs, |v| "[v.name]=[v.value]"));
 
-let fmt_env = |e: UnitEnvironment| -> string select e {
+let fmt_env = |e: UnitEnvironment| select e {
   `Inherit(vs) => fmt_vars(vs),
   `Replace(vs) => {
     let p = fmt_vars(vs);
@@ -78,17 +78,17 @@ let fmt_env = |e: UnitEnvironment| -> string select e {
   }
 };
 
-let opt_text = |o: [string, null]| -> string select o {
+let opt_text = |o: [string, null]| select o {
   null as _ => "",
   s => s
 };
 
-let opt_num = |o: [u32, null]| -> string select o {
+let opt_num = |o: [u32, null]| select o {
   null as _ => "",
   n => "[n]"
 };
 
-let def_fields = |d: UnitDef| -> Array<Field> [
+let def_fields = |d: UnitDef| [
   { label: "executable", value: d.exe },
   { label: "arguments", value: str::join(#sep: " ", d.args) },
   { label: "trigger", value: fmt_trigger(d.trigger) },
@@ -103,21 +103,21 @@ let def_fields = |d: UnitDef| -> Array<Field> [
 ];
 
 // ── reading a definition back from the form's text ──
-let words = |s: string| -> Array<string>
-  array::filter(str::split(#pat: " ", s), |w: string| w != "");
+let words = |s: string|
+  array::filter(str::split(#pat: " ", s), |w| w != "");
 
-let csv = |s: string| -> Array<string>
-  array::filter_map(str::split(#pat: ",", s), |p: string| -> [string, null] select str::trim(p) {
+let csv = |s: string|
+  array::filter_map(str::split(#pat: ",", s), |p| select str::trim(p) {
     "" => null,
     t => t
   });
 
-let opt_of = |s: string| -> [string, null] select str::trim(s) {
+let opt_of = |s: string| select str::trim(s) {
   "" => null,
   t => t
 };
 
-let parse_trigger = |s: string| -> [UnitTrigger, `Bad(string)] select str::trim(s) {
+let parse_trigger = |s: string| select str::trim(s) {
   "" => `OnStart,
   "OnStart" => `OnStart,
   t => select str::strip_prefix(#pfx: "OnAccess(", t) {
@@ -132,7 +132,7 @@ let parse_trigger = |s: string| -> [UnitTrigger, `Bad(string)] select str::trim(
   }
 };
 
-let parse_restart = |s: string| -> [UnitRestart, `Bad(string)] select str::trim(s) {
+let parse_restart = |s: string| select str::trim(s) {
   "" => `RateLimited(1.0),
   "no" => `No,
   "yes" => `Yes,
@@ -140,35 +140,29 @@ let parse_restart = |s: string| -> [UnitRestart, `Bad(string)] select str::trim(
     [] => `Bad("restart must be no, yes, or rate-limited:<seconds>"),
     [m, ..] => select m[1]$ {
       null as _ => `Bad("restart must be no, yes, or rate-limited:<seconds>"),
-      n => {
-        let secs = cast<f64>(n);
-        select is_err(secs) {
-          true => `Bad("rate-limited needs a number of seconds"),
-          false => `RateLimited(secs$)
-        }
+      n => select cast<f64>(n) {
+        error as _ => `Bad("rate-limited needs a number of seconds"),
+        secs => `RateLimited(secs)
       }
     }
   }
 };
 
-let parse_id = |what: string, s: string| -> [u32, null, `Bad(string)] select str::trim(s) {
+let parse_id = |what: string, s: string| select str::trim(s) {
   "" => null,
-  t => {
-    let n = cast<u32>(t);
-    select is_err(n) {
-      true => `Bad("[what] must be a number"),
-      false => n$
-    }
+  t => select cast<u32>(t) {
+    error as _ => `Bad("[what] must be a number"),
+    n => n
   }
 };
 
-let parse_env = |s: string| -> [UnitEnvironment, `Bad(string)] {
+let parse_env = |s: string| {
   let (replace, body) = select str::strip_prefix(#pfx: "replace:", str::trim(s)) {
     null as _ => (false, str::trim(s)),
     rest => (true, rest)
   };
   let none: [`Vars(Array<EnvVar>), `Bad(string)] = `Vars([]);
-  let parsed = array::fold(csv(body), none, |acc: [`Vars(Array<EnvVar>), `Bad(string)], p: string| select acc {
+  let parsed = array::fold(csv(body), none, |acc, p| select acc {
     `Bad(m) => `Bad(m),
     `Vars(vs) => select str::split_once(#pat: "=", p) {
       null as _ => `Bad("environment entries are NAME=VALUE, comma-separated"),
@@ -184,7 +178,7 @@ let parse_env = |s: string| -> [UnitEnvironment, `Bad(string)] {
   }
 };
 
-let read_def = |v: Array<string>| -> [UnitDef, `Bad(string)] select str::trim(v[0]$) {
+let read_def = |v: Array<string>| select str::trim(v[0]$) {
   "" => `Bad("an executable is required"),
   exe => select parse_trigger(v[2]$) {
     `Bad(m) => `Bad(m),
@@ -219,7 +213,7 @@ let read_def = |v: Array<string>| -> [UnitDef, `Bad(string)] select str::trim(v[
 let services = |#units_dir: string, #on_close: fn(e: Any) -> null, open: Any| -> Services {
   let toast: [Toast, null] = null;
   let confirm: [Confirm<Act>, null] = null;
-  let fail = |title: string, a: AdminError| -> null {
+  let fail = |title, a| {
     toast <- { title, lines: [admin_text(a)], error: true };
     null
   };
@@ -233,7 +227,7 @@ let services = |#units_dir: string, #on_close: fn(e: Any) -> null, open: Any| ->
   };
   let sel = 0;
   let last = max(0, opt_len(rows) - 1);
-  let selected: [LocalUnit, null] = select rows {
+  let selected = select rows {
     null as _ => null,
     [] => null,
     xs => xs[min(sel, array::len(xs) - 1)]$
@@ -244,16 +238,16 @@ let services = |#units_dir: string, #on_close: fn(e: Any) -> null, open: Any| ->
   let template = units::template(open);
   let form_open = false;
   let form_title = "";
-  let form_fields = never<Array<Field>>();
+  let form_fields = never();
   let creating = false;
-  let bad_unit = |m: string| -> null {
+  let bad_unit = |m| {
     toast <- { title: "Bad unit", lines: [m], error: true };
     null
   };
   let unit_form = form(
     #title: form_title,
     #help: "arguments are space-separated · trigger is OnStart or OnAccess(/path, /path) · restart is no, yes or rate-limited:<seconds> · environment is NAME=VALUE entries, comma-separated, prefixed replace: to discard the inherited one · an empty field is unset",
-    #on_submit: |v: Array<string>| -> null {
+    #on_submit: |v| {
       select v ~ creating {
         true => select str::trim(v[0]$) {
           "" => bad_unit(v ~ "a unit name is required"),
@@ -272,30 +266,26 @@ let services = |#units_dir: string, #on_close: fn(e: Any) -> null, open: Any| ->
       };
       null
     },
-    #on_cancel: |e: Any| -> null { form_open <- e ~ false; null },
+    #on_cancel: |e| { form_open <- e ~ false; null },
     form_fields
   );
   // ── keys ──
-  let control = |t: Any, op: ServiceOp| -> null {
-    select t ~ selected {
-      null as _ => never(),
-      u => run <- `Control({ unit: u.name, op })
-    };
+  let control = |t, op| {
+    let u = opt::or_never(t ~ selected);
+    run <- `Control({ unit: u.name, op });
     null
   };
-  let handle = |e: Event| -> [`Stop, `Continue] select e {
+  let handle = |e: Event| select e {
     `Key(k) => select k.kind {
       `Press => select k.code {
         `Up | `Char("k") => { sel <- k ~ max(0, sel - 1); `Stop },
         `Down | `Char("j") => { sel <- k ~ min(last, sel + 1); `Stop },
         kk@ `Char("s") => { control(kk, `Start); `Stop },
         kk@ `Char("t") => {
-          select kk ~ selected {
-            null as _ => never(),
-            u => confirm <- {
-              message: "Stop unit [u.name]? It stays down until started.",
-              action: `Control({ unit: u.name, op: `Stop })
-            }
+          let u = opt::or_never(kk ~ selected);
+          confirm <- {
+            message: "Stop unit [u.name]? It stays down until started.",
+            action: `Control({ unit: u.name, op: `Stop })
           };
           `Stop
         },
@@ -327,12 +317,10 @@ let services = |#units_dir: string, #on_close: fn(e: Any) -> null, open: Any| ->
           `Stop
         },
         kk@ `Char("d") => {
-          select kk ~ selected {
-            null as _ => never(),
-            u => confirm <- {
-              message: "Delete unit [u.name]? This removes its definition file and reloads the supervisor.",
-              action: `Delete(u.name)
-            }
+          let u = opt::or_never(kk ~ selected);
+          confirm <- {
+            message: "Delete unit [u.name]? This removes its definition file and reloads the supervisor.",
+            action: `Delete(u.name)
           };
           `Stop
         },
@@ -357,7 +345,7 @@ let services = |#units_dir: string, #on_close: fn(e: Any) -> null, open: Any| ->
     `Delete(name) => units::remove(#units_dir: units_dir, name),
     _ => never()
   };
-  let reload_text = |reloaded: bool| -> string select reloaded {
+  let reload_text = |reloaded| select reloaded {
     true => "The supervisor re-read its units.",
     false => "No supervisor was listening; it reads the units when it starts."
   };
@@ -371,7 +359,7 @@ let services = |#units_dir: string, #on_close: fn(e: Any) -> null, open: Any| ->
       };
       toast <- {
         title: verb,
-        lines: array::map(states, |u: LocalUnit| {
+        lines: array::map(states, |u| {
           let (word, _) = state_word(u.state, true);
           "[u.name]: [word]"
         }),
@@ -406,19 +394,15 @@ let services = |#units_dir: string, #on_close: fn(e: Any) -> null, open: Any| ->
   };
   // ── the view: the names beside the selected unit's status and
   // definition ──
-  let names: Array<tui::Line> = select rows {
+  let names = select rows {
     null as _ => [line(#style: hint, "listing…")],
     [] => [line(#style: hint, "(no units)")],
-    xs => array::map(xs, |u: LocalUnit| line(u.name))
+    xs => array::map(xs, |u| line(u.name))
   };
-  let status_lines: Array<tui::Line> = select selected {
+  let status_lines = select selected {
     null as _ => [line(#style: hint, "No unit selected.")],
     u => {
-      let defined = select u.definition {
-        null as _ => false,
-        _ => true
-      };
-      let (word, st) = state_word(u.state, defined);
+      let (word, st) = state_word(u.state, opt::is_some(u.definition));
       let pid = select u.state {
         `Running(p) => select p {
           null as _ => "—",
@@ -432,12 +416,12 @@ let services = |#units_dir: string, #on_close: fn(e: Any) -> null, open: Any| ->
       ]
     }
   };
-  let kv = |k: string, v: string| -> tui::Line line([span(#style: hint, k), span(v)]);
-  let opt_line = |k: string, o: [string, null]| -> Array<tui::Line> select o {
+  let kv = |k, v| line([span(#style: hint, k), span(v)]);
+  let opt_line = |k, o: [string, null]| select o {
     null as _ => [],
     v => [kv(k, v)]
   };
-  let detail: Array<tui::Line> = select selected {
+  let detail = select selected {
     null as _ => [line(#style: hint, "No unit selected.")],
     u => select u.definition {
       null as _ => [line(#style: hint, "Reported by the supervisor with no definition file — press r to refresh.")],
@@ -449,8 +433,8 @@ let services = |#units_dir: string, #on_close: fn(e: Any) -> null, open: Any| ->
           kv("restart: ", fmt_restart(d.restart))
         ],
         opt_line("cwd:     ", d.working_directory),
-        opt_line("uid:     ", select d.uid { null as _ => null, n => "[n]" }),
-        opt_line("gid:     ", select d.gid { null as _ => null, n => "[n]" }),
+        opt_line("uid:     ", opt::map(d.uid, |n| "[n]")),
+        opt_line("gid:     ", opt::map(d.gid, |n| "[n]")),
         opt_line("stdin:   ", d.stdin),
         opt_line("stdout:  ", d.stdout),
         opt_line("stderr:  ", d.stderr),
@@ -474,13 +458,13 @@ let services = |#units_dir: string, #on_close: fn(e: Any) -> null, open: Any| ->
         &paragraph(#trim: &false, &detail)))
     ]))
   ]);
-  let layers: Array<Layer> = array::concat(
+  let layers = array::concat(
     select form_open {
       false => [],
       true => [layer(#width: &`Percentage(80), #height: &`Percentage(90),
         input_handler(#handle: &unit_form.handle, &unit_form.view))]
     },
-    confirm_layers(#on_confirm: |a: Act| -> null { run <- a; null }, &confirm),
+    confirm_layers(#on_confirm: |a| { run <- a; null }, &confirm),
     toast_layers(&toast)
   );
   {
