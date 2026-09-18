@@ -76,21 +76,24 @@ let landing = |
   };
   // ── verification: each saved domain, at each address, in order —
   // at load, after every change to the set, and on demand ──
-  let poll: Any = known;
+  let verify: Any = known;
   let polling = false;
-  polling <- poll ~ true;
-  let states: Array<Poll> = array::map(poll ~ known.domains, |k: Known| -> Poll {
-    let verified = array::filter_map(k.addrs, |a: string| -> [string, null] select identity_at(a) {
-      error as _ => null,
-      id if id.fingerprint.code == k.fingerprint => a,
-      _ => null
+  let states: Array<Poll> = seqq verify {
+    polling <- true;
+    let st = array::map(known.domains, |k: Known| -> Poll {
+      let verified = array::filter_map(k.addrs, |a: string| -> [string, null] select identity_at(a) {
+        error as _ => null,
+        id if id.fingerprint.code == k.fingerprint => a,
+        _ => null
+      });
+      select verified {
+        [] => `Absent,
+        [a, ..] => `Present(a)
+      }
     });
-    select verified {
-      [] => `Absent,
-      [a, ..] => `Present(a)
-    }
-  });
-  polling <- states ~ false;
+    polling <- false;
+    st
+  };
   let visible: Array<{ known: Known, addr: string }> = array::filter_map(
     array::zip(known.domains, states),
     |(k, st): (Known, Poll)| -> [{ known: Known, addr: string }, null] select st {
@@ -144,7 +147,7 @@ let landing = |
         },
         kk@ `Char("d") => { discover_at <- kk; `Stop },
         kk@ `Char("c") => { on_manual(kk); `Stop },
-        kk@ `Char("r") => { poll <- kk; `Stop },
+        kk@ `Char("r") => { verify <- kk; `Stop },
         kk@ `Enter => {
           select kk ~ (toast, visible, sel) {
             (null, [], _) => never(),
