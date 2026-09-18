@@ -63,20 +63,20 @@ type Item = { label: string, act: Act, desc: string };
 
 type Screen = [`Home, `Admin, `Services];
 
-let role_title = |r: InstallRole| -> string select r {
+let role_title = |r: InstallRole| select r {
   `Ca => "CA",
   `Workstation => "Workstation",
   `Resolver => "Resolver",
   `Publisher => "Publisher"
 };
 
-let service_word = |s: ServiceState| -> string select s {
+let service_word = |s: ServiceState| select s {
   `Active => "running",
   `Inactive => "stopped",
   `NotInstalled => "no service"
 };
 
-let change_text = |c: Change| -> string select c {
+let change_text = |c: Change| select c {
   `Add(s) => "+ add [s]",
   `Del(s) => "- remove [s]",
   `Reauth(s) => "~ change [s]"
@@ -110,7 +110,7 @@ let fresh_choices: Array<{ act: Act, title: string, blurb: string }> = [
   }
 ];
 
-let desc = |a: Act| -> string select a {
+let desc = |a: Act| select a {
   `Status => "Full status detail for this install: its config, whether it is in sync with the admin domain, and its CA glyph.",
   `Update => "Reconcile this host's resolver list with the admin domain, adding or removing resolvers as necessary.",
   `Join(false) => "Graduate this local-only workstation onto an admin domain, enrolling a TLS identity.",
@@ -136,26 +136,26 @@ let desc = |a: Act| -> string select a {
 };
 
 // the destructive actions are held behind a yes/no
-let confirm_text = |a: Act| -> [string, null] select a {
+let confirm_text = |a: Act| select a {
   `AutoApprove(true) => "Rotate the auto-approve credential? The current keytab stops working; the admin server re-mints and re-seals it.",
   `RecoveryRotate => "Rotate the CA recovery password? The current recovery password stops working and a new one is shown once — save it.",
   `Uninstall => "Remove this install? This stops and removes the OS service and deletes its configuration.",
   _ => null
 };
 
-let rec pad = |s: string, n: i64| -> string select str::len(s) {
+let rec pad = |s: string, n: i64| select str::len(s) {
   l if l >= n => s,
   _ => pad(str::concat(" ", s), n)
 };
 
-let local = |#q: &Question| -> Local {
+let local = |#q: &Question| {
   let hint = style(#fg: `DarkGray);
   let selstyle = style(#add_modifier: [`Reversed]);
   let bold = style(#add_modifier: [`Bold]);
   let good = style(#fg: `Green);
   let warn = style(#fg: `Yellow);
   let toast: [Toast, null] = null;
-  let fail = |title: string, a: AdminError| -> null {
+  let fail = |title, a| {
     toast <- { title, lines: [admin_text(a)], error: true };
     null
   };
@@ -167,14 +167,14 @@ let local = |#q: &Question| -> Local {
     catch(e) fail("Detecting installs failed", (e.0).error);
     detected <- install::list(refresh)?
   };
-  let units: [string, null] = units::dir(refresh);
-  let own_base: [string, null] = local_resolver_base(refresh);
+  let units = units::dir(refresh);
+  let own_base = local_resolver_base(refresh);
   let sel = 0;
   let n_installs = select detected {
     null as _ => 0,
     xs => array::len(xs)
   };
-  let current: [Install, null] = select detected {
+  let current = select detected {
     null as _ => null,
     [] => null,
     xs => xs[min(sel, array::len(xs) - 1)]$
@@ -186,9 +186,9 @@ let local = |#q: &Question| -> Local {
   };
   // ── the facts that take a round trip, one per install; every
   // detection re-checks them ──
-  let syncs: Array<SyncState> = select detected {
+  let syncs = select detected {
     null as _ => [],
-    xs => array::map(xs, |i: Install| -> SyncState select (i.admin_domain, i.role) {
+    xs => array::map(xs, |i| select (i.admin_domain, i.role) {
       (null, _) => `NotApplicable,
       (_, `Ca) => `NotApplicable,
       _ => {
@@ -204,9 +204,9 @@ let local = |#q: &Question| -> Local {
       }
     })
   };
-  let probes: Array<Probe> = select detected {
+  let probes = select detected {
     null as _ => [],
-    xs => array::map(xs, |i: Install| -> Probe select i.local_ca {
+    xs => array::map(xs, |i| select i.local_ca {
       null as _ => `None,
       lca => {
         let p: Probe = `Probing;
@@ -218,55 +218,55 @@ let local = |#q: &Question| -> Local {
       }
     })
   };
-  let sync: SyncState = select syncs {
+  let sync = select syncs {
     [] => `NotApplicable,
     xs => xs[min(sel, array::len(xs) - 1)]$
   };
-  let probe: Probe = select probes {
+  let probe = select probes {
     [] => `None,
     xs => xs[min(sel, array::len(xs) - 1)]$
   };
-  let lca: [LocalCa, null] = select current {
+  let lca = select current {
     null as _ => null,
     d => d.local_ca
   };
   // ── the selected install's actions ──
-  let item = |label: string, act: Act| -> Item { label, act, desc: desc(act) };
-  let items: Array<Item> = select current {
+  let item = |label, act| { label, act, desc: desc(act) };
+  let items = select current {
     null as _ => [],
     d => {
       let joined = select d.admin_domain {
         null as _ => false,
         _ => true
       };
-      let update_items: Array<Item> = select (joined, d.role) {
+      let update_items = select (joined, d.role) {
         (true, `Ca) => [],
         (true, _) => [item("Update Resolvers", `Update)],
         _ => []
       };
-      let join_items: Array<Item> = select (d.role, joined) {
+      let join_items = select (d.role, joined) {
         (`Workstation, false) => [
           item("Join an Admin Domain", `Join(false)),
           item("Preview Join (Dry Run)", `Join(true))
         ],
         _ => []
       };
-      let parent_items: Array<Item> = select d.role {
+      let parent_items = select d.role {
         `Resolver => [item("Add a Parent", `AddParent)],
         _ => []
       };
-      let renew_items: Array<Item> = select (joined, d.renewable) {
+      let renew_items = select (joined, d.renewable) {
         (true, true) => [item("Renew Certificates", `Renew)],
         _ => []
       };
-      let service_items: Array<Item> = select units {
+      let service_items = select units {
         null as _ => [],
         _ => [item("Services", `Services)]
       };
-      let ca_items: Array<Item> = select d.local_ca {
+      let ca_items = select d.local_ca {
         null as _ => [],
         l => {
-          let admin_items: Array<Item> = select l.cfg {
+          let admin_items = select l.cfg {
             null as _ => [],
             _ => array::concat(
               [item("Admins", `Admins)],
@@ -276,7 +276,7 @@ let local = |#q: &Question| -> Local {
               }
             )
           };
-          let cred_items: Array<Item> = select probe {
+          let cred_items = select probe {
             `Ready(c) => array::concat(
               select c.auto_approve_present {
                 true => [item("Rotate Auto-Renew Credential", `AutoApprove(true))],
@@ -316,10 +316,7 @@ let local = |#q: &Question| -> Local {
     }
   };
   let n_items = array::len(items);
-  let offered = |a: Act| -> bool select array::find(items, |it: Item| it.act == a) {
-    null as _ => false,
-    _ => true
-  };
+  let offered = |a| opt::is_some(array::find(items, |it| it.act == a));
   // ── ui state ──
   let menu_sel = 0;
   let show_status = false;
@@ -338,7 +335,7 @@ let local = |#q: &Question| -> Local {
   };
   // a restore parked until its CA's service runs; F finishes it
   let restore_staged: [Staged, null] = null;
-  let finish_restore = |t: Any| -> null {
+  let finish_restore = |t| {
     select t ~ restore_staged {
       null as _ => toast <- t ~ { title: "No restore to finish", lines: ["No staged restore is waiting."], error: true },
       _ => run <- t ~ `FinishRestore
@@ -346,7 +343,7 @@ let local = |#q: &Question| -> Local {
     null
   };
   // ── keys ──
-  let home_keys = |k: KeyEvent| -> [`Stop, `Continue] select k.code {
+  let home_keys = |k: KeyEvent| select k.code {
     `Up | `Char("k") => { menu_sel <- k ~ max(0, menu_sel - 1); `Stop },
     `Down | `Char("j") => {
       menu_sel <- k ~ min(max(0, n_items - 1), menu_sel + 1);
@@ -384,7 +381,7 @@ let local = |#q: &Question| -> Local {
     kk@ `Char("F") => { finish_restore(kk); `Stop },
     _ => `Continue
   };
-  let fresh_keys = |k: KeyEvent| -> [`Stop, `Continue] select k.code {
+  let fresh_keys = |k: KeyEvent| select k.code {
     `Up | `Char("k") => { role_sel <- k ~ max(0, role_sel - 1); `Stop },
     `Down | `Char("j") => {
       role_sel <- k ~ min(array::len(fresh_choices) - 1, role_sel + 1);
@@ -404,19 +401,16 @@ let local = |#q: &Question| -> Local {
   };
   // ── the local admin server's panels: the roster, and this host's
   // own permissions ──
-  let admin_req = never<{ cfg: string, panel: [`Roster, `Perms] }>();
+  let admin_req = never();
   admin_req <- select run {
-    x@ `Admins | x@ `Perms => select x ~ lca {
-      null as _ => never(),
-      l => select l.cfg {
-        null as _ => never(),
-        c => { cfg: c, panel: select x { `Admins => `Roster, `Perms => `Perms } }
-      }
+    x@ `Admins | x@ `Perms => {
+      cfg: opt::or_never(opt::or_never(x ~ lca).cfg),
+      panel: select x { `Admins => `Roster, `Perms => `Perms }
     },
     _ => never()
   };
-  let admin_target = never<Target>();
-  let admin_entry = never<Entry>();
+  let admin_target = never();
+  let admin_entry = never();
   let admin_r = local_target(#cfg_path: admin_req.cfg, admin_req);
   {
     catch(e) fail("Opening this host's admin server failed", (e.0).error);
@@ -425,10 +419,7 @@ let local = |#q: &Question| -> Local {
       admin_target <- t;
       admin_entry <- select admin_req.panel {
         `Roster => `Roster,
-        `Perms => select own_base {
-          null as _ => never(),
-          b => `Perms(b)
-        }
+        `Perms => `Perms(opt::or_never(own_base))
       };
       screen <- `Admin
     }
@@ -436,18 +427,15 @@ let local = |#q: &Question| -> Local {
   let pan = panels::panels(
     #q: q,
     #entry: admin_entry,
-    #on_close: |why: CloseReason| -> null { screen <- why ~ `Home; null },
+    #on_close: |why| { screen <- why ~ `Home; null },
     admin_target
   );
   // ── this host's services, over its activation supervisor ──
-  let svc_dir: string = select units {
-    null as _ => never(),
-    d => d
-  };
-  let svc_open = never<Any>();
+  let svc_dir = opt::or_never(units);
+  let svc_open = never();
   let svc = services::services(
     #units_dir: svc_dir,
-    #on_close: |e: Any| -> null { screen <- e ~ `Home; null },
+    #on_close: |e| { screen <- e ~ `Home; null },
     svc_open
   );
   // ── the lifecycle ceremonies ──
@@ -456,45 +444,39 @@ let local = |#q: &Question| -> Local {
     _ => never()
   };
   let update_c = select run {
-    x@ `Update => select x ~ current {
-      null as _ => never(),
-      d => update(#config_root: d.config_dir, d.role)
+    x@ `Update => {
+      let d = opt::or_never(x ~ current);
+      update(#config_root: d.config_dir, d.role)
     },
     _ => never()
   };
   let backup_c = select run {
-    x@ `Backup => select x ~ current {
-      null as _ => never(),
-      d => backup(#config_root: d.config_dir, #target: null, d.scope)
+    x@ `Backup => {
+      let d = opt::or_never(x ~ current);
+      backup(#config_root: d.config_dir, #target: null, d.scope)
     },
     _ => never()
   };
   let autoapprove_c = select run {
-    `AutoApprove(rotate) => select rotate ~ lca {
-      null as _ => never(),
-      l => auto_approve(#rotate: rotate, #cfg: l.cfg, l.ca_dir)
+    `AutoApprove(rotate) => {
+      let l = opt::or_never(rotate ~ lca);
+      auto_approve(#rotate: rotate, #cfg: l.cfg, l.ca_dir)
     },
     _ => never()
   };
   let recovery_c = select run {
-    x@ `RecoveryRotate => select x ~ lca {
-      null as _ => never(),
-      l => recovery_rotate(#cfg: l.cfg, l.ca_dir)
+    x@ `RecoveryRotate => {
+      let l = opt::or_never(x ~ lca);
+      recovery_rotate(#cfg: l.cfg, l.ca_dir)
     },
     _ => never()
   };
   let csr_c = select run {
-    x@ `ExternalCsr => select x ~ lca {
-      null as _ => never(),
-      l => external_csr(l.ca_dir)
-    },
+    x@ `ExternalCsr => external_csr(opt::or_never(x ~ lca).ca_dir),
     _ => never()
   };
   let extinstall_c = select run {
-    x@ `ExternalInstall => select x ~ lca {
-      null as _ => never(),
-      l => external_install(#signed: null, #root: null, l.ca_dir)
-    },
+    x@ `ExternalInstall => external_install(#signed: null, #root: null, opt::or_never(x ~ lca).ca_dir),
     _ => never()
   };
   *q <- questions(renew_c);
@@ -683,7 +665,7 @@ let local = |#q: &Question| -> Local {
   // ── navigation, and the questions a teardown asks first ──
   let ca_ask = false;
   let ca_sel = 0;
-  let parent_root = never<string>();
+  let parent_root = never();
   let parent_open = false;
   let parent_sel = 0;
   select run {
@@ -693,9 +675,10 @@ let local = |#q: &Question| -> Local {
       null as _ => run <- x ~ `UninstallWith(false),
       _ => { ca_sel <- x ~ 0; ca_ask <- x ~ true }
     },
-    x@ `AddParent => select x ~ current {
-      null as _ => never(),
-      d => { parent_root <- d.config_dir; parent_sel <- d ~ 0; parent_open <- d ~ true }
+    x@ `AddParent => seq let d = opt::or_never(x ~ current) {
+      parent_root <- d.config_dir;
+      parent_sel <- 0;
+      parent_open <- true
     },
     _ => never()
   };
@@ -704,7 +687,7 @@ let local = |#q: &Question| -> Local {
   // released terminal and the service manager's state judges it ──
   let svc_req = never<{ scope: Scope, name: [string, null], for_user: [string, null] }>();
   let svc_r = install_service(#scope: svc_req.scope, #name: svc_req.name, #for_user: svc_req.for_user, svc_req);
-  let svc_ok = never<string>();
+  let svc_ok = never();
   // a privileged step: what it is, the netidx invocation, and what
   // follows its exit
   type Then = [`VerifyService({ name: string, for_user: string }), `UninstallAgain(bool), `Nothing];
@@ -726,7 +709,7 @@ let local = |#q: &Question| -> Local {
   refresh <- svc_ok;
   let priv_cmd = escalate_command(priv_req.argv, priv_req);
   let suspended = false;
-  let priv_exit = never<i64>();
+  let priv_exit = never();
   {
     catch(e) {
       select (e.0).error {
@@ -751,7 +734,7 @@ let local = |#q: &Question| -> Local {
       }
     }
   };
-  let verify_req = never<{ name: string, for_user: string, code: i64 }>();
+  let verify_req = never();
   select priv_exit ~ priv_req.then {
     `VerifyService({ name, for_user }) => verify_req <- { name, for_user, code: priv_exit },
     `UninstallAgain(remove_ca) => run <- `UninstallWith(remove_ca),
@@ -765,11 +748,8 @@ let local = |#q: &Question| -> Local {
     catch(e) fail("The system service is not running", (e.0).error);
     svc_ok <- verified?
   };
-  let need_service = |t: Any, scope: [Scope, null]| -> null {
-    select t ~ scope {
-      null as _ => never(),
-      sc => svc_req <- { scope: sc, name: null, for_user: null }
-    };
+  let need_service = |t, scope| {
+    svc_req <- { scope: opt::or_never(t ~ scope), name: null, for_user: null };
     null
   };
   // ── the lifecycle ceremonies ──
@@ -782,9 +762,9 @@ let local = |#q: &Question| -> Local {
     _ => never()
   };
   let addparent_c = select run {
-    `AddParentTo(a) => select a ~ current {
-      null as _ => never(),
-      d => add_parent(#config_root: d.config_dir, #parent: a.parent, #resolvers: a.resolvers, #path: a.path, d)
+    `AddParentTo(a) => {
+      let d = opt::or_never(a ~ current);
+      add_parent(#config_root: d.config_dir, #parent: a.parent, #resolvers: a.resolvers, #path: a.path, d)
     },
     _ => never()
   };
@@ -793,16 +773,13 @@ let local = |#q: &Question| -> Local {
     _ => never()
   };
   let finish_c = select run {
-    x@ `FinishRestore => select x ~ restore_staged {
-      null as _ => never(),
-      st => restore_finish(st)
-    },
+    x@ `FinishRestore => restore_finish(opt::or_never(x ~ restore_staged)),
     _ => never()
   };
   let uninstall_c = select run {
-    `UninstallWith(remove_ca) => select remove_ca ~ current {
-      null as _ => never(),
-      d => uninstall(#scope: d.scope, #config_dir: d.config_dir, #remove_ca: remove_ca, d)
+    `UninstallWith(remove_ca) => {
+      let d = opt::or_never(remove_ca ~ current);
+      uninstall(#scope: d.scope, #config_dir: d.config_dir, #remove_ca: remove_ca, d)
     },
     _ => never()
   };
@@ -893,7 +870,7 @@ let local = |#q: &Question| -> Local {
       refresh <- r
     }
   };
-  let restore_done = |t: Any, role: InstallRole, service: [Scope, null], reconciled: [string, null]| -> null {
+  let restore_done = |t, role, service, reconciled: [string, null]| {
     toast <- {
       title: t ~ "Restore complete",
       lines: array::concat(
@@ -929,10 +906,7 @@ let local = |#q: &Question| -> Local {
       }
     }
   };
-  select svc_ok ~ restore_staged {
-    null as _ => never(),
-    _ => run <- svc_ok ~ `FinishRestore
-  };
+  run <- opt::or_never(svc_ok ~ restore_staged) ~ `FinishRestore;
   {
     catch(e) fail("Finishing the restore failed", (e.0).error);
     seq finish_r {
@@ -944,7 +918,7 @@ let local = |#q: &Question| -> Local {
     catch(e) fail("Uninstall failed", (e.0).error);
     seq uninstall_r {
       let r = uninstall_r?;
-      let kept_lines = |kept: Array<{ path: string, why: string }>| -> Array<string>
+      let kept_lines = |kept: Array<{ path: string, why: string }>|
         array::map(kept, |k| "Kept [k.path] ([k.why]).");
       toast <- select r {
       `Nothing => { title: "Uninstalled", lines: ["Nothing to remove."], error: false },
@@ -953,7 +927,7 @@ let local = |#q: &Question| -> Local {
           true => " and the OS service",
           false => ""
         };
-        let destroyed: Array<string> = select rep.ca_destroyed {
+        let destroyed = select rep.ca_destroyed {
           null as _ => [],
           d => ["Destroyed the CA at [d]."]
         };
@@ -1000,7 +974,7 @@ let local = |#q: &Question| -> Local {
     }
   };
   // ── the teardown's CA question, and the parent picker with its form ──
-  let ca_handle = |e: Event| -> [`Stop, `Continue] select e {
+  let ca_handle = |e: Event| select e {
     `Key(k) => select k.kind {
       `Press => select k.code {
         `Up | `Char("k") => { ca_sel <- k ~ max(0, ca_sel - 1); `Stop },
@@ -1017,7 +991,7 @@ let local = |#q: &Question| -> Local {
     },
     _ => `Stop
   };
-  let ca_layers: Array<Layer> = select ca_ask {
+  let ca_layers = select ca_ask {
     false => [],
     true => [layer(#width: &`Percentage(70), #height: &`Percentage(40),
       input_handler(#handle: &ca_handle, &block(
@@ -1039,25 +1013,25 @@ let local = |#q: &Question| -> Local {
     catch(e) fail("Listing the parent candidates failed", (e.0).error);
     parent_cands <- parent_cands_r?
   };
-  let parent_cands_or_empty: Array<ParentCandidate> = select parent_cands {
+  let parent_cands_or_empty = select parent_cands {
     null as _ => [],
     cs => cs
   };
   let parent_pick: [Array<string>, null] = null;
-  let parent_fields = never<Array<Field>>();
+  let parent_fields = never();
   let parent_form_open = false;
   let parent_form = form(
     #title: "Add a parent",
     #help: "The parent's admin server is a host or host:port; the subtree is the path this resolver will own under it.",
-    #on_submit: |v: Array<string>| -> null {
+    #on_submit: |v| {
       run <- `AddParentTo({ parent: v[0]$, resolvers: v ~ parent_pick, path: v[1]$ });
       parent_form_open <- v ~ false;
       null
     },
-    #on_cancel: |e: Any| -> null { parent_form_open <- e ~ false; null },
+    #on_cancel: |e| { parent_form_open <- e ~ false; null },
     parent_fields
   );
-  let parent_handle = |e: Event| -> [`Stop, `Continue] select e {
+  let parent_handle = |e: Event| select e {
     `Key(k) => select k.kind {
       `Press => select k.code {
         `Up | `Char("k") => { parent_sel <- k ~ max(0, parent_sel - 1); `Stop },
@@ -1088,13 +1062,13 @@ let local = |#q: &Question| -> Local {
     },
     _ => `Stop
   };
-  let parent_layers: Array<Layer> = array::concat(
+  let parent_layers = array::concat(
     select parent_open {
       false => [],
       true => {
-        let items: Array<tui::Line> = select parent_cands {
+        let items = select parent_cands {
           null as _ => [line(#style: hint, "looking for parents in the admin domain's map…"), line("Enter an address manually…")],
-          cs => array::push(array::map(cs, |c: ParentCandidate| line("[c.resolver]  [c.base]  via [c.admin]")), line("Enter an address manually…"))
+          cs => array::push(array::map(cs, |c| line("[c.resolver]  [c.base]  via [c.admin]")), line("Enter an address manually…"))
         };
         [layer(#width: &`Percentage(70), #height: &`Percentage(50),
           input_handler(#handle: &parent_handle, &block(
@@ -1111,22 +1085,22 @@ let local = |#q: &Question| -> Local {
     }
   );
   // ── the status card ──
-  let kv = |label: string, value: string| -> tui::Line
+  let kv = |label, value|
     line([span(#style: hint, "[pad(label, 17)]: "), span(value)]);
-  let kvs = |label: string, value: string, st: tui::Style| -> tui::Line
+  let kvs = |label, value, st|
     line([span(#style: hint, "[pad(label, 17)]: "), span(#style: st, value)]);
-  let status_lines: Array<tui::Line> = select current {
+  let status_lines = select current {
     null as _ => [],
     d => {
       let domain = select d.admin_domain {
         null as _ => "standalone (local-only)",
         n => n.domain
       };
-      let servers: Array<tui::Line> = select d.admin_servers {
+      let servers = select d.admin_servers {
         [] => [],
         xs => [kv("Admin servers", str::join(#sep: ", ", xs))]
       };
-      let creds: Array<tui::Line> = select d.local_ca {
+      let creds = select d.local_ca {
         null as _ => [],
         _ => select probe {
           `None => [],
@@ -1155,14 +1129,14 @@ let local = |#q: &Question| -> Local {
         `Inactive => kvs("OS service", "installed, not running", warn),
         `NotInstalled => kvs("OS service", "not installed", hint)
       };
-      let sync_lines: Array<tui::Line> = select sync {
+      let sync_lines = select sync {
         `NotApplicable => [],
         `Checking => [kvs("Admin domain sync", "checking…", hint)],
         `InSync => [kvs("Admin domain sync", "✓ in sync", good)],
         `Failed(e) => [kvs("Admin domain sync", "could not check ([e])", hint)],
         `OutOfSync(cs) => array::concat(
           [kvs("Admin domain sync", "⚠ [array::len(cs)] pending change(s) — press U to apply", warn)],
-          array::map(cs, |c: Change| line([span("                   "), span(#style: warn, change_text(c))]))
+          array::map(cs, |c| line([span("                   "), span(#style: warn, change_text(c))]))
         )
       };
       array::concat(
@@ -1179,37 +1153,31 @@ let local = |#q: &Question| -> Local {
       )
     }
   };
-  let ca_glyph: Array<tui::Line> = select current {
+  let ca_glyph = select current {
     null as _ => [],
     d => select d.admin_domain {
       null as _ => [],
-      n => {
-        let parsed = parse_fingerprint(n.fingerprint);
-        select is_err(parsed) {
-          true => [line(#style: hint, "recorded fingerprint does not parse")],
-          false => {
-            let fp = parsed$;
-            array::concat([line(#style: hint, "CA glyph")], glyph(fp), fingerprint_lines(fp))
-          }
-        }
+      n => select parse_fingerprint(n.fingerprint) {
+        error as _ => [line(#style: hint, "recorded fingerprint does not parse")],
+        fp => array::concat([line(#style: hint, "CA glyph")], glyph(fp), fingerprint_lines(fp))
       }
     }
   };
-  let status_handle = |e: Event| -> [`Stop, `Continue] select e {
+  let status_handle = |e: Event| select e {
     `Key(k) => select k.kind {
       `Press => { show_status <- k ~ false; `Stop },
       _ => `Stop
     },
     _ => `Stop
   };
-  let status_layers: Array<Layer> = select show_status {
+  let status_layers = select show_status {
     false => [],
     true => {
       let title = select current {
         null as _ => "Status",
         d => "[role_title(d.role)] status"
       };
-      let content: tui::Tui = select ca_glyph {
+      let content = select ca_glyph {
         [] => paragraph(#trim: &false, &status_lines),
         g => layout(#direction: &`Horizontal, &[
           child(#constraint: `Min(0), paragraph(#trim: &false, &status_lines)),
@@ -1225,14 +1193,14 @@ let local = |#q: &Question| -> Local {
     }
   };
   // ── the fresh-machine welcome ──
-  let welcome_handle = |e: Event| -> [`Stop, `Continue] select e {
+  let welcome_handle = |e: Event| select e {
     `Key(k) => select k.kind {
       `Press => { welcome_seen <- k ~ true; `Stop },
       _ => `Stop
     },
     _ => `Stop
   };
-  let welcome_layers: Array<Layer> = select (fresh, welcome_seen) {
+  let welcome_layers = select (fresh, welcome_seen) {
     (true, false) => [layer(#width: &`Length(64), #height: &`Length(10),
       input_handler(#handle: &welcome_handle, &block(
         #border: &`All,
@@ -1276,7 +1244,7 @@ let local = |#q: &Question| -> Local {
       n if n > 1 => " ↑/↓ select · Enter run · ‹/› switch install ",
       _ => " ↑/↓ select · Enter run "
     };
-    let desc_lines: Array<tui::Line> = select items {
+    let desc_lines = select items {
       [] => [],
       xs => [line((xs[min(menu_sel, array::len(xs) - 1)]$).desc)]
     };
@@ -1292,7 +1260,7 @@ let local = |#q: &Question| -> Local {
         &paragraph(#trim: &false, &desc_lines)))
     ])
   };
-  let handle = |e: Event| -> [`Stop, `Continue] select e {
+  let handle = |e: Event| select e {
     ev@ `Key(k) => select k.kind {
       `Press => select k ~ screen {
         `Admin => pan.handle(ev),
@@ -1306,7 +1274,7 @@ let local = |#q: &Question| -> Local {
     },
     _ => `Continue
   };
-  let view: tui::Tui = select screen {
+  let view = select screen {
     `Admin => pan.view,
     `Services => svc.view,
     `Home => select fresh {
@@ -1314,7 +1282,7 @@ let local = |#q: &Question| -> Local {
       false => home_view
     }
   };
-  let status: tui::Line = select screen {
+  let status = select screen {
     `Admin => pan.status,
     `Services => svc.status,
     `Home => select fresh {
@@ -1322,7 +1290,7 @@ let local = |#q: &Question| -> Local {
       false => line(#style: hint, " Enter run · U update · r renew · u uninstall · R re-detect ")
     }
   };
-  let layers: Array<Layer> = array::concat(
+  let layers = array::concat(
     select screen {
       `Admin => pan.layers,
       `Services => svc.layers,
@@ -1332,7 +1300,7 @@ let local = |#q: &Question| -> Local {
     status_layers,
     ca_layers,
     parent_layers,
-    confirm_layers(#on_confirm: |a: Act| -> null { run <- a; null }, &confirm),
+    confirm_layers(#on_confirm: |a| { run <- a; null }, &confirm),
     toast_layers(&toast)
   );
   { view, handle, status, layers, installed: !fresh }
