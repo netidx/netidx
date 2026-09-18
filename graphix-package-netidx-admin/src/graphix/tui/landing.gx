@@ -80,19 +80,14 @@ let landing = |
   let polling = false;
   polling <- poll ~ true;
   let states: Array<Poll> = array::map(poll ~ known.domains, |k: Known| -> Poll {
-    let seen = array::map(k.addrs, |a: string| -> [string, null] {
-      let id = identity_at(a);
-      select is_err(id) {
-        true => null,
-        false => select (id$).fingerprint.code == k.fingerprint {
-          true => a,
-          false => null
-        }
-      }
+    let verified = array::filter_map(k.addrs, |a: string| -> [string, null] select identity_at(a) {
+      error as _ => null,
+      id if id.fingerprint.code == k.fingerprint => a,
+      _ => null
     });
-    select array::find(seen, |a: [string, null]| select a { null as _ => false, _ => true }) {
-      null as _ => `Absent,
-      a => `Present(a)
+    select verified {
+      [] => `Absent,
+      [a, ..] => `Present(a)
     }
   });
   polling <- states ~ false;
