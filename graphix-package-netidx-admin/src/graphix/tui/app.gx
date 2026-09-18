@@ -18,23 +18,24 @@ let app = |#server: string = ""| -> tui::Tui {
     d => sys::join_path(d, "netidx-admin-tui")
   };
   let rem = remote::remote(#q: &q, #book_dir: book_dir, #server: server);
-  let tab = select server {
-    "" => 0,
-    _ => 1
+  let order: Array<[`Local(local::Local), `Remote(remote::Remote)]> = select server {
+    "" => [`Local(loc), `Remote(rem)],
+    _ => [`Remote(rem), `Local(loc)]
   };
+  let tab = order[0]$;
   // the tab's own keys come first; what it leaves alone reaches the
   // global ones
   let tab_handle = |e: Event| -> [`Stop, `Continue] select e ~ tab {
-    0 => loc.handle(e),
-    _ => rem.handle(e)
+    `Local(t) => t.handle(e),
+    `Remote(t) => t.handle(e)
   };
   let global = |e: Event| -> [`Stop, `Continue] select e {
     `Key(k) => select k.kind {
       `Press => select k.code {
         `Tab => {
-          tab <- k ~ select loc.installed {
-            true => (tab + 1) % 2,
-            false => 0
+          order <- k ~ select loc.installed {
+            true => array::rotate(order),
+            false => [`Local(loc), `Remote(rem)]
           };
           `Stop
         },
@@ -45,25 +46,29 @@ let app = |#server: string = ""| -> tui::Tui {
     },
     _ => `Continue
   };
+  let selected: [i64, null] = select tab {
+    `Local(_) => 0,
+    `Remote(_) => 1
+  };
   let body: tui::Tui = select loc.installed {
     false => loc.view,
     true => tabs(
-      #selected: &tab,
+      #selected: &selected,
       #highlight_style: &selstyle,
       &[(line("Local"), loc.view), (line("Admin Domain"), rem.view)]
     )
   };
   let status: tui::Line = select p.progress {
     null as _ => select tab {
-      0 => loc.status,
-      _ => rem.status
+      `Local(t) => t.status,
+      `Remote(t) => t.status
     },
     pr => line(#style: hint, " working… [pr.message] ")
   };
   let layers = array::concat(
     select tab {
-      0 => loc.layers,
-      _ => rem.layers
+      `Local(t) => t.layers,
+      `Remote(t) => t.layers
     },
     p.layers
   );
