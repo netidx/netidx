@@ -42,11 +42,8 @@ let landing = |
   let selstyle = style(#add_modifier: [`Reversed]);
   let bold = style(#add_modifier: [`Bold]);
   // ── the bookmarks file ──
-  let path = select book_dir {
-    null as _ => null,
-    d => sys::join_path(d, "admin-domains.json")
-  };
-  let book_path = opt::or_never(path);
+  let dir = opt::or_never(book_dir);
+  let book_path = sys::join_path(dir, "admin-domains.json");
   let known = { domains: [] };
   let notice: [string, null] = null;
   let file = sys::fs::is_file(book_path)$;
@@ -63,11 +60,7 @@ let landing = |
   {
     catch(e) notice <- "could not save the admin domain list: [(e.0).error]";
     seq save {
-      let d = select book_dir {
-        null as _ => never(),
-        d => d
-      };
-      sys::fs::create_dir(#all: true, d)?;
+      sys::fs::create_dir(#all: true, dir)?;
       sys::fs::write_all(#path: book_path, json::write_str(#pretty: true, known)?)?
     }
   };
