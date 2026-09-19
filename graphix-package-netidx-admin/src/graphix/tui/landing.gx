@@ -42,7 +42,7 @@ let landing = |
   let selstyle = style(#add_modifier: [`Reversed]);
   let bold = style(#add_modifier: [`Bold]);
   // ── the bookmarks file ──
-  let dir = opt::or_never(book_dir);
+  let dir = book_dir$;
   let book_path = sys::join_path(dir, "admin-domains.json");
   let known = { domains: [] };
   let notice: [string, null] = null;
@@ -52,8 +52,8 @@ let landing = |
     known <- json::read(sys::fs::read_all(file)?)?
   };
   // this host's own domain, from its install record
-  let own = opt::or_never(local_domain(true));
-  seq let addr = opt::or_never(own.addr) {
+  let own = local_domain(true)$;
+  seq let addr = own.addr$ {
     known <- upsert(known, own.domain, addr, own.fingerprint)
   };
   let save: Any = never();
@@ -92,7 +92,7 @@ let landing = |
     }
   );
   // ── a session the tab established is remembered, and re-checked ──
-  seq let session = opt::or_never(*connected) {
+  seq let session = (*connected)$ {
     known <- upsert(known, session.domain, session.server, session.fingerprint);
     save <- session
   };

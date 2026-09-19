@@ -271,7 +271,7 @@ let services = |#units_dir: string, #on_close: fn(e: Any) -> null, open: Any| ->
   );
   // ── keys ──
   let control = |t, op| {
-    let u = opt::or_never(t ~ selected);
+    let u = (t ~ selected)$;
     run <- `Control({ unit: u.name, op });
     null
   };
@@ -282,7 +282,7 @@ let services = |#units_dir: string, #on_close: fn(e: Any) -> null, open: Any| ->
         `Down | `Char("j") => { sel <- k ~ min(last, sel + 1); `Stop },
         kk@ `Char("s") => { control(kk, `Start); `Stop },
         kk@ `Char("t") => {
-          let u = opt::or_never(kk ~ selected);
+          let u = (kk ~ selected)$;
           confirm <- {
             message: "Stop unit [u.name]? It stays down until started.",
             action: `Control({ unit: u.name, op: `Stop })
@@ -317,7 +317,7 @@ let services = |#units_dir: string, #on_close: fn(e: Any) -> null, open: Any| ->
           `Stop
         },
         kk@ `Char("d") => {
-          let u = opt::or_never(kk ~ selected);
+          let u = (kk ~ selected)$;
           confirm <- {
             message: "Delete unit [u.name]? This removes its definition file and reloads the supervisor.",
             action: `Delete(u.name)

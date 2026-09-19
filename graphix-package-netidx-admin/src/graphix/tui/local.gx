@@ -404,7 +404,7 @@ let local = |#q: &Question| {
   let admin_req = never();
   admin_req <- select run {
     x@ `Admins | x@ `Perms => {
-      cfg: opt::or_never(opt::or_never(x ~ lca).cfg),
+      cfg: (x ~ lca)$.cfg$,
       panel: select x { `Admins => `Roster, `Perms => `Perms }
     },
     _ => never()
@@ -419,7 +419,7 @@ let local = |#q: &Question| {
       admin_target <- t;
       admin_entry <- select admin_req.panel {
         `Roster => `Roster,
-        `Perms => `Perms(opt::or_never(own_base))
+        `Perms => `Perms(own_base$)
       };
       screen <- `Admin
     }
@@ -431,7 +431,7 @@ let local = |#q: &Question| {
     admin_target
   );
   // ── this host's services, over its activation supervisor ──
-  let svc_dir = opt::or_never(units);
+  let svc_dir = units$;
   let svc_open = never();
   let svc = services::services(
     #units_dir: svc_dir,
@@ -445,38 +445,38 @@ let local = |#q: &Question| {
   };
   let update_c = select run {
     x@ `Update => {
-      let d = opt::or_never(x ~ current);
+      let d = (x ~ current)$;
       update(#config_root: d.config_dir, d.role)
     },
     _ => never()
   };
   let backup_c = select run {
     x@ `Backup => {
-      let d = opt::or_never(x ~ current);
+      let d = (x ~ current)$;
       backup(#config_root: d.config_dir, #target: null, d.scope)
     },
     _ => never()
   };
   let autoapprove_c = select run {
     `AutoApprove(rotate) => {
-      let l = opt::or_never(rotate ~ lca);
+      let l = (rotate ~ lca)$;
       auto_approve(#rotate: rotate, #cfg: l.cfg, l.ca_dir)
     },
     _ => never()
   };
   let recovery_c = select run {
     x@ `RecoveryRotate => {
-      let l = opt::or_never(x ~ lca);
+      let l = (x ~ lca)$;
       recovery_rotate(#cfg: l.cfg, l.ca_dir)
     },
     _ => never()
   };
   let csr_c = select run {
-    x@ `ExternalCsr => external_csr(opt::or_never(x ~ lca).ca_dir),
+    x@ `ExternalCsr => external_csr((x ~ lca)$.ca_dir),
     _ => never()
   };
   let extinstall_c = select run {
-    x@ `ExternalInstall => external_install(#signed: null, #root: null, opt::or_never(x ~ lca).ca_dir),
+    x@ `ExternalInstall => external_install(#signed: null, #root: null, (x ~ lca)$.ca_dir),
     _ => never()
   };
   *q <- questions(renew_c);
@@ -675,7 +675,7 @@ let local = |#q: &Question| {
       null as _ => run <- x ~ `UninstallWith(false),
       _ => { ca_sel <- x ~ 0; ca_ask <- x ~ true }
     },
-    x@ `AddParent => seq let d = opt::or_never(x ~ current) {
+    x@ `AddParent => seq let d = (x ~ current)$ {
       parent_root <- d.config_dir;
       parent_sel <- 0;
       parent_open <- true
@@ -748,8 +748,8 @@ let local = |#q: &Question| {
     catch(e) fail("The system service is not running", (e.0).error);
     svc_ok <- verified?
   };
-  let need_service = |t, scope| {
-    svc_req <- { scope: opt::or_never(t ~ scope), name: null, for_user: null };
+  let need_service = |t, scope: [Scope, null]| {
+    svc_req <- { scope: (t ~ scope)$, name: null, for_user: null };
     null
   };
   // ── the lifecycle ceremonies ──
@@ -763,7 +763,7 @@ let local = |#q: &Question| {
   };
   let addparent_c = select run {
     `AddParentTo(a) => {
-      let d = opt::or_never(a ~ current);
+      let d = (a ~ current)$;
       add_parent(#config_root: d.config_dir, #parent: a.parent, #resolvers: a.resolvers, #path: a.path, d)
     },
     _ => never()
@@ -773,12 +773,12 @@ let local = |#q: &Question| {
     _ => never()
   };
   let finish_c = select run {
-    x@ `FinishRestore => restore_finish(opt::or_never(x ~ restore_staged)),
+    x@ `FinishRestore => restore_finish((x ~ restore_staged)$),
     _ => never()
   };
   let uninstall_c = select run {
     `UninstallWith(remove_ca) => {
-      let d = opt::or_never(remove_ca ~ current);
+      let d = (remove_ca ~ current)$;
       uninstall(#scope: d.scope, #config_dir: d.config_dir, #remove_ca: remove_ca, d)
     },
     _ => never()
@@ -906,7 +906,7 @@ let local = |#q: &Question| {
       }
     }
   };
-  run <- opt::or_never(svc_ok ~ restore_staged) ~ `FinishRestore;
+  run <- (svc_ok ~ restore_staged)$ ~ `FinishRestore;
   {
     catch(e) fail("Finishing the restore failed", (e.0).error);
     seq finish_r {

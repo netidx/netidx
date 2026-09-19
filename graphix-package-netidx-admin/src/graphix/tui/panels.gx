@@ -876,7 +876,7 @@ let panels = |
   };
   let queue_keys = |k: KeyEvent| select k.code {
     kk@ `Char("a") => {
-      let code = opt::or_never(kk ~ queue_code);
+      let code = (kk ~ queue_code)$;
       confirm <- {
         message: "Approve this enrollment?\n\nVerify this glyph and code match the screenshot the enrollee sent you, out of band:\n\n[code]",
         action: `Approve(code)
@@ -884,7 +884,7 @@ let panels = |
       `Stop
     },
     kk@ `Char("d") => {
-      run <- `Deny(opt::or_never(kk ~ queue_code));
+      run <- `Deny((kk ~ queue_code)$);
       `Stop
     },
     kk@ `Char("R") => { run <- kk ~ `Renewals; `Stop },
@@ -892,7 +892,7 @@ let panels = |
   };
   let deleg_keys = |k: KeyEvent| select k.code {
     kk@ `Char("a") => {
-      let code = opt::or_never(kk ~ deleg_code);
+      let code = (kk ~ deleg_code)$;
       confirm <- {
         message: "Approve or reconcile this delegation?\n\nVerify this glyph and code match the screenshot the child resolver's operator sent you, out of band:\n\n[code]",
         action: `ApproveDelegation(code)
@@ -900,7 +900,7 @@ let panels = |
       `Stop
     },
     kk@ `Char("d") => {
-      run <- `DenyDelegation(opt::or_never(kk ~ deleg_code));
+      run <- `DenyDelegation((kk ~ deleg_code)$);
       `Stop
     },
     _ => `Continue
@@ -914,7 +914,7 @@ let panels = |
       `Stop
     },
     kk@ `Char("e") => {
-      let a = opt::or_never(kk ~ roster_sel);
+      let a = (kk ~ roster_sel)$;
       select a.kind {
         `Signing => toast <- { title: "Signing slot", lines: ["[a.admin] is a signing slot; its policy is not editable."], error: true },
         `Role => {
@@ -928,7 +928,7 @@ let panels = |
     },
     kk@ `Char("c") => { run <- kk ~ `ChangeOwnPassword; `Stop },
     kk@ `Char("p") => {
-      let name = opt::or_never(kk ~ roster_name);
+      let name = (kk ~ roster_name)$;
       confirm <- {
         message: "Reset [name]'s password? The password they have stops working immediately and every session they hold is closed. You will get a one-time password to give them.",
         action: `ResetPassword(name)
@@ -936,7 +936,7 @@ let panels = |
       `Stop
     },
     kk@ `Char("d") => {
-      let name = opt::or_never(kk ~ roster_name);
+      let name = (kk ~ roster_name)$;
       confirm <- {
         message: "Remove admin [name]? Their password will no longer authenticate to this CA.",
         action: `RemoveAdmin(name)
@@ -948,7 +948,7 @@ let panels = |
   let server_keys = |k: KeyEvent| select k.code {
     kk@ `Char("c") => { run <- kk ~ `Reconcile; `Stop },
     kk@ `Char("g") => {
-      let s = opt::or_never(kk ~ server_sel);
+      let s = (kk ~ server_sel)$;
       select s.resolver {
         null as _ => toast <- {
           title: "No read gate",
@@ -960,7 +960,7 @@ let panels = |
       `Stop
     },
     kk@ `Char("x") => {
-      let id = opt::or_never(kk ~ server_id);
+      let id = (kk ~ server_id)$;
       confirm <- {
         message: "Permanently remove server [id]? Its certificates are revoked and the removal is pushed domain-wide.",
         action: `RemoveServer(id)
@@ -971,7 +971,7 @@ let panels = |
   };
   let cert_keys = |k: KeyEvent| select k.code {
     kk@ `Char("x") => {
-      let serial = opt::or_never(kk ~ cert_serial);
+      let serial = (kk ~ cert_serial)$;
       confirm <- {
         message: "Revoke certificate serial [serial]? This is irreversible — the admin domain re-signs its CRL and the holder can no longer authenticate.",
         action: `Revoke(serial)
@@ -981,7 +981,7 @@ let panels = |
     _ => `Continue
   };
   let service_act = |kk, op| {
-    let u = opt::or_never(kk ~ unit_sel);
+    let u = (kk ~ unit_sel)$;
     run <- `Service({ server: u.server, unit: u.unit, op });
     null
   };
@@ -1002,7 +1002,7 @@ let panels = |
       `Stop
     },
     kk@ `Char("e") => {
-      seq let r = opt::or_never(kk ~ perm_sel) {
+      seq let r = (kk ~ perm_sel)$ {
         perm_fields <- [
           { label: "path", value: r.path },
           { label: "entity", value: r.entity },
@@ -1013,7 +1013,7 @@ let panels = |
       `Stop
     },
     kk@ `Char("d") => {
-      let r = opt::or_never(kk ~ perm_sel);
+      let r = (kk ~ perm_sel)$;
       confirm <- {
         message: "Remove [r.entity]'s permissions at [r.path]?",
         action: `RemovePerm({ path: r.path, entity: r.entity })

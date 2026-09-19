@@ -222,11 +222,11 @@ let pump = |q: Question| -> Pump {
     null
   };
   let cancel = |t| {
-    submit <- t ~ { id: qid(opt::or_never(active)), a: `Cancel };
+    submit <- t ~ { id: qid(active$), a: `Cancel };
     null
   };
   let confirm_answer = |t, v| {
-    submit <- t ~ { id: qid(opt::or_never(active)), a: `Confirm(v) };
+    submit <- t ~ { id: qid(active$), a: `Confirm(v) };
     null
   };
   // ── per-kind key handling ──
