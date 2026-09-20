@@ -38,6 +38,8 @@ type Probe = [`None, `Probing, `Ready(CaCredentials), `Failed(string)];
 
 type InstallRow = { install: Install, sync: SyncState, probe: Probe };
 
+type ParentChoice = { parent: string, resolvers: [Array<string>, null], path: string };
+
 type Act = [
   `Status,
   `Update,
@@ -57,7 +59,7 @@ type Act = [
   `Install(InstallRole, bool),
   `Restore,
   `FinishRestore,
-  `AddParentTo({ parent: string, resolvers: [Array<string>, null], path: string })
+  `AddParentTo(ParentChoice)
 ];
 
 type Screen = [`Home, `Admin, `Services];
@@ -143,6 +145,130 @@ let confirm_text = |a: Act| select a {
 let rec pad = |s: string, n: i64| select str::len(s) {
   l if l >= n => s,
   _ => pad(str::concat(" ", s), n)
+};
+
+// the question a teardown asks of an install that owns a CA: up from each
+// `ask` until it is answered or cancelled
+let ca_question = |#on_answer: fn(remove_ca: bool) -> null, ask: Any| -> Array<Layer> {
+  let up = false;
+  let sel = 0;
+  up <- ask ~ true;
+  sel <- ask ~ 0;
+  let handle = |e: Event| {
+    on_press(e, |k| select k.code {
+      `Up | `Char("k") => { sel <- k ~ max(0, sel - 1); `Stop },
+      `Down | `Char("j") => { sel <- k ~ min(1, sel + 1); `Stop },
+      kk@ `Enter => {
+        on_answer(kk ~ sel == 1);
+        up <- kk ~ false;
+        `Stop
+      },
+      kk@ `Esc => { up <- kk ~ false; `Stop },
+      _ => `Stop
+    });
+    e ~ `Stop
+  };
+  select up {
+    false => [],
+    true => [layer(#width: &`Percentage(70), #height: &`Percentage(40),
+      input_handler(#handle: &handle, &block(
+        #border: &`All,
+        #title: &line("This install owns a CA"),
+        #title_bottom: &line(#style: hint, " ↑/↓ choose · Enter confirm · Esc cancel "),
+        &layout(#direction: &`Vertical, &[
+          child(#constraint: `Length(2), paragraph(#style: &hint,
+            &"Removing the CA directory destroys the admin domain's trust root: every enrolled node's certificate becomes unverifiable and unrenewable. There is no undo.")),
+          child(#constraint: `Min(2), list(#highlight_style: &selstyle, #selected: &sel, &[
+            line("Keep the CA directory"),
+            line("DESTROY the CA — irreversible")
+          ]))
+        ]))))]
+  }
+};
+
+// choosing a parent for the install at `root`: each `root` opens the
+// picker over the admin domain's candidates (or an address typed by
+// hand), and the form that follows calls `#on_pick` with the choice
+let parent_picker = |
+  #toast: &[Toast, null],
+  #on_pick: fn(c: ParentChoice) -> null,
+  root: string
+| -> Array<Layer> {
+  let cands: [Array<ParentCandidate>, null] = null;
+  {
+    catch(e) *toast <- {
+      title: "Listing the parent candidates failed",
+      lines: [admin_text((e.0).error)],
+      error: true
+    };
+    cands <- parent_candidates(#config_root: root, root)?
+  };
+  let picking = false;
+  let sel = 0;
+  picking <- root ~ true;
+  sel <- root ~ 0;
+  let resolvers: [Array<string>, null] = null;
+  let fields = never();
+  let filling = false;
+  let address_form = form(
+    #title: "Add a parent",
+    #help: "The parent's admin server is a host or host:port; the subtree is the path this resolver will own under it.",
+    #on_submit: |v| {
+      on_pick({ parent: v[0]$, resolvers: v ~ resolvers, path: v[1]$ });
+      filling <- v ~ false;
+      null
+    },
+    #on_cancel: |e| { filling <- e ~ false; null },
+    fields
+  );
+  let handle = |e: Event| {
+    on_press(e, |k| select k.code {
+      `Up | `Char("k") => { sel <- k ~ max(0, sel - 1); `Stop },
+      `Down | `Char("j") => { sel <- k ~ min(opt_len(cands), sel + 1); `Stop },
+      kk@ `Enter => {
+        select kk ~ (opt::or_default(cands, []), sel) {
+          (cs, i) if i < array::len(cs) => {
+            let c = cs[i]$;
+            resolvers <- [c.resolver];
+            fields <- [{ label: "parent admin server", value: c.admin }, { label: "subtree path", value: "" }]
+          },
+          (cs, _) => {
+            resolvers <- cs ~ null;
+            fields <- cs ~ [{ label: "parent admin server", value: "" }, { label: "subtree path", value: "" }]
+          }
+        };
+        picking <- kk ~ false;
+        filling <- kk ~ true;
+        `Stop
+      },
+      kk@ `Esc => { picking <- kk ~ false; `Stop },
+      _ => `Stop
+    });
+    e ~ `Stop
+  };
+  array::concat(
+    select picking {
+      false => [],
+      true => {
+        let manual = line("Enter an address manually…");
+        let items = select cands {
+          null as _ => [line(#style: hint, "looking for parents in the admin domain's map…"), manual],
+          cs => array::push(array::map(cs, |c| line("[c.resolver]  [c.base]  via [c.admin]")), manual)
+        };
+        [layer(#width: &`Percentage(70), #height: &`Percentage(50),
+          input_handler(#handle: &handle, &block(
+            #border: &`All,
+            #title: &line("Pick a parent"),
+            #title_bottom: &line(#style: hint, " ↑/↓ move · Enter choose · Esc cancel "),
+            &list(#highlight_style: &selstyle, #selected: &sel, &items))))]
+      }
+    },
+    select filling {
+      false => [],
+      true => [layer(#width: &`Percentage(70), #height: &`Percentage(40),
+        input_handler(#handle: &address_form.handle, &address_form.view))]
+    }
+  )
 };
 
 // the status card: everything known about one install, up from each
@@ -759,22 +885,15 @@ let local = |#q: &Question| {
     }
   };
   // ── navigation, and the questions a teardown asks first ──
-  let ca_ask = false;
-  let ca_sel = 0;
+  let ca_ask = never();
   let parent_root = never();
-  let parent_open = false;
-  let parent_sel = 0;
   select run {
     x@ `Services => { svc_open <- x; screen <- x ~ `Services },
     x@ `Uninstall => select x ~ lca {
       null as _ => run <- x ~ `UninstallWith(false),
-      _ => { ca_sel <- x ~ 0; ca_ask <- x ~ true }
+      _ => ca_ask <- x
     },
-    x@ `AddParent => seq let d = (x ~ current)$ {
-      parent_root <- d.config_dir;
-      parent_sel <- 0;
-      parent_open <- true
-    },
+    x@ `AddParent => parent_root <- (x ~ current)$.config_dir,
     _ => never()
   };
   // ── the OS service a role needs afterwards: registered here at user
@@ -1061,111 +1180,6 @@ let local = |#q: &Question| {
       }
     }
   };
-  // ── the teardown's CA question, and the parent picker with its form ──
-  let ca_handle = |e: Event| {
-    on_press(e, |k| select k.code {
-      `Up | `Char("k") => { ca_sel <- k ~ max(0, ca_sel - 1); `Stop },
-      `Down | `Char("j") => { ca_sel <- k ~ min(1, ca_sel + 1); `Stop },
-      kk@ `Enter => {
-        run <- kk ~ `UninstallWith(ca_sel == 1);
-        ca_ask <- kk ~ false;
-        `Stop
-      },
-      kk@ `Esc => { ca_ask <- kk ~ false; `Stop },
-      _ => `Stop
-    });
-    e ~ `Stop
-  };
-  let ca_layers = select ca_ask {
-    false => [],
-    true => [layer(#width: &`Percentage(70), #height: &`Percentage(40),
-      input_handler(#handle: &ca_handle, &block(
-        #border: &`All,
-        #title: &line("This install owns a CA"),
-        #title_bottom: &line(#style: hint, " ↑/↓ choose · Enter confirm · Esc cancel "),
-        &layout(#direction: &`Vertical, &[
-          child(#constraint: `Length(2), paragraph(#style: &hint,
-            &"Removing the CA directory destroys the admin domain's trust root: every enrolled node's certificate becomes unverifiable and unrenewable. There is no undo.")),
-          child(#constraint: `Min(2), list(#highlight_style: &selstyle, #selected: &ca_sel, &[
-            line("Keep the CA directory"),
-            line("DESTROY the CA — irreversible")
-          ]))
-        ]))))]
-  };
-  let parent_cands_r = parent_candidates(#config_root: parent_root, parent_root);
-  let parent_cands: [Array<ParentCandidate>, null] = null;
-  {
-    catch(e) fail("Listing the parent candidates failed", (e.0).error);
-    parent_cands <- parent_cands_r?
-  };
-  let parent_cands_or_empty = select parent_cands {
-    null as _ => [],
-    cs => cs
-  };
-  let parent_pick: [Array<string>, null] = null;
-  let parent_fields = never();
-  let parent_form_open = false;
-  let parent_form = form(
-    #title: "Add a parent",
-    #help: "The parent's admin server is a host or host:port; the subtree is the path this resolver will own under it.",
-    #on_submit: |v| {
-      run <- `AddParentTo({ parent: v[0]$, resolvers: v ~ parent_pick, path: v[1]$ });
-      parent_form_open <- v ~ false;
-      null
-    },
-    #on_cancel: |e| { parent_form_open <- e ~ false; null },
-    parent_fields
-  );
-  let parent_handle = |e: Event| {
-    on_press(e, |k| select k.code {
-      `Up | `Char("k") => { parent_sel <- k ~ max(0, parent_sel - 1); `Stop },
-      `Down | `Char("j") => {
-        parent_sel <- k ~ min(array::len(parent_cands_or_empty), parent_sel + 1);
-        `Stop
-      },
-      kk@ `Enter => {
-        select kk ~ (parent_cands_or_empty, parent_sel) {
-          (cs, i) if i < array::len(cs) => {
-            let c = cs[i]$;
-            parent_pick <- [c.resolver];
-            parent_fields <- [{ label: "parent admin server", value: c.admin }, { label: "subtree path", value: "" }]
-          },
-          (cs, _) => {
-            parent_pick <- cs ~ null;
-            parent_fields <- cs ~ [{ label: "parent admin server", value: "" }, { label: "subtree path", value: "" }]
-          }
-        };
-        parent_open <- kk ~ false;
-        parent_form_open <- kk ~ true;
-        `Stop
-      },
-      kk@ `Esc => { parent_open <- kk ~ false; `Stop },
-      _ => `Stop
-    });
-    e ~ `Stop
-  };
-  let parent_layers = array::concat(
-    select parent_open {
-      false => [],
-      true => {
-        let items = select parent_cands {
-          null as _ => [line(#style: hint, "looking for parents in the admin domain's map…"), line("Enter an address manually…")],
-          cs => array::push(array::map(cs, |c| line("[c.resolver]  [c.base]  via [c.admin]")), line("Enter an address manually…"))
-        };
-        [layer(#width: &`Percentage(70), #height: &`Percentage(50),
-          input_handler(#handle: &parent_handle, &block(
-            #border: &`All,
-            #title: &line("Pick a parent"),
-            #title_bottom: &line(#style: hint, " ↑/↓ move · Enter choose · Esc cancel "),
-            &list(#highlight_style: &selstyle, #selected: &parent_sel, &items))))]
-      }
-    },
-    select parent_form_open {
-      false => [],
-      true => [layer(#width: &`Percentage(70), #height: &`Percentage(40),
-        input_handler(#handle: &parent_form.handle, &parent_form.view))]
-    }
-  );
   // ── the views ──
   let fresh_view = {
     let titles = array::map(fresh_choices, |c| line(c.title));
@@ -1244,8 +1258,8 @@ let local = |#q: &Question| {
     },
     welcome(fresh),
     status_card(row, select run { x@ `Status => x, _ => never() }),
-    ca_layers,
-    parent_layers,
+    ca_question(#on_answer: |remove_ca| { run <- `UninstallWith(remove_ca); null }, ca_ask),
+    parent_picker(#toast: &toast, #on_pick: |c| { run <- `AddParentTo(c); null }, parent_root),
     confirm_layers(#on_confirm: |a| { run <- a; null }, &confirm),
     toast_layers(&toast)
   );
