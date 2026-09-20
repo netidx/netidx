@@ -22,7 +22,7 @@ use tui::{
   input_handler::{Event, KeyEvent, input_handler, on_press},
   layout::{child, layout},
   list::list,
-  overlay::layer,
+  overlay::{Layer, layer},
   paragraph::paragraph
 };
 
@@ -35,6 +35,8 @@ type SyncState = [
 ];
 
 type Probe = [`None, `Probing, `Ready(CaCredentials), `Failed(string)];
+
+type InstallRow = { install: Install, sync: SyncState, probe: Probe };
 
 type Act = [
   `Status,
@@ -143,10 +145,144 @@ let rec pad = |s: string, n: i64| select str::len(s) {
   _ => pad(str::concat(" ", s), n)
 };
 
-let local = |#q: &Question| {
-  let bold = style(#add_modifier: [`Bold]);
+// the status card: everything known about one install, up from each
+// `open` until the next key
+let status_card = |row: [InstallRow, null], open: Any| -> Array<Layer> {
   let good = style(#fg: `Green);
   let warn = style(#fg: `Yellow);
+  let show = false;
+  show <- open ~ true;
+  let kv = |label, value|
+    line([span(#style: hint, "[pad(label, 17)]: "), span(value)]);
+  let kvs = |label, value, st|
+    line([span(#style: hint, "[pad(label, 17)]: "), span(#style: st, value)]);
+  let lines = select row {
+    null as _ => [],
+    r => {
+      let d = r.install;
+      let domain = select d.admin_domain {
+        null as _ => "standalone (local-only)",
+        n => n.domain
+      };
+      let servers = select d.admin_servers {
+        [] => [],
+        xs => [kv("Admin servers", str::join(#sep: ", ", xs))]
+      };
+      let creds = select d.local_ca {
+        null as _ => [],
+        _ => select r.probe {
+          `None => [],
+          `Probing => [kvs("CA credentials", "checking…", hint)],
+          `Failed(e) => [kvs("CA credentials", e, warn)],
+          `Ready(c) => array::concat(
+            [select (c.auto_approve_present, c.auto_approve_wired) {
+              (true, true) => kvs("Auto-approve", "active", good),
+              (true, false) => kvs("Auto-approve", "present (not wired)", warn),
+              (false, _) => kvs("Auto-approve", "not set up", hint)
+            }],
+            [select c.recovery_present {
+              true => kvs("Recovery slot", "set", good),
+              false => kvs("Recovery slot", "MISSING", warn)
+            }],
+            select (c.external_signed, c.external_installed) {
+              (false, _) => [],
+              (true, true) => [kvs("External CA", "installed", good)],
+              (true, false) => [kvs("External CA", "awaiting signature", warn)]
+            }
+          )
+        }
+      };
+      let service = select d.service {
+        `Active => kvs("OS service", "active (running)", good),
+        `Inactive => kvs("OS service", "installed, not running", warn),
+        `NotInstalled => kvs("OS service", "not installed", hint)
+      };
+      let sync_lines = select r.sync {
+        `NotApplicable => [],
+        `Checking => [kvs("Admin domain sync", "checking…", hint)],
+        `InSync => [kvs("Admin domain sync", "✓ in sync", good)],
+        `Failed(e) => [kvs("Admin domain sync", "could not check ([e])", hint)],
+        `OutOfSync(cs) => array::concat(
+          [kvs("Admin domain sync", "⚠ [array::len(cs)] pending change(s) — press U to apply", warn)],
+          array::map(cs, |c| line([span("                   "), span(#style: warn, change_text(c))]))
+        )
+      };
+      array::concat(
+        [
+          kv("Role", role_title(d.role)),
+          kv("Base", d.base),
+          kv("Data-plane auth", d.auth),
+          kv("Admin domain", domain)
+        ],
+        servers,
+        creds,
+        [service, kv("Config", d.config_dir), kv("Installed", "[cast<datetime>(d.created_unix)$]")],
+        sync_lines
+      )
+    }
+  };
+  let ca_glyph = select row {
+    null as _ => [],
+    r => select r.install.admin_domain {
+      null as _ => [],
+      n => select parse_fingerprint(n.fingerprint) {
+        error as _ => [line(#style: hint, "recorded fingerprint does not parse")],
+        fp => array::concat([line(#style: hint, "CA glyph")], identity_lines(fp))
+      }
+    }
+  };
+  let handle = |e: Event| {
+    on_press(e, |k| { show <- k ~ false; `Stop });
+    e ~ `Stop
+  };
+  select show {
+    false => [],
+    true => {
+      let title = select row {
+        null as _ => "Status",
+        r => "[role_title(r.install.role)] status"
+      };
+      let content = select ca_glyph {
+        [] => paragraph(#trim: &false, &lines),
+        g => layout(#direction: &`Horizontal, &[
+          child(#constraint: `Min(0), paragraph(#trim: &false, &lines)),
+          child(#constraint: `Length(24), paragraph(#alignment: &`Center, #trim: &false, &g))
+        ])
+      };
+      [layer(#width: &`Percentage(85), #height: &`Percentage(75),
+        input_handler(#handle: &handle, &block(
+          #border: &`All,
+          #title: &line(title),
+          #title_bottom: &line(#style: hint, " any key to close "),
+          &content)))]
+    }
+  }
+};
+
+// the fresh-machine welcome, up until its first key
+let welcome = |fresh: bool| -> Array<Layer> {
+  let seen = false;
+  let handle = |e: Event| {
+    on_press(e, |k| { seen <- k ~ true; `Stop });
+    e ~ `Stop
+  };
+  select (fresh, seen) {
+    (true, false) => [layer(#width: &`Length(64), #height: &`Length(10),
+      input_handler(#handle: &handle, &block(
+        #border: &`All,
+        #title: &line("Welcome to netidx"),
+        &paragraph(#trim: &true, &[
+          line(#style: style(#add_modifier: [`Bold]), "netidx isn't installed on this machine."),
+          line(""),
+          line("Choose a role to install — a Workstation for a laptop or desktop, a Resolver to run an admin domain's directory, or a Publisher — or choose Restore from Backup to recover any managed installation."),
+          line(""),
+          line(#style: selstyle$, " Press Enter to continue ")
+        ]))))],
+    _ => []
+  }
+};
+
+let local = |#q: &Question| {
   let toast: [Toast, null] = null;
   let fail = |title, a| {
     toast <- { title, lines: [admin_text(a)], error: true };
@@ -296,8 +432,6 @@ let local = |#q: &Question| {
   // ── ui state ──
   let menu_sel = 0;
   let menu_item = selected(items, menu_sel);
-  let show_status = false;
-  let welcome_seen = false;
   let role_sel = 0;
   let screen: Screen = `Home;
   let confirm: [Confirm<Act>, null] = null;
@@ -631,7 +765,6 @@ let local = |#q: &Question| {
   let parent_open = false;
   let parent_sel = 0;
   select run {
-    x@ `Status => show_status <- x ~ true,
     x@ `Services => { svc_open <- x; screen <- x ~ `Services },
     x@ `Uninstall => select x ~ lca {
       null as _ => run <- x ~ `UninstallWith(false),
@@ -1033,131 +1166,6 @@ let local = |#q: &Question| {
         input_handler(#handle: &parent_form.handle, &parent_form.view))]
     }
   );
-  // ── the status card ──
-  let kv = |label, value|
-    line([span(#style: hint, "[pad(label, 17)]: "), span(value)]);
-  let kvs = |label, value, st|
-    line([span(#style: hint, "[pad(label, 17)]: "), span(#style: st, value)]);
-  let status_lines = select row {
-    null as _ => [],
-    r => {
-      let d = r.install;
-      let domain = select d.admin_domain {
-        null as _ => "standalone (local-only)",
-        n => n.domain
-      };
-      let servers = select d.admin_servers {
-        [] => [],
-        xs => [kv("Admin servers", str::join(#sep: ", ", xs))]
-      };
-      let creds = select d.local_ca {
-        null as _ => [],
-        _ => select r.probe {
-          `None => [],
-          `Probing => [kvs("CA credentials", "checking…", hint)],
-          `Failed(e) => [kvs("CA credentials", e, warn)],
-          `Ready(c) => array::concat(
-            [select (c.auto_approve_present, c.auto_approve_wired) {
-              (true, true) => kvs("Auto-approve", "active", good),
-              (true, false) => kvs("Auto-approve", "present (not wired)", warn),
-              (false, _) => kvs("Auto-approve", "not set up", hint)
-            }],
-            [select c.recovery_present {
-              true => kvs("Recovery slot", "set", good),
-              false => kvs("Recovery slot", "MISSING", warn)
-            }],
-            select (c.external_signed, c.external_installed) {
-              (false, _) => [],
-              (true, true) => [kvs("External CA", "installed", good)],
-              (true, false) => [kvs("External CA", "awaiting signature", warn)]
-            }
-          )
-        }
-      };
-      let service = select d.service {
-        `Active => kvs("OS service", "active (running)", good),
-        `Inactive => kvs("OS service", "installed, not running", warn),
-        `NotInstalled => kvs("OS service", "not installed", hint)
-      };
-      let sync_lines = select r.sync {
-        `NotApplicable => [],
-        `Checking => [kvs("Admin domain sync", "checking…", hint)],
-        `InSync => [kvs("Admin domain sync", "✓ in sync", good)],
-        `Failed(e) => [kvs("Admin domain sync", "could not check ([e])", hint)],
-        `OutOfSync(cs) => array::concat(
-          [kvs("Admin domain sync", "⚠ [array::len(cs)] pending change(s) — press U to apply", warn)],
-          array::map(cs, |c| line([span("                   "), span(#style: warn, change_text(c))]))
-        )
-      };
-      array::concat(
-        [
-          kv("Role", role_title(d.role)),
-          kv("Base", d.base),
-          kv("Data-plane auth", d.auth),
-          kv("Admin domain", domain)
-        ],
-        servers,
-        creds,
-        [service, kv("Config", d.config_dir), kv("Installed", "[cast<datetime>(d.created_unix)$]")],
-        sync_lines
-      )
-    }
-  };
-  let ca_glyph = select current {
-    null as _ => [],
-    d => select d.admin_domain {
-      null as _ => [],
-      n => select parse_fingerprint(n.fingerprint) {
-        error as _ => [line(#style: hint, "recorded fingerprint does not parse")],
-        fp => array::concat([line(#style: hint, "CA glyph")], identity_lines(fp))
-      }
-    }
-  };
-  let status_handle = |e: Event| {
-    on_press(e, |k| { show_status <- k ~ false; `Stop });
-    e ~ `Stop
-  };
-  let status_layers = select show_status {
-    false => [],
-    true => {
-      let title = select current {
-        null as _ => "Status",
-        d => "[role_title(d.role)] status"
-      };
-      let content = select ca_glyph {
-        [] => paragraph(#trim: &false, &status_lines),
-        g => layout(#direction: &`Horizontal, &[
-          child(#constraint: `Min(0), paragraph(#trim: &false, &status_lines)),
-          child(#constraint: `Length(24), paragraph(#alignment: &`Center, #trim: &false, &g))
-        ])
-      };
-      [layer(#width: &`Percentage(85), #height: &`Percentage(75),
-        input_handler(#handle: &status_handle, &block(
-          #border: &`All,
-          #title: &line(title),
-          #title_bottom: &line(#style: hint, " any key to close "),
-          &content)))]
-    }
-  };
-  // ── the fresh-machine welcome ──
-  let welcome_handle = |e: Event| {
-    on_press(e, |k| { welcome_seen <- k ~ true; `Stop });
-    e ~ `Stop
-  };
-  let welcome_layers = select (fresh, welcome_seen) {
-    (true, false) => [layer(#width: &`Length(64), #height: &`Length(10),
-      input_handler(#handle: &welcome_handle, &block(
-        #border: &`All,
-        #title: &line("Welcome to netidx"),
-        &paragraph(#trim: &true, &[
-          line(#style: bold, "netidx isn't installed on this machine."),
-          line(""),
-          line("Choose a role to install — a Workstation for a laptop or desktop, a Resolver to run an admin domain's directory, or a Publisher — or choose Restore from Backup to recover any managed installation."),
-          line(""),
-          line(#style: selstyle$, " Press Enter to continue ")
-        ]))))],
-    _ => []
-  };
   // ── the views ──
   let fresh_view = {
     let titles = array::map(fresh_choices, |c| line(c.title));
@@ -1234,8 +1242,8 @@ let local = |#q: &Question| {
       `Services => svc.layers,
       `Home => []
     },
-    welcome_layers,
-    status_layers,
+    welcome(fresh),
+    status_card(row, select run { x@ `Status => x, _ => never() }),
     ca_layers,
     parent_layers,
     confirm_layers(#on_confirm: |a| { run <- a; null }, &confirm),
