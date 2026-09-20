@@ -48,6 +48,14 @@ let landing = |
     catch(e) notice <- "could not load the admin domain list: [(e.0).error]";
     book <- json::read(sys::fs::read_all(file)?)?
   };
+  // the book, with this host's own domain from its install record
+  let known = select local_domain(true) {
+    null as _ => book,
+    own => select own.addr {
+      null as _ => book,
+      addr => upsert(book, own.domain, addr, own.fingerprint)
+    }
+  };
   // an edit is the new book: it replaces the old one and is what the file gets
   let edit = never();
   book <- edit;
@@ -56,14 +64,6 @@ let landing = |
     seqq let (dir, edited) = (book_dir$, edit) {
       sys::fs::create_dir(#all: true, dir)?;
       sys::fs::write_all(#path: book_path, json::write_str(#pretty: true, edited)?)?
-    }
-  };
-  // the book, with this host's own domain from its install record
-  let known = select local_domain(true) {
-    null as _ => book,
-    own => select own.addr {
-      null as _ => book,
-      addr => upsert(book, own.domain, addr, own.fingerprint)
     }
   };
   // ── verification: each saved domain, at each address, in order —
