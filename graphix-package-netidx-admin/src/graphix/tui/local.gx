@@ -162,68 +162,59 @@ let local = |#q: &Question| {
   };
   let units = units::dir(refresh);
   let own_base = local_resolver_base(refresh);
-  let sel = 0;
-  let current = selected(detected, sel);
   let fresh = select detected {
     null as _ => false,
     [] => true,
     _ => false
   };
-  // ── the facts that take a round trip, one per install; every
+  // ── one row per install, with the facts that take a round trip: every
   // detection re-checks them ──
-  let syncs = select detected {
+  let rows = select detected {
     null as _ => [],
-    xs => array::map(xs, |i| select (i.admin_domain, i.role) {
-      (null, _) => `NotApplicable,
-      (_, `Ca) => `NotApplicable,
-      _ => {
-        let st: SyncState = `Checking;
-        {
-          catch(e) st <- `Failed(admin_text((e.0).error));
-          st <- select sync_check(#config_root: i.config_dir, i.role)? {
-            `InSync => `InSync,
-            `OutOfSync(cs) => `OutOfSync(cs)
-          }
-        };
-        st
-      }
+    xs => array::map(xs, |i| {
+      let sync: SyncState = select (i.admin_domain, i.role) {
+        (null, _) => `NotApplicable,
+        (_, `Ca) => `NotApplicable,
+        _ => {
+          let st: SyncState = `Checking;
+          {
+            catch(e) st <- `Failed(admin_text((e.0).error));
+            st <- select sync_check(#config_root: i.config_dir, i.role)? {
+              `InSync => `InSync,
+              `OutOfSync(cs) => `OutOfSync(cs)
+            }
+          };
+          st
+        }
+      };
+      let probe: Probe = select i.local_ca {
+        null as _ => `None,
+        lca => {
+          let p: Probe = `Probing;
+          {
+            catch(e) p <- `Failed(admin_text((e.0).error));
+            p <- `Ready(ca::credentials(#cfg: lca.cfg, lca.ca_dir)?)
+          };
+          p
+        }
+      };
+      { install: i, sync, probe }
     })
   };
-  let probes = select detected {
-    null as _ => [],
-    xs => array::map(xs, |i| select i.local_ca {
-      null as _ => `None,
-      lca => {
-        let p: Probe = `Probing;
-        {
-          catch(e) p <- `Failed(admin_text((e.0).error));
-          p <- `Ready(ca::credentials(#cfg: lca.cfg, lca.ca_dir)?)
-        };
-        p
-      }
-    })
-  };
-  let sync = select syncs {
-    [] => `NotApplicable,
-    xs => xs[min(sel, array::len(xs) - 1)]$
-  };
-  let probe = select probes {
-    [] => `None,
-    xs => xs[min(sel, array::len(xs) - 1)]$
-  };
+  let sel = 0;
+  let row = selected(rows, sel);
+  let current = opt::map(row, |r| r.install);
   let lca = select current {
     null as _ => null,
     d => d.local_ca
   };
   // ── the selected install's actions ──
   let item = |label, act| { label, act, desc: desc(act) };
-  let items = select current {
+  let items = select row {
     null as _ => [],
-    d => {
-      let joined = select d.admin_domain {
-        null as _ => false,
-        _ => true
-      };
+    r => {
+      let d = r.install;
+      let joined = opt::is_some(d.admin_domain);
       let update_items = select (joined, d.role) {
         (true, `Ca) => [],
         (true, _) => [item("Update Resolvers", `Update)],
@@ -261,7 +252,7 @@ let local = |#q: &Question| {
               }
             )
           };
-          let cred_items = select probe {
+          let cred_items = select r.probe {
             `Ready(c) => array::concat(
               select c.auto_approve_present {
                 true => [item("Rotate Auto-Renew Credential", `AutoApprove(true))],
@@ -304,7 +295,7 @@ let local = |#q: &Question| {
   let offered = |a| opt::is_some(array::find(items, |it| it.act == a));
   // ── ui state ──
   let menu_sel = 0;
-  let item = selected(items, menu_sel);
+  let menu_item = selected(items, menu_sel);
   let show_status = false;
   let welcome_seen = false;
   let role_sel = 0;
@@ -342,7 +333,7 @@ let local = |#q: &Question| {
       `Stop
     },
     kk@ `Enter => {
-      chosen <- (kk ~ item)$.act;
+      chosen <- (kk ~ menu_item)$.act;
       `Stop
     },
     kk@ `Char("u") => { chosen <- kk ~ `Uninstall; `Stop },
@@ -1047,9 +1038,10 @@ let local = |#q: &Question| {
     line([span(#style: hint, "[pad(label, 17)]: "), span(value)]);
   let kvs = |label, value, st|
     line([span(#style: hint, "[pad(label, 17)]: "), span(#style: st, value)]);
-  let status_lines = select current {
+  let status_lines = select row {
     null as _ => [],
-    d => {
+    r => {
+      let d = r.install;
       let domain = select d.admin_domain {
         null as _ => "standalone (local-only)",
         n => n.domain
@@ -1060,7 +1052,7 @@ let local = |#q: &Question| {
       };
       let creds = select d.local_ca {
         null as _ => [],
-        _ => select probe {
+        _ => select r.probe {
           `None => [],
           `Probing => [kvs("CA credentials", "checking…", hint)],
           `Failed(e) => [kvs("CA credentials", e, warn)],
@@ -1087,7 +1079,7 @@ let local = |#q: &Question| {
         `Inactive => kvs("OS service", "installed, not running", warn),
         `NotInstalled => kvs("OS service", "not installed", hint)
       };
-      let sync_lines = select sync {
+      let sync_lines = select r.sync {
         `NotApplicable => [],
         `Checking => [kvs("Admin domain sync", "checking…", hint)],
         `InSync => [kvs("Admin domain sync", "✓ in sync", good)],
@@ -1196,7 +1188,7 @@ let local = |#q: &Question| {
       n if n > 1 => " ↑/↓ select · Enter run · ‹/› switch install ",
       _ => " ↑/↓ select · Enter run "
     };
-    let desc_lines = select item {
+    let desc_lines = select menu_item {
       null as _ => [],
       i => [line(i.desc)]
     };
