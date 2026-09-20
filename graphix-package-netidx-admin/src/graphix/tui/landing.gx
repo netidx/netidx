@@ -41,24 +41,38 @@ let landing = |
   let bold = style(#add_modifier: [`Bold]);
   // ── the bookmarks file ──
   let book_path = sys::join_path(book_dir$, "admin-domains.json");
-  let book: Book = { domains: [] };
   let notice: [string, null] = null;
-  let file = sys::fs::is_file(book_path)$;
-  {
-    catch(e) notice <- "could not load the admin domain list: [(e.0).error]";
-    book <- json::read(sys::fs::read_all(file)?)?
-  };
-  // the book, with this host's own domain from its install record
-  let known = select local_domain(true) {
-    null as _ => book,
-    own => select own.addr {
+  let blank: Book = { domains: [] };
+  // the initial state, loaded once: the file, then this host's own
+  // domain from its install record. known is absent until it is done,
+  // so every edit waits for it
+  let known: Book = seq {
+    let book = select book_dir {
+      null as _ => blank,
+      _ => select sys::fs::is_file(book_path) {
+        error as _ => blank,
+        file => seq {
+          try {
+            let loaded: Book = json::read(sys::fs::read_all(file)?)?;
+            loaded
+          } with(e) {
+            notice <- "could not load the admin domain list: [(e.0).error]";
+            blank
+          }
+        }
+      }
+    };
+    select local_domain(true) {
       null as _ => book,
-      addr => upsert(book, own.domain, addr, own.fingerprint)
+      own => select own.addr {
+        null as _ => book,
+        addr => upsert(book, own.domain, addr, own.fingerprint)
+      }
     }
   };
   // an edit is the new book: it replaces the old one and is what the file gets
   let edit = never();
-  book <- edit;
+  known <- edit;
   {
     catch(e) notice <- "could not save the admin domain list: [(e.0).error]";
     seqq let (book_dir, edit) = (book_dir$, edit) {
