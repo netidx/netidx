@@ -1,6 +1,9 @@
 use super::{
   AdminDomain, AdminError, CaIdentity, Fingerprint, identicon,
-  ceremony::{Answer, FieldInfo, OneTimeSecretKind, Question, QuestionId, Stage, answer}
+  ceremony::{
+    Answer, Ceremony, FieldInfo, OneTimeSecretKind, Question, QuestionId, Stage, answer,
+    questions, result
+  }
 };
 use tui::{line, span, style, overlay::{self, Layer, layer}};
 
@@ -24,6 +27,10 @@ val toast_layers: fn(t: &[Toast, null]) -> Array<Layer>;
 /// `y` or Enter calls `#on_confirm` with the held action and clears
 /// it; `n` or Esc clears it.
 val confirm_layers: fn(#on_confirm: fn(a: 'a) -> null, c: &[Confirm<'a>, null]) -> Array<Layer>;
+
+/// Conduct a ceremony: its questions go to the bus `q`, and its result is
+/// the value. Observing the result is what starts it.
+val conduct: fn(q: &Question, c: Ceremony<'r>) -> Result<'r, AdminError>;
 
 /// A CA identity as lines, the two halves of the out-of-band verification
 /// gesture: its 8x8 identicon glyph over its grouped fingerprint code.

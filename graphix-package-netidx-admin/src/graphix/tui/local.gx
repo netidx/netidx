@@ -3,7 +3,6 @@ use package::{
   ca::{
     self, CaCredentials, auto_approve, external_csr, external_install, recovery_rotate
   },
-  ceremony::{questions, result},
   install::{
     self, Change, Install, InstallRole, ParentCandidate, Scope, ServiceState, Staged,
     add_parent, backup, escalate_command, install_service, join, local_resolver_base,
@@ -12,8 +11,8 @@ use package::{
   }
 };
 use super::{
-  Confirm, Toast, admin_text, confirm_layers, hint, identity_lines, opt_len, panels,
-  selected, selstyle, services, toast_layers
+  Confirm, Toast, admin_text, conduct, confirm_layers, hint, identity_lines, opt_len,
+  panels, selected, selstyle, services, toast_layers
 };
 use tui::{
   line, span, style,
@@ -672,49 +671,35 @@ let local = |#q: &Question| {
     svc_open
   );
   // ── the lifecycle ceremonies ──
-  let renew_c = renew(select run { x@ `Renew => x, _ => never() });
-  let update_c = {
+  let renew_r = conduct(q, renew(select run { x@ `Renew => x, _ => never() }));
+  let update_r = conduct(q, {
     let x = select run { x@ `Update => x, _ => never() };
     let d = (x ~ current)$;
     update(#config_root: d.config_dir, d.role)
-  };
-  let backup_c = {
+  });
+  let backup_r = conduct(q, {
     let x = select run { x@ `Backup => x, _ => never() };
     let d = (x ~ current)$;
     backup(#config_root: d.config_dir, #target: null, d.scope)
-  };
-  let autoapprove_c = {
+  });
+  let autoapprove_r = conduct(q, {
     let rotate = select run { `AutoApprove(rotate) => rotate, _ => never() };
     let l = (rotate ~ lca)$;
     auto_approve(#rotate: rotate, #cfg: l.cfg, l.ca_dir)
-  };
-  let recovery_c = {
+  });
+  let recovery_r = conduct(q, {
     let x = select run { x@ `RecoveryRotate => x, _ => never() };
     let l = (x ~ lca)$;
     recovery_rotate(#cfg: l.cfg, l.ca_dir)
-  };
-  let csr_c = {
+  });
+  let csr_r = conduct(q, {
     let x = select run { x@ `ExternalCsr => x, _ => never() };
     external_csr((x ~ lca)$.ca_dir)
-  };
-  let extinstall_c = {
+  });
+  let extinstall_r = conduct(q, {
     let x = select run { x@ `ExternalInstall => x, _ => never() };
     external_install(#signed: null, #root: null, (x ~ lca)$.ca_dir)
-  };
-  *q <- questions(renew_c);
-  *q <- questions(update_c);
-  *q <- questions(backup_c);
-  *q <- questions(autoapprove_c);
-  *q <- questions(recovery_c);
-  *q <- questions(csr_c);
-  *q <- questions(extinstall_c);
-  let renew_r = result(renew_c);
-  let update_r = result(update_c);
-  let backup_r = result(backup_c);
-  let autoapprove_r = result(autoapprove_c);
-  let recovery_r = result(recovery_c);
-  let csr_r = result(csr_c);
-  let extinstall_r = result(extinstall_c);
+  });
   // ── their outcomes: a toast, then re-detect ──
   {
     catch(e) fail("Renewal failed", (e.0).error);
@@ -921,7 +906,6 @@ let local = |#q: &Question| {
   };
   toast <- { title: "OS service registered", lines: [svc_ok], error: false };
   refresh <- svc_ok;
-  let priv_cmd = escalate_command(priv_req.argv, priv_req);
   let suspended = false;
   let priv_exit = never();
   {
@@ -934,25 +918,28 @@ let local = |#q: &Question| {
       suspended <- e ~ false
     };
     let released = tui::suspend(suspended)?;
-    priv_exit <- seq priv_cmd {
-      let cmd = priv_cmd?;
+    priv_exit <- seq let req = priv_req {
+      let cmd = escalate_command(req.argv, req)?;
       suspended <- true;
       until released;
-      println("\nAdministrator privileges are needed to [priv_req.what].");
+      println("\nAdministrator privileges are needed to [req.what].");
       let child = sys::process::spawn(sys::process::options(#args: cmd.args, cmd.program))?;
       let status = sys::process::wait(child.proc)?;
       suspended <- false;
-      select status.code {
-        null as _ => -1,
-        c => c
+      {
+        code: select status.code {
+          null as _ => -1,
+          c => c
+        },
+        then: req.then
       }
     }
   };
   let verify_req = never();
-  select priv_exit ~ priv_req.then {
-    `VerifyService({ name, for_user }) => verify_req <- { name, for_user, code: priv_exit },
+  select priv_exit.then {
+    `VerifyService({ name, for_user }) => verify_req <- { name, for_user, code: priv_exit.code },
     `UninstallAgain(remove_ca) => run <- `UninstallWith(remove_ca),
-    `Nothing => select priv_exit {
+    `Nothing => select priv_exit.code {
       0 => refresh <- priv_exit,
       code => toast <- { title: "The privileged step failed", lines: ["It exited with status [code]."], error: true }
     }
@@ -967,41 +954,29 @@ let local = |#q: &Question| {
     null
   };
   // ── the lifecycle ceremonies ──
-  let install_c = {
+  let install_r = conduct(q, {
     let (role, dry) = select run { `Install(role, dry) => (role, dry), _ => never() };
     install::install(#role: role, #dry_run: dry, role)
-  };
-  let join_c = {
+  });
+  let join_r = conduct(q, {
     let dry = select run { `Join(dry) => dry, _ => never() };
     join(#dry_run: dry, dry)
-  };
-  let addparent_c = {
+  });
+  let addparent_r = conduct(q, {
     let a = select run { `AddParentTo(a) => a, _ => never() };
     let d = (a ~ current)$;
     add_parent(#config_root: d.config_dir, #parent: a.parent, #resolvers: a.resolvers, #path: a.path, d)
-  };
-  let restore_c = restore_stage(#bundle: null, select run { x@ `Restore => x, _ => never() });
-  let finish_c = {
+  });
+  let restore_r = conduct(q, restore_stage(#bundle: null, select run { x@ `Restore => x, _ => never() }));
+  let finish_r = conduct(q, {
     let x = select run { x@ `FinishRestore => x, _ => never() };
     restore_finish((x ~ restore_staged)$)
-  };
-  let uninstall_c = {
+  });
+  let uninstall_r = conduct(q, {
     let remove_ca = select run { `UninstallWith(remove_ca) => remove_ca, _ => never() };
     let d = (remove_ca ~ current)$;
     uninstall(#scope: d.scope, #config_dir: d.config_dir, #remove_ca: remove_ca, d)
-  };
-  *q <- questions(install_c);
-  *q <- questions(join_c);
-  *q <- questions(addparent_c);
-  *q <- questions(restore_c);
-  *q <- questions(finish_c);
-  *q <- questions(uninstall_c);
-  let install_r = result(install_c);
-  let join_r = result(join_c);
-  let addparent_r = result(addparent_c);
-  let restore_r = result(restore_c);
-  let finish_r = result(finish_c);
-  let uninstall_r = result(uninstall_c);
+  });
   {
     catch(e) fail("Install failed", (e.0).error);
     seq install_r {

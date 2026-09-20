@@ -54,6 +54,11 @@ let admin_text = |a: AdminError| -> string select a {
   `Unsupported(m) => "unsupported on this platform: [m]"
 };
 
+let conduct = |q: &Question, c: Ceremony<'r>| -> Result<'r, AdminError> {
+  *q <- questions(c);
+  result(c)
+};
+
 let identity_lines = |fp: Fingerprint| array::concat(glyph(fp), fingerprint_lines(fp));
 
 let hint = style(#fg: `DarkGray);

@@ -1,7 +1,6 @@
 use package::{
   AdminError, Target, info,
   admins::{self, Policy, SlotKind, change_password, reset_password},
-  ceremony::{questions, result},
   certs::{approve, approve_renewals, deny, issued, list_queue, revoke},
   perms::{self, list_resolver_clusters},
   servers::{
@@ -12,7 +11,7 @@ use package::{
   units::{ServiceOp, UnitState}
 };
 use super::{
-  Confirm, Toast, admin_text, confirm_layers, hint, opt_len, selected, selstyle,
+  Confirm, Toast, admin_text, conduct, confirm_layers, hint, opt_len, selected, selstyle,
   toast_layers
 };
 use tui::{
@@ -373,59 +372,53 @@ let panels = |
     `Perms(_) => `Perms,
     `Menu => never()
   };
-  let queue_c = {
+  let queue_r = conduct(q, {
     let x = select load { x@ `Queue => x, _ => never() };
     list_queue(x ~ target)
-  };
-  let deleg_c = {
+  });
+  let deleg_r = conduct(q, {
     let x = select load { x@ `Delegations => x, _ => never() };
     list_pending_delegations(x ~ target)
-  };
-  let servers_c = {
+  });
+  let servers_r = conduct(q, {
     let x = select load { x@ `Servers => x, _ => never() };
     servers::list(x ~ target)
-  };
-  let certs_c = {
+  });
+  let certs_r = conduct(q, {
     let x = select load { x@ `Certs => x, _ => never() };
     issued(x ~ target)
-  };
+  });
   let roster_r = {
     let x = select load { x@ `Roster => x, _ => never() };
     admins::list(x ~ target)
   };
-  let units_c = {
+  let units_r = conduct(q, {
     let x = select load { x@ `Services => x, _ => never() };
     let s = (x ~ service_server)$;
     service_control(#units: [], #op: `Status, #server: s.id, x ~ target)
-  };
+  });
   let perms_r = {
     let x = select load { x@ `Perms => x, _ => never() };
     perms::show(#at: (x ~ perms_at)$, x ~ target)
   };
   // ── the pick screens' lists ──
   let pick = never<[`Servers, `Clusters]>();
-  let svc_servers_c = {
+  let svc_servers_r = conduct(q, {
     let x = select pick { x@ `Servers => x, _ => never() };
     list_service_servers(x ~ target)
-  };
+  });
   let clusters_r = {
     let x = select pick { x@ `Clusters => x, _ => never() };
     list_resolver_clusters(x ~ target)
   };
-  *q <- questions(queue_c);
-  *q <- questions(deleg_c);
-  *q <- questions(servers_c);
-  *q <- questions(certs_c);
-  *q <- questions(units_c);
-  *q <- questions(svc_servers_c);
-  let queue_rows = rows_of(#toast: &toast, #failed: "Loading the queue failed", result(queue_c));
-  let deleg_rows = rows_of(#toast: &toast, #failed: "Loading delegations failed", result(deleg_c));
-  let server_rows = rows_of(#toast: &toast, #failed: "Loading servers failed", result(servers_c));
-  let cert_rows = rows_of(#toast: &toast, #failed: "Loading certificates failed", result(certs_c));
+  let queue_rows = rows_of(#toast: &toast, #failed: "Loading the queue failed", queue_r);
+  let deleg_rows = rows_of(#toast: &toast, #failed: "Loading delegations failed", deleg_r);
+  let server_rows = rows_of(#toast: &toast, #failed: "Loading servers failed", servers_r);
+  let cert_rows = rows_of(#toast: &toast, #failed: "Loading certificates failed", certs_r);
   let roster_rows = rows_of(#toast: &toast, #failed: "Loading the roster failed", roster_r);
-  let unit_rows = rows_of(#toast: &toast, #failed: "Listing the services failed", result(units_c));
+  let unit_rows = rows_of(#toast: &toast, #failed: "Listing the services failed", units_r);
   let perm_rows = rows_of(#toast: &toast, #failed: "Loading the permissions failed", perms_r);
-  let svc_servers = rows_of(#toast: &toast, #failed: "Listing the resolver servers failed", result(svc_servers_c));
+  let svc_servers = rows_of(#toast: &toast, #failed: "Listing the resolver servers failed", svc_servers_r);
   let clusters = rows_of(#toast: &toast, #failed: "Listing the resolver clusters failed", clusters_r);
   // the servers table's clock: "shut for another 29m" is relative to
   // when the rows arrived
@@ -469,58 +462,58 @@ let panels = |
     c => "[c.serial]"
   };
   // ── action dispatch: each run event starts the op's ceremony ──
-  let approve_c = {
+  let approve_r = conduct(q, {
     let code = select run { `Approve(code) => code, _ => never() };
     approve(#code: code, code ~ target)
-  };
-  let deny_c = {
+  });
+  let deny_r = conduct(q, {
     let code = select run { `Deny(code) => code, _ => never() };
     deny(#code: code, code ~ target)
-  };
-  let renewals_c = {
+  });
+  let renewals_r = conduct(q, {
     let x = select run { x@ `Renewals => x, _ => never() };
     approve_renewals(x ~ target)
-  };
-  let apdel_c = {
+  });
+  let apdel_r = conduct(q, {
     let code = select run { `ApproveDelegation(code) => code, _ => never() };
     approve_delegation(#code: code, code ~ target)
-  };
-  let dendel_c = {
+  });
+  let dendel_r = conduct(q, {
     let code = select run { `DenyDelegation(code) => code, _ => never() };
     deny_delegation(#code: code, code ~ target)
-  };
-  let revoke_c = {
+  });
+  let revoke_r = conduct(q, {
     let serial = select run { `Revoke(serial) => serial, _ => never() };
     revoke(serial, serial ~ target)
-  };
+  });
   let resetpw_r = {
     let name = select run { `ResetPassword(name) => name, _ => never() };
     reset_password(name, name ~ target)
   };
-  let chpw_c = {
+  let chpw_r = conduct(q, {
     let x = select run { x@ `ChangeOwnPassword => x, _ => never() };
     change_password(x ~ target)
-  };
+  });
   let rmadmin_r = {
     let name = select run { `RemoveAdmin(name) => name, _ => never() };
     admins::remove(name, name ~ target)
   };
-  let rmserver_c = {
+  let rmserver_r = conduct(q, {
     let id = select run { `RemoveServer(id) => id, _ => never() };
     servers::remove(id, id ~ target)
-  };
-  let reconcile_c = {
+  });
+  let reconcile_r = conduct(q, {
     let x = select run { x@ `Reconcile => x, _ => never() };
     reconcile_ca(x ~ target)
-  };
-  let svc_c = {
+  });
+  let svcc_r = conduct(q, {
     let a = select run { `Service(a) => a, _ => never() };
     service_control(#units: [a.unit], #op: a.op, #server: a.server, a ~ target)
-  };
-  let gate_c = {
+  });
+  let gate_r = conduct(q, {
     let a = select run { `Gate(a) => a, _ => never() };
     set_read_gate(#server: a.server, a.gate, a ~ target)
-  };
+  });
   let setperm_r = {
     let e = select run { `SetPerm(e) => e, _ => never() };
     perms::set(#at: (e ~ perms_at)$, #path: e.path, #entity: e.entity, #bits: e.bits, e ~ target)
@@ -537,28 +530,6 @@ let panels = |
     let e = select run { `RemovePerm(e) => e, _ => never() };
     perms::remove(#at: (e ~ perms_at)$, #path: e.path, #entity: e.entity, e ~ target)
   };
-  *q <- questions(approve_c);
-  *q <- questions(deny_c);
-  *q <- questions(renewals_c);
-  *q <- questions(apdel_c);
-  *q <- questions(dendel_c);
-  *q <- questions(revoke_c);
-  *q <- questions(chpw_c);
-  *q <- questions(rmserver_c);
-  *q <- questions(reconcile_c);
-  *q <- questions(svc_c);
-  *q <- questions(gate_c);
-  let approve_r = result(approve_c);
-  let deny_r = result(deny_c);
-  let renewals_r = result(renewals_c);
-  let apdel_r = result(apdel_c);
-  let dendel_r = result(dendel_c);
-  let revoke_r = result(revoke_c);
-  let chpw_r = result(chpw_c);
-  let rmserver_r = result(rmserver_c);
-  let reconcile_r = result(reconcile_c);
-  let svcc_r = result(svc_c);
-  let gate_r = result(gate_c);
   // ── action outcomes: toast the summary, then refresh the panel ──
   load <- outcome(#toast: &toast, #failed: "Approve failed", #reload: `Queue, approve_r, |r| note(
     "Approved",
