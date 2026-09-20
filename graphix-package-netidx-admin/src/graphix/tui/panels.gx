@@ -11,7 +11,10 @@ use package::{
   },
   units::{ServiceOp, UnitState}
 };
-use super::{Confirm, Toast, admin_text, confirm_layers, opt_len, selected, toast_layers};
+use super::{
+  Confirm, Toast, admin_text, confirm_layers, hint, opt_len, selected, selstyle,
+  toast_layers
+};
 use tui::{
   line, style,
   block::block,
@@ -299,10 +302,8 @@ let panels = |
   #on_close: fn(why: CloseReason) -> null,
   target: Target
 | -> Panels {
-  let hint = style(#fg: `DarkGray);
   let menu_legend = line(#style: hint, " ↑/↓ move · Enter open · Esc disconnect ");
   let pick_legend = line(#style: hint, " ↑/↓ move · Enter open · Esc back ");
-  let selstyle = style(#add_modifier: [`Reversed]);
   let bold = style(#add_modifier: [`Bold]);
   let screen: Screen = select entry {
     `Menu => `Menu,

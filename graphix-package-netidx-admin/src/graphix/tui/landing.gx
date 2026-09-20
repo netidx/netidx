@@ -1,5 +1,5 @@
 use package::discovery::{discover_domains, identity_at, local_domain};
-use super::{admin_text, fingerprint_lines, glyph, selected};
+use super::{admin_text, hint, identity_lines, selected, selstyle};
 use tui::{
   line, span, style,
   block::block,
@@ -132,8 +132,6 @@ let landing = |
   #on_connect: fn(c: Connect) -> null,
   #on_manual: fn(e: Any) -> null
 | -> Landing {
-  let hint = style(#fg: `DarkGray);
-  let selstyle = style(#add_modifier: [`Reversed]);
   let bold = style(#add_modifier: [`Bold]);
   // ── the bookmarks ──
   let notice: [string, null] = null;
@@ -193,7 +191,7 @@ let landing = |
     null as _ => [],
     r => select package::parse_fingerprint(r.known.fingerprint) {
       error as _ => [line(#style: hint, "saved fingerprint does not parse")],
-      fp => array::concat([line(#style: hint, "CA glyph")], glyph(fp), fingerprint_lines(fp))
+      fp => array::concat([line(#style: hint, "CA glyph")], identity_lines(fp))
     }
   };
   let notice_lines = select notice {

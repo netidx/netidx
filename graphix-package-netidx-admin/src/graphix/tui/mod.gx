@@ -54,6 +54,12 @@ let admin_text = |a: AdminError| -> string select a {
   `Unsupported(m) => "unsupported on this platform: [m]"
 };
 
+let identity_lines = |fp: Fingerprint| array::concat(glyph(fp), fingerprint_lines(fp));
+
+let hint = style(#fg: `DarkGray);
+
+let selstyle: [tui::Style, null] = style(#add_modifier: [`Reversed]);
+
 let opt_len = |o: [Array<'a>, null]| select o {
   null as _ => 0,
   a => array::len(a)
@@ -67,7 +73,6 @@ let selected = |rows: [Array<'a>, null], i: i64| -> ['a, null] select rows {
 };
 
 let toast_layers = |t: &[Toast, null]| -> Array<Layer> {
-  let hint = style(#fg: `DarkGray);
   let handle = |e: Event| {
     on_press(e, |k| select k.code {
       `Enter | `Esc | `Char(" ") => { *t <- k ~ null; `Stop },
@@ -94,7 +99,6 @@ let toast_layers = |t: &[Toast, null]| -> Array<Layer> {
 };
 
 let confirm_layers = |#on_confirm: fn(a: 'a) -> null, c: &[Confirm<'a>, null]| -> Array<Layer> {
-  let hint = style(#fg: `DarkGray);
   let handle = |e: Event| {
     on_press(e, |k| select k.code {
       `Char("y") | `Enter => {
@@ -133,8 +137,6 @@ let qid = |b: Blocking| select b {
 };
 
 let pump = |q: Question| -> Pump {
-  let hint = style(#fg: `DarkGray);
-  let selstyle = style(#add_modifier: [`Reversed]);
   // ── presentation channels ──
   let notes = [];
   let progress: [{ stage: Stage, message: string, duration: [duration, null] }, null] = null;
@@ -332,7 +334,7 @@ let pump = |q: Question| -> Pump {
     let side = select sel {
       s if s < array::len(domains) => {
         let fp = (domains[s]$).identity.fingerprint;
-        array::concat(glyph(fp), fingerprint_lines(fp))
+        identity_lines(fp)
       },
       s if s == array::len(domains) => [line(#style: hint, "Browse the network again.")],
       _ => [line(#style: hint, "Type an admin-server address (host:port).")]
@@ -362,7 +364,7 @@ let pump = |q: Question| -> Pump {
       child(#constraint: `Min(2), paragraph(#style: &hint, &body)),
       child(#constraint: `Length(13),
         paragraph(#alignment: &`Center, #trim: &false,
-          &array::concat(glyph(fp), fingerprint_lines(fp))))
+          &identity_lines(fp)))
     ])
   );
   let confirm_identity_modal = |identity: CaIdentity| block(
@@ -374,7 +376,7 @@ let pump = |q: Question| -> Pump {
         &"Verify OUT OF BAND that this is [identity.domain]'s CA glyph and fingerprint.")),
       child(#constraint: `Min(13),
         paragraph(#alignment: &`Center, #trim: &false,
-          &array::concat(glyph(identity.fingerprint), fingerprint_lines(identity.fingerprint))))
+          &identity_lines(identity.fingerprint)))
     ])
   );
   let secret_modal = |kind, password| {

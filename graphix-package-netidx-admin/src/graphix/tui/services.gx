@@ -2,7 +2,9 @@ use package::units::{
   self, LocalUnit, ServiceOp, UnitDef, UnitEnvironment, UnitRestart, UnitState,
   UnitTrigger
 };
-use super::{Confirm, Toast, admin_text, confirm_layers, opt_len, toast_layers};
+use super::{
+  Confirm, Toast, admin_text, confirm_layers, hint, opt_len, selstyle, toast_layers
+};
 use tui::{
   line, span, style,
   block::block,
@@ -22,11 +24,9 @@ type Act = [
 
 type EnvVar = { name: string, value: string };
 
-let hint = style(#fg: `DarkGray);
 let good = style(#fg: `Green);
 let warn = style(#fg: `Yellow);
 let bad = style(#fg: `Red);
-let selstyle = style(#add_modifier: [`Reversed]);
 
 let fmt_op = |op: ServiceOp| select op {
   `Start => "Started",

@@ -12,9 +12,8 @@ use package::{
   }
 };
 use super::{
-  Confirm, Toast, admin_text, confirm_layers, fingerprint_lines, glyph, opt_len, selected,
-  services, toast_layers,
-  panels
+  Confirm, Toast, admin_text, confirm_layers, hint, identity_lines, opt_len, panels,
+  selected, selstyle, services, toast_layers
 };
 use tui::{
   line, span, style,
@@ -145,8 +144,6 @@ let rec pad = |s: string, n: i64| select str::len(s) {
 };
 
 let local = |#q: &Question| {
-  let hint = style(#fg: `DarkGray);
-  let selstyle = style(#add_modifier: [`Reversed]);
   let bold = style(#add_modifier: [`Bold]);
   let good = style(#fg: `Green);
   let warn = style(#fg: `Yellow);
@@ -1120,7 +1117,7 @@ let local = |#q: &Question| {
       null as _ => [],
       n => select parse_fingerprint(n.fingerprint) {
         error as _ => [line(#style: hint, "recorded fingerprint does not parse")],
-        fp => array::concat([line(#style: hint, "CA glyph")], glyph(fp), fingerprint_lines(fp))
+        fp => array::concat([line(#style: hint, "CA glyph")], identity_lines(fp))
       }
     }
   };
@@ -1165,7 +1162,7 @@ let local = |#q: &Question| {
           line(""),
           line("Choose a role to install — a Workstation for a laptop or desktop, a Resolver to run an admin domain's directory, or a Publisher — or choose Restore from Backup to recover any managed installation."),
           line(""),
-          line(#style: selstyle, " Press Enter to continue ")
+          line(#style: selstyle$, " Press Enter to continue ")
         ]))))],
     _ => []
   };

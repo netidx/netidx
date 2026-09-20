@@ -1,7 +1,7 @@
 use package::ceremony::Question;
-use super::{local, pump, remote};
+use super::{hint, local, pump, remote, selstyle};
 use tui::{
-  line, style,
+  line,
   input_handler::{Event, input_handler, on_press},
   layout::{child, layout},
   overlay::overlay,
@@ -10,8 +10,6 @@ use tui::{
 };
 
 let app = |#server: string = ""| -> tui::Tui {
-  let hint = style(#fg: `DarkGray);
-  let selstyle = style(#add_modifier: [`Reversed]);
   let q = never<Question>();
   let p = pump(q);
   let loc = local::local(#q: &q);

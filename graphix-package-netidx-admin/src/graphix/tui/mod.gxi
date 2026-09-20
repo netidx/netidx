@@ -25,22 +25,23 @@ val toast_layers: fn(t: &[Toast, null]) -> Array<Layer>;
 /// it; `n` or Esc clears it.
 val confirm_layers: fn(#on_confirm: fn(a: 'a) -> null, c: &[Confirm<'a>, null]) -> Array<Layer>;
 
+/// A CA identity as lines, the two halves of the out-of-band verification
+/// gesture: its 8x8 identicon glyph over its grouped fingerprint code.
+val identity_lines: fn(fp: Fingerprint) -> Array<tui::Line>;
+
+/// The dim style of hints, legends and secondary text.
+val hint: tui::Style;
+
+/// The style of the row a cursor rests on; optional, as a list's
+/// `#highlight_style` reference is.
+val selstyle: [tui::Style, null];
+
 /// How many rows there are; none while they are absent.
 val opt_len: fn(o: [Array<'a>, null]) -> i64;
 
 /// The row a cursor rests on, clamped to the list; null while there is
 /// none (the rows are absent, or empty).
 val selected: fn(rows: [Array<'a>, null], i: i64) -> ['a, null];
-
-/// A fingerprint's 8x8 identicon as styled lines — the glyph on its
-/// black tile, ready to render in a paragraph. The visual half of the
-/// out-of-band verification gesture.
-val glyph: fn(fp: Fingerprint) -> Array<tui::Line>;
-
-/// The fingerprint's grouped code, four groups per bold centered
-/// line — the textual half of the verification gesture, paired with
-/// the glyph.
-val fingerprint_lines: fn(fp: Fingerprint) -> Array<tui::Line>;
 
 /// The nine blocking question shapes — the subset of `Question` the
 /// pump can have open as a modal. The presentation events never land

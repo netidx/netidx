@@ -2,7 +2,7 @@ use package::{
   Fingerprint, Target, change_password_at, connect, info,
   ceremony::{questions, result}
 };
-use super::{Toast, admin_text, toast_layers, landing::{self, Connected}, panels};
+use super::{Toast, admin_text, hint, panels, toast_layers, landing::{self, Connected}};
 use tui::{
   line, line_edit, style,
   block::block,
@@ -15,7 +15,6 @@ use tui::{
 type Screen = [`Landing, `Connect, `Panels];
 
 let remote = |#q: &Question, #book_dir: [string, null], #server: string = ""| -> Remote {
-  let hint = style(#fg: `DarkGray);
   // ── connection state ──
   let target = never<Target>();
   let screen: Screen = select server {
@@ -23,13 +22,12 @@ let remote = |#q: &Question, #book_dir: [string, null], #server: string = ""| ->
     _ => `Connect
   };
   let ed = line_edit::state(server);
-  let connect_to = never<string>();
-  // a domain the landing screen verified against its saved fingerprint
-  // connects without the gesture
-  let connect_glyph: [Fingerprint, null] = null;
+  // a connect request. A domain the landing screen verified against its
+  // saved fingerprint brings that glyph and connects without the gesture
+  let connect_req = never<{ server: string, glyph: [Fingerprint, null] }>();
   let conn_err: [string, null] = null;
-  conn_err <- connect_to ~ null;
-  let connect_c = connect(#glyph: connect_glyph, connect_to);
+  conn_err <- connect_req ~ null;
+  let connect_c = connect(#glyph: connect_req.glyph, connect_req.server);
   *q <- questions(connect_c);
   // ── the landing screen: known admin domains ──
   let connected: [Connected, null] = null;
@@ -37,8 +35,7 @@ let remote = |#q: &Question, #book_dir: [string, null], #server: string = ""| ->
     #book_dir: book_dir,
     #connected: &connected,
     #on_connect: |c| {
-      connect_glyph <- c.glyph;
-      connect_to <- c.server;
+      connect_req <- { server: c.server, glyph: c.glyph };
       screen <- c ~ `Connect;
       null
     },
@@ -47,7 +44,7 @@ let remote = |#q: &Question, #book_dir: [string, null], #server: string = ""| ->
   // the CA fingerprint the operator confirmed during this connect, so
   // a follow-on ceremony against the same server skips the gesture
   let glyph: [Fingerprint, null] = null;
-  glyph <- connect_to ~ null;
+  glyph <- connect_req ~ null;
   glyph <- select questions(connect_c) {
     `ConfirmIdentity({ identity, .. }) => identity.fingerprint,
     _ => never()
@@ -76,7 +73,7 @@ let remote = |#q: &Question, #book_dir: [string, null], #server: string = ""| ->
   let chpw_at_c = change_password_at(
     #admin: must_change,
     #glyph: must_change ~ glyph,
-    must_change ~ connect_to
+    (must_change ~ connect_req).server
   );
   *q <- questions(chpw_at_c);
   let chpw_r = result(chpw_at_c);
@@ -95,10 +92,7 @@ let remote = |#q: &Question, #book_dir: [string, null], #server: string = ""| ->
     kk@ `Enter => {
       select kk ~ ed.value {
         "" => never(),
-        v => {
-          connect_glyph <- v ~ null;
-          connect_to <- v
-        }
+        v => connect_req <- { server: v, glyph: null }
       };
       `Stop
     },
