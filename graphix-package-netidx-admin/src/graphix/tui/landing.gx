@@ -71,6 +71,32 @@ let saved_domains = |#notice: &[string, null], dir: [string, null], edit: Book| 
   known
 };
 
+// the saved domains that answer: each one's addresses are tried in
+// order and the first whose identity matches the saved fingerprint is
+// its row. Checked a quarter second after `known` settles and on every
+// `recheck`; `polling` is true while a check runs
+let reachable = |#polling: &bool, known: Book, recheck: Any| {
+  let verify: Any = known;
+  verify <- recheck;
+  let visible = [];
+  seqq sys::time::after_idle(duration:250.ms, verify) {
+    *polling <- true;
+    visible <- array::filter_map(known.domains, |k| {
+      let verified = array::filter_map(k.addrs, |a| select identity_at(a) {
+        error as _ => null,
+        id if id.fingerprint.code == k.fingerprint => a,
+        _ => null
+      });
+      select verified {
+        [] => null,
+        [addr, ..] => { known: k, addr }
+      }
+    });
+    *polling <- false
+  };
+  visible
+};
+
 let landing = |
   #q: &Question,
   #book_dir: [string, null],
@@ -85,26 +111,10 @@ let landing = |
   let notice: [string, null] = null;
   let edit = never();
   let known = saved_domains(#notice: &notice, book_dir, edit);
-  // ── verification: each saved domain, at each address, in order —
-  // at load, after every change to the set, and on demand ──
-  let verify: Any = known;
+  // ── verification ──
   let polling = true;
-  let visible = [];
-  seqq sys::time::after_idle(duration:250.ms, verify) {
-    polling <- true;
-    visible <- array::filter_map(known.domains, |k| {
-      let verified = array::filter_map(k.addrs, |a| select identity_at(a) {
-        error as _ => null,
-        id if id.fingerprint.code == k.fingerprint => a,
-        _ => null
-      });
-      select verified {
-        [] => null,
-        [addr, ..] => { known: k, addr }
-      }
-    });
-    polling <- false
-  };
+  let recheck = never();
+  let visible = reachable(#polling: &polling, known, recheck);
   // ── a session the tab established is remembered, and re-checked ──
   seq let session = (*connected)$ {
     edit <- upsert(known, session.domain, session.server, session.fingerprint)
@@ -144,7 +154,7 @@ let landing = |
     },
     kk@ `Char("d") => { discover_at <- kk; `Stop },
     kk@ `Char("c") => { on_manual(kk); `Stop },
-    kk@ `Char("r") => { verify <- kk; `Stop },
+    kk@ `Char("r") => { recheck <- kk; `Stop },
     kk@ `Enter => {
       select kk ~ (toast, visible, sel) {
         (null, [], _) => never(),
