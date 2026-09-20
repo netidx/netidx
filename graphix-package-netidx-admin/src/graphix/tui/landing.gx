@@ -9,8 +9,6 @@ use tui::list::{self, *};
 use tui::paragraph::{self, *};
 use tui::text::{self, *};
 
-type Poll = [`Present(string), `Absent];
-
 // record a domain under its fingerprint: a new address joins the
 // saved ones, a changed name replaces the saved one
 let upsert = |book: Book, domain: string, addr: string, fp: string| -> Book
@@ -42,59 +40,55 @@ let landing = |
   let selstyle = style(#add_modifier: [`Reversed]);
   let bold = style(#add_modifier: [`Bold]);
   // ── the bookmarks file ──
-  let dir = book_dir$;
-  let book_path = sys::join_path(dir, "admin-domains.json");
-  let known = { domains: [] };
+  let book_path = sys::join_path(book_dir$, "admin-domains.json");
+  let book: Book = { domains: [] };
   let notice: [string, null] = null;
   let file = sys::fs::is_file(book_path)$;
   {
     catch(e) notice <- "could not load the admin domain list: [(e.0).error]";
-    known <- json::read(sys::fs::read_all(file)?)?
+    book <- json::read(sys::fs::read_all(file)?)?
   };
-  // this host's own domain, from its install record
-  let own = local_domain(true)$;
-  seq let addr = own.addr$ {
-    known <- upsert(known, own.domain, addr, own.fingerprint)
-  };
-  let save: Any = never();
+  // an edit is the new book: it replaces the old one and is what the file gets
+  let edit = never();
+  book <- edit;
   {
     catch(e) notice <- "could not save the admin domain list: [(e.0).error]";
-    seq save {
+    seqq let (dir, edited) = (book_dir$, edit) {
       sys::fs::create_dir(#all: true, dir)?;
-      sys::fs::write_all(#path: book_path, json::write_str(#pretty: true, known)?)?
+      sys::fs::write_all(#path: book_path, json::write_str(#pretty: true, edited)?)?
+    }
+  };
+  // the book, with this host's own domain from its install record
+  let known = select local_domain(true) {
+    null as _ => book,
+    own => select own.addr {
+      null as _ => book,
+      addr => upsert(book, own.domain, addr, own.fingerprint)
     }
   };
   // ── verification: each saved domain, at each address, in order —
   // at load, after every change to the set, and on demand ──
   let verify: Any = known;
-  let polling = false;
-  let states = seqq sys::time::after_idle(duration:250.ms, verify) {
+  let polling = true;
+  let visible = [];
+  seqq sys::time::after_idle(duration:250.ms, verify) {
     polling <- true;
-    let st = array::map(known.domains, |k| {
+    visible <- array::filter_map(known.domains, |k| {
       let verified = array::filter_map(k.addrs, |a| select identity_at(a) {
         error as _ => null,
         id if id.fingerprint.code == k.fingerprint => a,
         _ => null
       });
       select verified {
-        [] => `Absent,
-        [a, ..] => `Present(a)
+        [] => null,
+        [addr, ..] => { known: k, addr }
       }
     });
-    polling <- false;
-    st
+    polling <- false
   };
-  let visible = array::filter_map(
-    array::zip(known.domains, states),
-    |(k, st)| select st {
-      `Present(addr) => { known: k, addr },
-      `Absent => null
-    }
-  );
   // ── a session the tab established is remembered, and re-checked ──
   seq let session = (*connected)$ {
-    known <- upsert(known, session.domain, session.server, session.fingerprint);
-    save <- session
+    edit <- upsert(known, session.domain, session.server, session.fingerprint)
   };
   // ── discovery: what verified is recorded ──
   let discover_at = never();
@@ -107,12 +101,11 @@ let landing = |
         null as _ => null,
         id => { domain: r.domain, servers: r.servers, fp: id.fingerprint.code }
       });
-      known <- array::fold(verified, known, |book, v| array::fold(
+      edit <- array::fold(verified, known, |acc, v| array::fold(
         v.servers,
-        book,
+        acc,
         |b, s| upsert(b, v.domain, s, v.fp)
       ));
-      save <- found;
       toast <- select array::len(found.diagnosis) {
         0 => select array::len(verified) {
           0 => { title: "Discovery", lines: ["No admin domain answered on the local network."] },
