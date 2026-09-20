@@ -2,17 +2,12 @@ use package::{
   Fingerprint, Target, change_password_at, connect, info,
   ceremony::{questions, result}
 };
-use super::{
-  Toast, admin_text, toast_layers,
-  landing::{self, Connected},
-  panels::{self, CloseReason}
-};
+use super::{Toast, admin_text, toast_layers, landing::{self, Connected}, panels};
 use tui::{
   line, line_edit, style,
   block::block,
   input_handler::{Event, KeyEvent, on_press},
   layout::{child, layout},
-  overlay::{self, Layer},
   paragraph::paragraph,
   text::text
 };
@@ -21,7 +16,6 @@ type Screen = [`Landing, `Connect, `Panels];
 
 let remote = |#q: &Question, #book_dir: [string, null], #server: string = ""| -> Remote {
   let hint = style(#fg: `DarkGray);
-  let selstyle = style(#add_modifier: [`Reversed]);
   // ── connection state ──
   let target = never<Target>();
   let screen: Screen = select server {
@@ -89,7 +83,7 @@ let remote = |#q: &Question, #book_dir: [string, null], #server: string = ""| ->
   {
     catch(e) conn_err <- admin_text((e.0).error);
     seq chpw_r {
-      let r = chpw_r?;
+      chpw_r?;
       toast <- {
         title: "Password changed",
         lines: ["Connect again with the new password."],

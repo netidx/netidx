@@ -54,6 +54,11 @@ let admin_text = |a: AdminError| -> string select a {
   `Unsupported(m) => "unsupported on this platform: [m]"
 };
 
+let opt_len = |o: [Array<'a>, null]| select o {
+  null as _ => 0,
+  a => array::len(a)
+};
+
 // the row a cursor rests on, clamped to the list; null while there is none
 let selected = |rows: [Array<'a>, null], i: i64| -> ['a, null] select rows {
   null as _ => null,

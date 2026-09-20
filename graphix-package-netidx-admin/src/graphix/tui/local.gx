@@ -1,20 +1,20 @@
 use package::{
-  AdminError, Target, local as local_target, parse_fingerprint, units,
+  local as local_target, parse_fingerprint, units,
   ca::{
     self, CaCredentials, auto_approve, external_csr, external_install, recovery_rotate
   },
   ceremony::{questions, result},
   install::{
-    self, Change, Install, InstallRole, LocalCa, ParentCandidate, Scope, ServiceState,
-    Staged, add_parent, backup, escalate_command, install_service, join,
-    local_resolver_base, parent_candidates, renew, restore_finish, restore_stage,
-    sync_check, uninstall, update, verify_system_service
+    self, Change, Install, InstallRole, ParentCandidate, Scope, ServiceState, Staged,
+    add_parent, backup, escalate_command, install_service, join, local_resolver_base,
+    parent_candidates, renew, restore_finish, restore_stage, sync_check, uninstall,
+    update, verify_system_service
   }
 };
 use super::{
-  Confirm, Toast, admin_text, confirm_layers, fingerprint_lines, glyph, services,
-  toast_layers,
-  panels::{self, CloseReason, Entry}
+  Confirm, Toast, admin_text, confirm_layers, fingerprint_lines, glyph, opt_len, selected,
+  services, toast_layers,
+  panels
 };
 use tui::{
   line, span, style,
@@ -23,7 +23,7 @@ use tui::{
   input_handler::{Event, KeyEvent, input_handler, on_press},
   layout::{child, layout},
   list::list,
-  overlay::{self, Layer, layer},
+  overlay::layer,
   paragraph::paragraph
 };
 
@@ -58,8 +58,6 @@ type Act = [
   `FinishRestore,
   `AddParentTo({ parent: string, resolvers: [Array<string>, null], path: string })
 ];
-
-type Item = { label: string, act: Act, desc: string };
 
 type Screen = [`Home, `Admin, `Services];
 
@@ -115,7 +113,7 @@ let desc = |a: Act| select a {
   `Update => "Reconcile this host's resolver list with the admin domain, adding or removing resolvers as necessary.",
   `Join(false) => "Graduate this local-only workstation onto an admin domain, enrolling a TLS identity.",
   `Join(true) => "Preview joining an admin domain, without changing anything.",
-  `AddParent => "Attach this resolver under a parent resolver by delegation.",
+  `AddParent | `AddParentTo(_) => "Attach this resolver under a parent resolver by delegation.",
   `Renew => "Renew this host's TLS certificates from the admin domain's CA now. The auto-renew service does this automatically unless it has been turned off.",
   `Services => "Manage netidx services on this machine — list them, start/stop/restart, and create, edit, or delete units.",
   `Admins => "Manage this admin server's admins and their scopes.",
@@ -126,10 +124,8 @@ let desc = |a: Act| select a {
   `ExternalCsr => "Write a subordinate-CA CSR for your external PKI to sign.",
   `ExternalInstall => "Install the externally-signed CA certificate returned by your PKI.",
   `Backup => "Back up this complete managed installation. CA state is captured consistently while the CA remains online; machine credentials are re-enrolled on restore.",
-  `Uninstall => "Remove this install — its config and OS service.",
-  `UninstallWith(_) => "Remove this install — its config and OS service.",
+  `Uninstall | `UninstallWith(_) => "Remove this install — its config and OS service.",
   `FinishRestore => "Finish re-enrolling roles after CA startup.",
-  `AddParentTo(_) => "Attach this resolver under a parent resolver by delegation.",
   `Install(_, false) => "Install this role on the machine.",
   `Install(_, true) => "Preview installing this role — show the plan without changing anything.",
   `Restore => "Restore a complete installation from a verified backup bundle."
@@ -170,15 +166,7 @@ let local = |#q: &Question| {
   let units = units::dir(refresh);
   let own_base = local_resolver_base(refresh);
   let sel = 0;
-  let n_installs = select detected {
-    null as _ => 0,
-    xs => array::len(xs)
-  };
-  let current = select detected {
-    null as _ => null,
-    [] => null,
-    xs => xs[min(sel, array::len(xs) - 1)]$
-  };
+  let current = selected(detected, sel);
   let fresh = select detected {
     null as _ => false,
     [] => true,
@@ -319,6 +307,7 @@ let local = |#q: &Question| {
   let offered = |a| opt::is_some(array::find(items, |it| it.act == a));
   // ── ui state ──
   let menu_sel = 0;
+  let item = selected(items, menu_sel);
   let show_status = false;
   let welcome_seen = false;
   let role_sel = 0;
@@ -351,15 +340,12 @@ let local = |#q: &Question| {
     },
     `Left => { sel <- k ~ max(0, sel - 1); menu_sel <- k ~ 0; `Stop },
     `Right => {
-      sel <- k ~ min(max(0, n_installs - 1), sel + 1);
+      sel <- k ~ min(max(0, opt_len(detected) - 1), sel + 1);
       menu_sel <- k ~ 0;
       `Stop
     },
     kk@ `Enter => {
-      select kk ~ (items, menu_sel) {
-        ([], _) => never(),
-        (xs, i) => chosen <- (xs[min(i, array::len(xs) - 1)]$).act
-      };
+      chosen <- (kk ~ item)$.act;
       `Stop
     },
     kk@ `Char("u") => { chosen <- kk ~ `Uninstall; `Stop },
@@ -431,10 +417,9 @@ let local = |#q: &Question| {
     admin_target
   );
   // ── this host's services, over its activation supervisor ──
-  let svc_dir = units$;
   let svc_open = never();
   let svc = services::services(
-    #units_dir: svc_dir,
+    #units_dir: units$,
     #on_close: |e| { screen <- e ~ `Home; null },
     svc_open
   );
@@ -1187,7 +1172,7 @@ let local = |#q: &Question| {
   // ── the views ──
   let fresh_view = {
     let titles = array::map(fresh_choices, |c| line(c.title));
-    let choice = fresh_choices[min(role_sel, array::len(fresh_choices) - 1)]$;
+    let choice = selected(fresh_choices, role_sel)$;
     let keys = select choice.act {
       `Restore => " Enter restore ",
       _ => " Enter install · p preview "
@@ -1210,13 +1195,13 @@ let local = |#q: &Question| {
       null as _ => "",
       d => "[role_title(d.role)] ([service_word(d.service)])"
     };
-    let keys = select n_installs {
+    let keys = select opt_len(detected) {
       n if n > 1 => " ↑/↓ select · Enter run · ‹/› switch install ",
       _ => " ↑/↓ select · Enter run "
     };
-    let desc_lines = select items {
-      [] => [],
-      xs => [line((xs[min(menu_sel, array::len(xs) - 1)]$).desc)]
+    let desc_lines = select item {
+      null as _ => [],
+      i => [line(i.desc)]
     };
     layout(#direction: &`Horizontal, &[
       child(#constraint: `Min(0), block(

@@ -1,11 +1,11 @@
 use package::{
-  AdminError, Target, info,
+  Target, info,
   admins::{self, AdminInfo, Policy, SlotKind, change_password, reset_password},
   ceremony::{questions, result},
   certs::{
     IssuedEntry, QueueItem, approve, approve_renewals, deny, issued, list_queue, revoke
   },
-  perms::{self, PermEntry, RecordedEdit, list_resolver_clusters},
+  perms::{self, PermEntry, list_resolver_clusters},
   servers::{
     self, PendingDelegation, ReadGate, ServerInfo, ServiceServer, ServiceUnit,
     approve_delegation, deny_delegation, list_pending_delegations, list_service_servers,
@@ -13,7 +13,7 @@ use package::{
   },
   units::{ServiceOp, UnitState}
 };
-use super::{Confirm, Toast, admin_text, confirm_layers, selected, toast_layers};
+use super::{Confirm, Toast, admin_text, confirm_layers, opt_len, selected, toast_layers};
 use tui::{
   line, style,
   block::block,
@@ -21,7 +21,7 @@ use tui::{
   input_handler::{Event, KeyEvent, input_handler, on_press},
   layout::{child, layout},
   list::list,
-  overlay::{self, Layer, layer},
+  overlay::layer,
   paragraph::paragraph,
   table::{cell, row, table},
   text::text
@@ -256,11 +256,6 @@ let fmt_service_op = |op: ServiceOp| select op {
   `Status => "Listed"
 };
 
-let opt_len = |o: [Array<'a>, null]| select o {
-  null as _ => 0,
-  a => array::len(a)
-};
-
 let panels = |
   #q: &Question,
   #entry: Entry,
@@ -268,6 +263,8 @@ let panels = |
   target: Target
 | -> Panels {
   let hint = style(#fg: `DarkGray);
+  let menu_legend = line(#style: hint, " ↑/↓ move · Enter open · Esc disconnect ");
+  let pick_legend = line(#style: hint, " ↑/↓ move · Enter open · Esc back ");
   let selstyle = style(#add_modifier: [`Reversed]);
   let bold = style(#add_modifier: [`Bold]);
   let screen: Screen = select entry {
@@ -663,7 +660,7 @@ let panels = |
   {
     catch(e) fail("Changing the password failed", (e.0).error);
     seq chpw_r {
-      let r = chpw_r?;
+      chpw_r?;
       toast <- {
         title: "Password changed",
         lines: ["The session's credential is gone — connect again with the new password."],
@@ -675,7 +672,7 @@ let panels = |
   {
     catch(e) fail("Removing the admin failed", (e.0).error);
     seq rmadmin_r {
-      let r = rmadmin_r?;
+      rmadmin_r?;
       toast <- {
         title: "Admin removed",
         lines: ["The keyslot was removed"],
@@ -729,7 +726,7 @@ let panels = |
   {
     catch(e) fail("Setting the read gate failed", (e.0).error);
     seq gate_r {
-      let r = gate_r?;
+      gate_r?;
       toast <- {
         title: "Read gate set",
         lines: ["The member applies it at its next register; the Servers panel shows what it reports."],
@@ -765,7 +762,7 @@ let panels = |
   {
     catch(e) fail("Setting the policy failed", (e.0).error);
     seq setpolicy_r {
-      let r = setpolicy_r?;
+      setpolicy_r?;
       toast <- { title: "Policy updated", lines: ["The admin's policy was replaced."], error: false };
       load <- `Roster
     }
@@ -826,20 +823,18 @@ let panels = |
     kk@ `Esc => { screen <- kk ~ `Menu; `Stop },
     kk@ `Enter => {
       select kk ~ (screen, svc_servers, clusters, pick_sel) {
-        (`ServerPick, rows, _, i) => select rows {
+        (`ServerPick, rows, _, i) => select selected(rows, i) {
           null as _ => never(),
-          [] => never(),
-          rows => {
-            service_server <- rows[min(i, array::len(rows) - 1)]$;
+          s => {
+            service_server <- s;
             screen <- kk ~ `Panel(`Services);
             load <- kk ~ `Services
           }
         },
-        (`ClusterPick, _, bases, i) => select bases {
+        (`ClusterPick, _, bases, i) => select selected(bases, i) {
           null as _ => never(),
-          [] => never(),
-          bases => {
-            perms_at <- bases[min(i, array::len(bases) - 1)]$;
+          at => {
+            perms_at <- at;
             screen <- kk ~ `Panel(`Perms);
             load <- kk ~ `Perms
           }
@@ -1106,7 +1101,7 @@ let panels = |
     block(
       #border: &`All,
       #title: &line(title),
-      #title_bottom: &line(#style: hint, " ↑/↓ move · Enter open · Esc disconnect "),
+      #title_bottom: &menu_legend,
       &layout(#direction: &`Vertical, &[
         child(#constraint: `Length(array::len(menu_entries)),
           list(#highlight_style: &selstyle, #selected: &menu_sel, &items)),
@@ -1366,7 +1361,7 @@ let panels = |
     block(
       #border: &`All,
       #title: &line("Pick an admin server"),
-      #title_bottom: &line(#style: hint, " ↑/↓ move · Enter open · Esc back "),
+      #title_bottom: &pick_legend,
       &list(#highlight_style: &selstyle, #selected: &pick_sel, &items)
     )
   };
@@ -1379,7 +1374,7 @@ let panels = |
     block(
       #border: &`All,
       #title: &line("Pick a resolver cluster"),
-      #title_bottom: &line(#style: hint, " ↑/↓ move · Enter open · Esc back "),
+      #title_bottom: &pick_legend,
       &list(#highlight_style: &selstyle, #selected: &pick_sel, &items)
     )
   };
@@ -1404,9 +1399,8 @@ let panels = |
     `ClusterPick => cluster_pick_view
   };
   let status = select screen {
-    `Menu => line(#style: hint, " ↑/↓ move · Enter open · Esc back "),
-    `ServerPick => line(#style: hint, " ↑/↓ move · Enter open · Esc back "),
-    `ClusterPick => line(#style: hint, " ↑/↓ move · Enter open · Esc back "),
+    `Menu => menu_legend,
+    `ServerPick | `ClusterPick => pick_legend,
     `Panel(p) => {
       let m = menu_entries[0]$;
       let entry = select array::find(menu_entries, |e| e.kind == p) {
