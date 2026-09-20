@@ -227,38 +227,41 @@ let services = |#units_dir: string, #on_close: fn(e: Any) -> null, open: Any| ->
   // ── the unit form: create seeds the template, edit the unit's own
   // definition ──
   let template = units::template(open);
-  let form_open = false;
-  let form_title = "";
-  let form_fields = never();
-  let creating = false;
+  let editing: [`Create(UnitDef), `Edit(string, UnitDef), null] = null;
   let bad_unit = |m| {
     toast <- { title: "Bad unit", lines: [m], error: true };
     null
   };
   let unit_form = form(
-    #title: form_title,
+    #title: select editing {
+      `Create(_) => "New unit",
+      `Edit(name, _) => "Edit [name]",
+      null as _ => ""
+    },
     #help: "arguments are space-separated · trigger is OnStart or OnAccess(/path, /path) · restart is no, yes or rate-limited:<seconds> · environment is NAME=VALUE entries, comma-separated, prefixed replace: to discard the inherited one · an empty field is unset",
     #on_submit: |v| {
-      select v ~ creating {
-        true => select str::trim(v[0]$) {
+      select v ~ editing {
+        `Create(_) => select str::trim(v[0]$) {
           "" => bad_unit(v ~ "a unit name is required"),
           name => select read_def(v[1..]$) {
             `Bad(m) => bad_unit(m),
-            def => { run <- `Install({ name, def }); form_open <- def ~ false }
+            def => { run <- `Install({ name, def }); editing <- def ~ null }
           }
         },
-        false => select v ~ selected {
-          null as _ => never(),
-          u => select read_def(v) {
-            `Bad(m) => bad_unit(m),
-            def => { run <- `Install({ name: u.name, def }); form_open <- def ~ false }
-          }
-        }
+        `Edit(name, _) => select read_def(v) {
+          `Bad(m) => bad_unit(m),
+          def => { run <- `Install({ name, def }); editing <- def ~ null }
+        },
+        null as _ => never()
       };
       null
     },
-    #on_cancel: |e| { form_open <- e ~ false; null },
-    form_fields
+    #on_cancel: |e| { editing <- e ~ null; null },
+    select editing {
+      `Create(t) => array::push_front(def_fields(t), { label: "name", value: "" }),
+      `Edit(_, d) => def_fields(d),
+      null as _ => never()
+    }
   );
   // ── keys ──
   let control = |t, op| {
@@ -279,13 +282,7 @@ let services = |#units_dir: string, #on_close: fn(e: Any) -> null, open: Any| ->
       `Stop
     },
     kk@ `Char("R") => { control(kk, `Restart); `Stop },
-    kk@ `Char("c") => {
-      form_title <- kk ~ "New unit";
-      creating <- kk ~ true;
-      form_fields <- kk ~ array::push_front(def_fields(template), { label: "name", value: "" });
-      form_open <- kk ~ true;
-      `Stop
-    },
+    kk@ `Char("c") => { editing <- kk ~ `Create(template); `Stop },
     kk@ `Char("e") => {
       select kk ~ selected {
         null as _ => never(),
@@ -295,12 +292,7 @@ let services = |#units_dir: string, #on_close: fn(e: Any) -> null, open: Any| ->
             lines: ["[u.name] is reported by the supervisor with no definition file to edit."],
             error: true
           },
-          d => {
-            form_title <- "Edit [u.name]";
-            creating <- d ~ false;
-            form_fields <- def_fields(d);
-            form_open <- d ~ true
-          }
+          d => editing <- `Edit(u.name, d)
         }
       };
       `Stop
@@ -420,9 +412,9 @@ let services = |#units_dir: string, #on_close: fn(e: Any) -> null, open: Any| ->
     ]))
   ]);
   let layers = array::concat(
-    select form_open {
-      false => [],
-      true => [layer(#width: &`Percentage(80), #height: &`Percentage(90),
+    select editing {
+      null as _ => [],
+      _ => [layer(#width: &`Percentage(80), #height: &`Percentage(90),
         input_handler(#handle: &unit_form.handle, &unit_form.view))]
     },
     confirm_layers(#on_confirm: |a| { run <- a; null }, &confirm),
