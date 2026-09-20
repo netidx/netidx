@@ -26,6 +26,10 @@ val toast_layers: fn(t: &[Toast, null]) -> Array<Layer>;
 /// it; `n` or Esc clears it.
 val confirm_layers: fn(#on_confirm: fn(a: 'a) -> null, c: &[Confirm<'a>, null]) -> Array<Layer>;
 
+/// The row a cursor rests on, clamped to the list; null while there is
+/// none (the rows are absent, or empty).
+val selected: fn(rows: [Array<'a>, null], i: i64) -> ['a, null];
+
 /// A fingerprint's 8x8 identicon as styled lines — the glyph on its
 /// black tile, ready to render in a paragraph. The visual half of the
 /// out-of-band verification gesture.

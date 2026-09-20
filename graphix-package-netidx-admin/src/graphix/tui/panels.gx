@@ -14,7 +14,7 @@ use package::servers::{
   list_service_servers, reconcile_ca, service_control, set_read_gate
 };
 use package::units::{ServiceOp, UnitState};
-use super::{Confirm, Toast, admin_text, confirm_layers, toast_layers};
+use super::{Confirm, Toast, admin_text, confirm_layers, selected, toast_layers};
 use tui::{line, style};
 use tui::block::{self, *};
 use tui::form::{self, *};
@@ -265,13 +265,6 @@ let fmt_service_op = |op: ServiceOp| select op {
 let opt_len = |o: [Array<'a>, null]| select o {
   null as _ => 0,
   a => array::len(a)
-};
-
-// the row a cursor rests on, clamped to the list; null while there is none
-let selected = |rows: [Array<'a>, null], i: i64| -> ['a, null] select rows {
-  null as _ => null,
-  [] => null,
-  rows => rows[min(i, array::len(rows) - 1)]$
 };
 
 let panels = |

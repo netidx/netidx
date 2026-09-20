@@ -1,6 +1,4 @@
 use package::Fingerprint;
-use package::ceremony::Question;
-use tui::overlay::Layer;
 
 /// One saved admin domain — a CA identity (its fingerprint text)
 /// reachable at one or more admin-server addresses, tried in order.
@@ -36,9 +34,8 @@ type Landing = {
 /// the network and records what verified; `r` re-checks. Sessions the
 /// tab establishes arrive on `#connected` and are recorded. Enter on a
 /// verified domain calls `#on_connect`; `c` calls `#on_manual` with the
-/// key. Questions go to the app's bus `#q` like every other screen's.
+/// key.
 val landing: fn(
-  #q: &Question,
   #book_dir: [string, null],
   #connected: &[Connected, null],
   #on_connect: fn(c: Connect) -> null,

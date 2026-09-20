@@ -1,6 +1,5 @@
-use package::AdminError;
 use package::discovery::{discover_domains, identity_at, local_domain};
-use super::{admin_text, fingerprint_lines, glyph};
+use super::{admin_text, fingerprint_lines, glyph, selected};
 use tui::{line, span, style};
 use tui::block::{self, *};
 use tui::input_handler::{self, *};
@@ -126,7 +125,6 @@ let discovered = |#toast: &[Report, null], known: Book, at: Any| -> Book {
 };
 
 let landing = |
-  #q: &Question,
   #book_dir: [string, null],
   #connected: &[Connected, null],
   #on_connect: fn(c: Connect) -> null,
@@ -153,6 +151,7 @@ let landing = |
   edit <- discovered(#toast: &toast, known, discover_at);
   // ── keys ──
   let sel = 0;
+  let row = selected(visible, sel);
   let handle = |e: Event| on_press(e, |k| select k.code {
     `Up | `Char("k") => { sel <- k ~ max(0, sel - 1); `Stop },
     `Down | `Char("j") => {
@@ -163,16 +162,12 @@ let landing = |
     kk@ `Char("c") => { on_manual(kk); `Stop },
     kk@ `Char("r") => { recheck <- kk; `Stop },
     kk@ `Enter => {
-      select kk ~ (toast, visible, sel) {
-        (null, [], _) => never(),
-        (null, rows, i) => {
-          let row = rows[min(i, array::len(rows) - 1)]$;
-          on_connect({
-            server: row.addr,
-            glyph: package::parse_fingerprint(row.known.fingerprint)$
-          })
+      select kk ~ toast {
+        null as _ => {
+          let r = (kk ~ row)$;
+          on_connect({ server: r.addr, glyph: package::parse_fingerprint(r.known.fingerprint)$ })
         },
-        _ => toast <- null
+        _ => toast <- kk ~ null
       };
       `Stop
     },
@@ -192,18 +187,11 @@ let landing = |
     [span("[v.known.domain] ")],
     [span(#style: hint, "([v.addr])")]
   )));
-  let side = select visible {
-    [] => [],
-    rows => {
-      let row = rows[min(sel, array::len(rows) - 1)]$;
-      let parsed = package::parse_fingerprint(row.known.fingerprint);
-      select is_err(parsed) {
-        true => [line(#style: hint, "saved fingerprint does not parse")],
-        false => {
-          let fp = parsed$;
-          array::concat([line(#style: hint, "CA glyph")], glyph(fp), fingerprint_lines(fp))
-        }
-      }
+  let side = select row {
+    null as _ => [],
+    r => select package::parse_fingerprint(r.known.fingerprint) {
+      error as _ => [line(#style: hint, "saved fingerprint does not parse")],
+      fp => array::concat([line(#style: hint, "CA glyph")], glyph(fp), fingerprint_lines(fp))
     }
   };
   let notice_lines = select notice {
@@ -214,10 +202,11 @@ let landing = |
     null as _ => [],
     t => array::concat([line(#style: bold, t.title)], array::map(t.lines, |l| line(l)))
   };
+  let legend = line(#style: hint, " Enter connect · d discover · c connect direct · r refresh ");
   let view = block(
     #border: &`All,
     #title: &line("Admin Domains"),
-    #title_bottom: &line(#style: hint, " Enter connect · d discover · c connect direct · r refresh "),
+    #title_bottom: &legend,
     &layout(#direction: &`Horizontal, &[
       child(#constraint: `Min(30), layout(#direction: &`Vertical, &[
         child(#constraint: `Length(array::len(empty)), paragraph(#trim: &false, &empty)),
@@ -231,6 +220,6 @@ let landing = |
   {
     view,
     handle,
-    status: line(#style: hint, " Enter connect · d discover · c connect direct · r refresh ")
+    status: legend
   }
 }

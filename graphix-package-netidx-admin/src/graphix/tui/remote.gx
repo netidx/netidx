@@ -35,7 +35,6 @@ let remote = |#q: &Question, #book_dir: [string, null], #server: string = ""| ->
   // ── the landing screen: known admin domains ──
   let connected: [Connected, null] = null;
   let land = landing::landing(
-    #q: q,
     #book_dir: book_dir,
     #connected: &connected,
     #on_connect: |c| {

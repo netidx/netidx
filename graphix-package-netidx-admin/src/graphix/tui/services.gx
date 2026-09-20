@@ -227,11 +227,7 @@ let services = |#units_dir: string, #on_close: fn(e: Any) -> null, open: Any| ->
   };
   let sel = 0;
   let last = max(0, opt_len(rows) - 1);
-  let selected = select rows {
-    null as _ => null,
-    [] => null,
-    xs => xs[min(sel, array::len(xs) - 1)]$
-  };
+  let selected = super::selected(rows, sel);
   let run = never<Act>();
   // ── the unit form: create seeds the template, edit the unit's own
   // definition ──
