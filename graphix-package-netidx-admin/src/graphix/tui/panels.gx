@@ -107,13 +107,6 @@ let gate_choices: Array<{ label: string, gate: GateReq }> = [
   { label: "Shut for 8 hours", gate: `ShutFor(duration:28800.s) }
 ];
 
-let admin_text = |a: AdminError| select a {
-  `Admin(m) => m,
-  `PasswordChangeRequired(name) =>
-    "[name]'s password was reset and must be changed before anything else",
-  `Unsupported(m) => "unsupported on this platform: [m]"
-};
-
 let fmt_age = |secs: u64| select secs {
   s if s < u64:60 => "[s]s",
   s if s < u64:3600 => "[s / u64:60]m",
@@ -349,49 +342,44 @@ let panels = |
     `Perms(_) => `Perms,
     `Menu => never()
   };
-  let queue_c = select load {
-    x@ `Queue => list_queue(x ~ target),
-    _ => never()
+  let queue_c = {
+    let x = select load { x@ `Queue => x, _ => never() };
+    list_queue(x ~ target)
   };
-  let deleg_c = select load {
-    x@ `Delegations => list_pending_delegations(x ~ target),
-    _ => never()
+  let deleg_c = {
+    let x = select load { x@ `Delegations => x, _ => never() };
+    list_pending_delegations(x ~ target)
   };
-  let servers_c = select load {
-    x@ `Servers => servers::list(x ~ target),
-    _ => never()
+  let servers_c = {
+    let x = select load { x@ `Servers => x, _ => never() };
+    servers::list(x ~ target)
   };
-  let certs_c = select load {
-    x@ `Certs => issued(x ~ target),
-    _ => never()
+  let certs_c = {
+    let x = select load { x@ `Certs => x, _ => never() };
+    issued(x ~ target)
   };
-  let roster_r = select load {
-    x@ `Roster => admins::list(x ~ target),
-    _ => never()
+  let roster_r = {
+    let x = select load { x@ `Roster => x, _ => never() };
+    admins::list(x ~ target)
   };
-  let units_c = select load {
-    x@ `Services => select x ~ service_server {
-      null as _ => never(),
-      s => service_control(#units: [], #op: `Status, #server: s.id, x ~ target)
-    },
-    _ => never()
+  let units_c = {
+    let x = select load { x@ `Services => x, _ => never() };
+    let s = (x ~ service_server)$;
+    service_control(#units: [], #op: `Status, #server: s.id, x ~ target)
   };
-  let perms_r = select load {
-    x@ `Perms => select x ~ perms_at {
-      null as _ => never(),
-      at => perms::show(#at: at, x ~ target)
-    },
-    _ => never()
+  let perms_r = {
+    let x = select load { x@ `Perms => x, _ => never() };
+    perms::show(#at: (x ~ perms_at)$, x ~ target)
   };
   // ── the pick screens' lists ──
   let pick = never<[`Servers, `Clusters]>();
-  let svc_servers_c = select pick {
-    x@ `Servers => list_service_servers(x ~ target),
-    _ => never()
+  let svc_servers_c = {
+    let x = select pick { x@ `Servers => x, _ => never() };
+    list_service_servers(x ~ target)
   };
-  let clusters_r = select pick {
-    x@ `Clusters => list_resolver_clusters(x ~ target),
-    _ => never()
+  let clusters_r = {
+    let x = select pick { x@ `Clusters => x, _ => never() };
+    list_resolver_clusters(x ~ target)
   };
   *q <- questions(queue_c);
   *q <- questions(deleg_c);
@@ -486,79 +474,73 @@ let panels = |
     c => "[c.serial]"
   };
   // ── action dispatch: each run event starts the op's ceremony ──
-  let approve_c = select run {
-    `Approve(code) => approve(#code: code, code ~ target),
-    _ => never()
+  let approve_c = {
+    let code = select run { `Approve(code) => code, _ => never() };
+    approve(#code: code, code ~ target)
   };
-  let deny_c = select run {
-    `Deny(code) => deny(#code: code, code ~ target),
-    _ => never()
+  let deny_c = {
+    let code = select run { `Deny(code) => code, _ => never() };
+    deny(#code: code, code ~ target)
   };
-  let renewals_c = select run {
-    x@ `Renewals => approve_renewals(x ~ target),
-    _ => never()
+  let renewals_c = {
+    let x = select run { x@ `Renewals => x, _ => never() };
+    approve_renewals(x ~ target)
   };
-  let apdel_c = select run {
-    `ApproveDelegation(code) => approve_delegation(#code: code, code ~ target),
-    _ => never()
+  let apdel_c = {
+    let code = select run { `ApproveDelegation(code) => code, _ => never() };
+    approve_delegation(#code: code, code ~ target)
   };
-  let dendel_c = select run {
-    `DenyDelegation(code) => deny_delegation(#code: code, code ~ target),
-    _ => never()
+  let dendel_c = {
+    let code = select run { `DenyDelegation(code) => code, _ => never() };
+    deny_delegation(#code: code, code ~ target)
   };
-  let revoke_c = select run {
-    `Revoke(serial) => revoke(serial, serial ~ target),
-    _ => never()
+  let revoke_c = {
+    let serial = select run { `Revoke(serial) => serial, _ => never() };
+    revoke(serial, serial ~ target)
   };
-  let resetpw_r = select run {
-    `ResetPassword(name) => reset_password(name, name ~ target),
-    _ => never()
+  let resetpw_r = {
+    let name = select run { `ResetPassword(name) => name, _ => never() };
+    reset_password(name, name ~ target)
   };
-  let chpw_c = select run {
-    x@ `ChangeOwnPassword => change_password(x ~ target),
-    _ => never()
+  let chpw_c = {
+    let x = select run { x@ `ChangeOwnPassword => x, _ => never() };
+    change_password(x ~ target)
   };
-  let rmadmin_r = select run {
-    `RemoveAdmin(name) => admins::remove(name, name ~ target),
-    _ => never()
+  let rmadmin_r = {
+    let name = select run { `RemoveAdmin(name) => name, _ => never() };
+    admins::remove(name, name ~ target)
   };
-  let rmserver_c = select run {
-    `RemoveServer(id) => servers::remove(id, id ~ target),
-    _ => never()
+  let rmserver_c = {
+    let id = select run { `RemoveServer(id) => id, _ => never() };
+    servers::remove(id, id ~ target)
   };
-  let reconcile_c = select run {
-    x@ `Reconcile => reconcile_ca(x ~ target),
-    _ => never()
+  let reconcile_c = {
+    let x = select run { x@ `Reconcile => x, _ => never() };
+    reconcile_ca(x ~ target)
   };
-  let svc_c = select run {
-    `Service(a) => service_control(#units: [a.unit], #op: a.op, #server: a.server, a ~ target),
-    _ => never()
+  let svc_c = {
+    let a = select run { `Service(a) => a, _ => never() };
+    service_control(#units: [a.unit], #op: a.op, #server: a.server, a ~ target)
   };
-  let gate_c = select run {
-    `Gate(a) => set_read_gate(#server: a.server, a.gate, a ~ target),
-    _ => never()
+  let gate_c = {
+    let a = select run { `Gate(a) => a, _ => never() };
+    set_read_gate(#server: a.server, a.gate, a ~ target)
   };
-  let setperm_r = select run {
-    `SetPerm(e) => select e ~ perms_at {
-      null as _ => never(),
-      at => perms::set(#at: at, #path: e.path, #entity: e.entity, #bits: e.bits, e ~ target)
-    },
-    _ => never()
+  let setperm_r = {
+    let e = select run { `SetPerm(e) => e, _ => never() };
+    perms::set(#at: (e ~ perms_at)$, #path: e.path, #entity: e.entity, #bits: e.bits, e ~ target)
   };
-  let addadmin_r = select run {
-    `AddAdmin(a) => admins::add(a.name, a.policy, a ~ target),
-    _ => never()
+  let addadmin_r = {
+    let a = select run { `AddAdmin(a) => a, _ => never() };
+    admins::add(a.name, a.policy, a ~ target)
   };
-  let setpolicy_r = select run {
-    `SetPolicy(a) => admins::set_policy(a.name, a.policy, a ~ target),
-    _ => never()
+  let setpolicy_r = {
+    let a = select run { `SetPolicy(a) => a, _ => never() };
+    admins::set_policy(a.name, a.policy, a ~ target)
   };
-  let rmperm_r = select run {
-    `RemovePerm(e) => select e ~ perms_at {
-      null as _ => never(),
-      at => perms::remove(#at: at, #path: e.path, #entity: e.entity, e ~ target)
-    },
-    _ => never()
+  let rmperm_r = {
+    let e = select run { `RemovePerm(e) => e, _ => never() };
+    perms::remove(#at: (e ~ perms_at)$, #path: e.path, #entity: e.entity, e ~ target)
   };
   *q <- questions(approve_c);
   *q <- questions(deny_c);
@@ -732,11 +714,12 @@ let panels = |
   };
   {
     catch(e) fail("Service control failed", (e.0).error);
+    let op = never();
+    op <- select run { `Service(a) => a.op, _ => never() };
     seq svcc_r {
       let units = svcc_r?;
-      let verb = select run { `Service(a) => fmt_service_op(a.op), _ => "Applied" };
       toast <- {
-        title: verb,
+        title: fmt_service_op(op),
         lines: array::map(units, |u| "[u.unit]: [fmt_unit_state(u.state)]"),
         error: false
       };

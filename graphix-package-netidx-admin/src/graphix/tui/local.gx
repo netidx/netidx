@@ -439,45 +439,34 @@ let local = |#q: &Question| {
     svc_open
   );
   // ── the lifecycle ceremonies ──
-  let renew_c = select run {
-    x@ `Renew => renew(x),
-    _ => never()
+  let renew_c = renew(select run { x@ `Renew => x, _ => never() });
+  let update_c = {
+    let x = select run { x@ `Update => x, _ => never() };
+    let d = (x ~ current)$;
+    update(#config_root: d.config_dir, d.role)
   };
-  let update_c = select run {
-    x@ `Update => {
-      let d = (x ~ current)$;
-      update(#config_root: d.config_dir, d.role)
-    },
-    _ => never()
+  let backup_c = {
+    let x = select run { x@ `Backup => x, _ => never() };
+    let d = (x ~ current)$;
+    backup(#config_root: d.config_dir, #target: null, d.scope)
   };
-  let backup_c = select run {
-    x@ `Backup => {
-      let d = (x ~ current)$;
-      backup(#config_root: d.config_dir, #target: null, d.scope)
-    },
-    _ => never()
+  let autoapprove_c = {
+    let rotate = select run { `AutoApprove(rotate) => rotate, _ => never() };
+    let l = (rotate ~ lca)$;
+    auto_approve(#rotate: rotate, #cfg: l.cfg, l.ca_dir)
   };
-  let autoapprove_c = select run {
-    `AutoApprove(rotate) => {
-      let l = (rotate ~ lca)$;
-      auto_approve(#rotate: rotate, #cfg: l.cfg, l.ca_dir)
-    },
-    _ => never()
+  let recovery_c = {
+    let x = select run { x@ `RecoveryRotate => x, _ => never() };
+    let l = (x ~ lca)$;
+    recovery_rotate(#cfg: l.cfg, l.ca_dir)
   };
-  let recovery_c = select run {
-    x@ `RecoveryRotate => {
-      let l = (x ~ lca)$;
-      recovery_rotate(#cfg: l.cfg, l.ca_dir)
-    },
-    _ => never()
+  let csr_c = {
+    let x = select run { x@ `ExternalCsr => x, _ => never() };
+    external_csr((x ~ lca)$.ca_dir)
   };
-  let csr_c = select run {
-    x@ `ExternalCsr => external_csr((x ~ lca)$.ca_dir),
-    _ => never()
-  };
-  let extinstall_c = select run {
-    x@ `ExternalInstall => external_install(#signed: null, #root: null, (x ~ lca)$.ca_dir),
-    _ => never()
+  let extinstall_c = {
+    let x = select run { x@ `ExternalInstall => x, _ => never() };
+    external_install(#signed: null, #root: null, (x ~ lca)$.ca_dir)
   };
   *q <- questions(renew_c);
   *q <- questions(update_c);
@@ -753,35 +742,28 @@ let local = |#q: &Question| {
     null
   };
   // ── the lifecycle ceremonies ──
-  let install_c = select run {
-    `Install(role, dry) => install::install(#role: role, #dry_run: dry, role),
-    _ => never()
+  let install_c = {
+    let (role, dry) = select run { `Install(role, dry) => (role, dry), _ => never() };
+    install::install(#role: role, #dry_run: dry, role)
   };
-  let join_c = select run {
-    `Join(dry) => join(#dry_run: dry, dry),
-    _ => never()
+  let join_c = {
+    let dry = select run { `Join(dry) => dry, _ => never() };
+    join(#dry_run: dry, dry)
   };
-  let addparent_c = select run {
-    `AddParentTo(a) => {
-      let d = (a ~ current)$;
-      add_parent(#config_root: d.config_dir, #parent: a.parent, #resolvers: a.resolvers, #path: a.path, d)
-    },
-    _ => never()
+  let addparent_c = {
+    let a = select run { `AddParentTo(a) => a, _ => never() };
+    let d = (a ~ current)$;
+    add_parent(#config_root: d.config_dir, #parent: a.parent, #resolvers: a.resolvers, #path: a.path, d)
   };
-  let restore_c = select run {
-    x@ `Restore => restore_stage(#bundle: null, x),
-    _ => never()
+  let restore_c = restore_stage(#bundle: null, select run { x@ `Restore => x, _ => never() });
+  let finish_c = {
+    let x = select run { x@ `FinishRestore => x, _ => never() };
+    restore_finish((x ~ restore_staged)$)
   };
-  let finish_c = select run {
-    x@ `FinishRestore => restore_finish((x ~ restore_staged)$),
-    _ => never()
-  };
-  let uninstall_c = select run {
-    `UninstallWith(remove_ca) => {
-      let d = (remove_ca ~ current)$;
-      uninstall(#scope: d.scope, #config_dir: d.config_dir, #remove_ca: remove_ca, d)
-    },
-    _ => never()
+  let uninstall_c = {
+    let remove_ca = select run { `UninstallWith(remove_ca) => remove_ca, _ => never() };
+    let d = (remove_ca ~ current)$;
+    uninstall(#scope: d.scope, #config_dir: d.config_dir, #remove_ca: remove_ca, d)
   };
   *q <- questions(install_c);
   *q <- questions(join_c);

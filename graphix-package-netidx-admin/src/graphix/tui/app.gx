@@ -17,31 +17,32 @@ let app = |#server: string = ""| -> tui::Tui {
   let loc = local::local(#q: &q);
   let book_dir = opt::map(sys::dirs::config_dir(), |d| sys::join_path(d, "netidx-admin-tui"));
   let rem = remote::remote(#q: &q, #book_dir: book_dir, #server: server);
-  let order = select server {
-    "" => [`Local(loc), `Remote(rem)],
-    _ => [`Remote(rem), `Local(loc)]
+  // which tab is in front: a tag, never the tab itself, which re-fires
+  // with every change inside it
+  let front: [`Local, `Remote] = select server {
+    "" => `Local,
+    _ => `Remote
   };
-  let tab = order[0]$;
   // the tab's own keys come first; what it leaves alone reaches the
   // global ones
-  let tab_handle = |e: Event| select e ~ tab {
-    `Local(t) => t.handle(e),
-    `Remote(t) => t.handle(e)
+  let tab_handle = |e: Event| select e ~ front {
+    `Local => loc.handle(e),
+    `Remote => rem.handle(e)
   };
   let global = |e: Event| on_press(e, |k| select k.code {
     `Tab => {
-      order <- k ~ select loc.installed {
-        true => array::rotate(order),
-        false => [`Local(loc), `Remote(rem)]
+      front <- k ~ select (loc.installed, front) {
+        (true, `Local) => `Remote,
+        _ => `Local
       };
       `Stop
     },
     `Char("q") => { tui::exit(k ~ null); `Stop },
     _ => `Continue
   });
-  let selected = select tab {
-    `Local(_) => 0,
-    `Remote(_) => 1
+  let selected = select front {
+    `Local => 0,
+    `Remote => 1
   };
   let body = select loc.installed {
     false => loc.view,
@@ -52,16 +53,16 @@ let app = |#server: string = ""| -> tui::Tui {
     )
   };
   let status = select p.progress {
-    null as _ => select tab {
-      `Local(t) => t.status,
-      `Remote(t) => t.status
+    null as _ => select front {
+      `Local => loc.status,
+      `Remote => rem.status
     },
     pr => line(#style: hint, " working… [pr.message] ")
   };
   let layers = array::concat(
-    select tab {
-      `Local(t) => t.layers,
-      `Remote(t) => t.layers
+    select front {
+      `Local => loc.layers,
+      `Remote => rem.layers
     },
     p.layers
   );

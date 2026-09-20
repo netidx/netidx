@@ -326,32 +326,16 @@ let services = |#units_dir: string, #on_close: fn(e: Any) -> null, open: Any| ->
     _ => `Continue
   });
   // ── the actions and their outcomes ──
-  let control_r = select run {
-    `Control(c) => units::control(#units_dir: units_dir, #unit: c.unit, c.op),
-    _ => never()
-  };
-  let install_r = select run {
-    `Install(i) => units::install(#units_dir: units_dir, #name: i.name, i.def),
-    _ => never()
-  };
-  let remove_r = select run {
-    `Delete(name) => units::remove(#units_dir: units_dir, name),
-    _ => never()
-  };
   let reload_text = |reloaded| select reloaded {
     true => "The supervisor re-read its units.",
     false => "No supervisor was listening; it reads the units when it starts."
   };
   {
     catch(e) fail("Service control failed", (e.0).error);
-    seq control_r {
-      let states = control_r?;
-      let verb = select run {
-        `Control(c) => fmt_op(c.op),
-        _ => "Services"
-      };
+    seqq let c = select run { `Control(c) => c, _ => never() } {
+      let states = units::control(#units_dir: units_dir, #unit: c.unit, c.op)?;
       toast <- {
-        title: verb,
+        title: fmt_op(c.op),
         lines: array::map(states, |u| {
           let (word, _) = state_word(u.state, true);
           "[u.name]: [word]"
@@ -363,24 +347,16 @@ let services = |#units_dir: string, #on_close: fn(e: Any) -> null, open: Any| ->
   };
   {
     catch(e) fail("Saving the unit failed", (e.0).error);
-    seq install_r {
-      let reloaded = install_r?;
-      let name = select run {
-        `Install(i) => i.name,
-        _ => ""
-      };
-      toast <- { title: "Unit saved", lines: ["Saved unit [name].", reload_text(reloaded)], error: false };
+    seqq let i = select run { `Install(i) => i, _ => never() } {
+      let reloaded = units::install(#units_dir: units_dir, #name: i.name, i.def)?;
+      toast <- { title: "Unit saved", lines: ["Saved unit [i.name].", reload_text(reloaded)], error: false };
       load <- reloaded
     }
   };
   {
     catch(e) fail("Deleting the unit failed", (e.0).error);
-    seq remove_r {
-      let reloaded = remove_r?;
-      let name = select run {
-        `Delete(n) => n,
-        _ => ""
-      };
+    seqq let name = select run { `Delete(name) => name, _ => never() } {
+      let reloaded = units::remove(#units_dir: units_dir, name)?;
       toast <- { title: "Unit deleted", lines: ["Deleted unit [name].", reload_text(reloaded)], error: false };
       load <- reloaded
     }

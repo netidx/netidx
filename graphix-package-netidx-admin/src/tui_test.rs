@@ -541,6 +541,48 @@ impl Drop for InstallRecordGuard {
     }
 }
 
+/// Tab brings the Admin Domain tab forward, and it stays forward when
+/// that tab changes underneath it: a screen switch re-fires the tab's
+/// whole struct, which must not put the first tab back in front.
+#[tokio::test(flavor = "multi_thread")]
+async fn tab_keeps_the_admin_domain_tab_in_front_when_it_changes() -> Result<()> {
+    use netidx_admin::provenance::{AdminDomainIdentity, InstallRecord, InstallRole};
+    let d = TestAdminDomain::start().await?;
+    let record = InstallRecord::new(
+        InstallRole::Ca,
+        "/",
+        "tls",
+        Some(AdminDomainIdentity::new(&d.domain, &d.fingerprint)),
+        Some(d.listen),
+    );
+    let path = netidx_admin::paths::user_install_record()?;
+    std::fs::write(&path, serde_json::to_vec_pretty(&record)?)?;
+    let _guard = InstallRecordGuard(path);
+    let prog = "let result = netidx_admin::tui::app::app()";
+    let mut h =
+        TuiTestHarness::with_register(prog, crate::TEST_REGISTER, 120, 40).await?;
+    wait_render(&mut h, Duration::from_secs(60), "the action list", |lines| {
+        lines.iter().any(|l| l.contains("CA ("))
+    })
+    .await?;
+    h.dispatch_event(key(KeyCode::Tab)).await?;
+    wait_render(&mut h, Duration::from_secs(60), "the landing screen", |lines| {
+        lines.iter().any(|l| l.contains("d discover"))
+    })
+    .await?;
+    h.dispatch_event(key(KeyCode::Char('c'))).await?;
+    wait_render(&mut h, Duration::from_secs(20), "the connect screen", |lines| {
+        lines.iter().any(|l| l.contains("Connect to an admin domain"))
+    })
+    .await?;
+    h.dispatch_event(key(KeyCode::Tab)).await?;
+    wait_render(&mut h, Duration::from_secs(20), "the Local tab again", |lines| {
+        lines.iter().any(|l| l.contains("CA ("))
+    })
+    .await?;
+    Ok(())
+}
+
 /// The row offset from the `Status` item to the item labeled `label`
 /// in the rendered action list.
 fn rows_below_status(lines: &[String], label: &str) -> Result<usize> {
