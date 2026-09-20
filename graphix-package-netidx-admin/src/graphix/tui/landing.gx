@@ -9,6 +9,8 @@ use tui::list::{self, *};
 use tui::paragraph::{self, *};
 use tui::text::{self, *};
 
+type Report = { title: string, lines: Array<string> };
+
 // record a domain under its fingerprint: a new address joins the
 // saved ones, a changed name replaces the saved one
 let upsert = |book: Book, domain: string, addr: string, fp: string| -> Book
@@ -97,6 +99,32 @@ let reachable = |#polling: &bool, known: Book, recheck: Any| {
   visible
 };
 
+// one discovery pass per `at`: the saved domains with every domain that
+// verified recorded at each of its servers, an edit. `toast` gets what
+// the pass found, or why it failed, and a failed pass is no edit
+let discovered = |#toast: &[Report, null], known: Book, at: Any| -> Book {
+  catch(e) *toast <- { title: "Discovery failed", lines: [admin_text((e.0).error)] };
+  seq at {
+    let found = discover_domains(at)?;
+    let verified = array::filter_map(found.domains, |r| select r.identity {
+      null as _ => null,
+      id => { domain: r.domain, servers: r.servers, fp: id.fingerprint.code }
+    });
+    *toast <- select array::len(found.diagnosis) {
+      0 => select array::len(verified) {
+        0 => { title: "Discovery", lines: ["No admin domain answered on the local network."] },
+        n => { title: "Discovery", lines: ["Found [n] admin domain(s); they are saved."] }
+      },
+      _ => { title: "Discovery", lines: found.diagnosis }
+    };
+    array::fold(verified, known, |acc, v| array::fold(
+      v.servers,
+      acc,
+      |b, s| upsert(b, v.domain, s, v.fp)
+    ))
+  }
+};
+
 let landing = |
   #q: &Question,
   #book_dir: [string, null],
@@ -120,30 +148,9 @@ let landing = |
     edit <- upsert(known, session.domain, session.server, session.fingerprint)
   };
   // ── discovery: what verified is recorded ──
+  let toast: [Report, null] = null;
   let discover_at = never();
-  let toast: [{ title: string, lines: Array<string> }, null] = null;
-  {
-    catch(e) toast <- { title: "Discovery failed", lines: [admin_text((e.0).error)] };
-    seq discover_at {
-      let found = discover_domains(discover_at)?;
-      let verified = array::filter_map(found.domains, |r| select r.identity {
-        null as _ => null,
-        id => { domain: r.domain, servers: r.servers, fp: id.fingerprint.code }
-      });
-      edit <- array::fold(verified, known, |acc, v| array::fold(
-        v.servers,
-        acc,
-        |b, s| upsert(b, v.domain, s, v.fp)
-      ));
-      toast <- select array::len(found.diagnosis) {
-        0 => select array::len(verified) {
-          0 => { title: "Discovery", lines: ["No admin domain answered on the local network."] },
-          n => { title: "Discovery", lines: ["Found [n] admin domain(s); they are saved."] }
-        },
-        _ => { title: "Discovery", lines: found.diagnosis }
-      }
-    }
-  };
+  edit <- discovered(#toast: &toast, known, discover_at);
   // ── keys ──
   let sel = 0;
   let handle = |e: Event| on_press(e, |k| select k.code {
