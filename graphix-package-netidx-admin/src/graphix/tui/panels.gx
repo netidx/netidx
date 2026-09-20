@@ -1,15 +1,13 @@
 use package::{
-  Target, info,
-  admins::{self, AdminInfo, Policy, SlotKind, change_password, reset_password},
+  AdminError, Target, info,
+  admins::{self, Policy, SlotKind, change_password, reset_password},
   ceremony::{questions, result},
-  certs::{
-    IssuedEntry, QueueItem, approve, approve_renewals, deny, issued, list_queue, revoke
-  },
-  perms::{self, PermEntry, list_resolver_clusters},
+  certs::{approve, approve_renewals, deny, issued, list_queue, revoke},
+  perms::{self, list_resolver_clusters},
   servers::{
-    self, PendingDelegation, ReadGate, ServerInfo, ServiceServer, ServiceUnit,
-    approve_delegation, deny_delegation, list_pending_delegations, list_service_servers,
-    reconcile_ca, service_control, set_read_gate
+    self, PeerResult, ReadGate, ServerInfo, ServiceServer, approve_delegation,
+    deny_delegation, list_pending_delegations, list_service_servers, reconcile_ca,
+    service_control, set_read_gate
   },
   units::{ServiceOp, UnitState}
 };
@@ -256,6 +254,45 @@ let fmt_service_op = |op: ServiceOp| select op {
   `Status => "Listed"
 };
 
+let note = |title: string, lines: Array<string>| -> Toast { title, lines, error: false };
+
+let failure = |title: string, a: AdminError| -> Toast { title, lines: [admin_text(a)], error: true };
+
+let peer_lines = |peers: Array<PeerResult>| array::map(peers, |p| select p.error {
+  null as _ => "updated [p.server]",
+  e => "failed [p.server]: [e]"
+});
+
+let one_time_password = |pw: string|
+  note("One-time password", ["Record this now; it is never shown again:", pw]);
+
+// a panel's rows: absent until a load answers, then what the last load
+// that succeeded returned; a failed load says why on the toast
+let rows_of = |#toast: &[Toast, null], #failed: string, r: Result<Array<'a>, AdminError>|
+  -> [Array<'a>, null] {
+  let rows: [Array<'a>, null] = null;
+  catch(e) *toast <- failure(failed, (e.0).error);
+  rows <- r?;
+  rows
+};
+
+// what a finished action does: toast what `say` makes of its result and
+// name the panel to reload; a failed one toasts why and reloads nothing
+let outcome = |
+  #toast: &[Toast, null],
+  #failed: string,
+  #reload: PanelKind,
+  r: Result<'a, AdminError>,
+  say: fn(v: 'a) -> Toast
+| -> PanelKind {
+  catch(e) *toast <- failure(failed, (e.0).error);
+  seq r {
+    let v = r?;
+    *toast <- say(v);
+    v ~ reload
+  }
+};
+
 let panels = |
   #q: &Question,
   #entry: Entry,
@@ -328,10 +365,6 @@ let panels = |
     policy_fields_in
   );
   let confirm: [Confirm<Act>, null] = null;
-  let fail = |title, a| {
-    toast <- { title, lines: [admin_text(a)], error: true };
-    null
-  };
   // ── panel loads: each (re)load starts a fresh list ceremony ──
   let load = never<PanelKind>();
   load <- select entry {
@@ -384,51 +417,15 @@ let panels = |
   *q <- questions(certs_c);
   *q <- questions(units_c);
   *q <- questions(svc_servers_c);
-  let queue_rows: [Array<QueueItem>, null] = null;
-  {
-    catch(e) fail("Loading the queue failed", (e.0).error);
-    queue_rows <- result(queue_c)?
-  };
-  let deleg_rows: [Array<PendingDelegation>, null] = null;
-  {
-    catch(e) fail("Loading delegations failed", (e.0).error);
-    deleg_rows <- result(deleg_c)?
-  };
-  let server_rows: [Array<ServerInfo>, null] = null;
-  {
-    catch(e) fail("Loading servers failed", (e.0).error);
-    server_rows <- result(servers_c)?
-  };
-  let cert_rows: [Array<IssuedEntry>, null] = null;
-  {
-    catch(e) fail("Loading certificates failed", (e.0).error);
-    cert_rows <- result(certs_c)?
-  };
-  let roster_rows: [Array<AdminInfo>, null] = null;
-  {
-    catch(e) fail("Loading the roster failed", (e.0).error);
-    roster_rows <- roster_r?
-  };
-  let unit_rows: [Array<ServiceUnit>, null] = null;
-  {
-    catch(e) fail("Listing the services failed", (e.0).error);
-    unit_rows <- result(units_c)?
-  };
-  let perm_rows: [Array<PermEntry>, null] = null;
-  {
-    catch(e) fail("Loading the permissions failed", (e.0).error);
-    perm_rows <- perms_r?
-  };
-  let svc_servers: [Array<ServiceServer>, null] = null;
-  {
-    catch(e) fail("Listing the resolver servers failed", (e.0).error);
-    svc_servers <- result(svc_servers_c)?
-  };
-  let clusters: [Array<string>, null] = null;
-  {
-    catch(e) fail("Listing the resolver clusters failed", (e.0).error);
-    clusters <- clusters_r?
-  };
+  let queue_rows = rows_of(#toast: &toast, #failed: "Loading the queue failed", result(queue_c));
+  let deleg_rows = rows_of(#toast: &toast, #failed: "Loading delegations failed", result(deleg_c));
+  let server_rows = rows_of(#toast: &toast, #failed: "Loading servers failed", result(servers_c));
+  let cert_rows = rows_of(#toast: &toast, #failed: "Loading certificates failed", result(certs_c));
+  let roster_rows = rows_of(#toast: &toast, #failed: "Loading the roster failed", roster_r);
+  let unit_rows = rows_of(#toast: &toast, #failed: "Listing the services failed", result(units_c));
+  let perm_rows = rows_of(#toast: &toast, #failed: "Loading the permissions failed", perms_r);
+  let svc_servers = rows_of(#toast: &toast, #failed: "Listing the resolver servers failed", result(svc_servers_c));
+  let clusters = rows_of(#toast: &toast, #failed: "Listing the resolver clusters failed", clusters_r);
   // the servers table's clock: "shut for another 29m" is relative to
   // when the rows arrived
   let now = sys::time::now(server_rows);
@@ -562,221 +559,69 @@ let panels = |
   let svcc_r = result(svc_c);
   let gate_r = result(gate_c);
   // ── action outcomes: toast the summary, then refresh the panel ──
+  load <- outcome(#toast: &toast, #failed: "Approve failed", #reload: `Queue, approve_r, |r| note(
+    "Approved",
+    array::concat(
+      ["[r.requested_name] approved", "id-map groups: [str::join(#sep: ", ", r.id_map_groups)]"],
+      r.warnings
+    )
+  ));
+  load <- outcome(#toast: &toast, #failed: "Deny failed", #reload: `Queue, deny_r,
+    |name| note("Denied", ["Denied [name]"]));
+  load <- outcome(#toast: &toast, #failed: "Approving renewals failed", #reload: `Queue, renewals_r,
+    |rs| note("Renewals", select array::len(rs) {
+      0 => ["No verified renewals were pending"],
+      _ => array::map(rs, |r| select r.error {
+        null as _ => "renewed [r.requested_name]",
+        e => "failed [r.requested_name]: [e]"
+      })
+    }));
+  load <- outcome(#toast: &toast, #failed: "Approving the delegation failed", #reload: `Delegations, apdel_r,
+    |r| note("Delegation approved", array::concat(["[r.proposed_path] approved"], peer_lines(r.peers))));
+  load <- outcome(#toast: &toast, #failed: "Denying the delegation failed", #reload: `Delegations, dendel_r,
+    |r| note("Delegation denied", ["Denied [r.proposed_path]"]));
+  load <- outcome(#toast: &toast, #failed: "Revoke failed", #reload: `Certs, revoke_r, |r| note(
+    "Revoked",
+    array::concat(array::map(r.revoked, |c| "revoked serial [c.serial] ([c.name])"), r.warnings)
+  ));
+  load <- outcome(#toast: &toast, #failed: "Password reset failed", #reload: `Roster, resetpw_r,
+    one_time_password);
+  load <- outcome(#toast: &toast, #failed: "Adding the admin failed", #reload: `Roster, addadmin_r,
+    one_time_password);
+  load <- outcome(#toast: &toast, #failed: "Removing the admin failed", #reload: `Roster, rmadmin_r,
+    |_| note("Admin removed", ["The keyslot was removed"]));
+  load <- outcome(#toast: &toast, #failed: "Setting the policy failed", #reload: `Roster, setpolicy_r,
+    |_| note("Policy updated", ["The admin's policy was replaced."]));
+  load <- outcome(#toast: &toast, #failed: "Removing the server failed", #reload: `Servers, rmserver_r,
+    |r| note("Server removed", array::concat(["revoked [r.revoked] certificates"], peer_lines(r.peers))));
+  load <- outcome(#toast: &toast, #failed: "Reconcile failed", #reload: `Servers, reconcile_r,
+    |r| note("Reconciled", peer_lines(r.peers)));
+  load <- outcome(#toast: &toast, #failed: "Setting the read gate failed", #reload: `Servers, gate_r,
+    |_| note("Read gate set",
+      ["The member applies it at its next register; the Servers panel shows what it reports."]));
+  load <- outcome(#toast: &toast, #failed: "Recording the permission failed", #reload: `Perms, setperm_r,
+    |r| note("Permissions updated", [select r.changed {
+      true => "Recorded as version [r.version]. Every member of the cluster converges within a poll interval.",
+      false => "Already so — nothing changed (version [r.version])."
+    }]));
+  load <- outcome(#toast: &toast, #failed: "Removing the permission failed", #reload: `Perms, rmperm_r,
+    |r| note("Permissions updated", [select r.changed {
+      true => "Removed; recorded as version [r.version].",
+      false => "There was no such entry (version [r.version])."
+    }]));
   {
-    catch(e) fail("Approve failed", (e.0).error);
-    seq approve_r {
-      let r = approve_r?;
-      let groups = str::join(#sep: ", ", r.id_map_groups);
-      toast <- {
-        title: "Approved",
-        lines: array::concat(
-          ["[r.requested_name] approved", "id-map groups: [groups]"],
-          r.warnings
-        ),
-        error: false
-      };
-      load <- `Queue
-    }
-  };
-  {
-    catch(e) fail("Deny failed", (e.0).error);
-    seq deny_r {
-      let name = deny_r?;
-      toast <- { title: "Denied", lines: ["Denied [name]"], error: false };
-      load <- `Queue
-    }
-  };
-  {
-    catch(e) fail("Approving renewals failed", (e.0).error);
-    seq renewals_r {
-      let rs = renewals_r?;
-      toast <- {
-        title: "Renewals",
-        lines: select array::len(rs) {
-          0 => ["No verified renewals were pending"],
-          _ => array::map(rs, |r| select r.error {
-            null as _ => "renewed [r.requested_name]",
-            e => "failed [r.requested_name]: [e]"
-          })
-        },
-        error: false
-      };
-      load <- `Queue
-    }
-  };
-  {
-    catch(e) fail("Approving the delegation failed", (e.0).error);
-    seq apdel_r {
-      let r = apdel_r?;
-      let lines = array::map(r.peers, |p| select p.error {
-        null as _ => "updated [p.server]",
-        e => "failed [p.server]: [e]"
-      });
-      toast <- {
-        title: "Delegation approved",
-        lines: array::concat(["[r.proposed_path] approved"], lines),
-        error: false
-      };
-      load <- `Delegations
-    }
-  };
-  {
-    catch(e) fail("Denying the delegation failed", (e.0).error);
-    seq dendel_r {
-      let r = dendel_r?;
-      toast <- {
-        title: "Delegation denied",
-        lines: ["Denied [r.proposed_path]"],
-        error: false
-      };
-      load <- `Delegations
-    }
-  };
-  {
-    catch(e) fail("Revoke failed", (e.0).error);
-    seq revoke_r {
-      let r = revoke_r?;
-      let lines = array::map(r.revoked, |c| "revoked serial [c.serial] ([c.name])");
-      toast <- {
-        title: "Revoked",
-        lines: array::concat(lines, r.warnings),
-        error: false
-      };
-      load <- `Certs
-    }
-  };
-  {
-    catch(e) fail("Password reset failed", (e.0).error);
-    seq resetpw_r {
-      let pw = resetpw_r?;
-      toast <- {
-        title: "One-time password",
-        lines: ["Record this now; it is never shown again:", pw],
-        error: false
-      };
-      load <- `Roster
-    }
-  };
-  {
-    catch(e) fail("Changing the password failed", (e.0).error);
-    seq chpw_r {
-      chpw_r?;
-      toast <- {
-        title: "Password changed",
-        lines: ["The session's credential is gone — connect again with the new password."],
-        error: false
-      };
-      on_close(`SessionLost)
-    }
-  };
-  {
-    catch(e) fail("Removing the admin failed", (e.0).error);
-    seq rmadmin_r {
-      rmadmin_r?;
-      toast <- {
-        title: "Admin removed",
-        lines: ["The keyslot was removed"],
-        error: false
-      };
-      load <- `Roster
-    }
-  };
-  {
-    catch(e) fail("Removing the server failed", (e.0).error);
-    seq rmserver_r {
-      let r = rmserver_r?;
-      let lines = array::map(r.peers, |p| select p.error {
-        null as _ => "updated [p.server]",
-        e => "failed [p.server]: [e]"
-      });
-      toast <- {
-        title: "Server removed",
-        lines: array::concat(["revoked [r.revoked] certificates"], lines),
-        error: false
-      };
-      load <- `Servers
-    }
-  };
-  {
-    catch(e) fail("Reconcile failed", (e.0).error);
-    seq reconcile_r {
-      let r = reconcile_r?;
-      let lines = array::map(r.peers, |p| select p.error {
-        null as _ => "updated [p.server]",
-        e => "failed [p.server]: [e]"
-      });
-      toast <- { title: "Reconciled", lines, error: false };
-      load <- `Servers
-    }
-  };
-  {
-    catch(e) fail("Service control failed", (e.0).error);
     let op = never();
     op <- select run { `Service(a) => a.op, _ => never() };
-    seq svcc_r {
-      let units = svcc_r?;
-      toast <- {
-        title: fmt_service_op(op),
-        lines: array::map(units, |u| "[u.unit]: [fmt_unit_state(u.state)]"),
-        error: false
-      };
-      load <- `Services
-    }
+    load <- outcome(#toast: &toast, #failed: "Service control failed", #reload: `Services, svcc_r,
+      |units| note(fmt_service_op(op), array::map(units, |u| "[u.unit]: [fmt_unit_state(u.state)]")))
   };
   {
-    catch(e) fail("Setting the read gate failed", (e.0).error);
-    seq gate_r {
-      gate_r?;
-      toast <- {
-        title: "Read gate set",
-        lines: ["The member applies it at its next register; the Servers panel shows what it reports."],
-        error: false
-      };
-      load <- `Servers
-    }
-  };
-  {
-    catch(e) fail("Recording the permission failed", (e.0).error);
-    seq setperm_r {
-      let r = setperm_r?;
-      let what = select r.changed {
-        true => "Recorded as version [r.version]. Every member of the cluster converges within a poll interval.",
-        false => "Already so — nothing changed (version [r.version])."
-      };
-      toast <- { title: "Permissions updated", lines: [what], error: false };
-      load <- `Perms
-    }
-  };
-  {
-    catch(e) fail("Adding the admin failed", (e.0).error);
-    seq addadmin_r {
-      let pw = addadmin_r?;
-      toast <- {
-        title: "One-time password",
-        lines: ["Record this now; it is never shown again:", pw],
-        error: false
-      };
-      load <- `Roster
-    }
-  };
-  {
-    catch(e) fail("Setting the policy failed", (e.0).error);
-    seq setpolicy_r {
-      setpolicy_r?;
-      toast <- { title: "Policy updated", lines: ["The admin's policy was replaced."], error: false };
-      load <- `Roster
-    }
-  };
-  {
-    catch(e) fail("Removing the permission failed", (e.0).error);
-    seq rmperm_r {
-      let r = rmperm_r?;
-      let what = select r.changed {
-        true => "Removed; recorded as version [r.version].",
-        false => "There was no such entry (version [r.version])."
-      };
-      toast <- { title: "Permissions updated", lines: [what], error: false };
-      load <- `Perms
+    catch(e) toast <- failure("Changing the password failed", (e.0).error);
+    seq chpw_r {
+      chpw_r?;
+      toast <- note("Password changed",
+        ["The session's credential is gone — connect again with the new password."]);
+      on_close(`SessionLost)
     }
   };
   // ── key handling ──
