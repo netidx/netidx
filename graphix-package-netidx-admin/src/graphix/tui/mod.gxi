@@ -1,9 +1,8 @@
-use super::{AdminDomain, AdminError, CaIdentity, Fingerprint, identicon};
-use super::ceremony::{
-  Answer, FieldInfo, OneTimeSecretKind, Question, QuestionId, Stage, answer
+use super::{
+  AdminDomain, AdminError, CaIdentity, Fingerprint, identicon,
+  ceremony::{Answer, FieldInfo, OneTimeSecretKind, Question, QuestionId, Stage, answer}
 };
-use tui::{line, span, style};
-use tui::overlay::{self, layer, Layer};
+use tui::{line, span, style, overlay::{self, Layer, layer}};
 
 /// An admin error as one line for the operator.
 val admin_text: fn(a: AdminError) -> string;

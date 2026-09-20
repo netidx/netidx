@@ -1,30 +1,31 @@
-use package::{AdminError, Target, info};
-use package::admins::{
-  self, AdminInfo, Policy, SlotKind, change_password, reset_password
+use package::{
+  AdminError, Target, info,
+  admins::{self, AdminInfo, Policy, SlotKind, change_password, reset_password},
+  ceremony::{questions, result},
+  certs::{
+    IssuedEntry, QueueItem, approve, approve_renewals, deny, issued, list_queue, revoke
+  },
+  perms::{self, PermEntry, RecordedEdit, list_resolver_clusters},
+  servers::{
+    self, PendingDelegation, ReadGate, ServerInfo, ServiceServer, ServiceUnit,
+    approve_delegation, deny_delegation, list_pending_delegations, list_service_servers,
+    reconcile_ca, service_control, set_read_gate
+  },
+  units::{ServiceOp, UnitState}
 };
-use package::ceremony::{questions, result};
-use package::certs::{
-  IssuedEntry, QueueItem, approve, approve_renewals, deny, issued, list_queue,
-  revoke
-};
-use package::perms::{self, PermEntry, RecordedEdit, list_resolver_clusters};
-use package::servers::{
-  self, PendingDelegation, ReadGate, ServerInfo, ServiceServer, ServiceUnit,
-  approve_delegation, deny_delegation, list_pending_delegations,
-  list_service_servers, reconcile_ca, service_control, set_read_gate
-};
-use package::units::{ServiceOp, UnitState};
 use super::{Confirm, Toast, admin_text, confirm_layers, selected, toast_layers};
-use tui::{line, style};
-use tui::block::{self, *};
-use tui::form::{self, *};
-use tui::input_handler::{self, *};
-use tui::layout::{self, *};
-use tui::list::{self, *};
-use tui::overlay::{self, layer, Layer};
-use tui::paragraph::{self, *};
-use tui::table::{self, *};
-use tui::text::{self, *};
+use tui::{
+  line, style,
+  block::block,
+  form::form,
+  input_handler::{Event, KeyEvent, input_handler, on_press},
+  layout::{child, layout},
+  list::list,
+  overlay::{self, Layer, layer},
+  paragraph::paragraph,
+  table::{cell, row, table},
+  text::text
+};
 
 type Screen = [`Menu, `Panel(PanelKind), `ServerPick, `ClusterPick];
 

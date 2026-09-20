@@ -1,18 +1,21 @@
-use package::AdminError;
-use package::units::{
-  self, LocalUnit, ServiceOp, UnitDef, UnitEnvironment, UnitRestart, UnitState,
-  UnitTrigger
+use package::{
+  AdminError,
+  units::{
+    self, LocalUnit, ServiceOp, UnitDef, UnitEnvironment, UnitRestart, UnitState,
+    UnitTrigger
+  }
 };
 use super::{Confirm, Toast, admin_text, confirm_layers, toast_layers};
-use tui::{line, span, style};
-use tui::block::{self, *};
-use tui::form::{self, *};
-use tui::input_handler::{self, *};
-use tui::layout::{self, *};
-use tui::list::{self, *};
-use tui::overlay::{self, layer, Layer};
-use tui::paragraph::{self, *};
-use tui::text::{self, *};
+use tui::{
+  line, span, style,
+  block::block,
+  form::form,
+  input_handler::{Event, input_handler, on_press},
+  layout::{child, layout},
+  list::list,
+  overlay::{self, Layer, layer},
+  paragraph::paragraph
+};
 
 type Act = [
   `Control({ unit: string, op: ServiceOp }),

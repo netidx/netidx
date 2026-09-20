@@ -1,5 +1,4 @@
-use super::{AdminError, Target};
-use super::perms::RecordedEdit;
+use super::{AdminError, Target, perms::RecordedEdit};
 
 /// One identity in the id-map.
 type Identity = { name: string, primary_group: string, groups: Array<string> };

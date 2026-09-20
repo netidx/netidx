@@ -1,6 +1,8 @@
-use super::{AdminError, Fingerprint, Target};
-use super::ceremony::Ceremony;
-use super::units::{ServiceOp, UnitState};
+use super::{
+  AdminError, Fingerprint, Target,
+  ceremony::Ceremony,
+  units::{ServiceOp, UnitState}
+};
 
 /// One admin server's push/propagation result. A null error means it
 /// was updated.

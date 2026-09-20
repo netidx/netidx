@@ -1,16 +1,21 @@
-use package::{Fingerprint, Target, change_password_at, connect, info};
-use package::ceremony::{questions, result};
-use super::{Toast, admin_text, toast_layers};
-use super::landing::{self, Connected};
-use super::panels::{self, CloseReason};
-use tui::{line, style};
-use tui::block::{self, *};
-use tui::input_handler::{self, *};
-use tui::layout::{self, *};
-use tui::line_edit::{self, *};
-use tui::overlay::{self, Layer};
-use tui::paragraph::{self, *};
-use tui::text::{self, *};
+use package::{
+  Fingerprint, Target, change_password_at, connect, info,
+  ceremony::{questions, result}
+};
+use super::{
+  Toast, admin_text, toast_layers,
+  landing::{self, Connected},
+  panels::{self, CloseReason}
+};
+use tui::{
+  line, line_edit, style,
+  block::block,
+  input_handler::{Event, KeyEvent, on_press},
+  layout::{child, layout},
+  overlay::{self, Layer},
+  paragraph::paragraph,
+  text::text
+};
 
 type Screen = [`Landing, `Connect, `Panels];
 

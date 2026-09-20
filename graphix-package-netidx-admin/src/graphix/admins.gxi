@@ -1,5 +1,4 @@
-use super::{AdminError, Target};
-use super::ceremony::Ceremony;
+use super::{AdminError, Target, ceremony::Ceremony};
 
 /// Whether an admin keyslot can recover the CA key (`Signing`) or only
 /// authenticate a scoped role admin (`Role`).

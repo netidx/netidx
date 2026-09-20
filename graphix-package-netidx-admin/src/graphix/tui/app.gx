@@ -1,11 +1,13 @@
 use package::ceremony::Question;
 use super::{local, pump, remote};
-use tui::{line, style};
-use tui::input_handler::{self, *};
-use tui::layout::{self, *};
-use tui::overlay::{self, *};
-use tui::tabs::{self, *};
-use tui::text::{self, *};
+use tui::{
+  line, style,
+  input_handler::{Event, input_handler, on_press},
+  layout::{child, layout},
+  overlay::overlay,
+  tabs::tabs,
+  text::text
+};
 
 let app = |#server: string = ""| -> tui::Tui {
   let hint = style(#fg: `DarkGray);

@@ -1,6 +1,8 @@
-use super::{Fingerprint, Target};
-use super::ceremony::Ceremony;
-use super::servers::PeerResult;
+use super::{
+  Fingerprint, Target,
+  ceremony::Ceremony,
+  servers::PeerResult
+};
 
 /// A pending enrollment-queue entry, keyed by its code — recomputed
 /// locally from the CSR, never trusted from the wire. A null code means

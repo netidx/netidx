@@ -1,12 +1,14 @@
 use package::discovery::{discover_domains, identity_at, local_domain};
 use super::{admin_text, fingerprint_lines, glyph, selected};
-use tui::{line, span, style};
-use tui::block::{self, *};
-use tui::input_handler::{self, *};
-use tui::layout::{self, *};
-use tui::list::{self, *};
-use tui::paragraph::{self, *};
-use tui::text::{self, *};
+use tui::{
+  line, span, style,
+  block::block,
+  input_handler::{Event, on_press},
+  layout::{child, layout},
+  list::list,
+  paragraph::paragraph,
+  text::text
+};
 
 type Report = { title: string, lines: Array<string> };
 

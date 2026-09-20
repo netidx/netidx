@@ -1,5 +1,4 @@
-use package::Target;
-use package::ceremony::Question;
+use package::{Target, ceremony::Question};
 use tui::overlay::Layer;
 
 /// The admin-server panels: the enrollment queue, delegation

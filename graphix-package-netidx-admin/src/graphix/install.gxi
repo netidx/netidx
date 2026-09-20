@@ -1,5 +1,4 @@
-use super::AdminError;
-use super::ceremony::Ceremony;
+use super::{AdminError, ceremony::Ceremony};
 
 /// Which role template produced an install on this host.
 type InstallRole = [`Ca, `Workstation, `Resolver, `Publisher];

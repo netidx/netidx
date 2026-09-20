@@ -1,6 +1,8 @@
-use super::AdminError;
-use super::ceremony::Ceremony;
-use super::install::Scope;
+use super::{
+  AdminError,
+  ceremony::Ceremony,
+  install::Scope
+};
 
 /// The credential state of a CA this host owns: whether the
 /// auto-approve slot exists and is wired into the daemon config,

@@ -1,31 +1,31 @@
-use package::{AdminError, Target, local as local_target, parse_fingerprint};
-use package::ca::{
-  self, CaCredentials, auto_approve, external_csr, external_install,
-  recovery_rotate
+use package::{
+  AdminError, Target, local as local_target, parse_fingerprint, units,
+  ca::{
+    self, CaCredentials, auto_approve, external_csr, external_install, recovery_rotate
+  },
+  ceremony::{questions, result},
+  install::{
+    self, Change, Install, InstallRole, LocalCa, ParentCandidate, Scope, ServiceState,
+    Staged, add_parent, backup, escalate_command, install_service, join,
+    local_resolver_base, parent_candidates, renew, restore_finish, restore_stage,
+    sync_check, uninstall, update, verify_system_service
+  }
 };
-use package::ceremony::{questions, result};
-use package::install::{
-  self, Change, Install, InstallRole, LocalCa, ParentCandidate, Scope,
-  ServiceState, Staged, add_parent, backup, escalate_command, install_service,
-  join, local_resolver_base, parent_candidates, renew, restore_finish,
-  restore_stage, sync_check, uninstall, update, verify_system_service
-};
-use package::units;
 use super::{
-  Confirm, Toast, admin_text, confirm_layers, fingerprint_lines, glyph,
-  toast_layers
+  Confirm, Toast, admin_text, confirm_layers, fingerprint_lines, glyph, services,
+  toast_layers,
+  panels::{self, CloseReason, Entry}
 };
-use super::panels::{self, CloseReason, Entry};
-use super::services;
-use tui::{line, span, style};
-use tui::block::{self, *};
-use tui::form::{self, *};
-use tui::input_handler::{self, *};
-use tui::layout::{self, *};
-use tui::list::{self, *};
-use tui::overlay::{self, layer, Layer};
-use tui::paragraph::{self, *};
-use tui::text::{self, *};
+use tui::{
+  line, span, style,
+  block::block,
+  form::form,
+  input_handler::{Event, KeyEvent, input_handler, on_press},
+  layout::{child, layout},
+  list::list,
+  overlay::{self, Layer, layer},
+  paragraph::paragraph
+};
 
 type SyncState = [
   `NotApplicable,
