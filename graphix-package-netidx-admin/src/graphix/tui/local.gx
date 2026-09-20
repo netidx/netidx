@@ -974,22 +974,19 @@ let local = |#q: &Question| {
     }
   };
   // ── the teardown's CA question, and the parent picker with its form ──
-  let ca_handle = |e: Event| select e {
-    `Key(k) => select k.kind {
-      `Press => select k.code {
-        `Up | `Char("k") => { ca_sel <- k ~ max(0, ca_sel - 1); `Stop },
-        `Down | `Char("j") => { ca_sel <- k ~ min(1, ca_sel + 1); `Stop },
-        kk@ `Enter => {
-          run <- kk ~ `UninstallWith(ca_sel == 1);
-          ca_ask <- kk ~ false;
-          `Stop
-        },
-        kk@ `Esc => { ca_ask <- kk ~ false; `Stop },
-        _ => `Stop
+  let ca_handle = |e: Event| {
+    on_press(e, |k| select k.code {
+      `Up | `Char("k") => { ca_sel <- k ~ max(0, ca_sel - 1); `Stop },
+      `Down | `Char("j") => { ca_sel <- k ~ min(1, ca_sel + 1); `Stop },
+      kk@ `Enter => {
+        run <- kk ~ `UninstallWith(ca_sel == 1);
+        ca_ask <- kk ~ false;
+        `Stop
       },
+      kk@ `Esc => { ca_ask <- kk ~ false; `Stop },
       _ => `Stop
-    },
-    _ => `Stop
+    });
+    e ~ `Stop
   };
   let ca_layers = select ca_ask {
     false => [],
@@ -1031,36 +1028,33 @@ let local = |#q: &Question| {
     #on_cancel: |e| { parent_form_open <- e ~ false; null },
     parent_fields
   );
-  let parent_handle = |e: Event| select e {
-    `Key(k) => select k.kind {
-      `Press => select k.code {
-        `Up | `Char("k") => { parent_sel <- k ~ max(0, parent_sel - 1); `Stop },
-        `Down | `Char("j") => {
-          parent_sel <- k ~ min(array::len(parent_cands_or_empty), parent_sel + 1);
-          `Stop
-        },
-        kk@ `Enter => {
-          select kk ~ (parent_cands_or_empty, parent_sel) {
-            (cs, i) if i < array::len(cs) => {
-              let c = cs[i]$;
-              parent_pick <- [c.resolver];
-              parent_fields <- [{ label: "parent admin server", value: c.admin }, { label: "subtree path", value: "" }]
-            },
-            (cs, _) => {
-              parent_pick <- cs ~ null;
-              parent_fields <- cs ~ [{ label: "parent admin server", value: "" }, { label: "subtree path", value: "" }]
-            }
-          };
-          parent_open <- kk ~ false;
-          parent_form_open <- kk ~ true;
-          `Stop
-        },
-        kk@ `Esc => { parent_open <- kk ~ false; `Stop },
-        _ => `Stop
+  let parent_handle = |e: Event| {
+    on_press(e, |k| select k.code {
+      `Up | `Char("k") => { parent_sel <- k ~ max(0, parent_sel - 1); `Stop },
+      `Down | `Char("j") => {
+        parent_sel <- k ~ min(array::len(parent_cands_or_empty), parent_sel + 1);
+        `Stop
       },
+      kk@ `Enter => {
+        select kk ~ (parent_cands_or_empty, parent_sel) {
+          (cs, i) if i < array::len(cs) => {
+            let c = cs[i]$;
+            parent_pick <- [c.resolver];
+            parent_fields <- [{ label: "parent admin server", value: c.admin }, { label: "subtree path", value: "" }]
+          },
+          (cs, _) => {
+            parent_pick <- cs ~ null;
+            parent_fields <- cs ~ [{ label: "parent admin server", value: "" }, { label: "subtree path", value: "" }]
+          }
+        };
+        parent_open <- kk ~ false;
+        parent_form_open <- kk ~ true;
+        `Stop
+      },
+      kk@ `Esc => { parent_open <- kk ~ false; `Stop },
       _ => `Stop
-    },
-    _ => `Stop
+    });
+    e ~ `Stop
   };
   let parent_layers = array::concat(
     select parent_open {
@@ -1163,12 +1157,9 @@ let local = |#q: &Question| {
       }
     }
   };
-  let status_handle = |e: Event| select e {
-    `Key(k) => select k.kind {
-      `Press => { show_status <- k ~ false; `Stop },
-      _ => `Stop
-    },
-    _ => `Stop
+  let status_handle = |e: Event| {
+    on_press(e, |k| { show_status <- k ~ false; `Stop });
+    e ~ `Stop
   };
   let status_layers = select show_status {
     false => [],
@@ -1193,12 +1184,9 @@ let local = |#q: &Question| {
     }
   };
   // ── the fresh-machine welcome ──
-  let welcome_handle = |e: Event| select e {
-    `Key(k) => select k.kind {
-      `Press => { welcome_seen <- k ~ true; `Stop },
-      _ => `Stop
-    },
-    _ => `Stop
+  let welcome_handle = |e: Event| {
+    on_press(e, |k| { welcome_seen <- k ~ true; `Stop });
+    e ~ `Stop
   };
   let welcome_layers = select (fresh, welcome_seen) {
     (true, false) => [layer(#width: &`Length(64), #height: &`Length(10),
@@ -1260,20 +1248,14 @@ let local = |#q: &Question| {
         &paragraph(#trim: &false, &desc_lines)))
     ])
   };
-  let handle = |e: Event| select e {
-    ev@ `Key(k) => select k.kind {
-      `Press => select k ~ screen {
-        `Admin => pan.handle(ev),
-        `Services => svc.handle(ev),
-        `Home => select k ~ fresh {
-          true => fresh_keys(k),
-          false => home_keys(k)
-        }
-      },
-      _ => `Continue
-    },
-    _ => `Continue
-  };
+  let handle = |e: Event| on_press(e, |k| select k ~ screen {
+    `Admin => pan.handle(e),
+    `Services => svc.handle(e),
+    `Home => select k ~ fresh {
+      true => fresh_keys(k),
+      false => home_keys(k)
+    }
+  });
   let view = select screen {
     `Admin => pan.view,
     `Services => svc.view,

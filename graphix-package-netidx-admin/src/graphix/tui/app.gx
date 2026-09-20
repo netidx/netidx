@@ -26,23 +26,17 @@ let app = |#server: string = ""| -> tui::Tui {
     `Local(t) => t.handle(e),
     `Remote(t) => t.handle(e)
   };
-  let global = |e: Event| select e {
-    `Key(k) => select k.kind {
-      `Press => select k.code {
-        `Tab => {
-          order <- k ~ select loc.installed {
-            true => array::rotate(order),
-            false => [`Local(loc), `Remote(rem)]
-          };
-          `Stop
-        },
-        `Char("q") => { tui::exit(k ~ null); `Stop },
-        _ => `Continue
-      },
-      _ => `Continue
+  let global = |e: Event| on_press(e, |k| select k.code {
+    `Tab => {
+      order <- k ~ select loc.installed {
+        true => array::rotate(order),
+        false => [`Local(loc), `Remote(rem)]
+      };
+      `Stop
     },
+    `Char("q") => { tui::exit(k ~ null); `Stop },
     _ => `Continue
-  };
+  });
   let selected = select tab {
     `Local(_) => 0,
     `Remote(_) => 1

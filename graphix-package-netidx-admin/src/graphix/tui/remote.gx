@@ -119,17 +119,11 @@ let remote = |#q: &Question, #book_dir: [string, null], #server: string = ""| ->
     },
     target
   );
-  let handle = |e: Event| select e {
-    ev@ `Key(k) => select k.kind {
-      `Press => select k ~ screen {
-        `Landing => land.handle(ev),
-        `Connect => connect_keys(ev, k),
-        `Panels => pan.handle(ev)
-      },
-      _ => `Continue
-    },
-    _ => `Continue
-  };
+  let handle = |e: Event| on_press(e, |k| select k ~ screen {
+    `Landing => land.handle(e),
+    `Connect => connect_keys(e, k),
+    `Panels => pan.handle(e)
+  });
   let conn_err_lines = select conn_err {
     null as _ => [],
     m => [line(#style: style(#fg: `Red), m)]

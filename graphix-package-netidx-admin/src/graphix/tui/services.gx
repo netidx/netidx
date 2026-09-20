@@ -275,63 +275,57 @@ let services = |#units_dir: string, #on_close: fn(e: Any) -> null, open: Any| ->
     run <- `Control({ unit: u.name, op });
     null
   };
-  let handle = |e: Event| select e {
-    `Key(k) => select k.kind {
-      `Press => select k.code {
-        `Up | `Char("k") => { sel <- k ~ max(0, sel - 1); `Stop },
-        `Down | `Char("j") => { sel <- k ~ min(last, sel + 1); `Stop },
-        kk@ `Char("s") => { control(kk, `Start); `Stop },
-        kk@ `Char("t") => {
-          let u = (kk ~ selected)$;
-          confirm <- {
-            message: "Stop unit [u.name]? It stays down until started.",
-            action: `Control({ unit: u.name, op: `Stop })
-          };
-          `Stop
-        },
-        kk@ `Char("R") => { control(kk, `Restart); `Stop },
-        kk@ `Char("c") => {
-          form_title <- kk ~ "New unit";
-          creating <- kk ~ true;
-          form_fields <- kk ~ array::push_front(def_fields(template), { label: "name", value: "" });
-          form_open <- kk ~ true;
-          `Stop
-        },
-        kk@ `Char("e") => {
-          select kk ~ selected {
-            null as _ => never(),
-            u => select u.definition {
-              null as _ => toast <- {
-                title: "No definition",
-                lines: ["[u.name] is reported by the supervisor with no definition file to edit."],
-                error: true
-              },
-              d => {
-                form_title <- "Edit [u.name]";
-                creating <- d ~ false;
-                form_fields <- def_fields(d);
-                form_open <- d ~ true
-              }
-            }
-          };
-          `Stop
-        },
-        kk@ `Char("d") => {
-          let u = (kk ~ selected)$;
-          confirm <- {
-            message: "Delete unit [u.name]? This removes its definition file and reloads the supervisor.",
-            action: `Delete(u.name)
-          };
-          `Stop
-        },
-        kk@ `Char("r") => { load <- kk; `Stop },
-        kk@ `Esc => { on_close(kk); `Stop },
-        _ => `Continue
-      },
-      _ => `Continue
+  let handle = |e: Event| on_press(e, |k| select k.code {
+    `Up | `Char("k") => { sel <- k ~ max(0, sel - 1); `Stop },
+    `Down | `Char("j") => { sel <- k ~ min(last, sel + 1); `Stop },
+    kk@ `Char("s") => { control(kk, `Start); `Stop },
+    kk@ `Char("t") => {
+      let u = (kk ~ selected)$;
+      confirm <- {
+        message: "Stop unit [u.name]? It stays down until started.",
+        action: `Control({ unit: u.name, op: `Stop })
+      };
+      `Stop
     },
+    kk@ `Char("R") => { control(kk, `Restart); `Stop },
+    kk@ `Char("c") => {
+      form_title <- kk ~ "New unit";
+      creating <- kk ~ true;
+      form_fields <- kk ~ array::push_front(def_fields(template), { label: "name", value: "" });
+      form_open <- kk ~ true;
+      `Stop
+    },
+    kk@ `Char("e") => {
+      select kk ~ selected {
+        null as _ => never(),
+        u => select u.definition {
+          null as _ => toast <- {
+            title: "No definition",
+            lines: ["[u.name] is reported by the supervisor with no definition file to edit."],
+            error: true
+          },
+          d => {
+            form_title <- "Edit [u.name]";
+            creating <- d ~ false;
+            form_fields <- def_fields(d);
+            form_open <- d ~ true
+          }
+        }
+      };
+      `Stop
+    },
+    kk@ `Char("d") => {
+      let u = (kk ~ selected)$;
+      confirm <- {
+        message: "Delete unit [u.name]? This removes its definition file and reloads the supervisor.",
+        action: `Delete(u.name)
+      };
+      `Stop
+    },
+    kk@ `Char("r") => { load <- kk; `Stop },
+    kk@ `Esc => { on_close(kk); `Stop },
     _ => `Continue
-  };
+  });
   // ── the actions and their outcomes ──
   let control_r = select run {
     `Control(c) => units::control(#units_dir: units_dir, #unit: c.unit, c.op),

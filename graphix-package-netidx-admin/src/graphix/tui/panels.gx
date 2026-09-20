@@ -1046,46 +1046,37 @@ let panels = |
       `Perms => perms_keys(k)
     }
   };
-  let handle = |e: Event| select e {
-    ev@ `Key(k) => select k.kind {
-      `Press => select k ~ screen {
-        `Menu => menu_keys(k),
-        `Panel(p) => panel_keys(k, p),
-        `ServerPick => pick_keys(k),
-        `ClusterPick => pick_keys(k)
-      },
-      _ => `Continue
-    },
-    _ => `Continue
-  };
+  let handle = |e: Event| on_press(e, |k| select k ~ screen {
+    `Menu => menu_keys(k),
+    `Panel(p) => panel_keys(k, p),
+    `ServerPick => pick_keys(k),
+    `ClusterPick => pick_keys(k)
+  });
   // ── the read-gate chooser and the permission form ──
-  let gate_handle = |e: Event| select e {
-    `Key(k) => select k.kind {
-      `Press => select k.code {
-        `Up | `Char("k") => { gate_sel <- k ~ max(0, gate_sel - 1); `Stop },
-        `Down | `Char("j") => {
-          gate_sel <- k ~ min(array::len(gate_choices) - 1, gate_sel + 1);
-          `Stop
-        },
-        kk@ `Enter => {
-          let g = kk ~ (gate_choices[gate_sel]$).gate;
-          let at = kk ~ now;
-          select kk ~ gate_for {
-            null as _ => never(),
-            s => select gate_warning(s, g, at) {
-              null as _ => run <- `Gate({ server: s.id, gate: g }),
-              w => confirm <- { message: w, action: `Gate({ server: s.id, gate: g }) }
-            }
-          };
-          gate_for <- kk ~ null;
-          `Stop
-        },
-        kk@ `Esc => { gate_for <- kk ~ null; `Stop },
-        _ => `Stop
+  let gate_handle = |e: Event| {
+    on_press(e, |k| select k.code {
+      `Up | `Char("k") => { gate_sel <- k ~ max(0, gate_sel - 1); `Stop },
+      `Down | `Char("j") => {
+        gate_sel <- k ~ min(array::len(gate_choices) - 1, gate_sel + 1);
+        `Stop
       },
+      kk@ `Enter => {
+        let g = kk ~ (gate_choices[gate_sel]$).gate;
+        let at = kk ~ now;
+        select kk ~ gate_for {
+          null as _ => never(),
+          s => select gate_warning(s, g, at) {
+            null as _ => run <- `Gate({ server: s.id, gate: g }),
+            w => confirm <- { message: w, action: `Gate({ server: s.id, gate: g }) }
+          }
+        };
+        gate_for <- kk ~ null;
+        `Stop
+      },
+      kk@ `Esc => { gate_for <- kk ~ null; `Stop },
       _ => `Stop
-    },
-    _ => `Stop
+    });
+    e ~ `Stop
   };
   let gate_widget = select gate_for {
     null as _ => paragraph(&""),

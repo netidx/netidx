@@ -54,15 +54,12 @@ let admin_text = |a: AdminError| -> string select a {
 
 let toast_layers = |t: &[Toast, null]| -> Array<Layer> {
   let hint = style(#fg: `DarkGray);
-  let handle = |e: Event| select e {
-    `Key(k) => select k.kind {
-      `Press => select k.code {
-        `Enter | `Esc | `Char(" ") => { *t <- k ~ null; `Stop },
-        _ => `Stop
-      },
+  let handle = |e: Event| {
+    on_press(e, |k| select k.code {
+      `Enter | `Esc | `Char(" ") => { *t <- k ~ null; `Stop },
       _ => `Stop
-    },
-    _ => `Stop
+    });
+    e ~ `Stop
   };
   select *t {
     null as _ => [],
@@ -84,22 +81,19 @@ let toast_layers = |t: &[Toast, null]| -> Array<Layer> {
 
 let confirm_layers = |#on_confirm: fn(a: 'a) -> null, c: &[Confirm<'a>, null]| -> Array<Layer> {
   let hint = style(#fg: `DarkGray);
-  let handle = |e: Event| select e {
-    `Key(k) => select k.kind {
-      `Press => select k.code {
-        `Char("y") | `Enter => {
-          select k ~ *c {
-            null as _ => never(),
-            cc => { on_confirm(cc.action); *c <- cc ~ null }
-          };
-          `Stop
-        },
-        `Char("n") | `Esc => { *c <- k ~ null; `Stop },
-        _ => `Stop
+  let handle = |e: Event| {
+    on_press(e, |k| select k.code {
+      `Char("y") | `Enter => {
+        select k ~ *c {
+          null as _ => never(),
+          cc => { on_confirm(cc.action); *c <- cc ~ null }
+        };
+        `Stop
       },
+      `Char("n") | `Esc => { *c <- k ~ null; `Stop },
       _ => `Stop
-    },
-    _ => `Stop
+    });
+    e ~ `Stop
   };
   select *c {
     null as _ => [],
@@ -260,24 +254,18 @@ let pump = |q: Question| -> Pump {
     `Char("r") | `Char("n") | `Esc => { confirm_answer(k, false); `Stop },
     _ => `Continue
   };
-  let handle = |e: tui::input_handler::Event| select e {
-    ev@ `Key(k) => select k.kind {
-      `Press => select k ~ active {
-        null as _ => `Continue,
-        `Text(_) => text_keys(ev, k),
-        `Secret(_) => text_keys(ev, k),
-        `Choice({ choices, .. }) => list_keys(k, array::len(choices) - 1),
-        `Confirm(_) => confirm_keys(k),
-        `SelectAdminDomain({ domains, .. }) => list_keys(k, array::len(domains) + 1),
-        `Announce(_) => ack_keys(k),
-        `AnnounceIdentity(_) => ack_keys(k),
-        `ConfirmIdentity(_) => identity_keys(k),
-        `OneTimeSecret(_) => ack_keys(k)
-      },
-      _ => `Continue
-    },
-    _ => `Continue
-  };
+  let handle = |e: tui::input_handler::Event| on_press(e, |k| select k ~ active {
+    null as _ => `Continue,
+    `Text(_) => text_keys(e, k),
+    `Secret(_) => text_keys(e, k),
+    `Choice({ choices, .. }) => list_keys(k, array::len(choices) - 1),
+    `Confirm(_) => confirm_keys(k),
+    `SelectAdminDomain({ domains, .. }) => list_keys(k, array::len(domains) + 1),
+    `Announce(_) => ack_keys(k),
+    `AnnounceIdentity(_) => ack_keys(k),
+    `ConfirmIdentity(_) => identity_keys(k),
+    `OneTimeSecret(_) => ack_keys(k)
+  });
   // ── the modal views ──
   let err_lines = select err {
     null as _ => [],
