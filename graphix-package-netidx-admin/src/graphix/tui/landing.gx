@@ -42,11 +42,11 @@ let landing = |
   // ── the bookmarks file ──
   let book_path = sys::join_path(book_dir$, "admin-domains.json");
   let notice: [string, null] = null;
-  let blank: Book = { domains: [] };
   // the initial state, loaded once: the file, then this host's own
   // domain from its install record. known is absent until it is done,
   // so every edit waits for it
   let known: Book = seq {
+    let blank: Book = { domains: [] };
     let book = select book_dir {
       null as _ => blank,
       _ => select sys::fs::is_file(book_path) {
