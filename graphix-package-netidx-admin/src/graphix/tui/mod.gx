@@ -1,7 +1,7 @@
 use tui::{
   line_edit,
   block::block,
-  input_handler::{Event, input_handler, on_press},
+  input_handler::{Event, KeyEvent, input_handler, on_press},
   layout::{child, layout},
   list::list,
   paragraph::paragraph,
@@ -212,13 +212,15 @@ let pump = |q: Question| -> Pump {
     `OneTimeSecret({ id, .. }) => { id, a: `Ack }
   };
   // ── submit: answer the question, close on success, show refusals ──
-  let submit: [{ id: QuestionId, a: Answer }, null] = null;
-  select submit {
-    null as _ => never(),
-    { id, a } => {
-      catch(e) select (e.0).error { `Admin(m) => err <- m };
-      let sent = answer(id, a)?;
-      active <- sent ~ null
+  let submit = never<{ id: QuestionId, a: Answer }>();
+  seqq let s = submit {
+    try {
+      answer(s.id, s.a)?;
+      active <- null;
+      null
+    } with(e) {
+      err <- select (e.0).error { `Admin(m) => m };
+      null
     }
   };
   let enter = |t| {
@@ -238,19 +240,19 @@ let pump = |q: Question| -> Pump {
     null
   };
   // ── per-kind key handling ──
-  let text_keys = |ev, k: tui::input_handler::KeyEvent| select k.code {
-      kk@ `Enter => { enter(kk); `Stop },
-      kk@ `Esc => { cancel(kk); `Stop },
-      _ => line_edit::handle(&ed, ev)
-    };
-  let list_keys = |k: tui::input_handler::KeyEvent, last| select k.code {
-      `Up | `Char("k") => { sel <- k ~ max(0, sel - 1); `Stop },
-      `Down | `Char("j") => { sel <- k ~ min(last, sel + 1); `Stop },
-      kk@ `Enter => { enter(kk); `Stop },
-      kk@ `Esc => { cancel(kk); `Stop },
-      _ => `Continue
-    };
-  let confirm_keys = |k: tui::input_handler::KeyEvent| select k.code {
+  let text_keys = |ev, k: KeyEvent| select k.code {
+    kk@ `Enter => { enter(kk); `Stop },
+    kk@ `Esc => { cancel(kk); `Stop },
+    _ => line_edit::handle(&ed, ev)
+  };
+  let list_keys = |k: KeyEvent, last| select k.code {
+    `Up | `Char("k") => { sel <- k ~ max(0, sel - 1); `Stop },
+    `Down | `Char("j") => { sel <- k ~ min(last, sel + 1); `Stop },
+    kk@ `Enter => { enter(kk); `Stop },
+    kk@ `Esc => { cancel(kk); `Stop },
+    _ => `Continue
+  };
+  let confirm_keys = |k: KeyEvent| select k.code {
     `Left | `Right | `Tab => { yes <- k ~ !yes; `Stop },
     kk@ `Char("y") => { confirm_answer(kk, true); `Stop },
     kk@ `Char("n") => { confirm_answer(kk, false); `Stop },
@@ -258,17 +260,17 @@ let pump = |q: Question| -> Pump {
     kk@ `Esc => { cancel(kk); `Stop },
     _ => `Continue
   };
-  let ack_keys = |k: tui::input_handler::KeyEvent| select k.code {
+  let ack_keys = |k: KeyEvent| select k.code {
     `Enter | `Char(" ") => { enter(k); `Stop },
     kk@ `Esc => { cancel(kk); `Stop },
     _ => `Continue
   };
-  let identity_keys = |k: tui::input_handler::KeyEvent| select k.code {
+  let identity_keys = |k: KeyEvent| select k.code {
     `Char("a") | `Enter => { confirm_answer(k, true); `Stop },
     `Char("r") | `Char("n") | `Esc => { confirm_answer(k, false); `Stop },
     _ => `Continue
   };
-  let handle = |e: tui::input_handler::Event| on_press(e, |k| select k ~ active {
+  let handle = |e: Event| on_press(e, |k| select k ~ active {
     null as _ => `Continue,
     `Text(_) => text_keys(e, k),
     `Secret(_) => text_keys(e, k),
