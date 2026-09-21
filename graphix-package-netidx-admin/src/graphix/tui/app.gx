@@ -15,15 +15,21 @@ let app = |#server: string = ""| -> tui::Tui {
   let loc = local::local(#q: &q);
   let book_dir = opt::map(sys::dirs::config_dir(), |d| sys::join_path(d, "netidx-admin-tui"));
   let rem = remote::remote(#q: &q, #book_dir: book_dir, #server: server);
-  // which tab is in front: a tag, never the tab itself, which re-fires
-  // with every change inside it
+  // which tab the operator asked for: a tag, never the tab itself,
+  // which re-fires with every change inside it
   let front: [`Local, `Remote] = select server {
     "" => `Local,
     _ => `Remote
   };
+  // which tab is in front: the Local tab is the only one until
+  // something is installed here
+  let shown = select loc.installed {
+    false => `Local,
+    true => front
+  };
   // the tab's own keys come first; what it leaves alone reaches the
   // global ones
-  let tab_handle = |e: Event| select e ~ front {
+  let tab_handle = |e: Event| select e ~ shown {
     `Local => loc.handle(e),
     `Remote => rem.handle(e)
   };
@@ -38,7 +44,7 @@ let app = |#server: string = ""| -> tui::Tui {
     `Char("q") => { tui::exit(k ~ null); `Stop },
     _ => `Continue
   });
-  let selected = select front {
+  let selected = select shown {
     `Local => 0,
     `Remote => 1
   };
@@ -51,14 +57,14 @@ let app = |#server: string = ""| -> tui::Tui {
     )
   };
   let status = select p.progress {
-    null as _ => select front {
+    null as _ => select shown {
       `Local => loc.status,
       `Remote => rem.status
     },
     pr => line(#style: hint, " working… [pr.message] ")
   };
   let layers = array::concat(
-    select front {
+    select shown {
       `Local => loc.layers,
       `Remote => rem.layers
     },

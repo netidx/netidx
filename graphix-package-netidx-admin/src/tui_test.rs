@@ -766,6 +766,34 @@ async fn services_surface_creates_and_deletes_a_unit() -> Result<()> {
     Ok(())
 }
 
+/// `#server` on a fresh machine: there is no Admin Domain tab to open
+/// on until something is installed, so the welcome dialog and the role
+/// menu are what is shown and what the keys reach.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_server_argument_on_a_fresh_machine_leaves_the_keys_with_the_install()
+-> Result<()> {
+    let _ = std::fs::remove_file(netidx_admin::paths::user_install_record()?);
+    let prog = r#"let result = netidx_admin::tui::app::app(#server: "127.0.0.1:1")"#;
+    let mut h =
+        TuiTestHarness::with_register(prog, crate::TEST_REGISTER, 120, 40).await?;
+    wait_render(&mut h, Duration::from_secs(60), "the welcome dialog", |lines| {
+        lines.iter().any(|l| l.contains("Welcome to netidx"))
+    })
+    .await?;
+    h.dispatch_event(key(KeyCode::Enter)).await?;
+    wait_render(&mut h, Duration::from_secs(10), "the role menu", |lines| {
+        lines.iter().any(|l| l.contains("Enter install"))
+            && !lines.iter().any(|l| l.contains("Welcome to netidx"))
+    })
+    .await?;
+    h.dispatch_event(key(KeyCode::Down)).await?;
+    wait_render(&mut h, Duration::from_secs(10), "the workstation blurb", |lines| {
+        lines.iter().any(|l| l.contains("full netidx node"))
+    })
+    .await?;
+    Ok(())
+}
+
 /// A fresh machine: the welcome dialog, the role menu, and a dry-run
 /// preview of the Workstation role reaching the guided install's first
 /// question through the pump — cancelled there, which the tab reports
