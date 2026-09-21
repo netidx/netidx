@@ -29,7 +29,7 @@ months. Run this alongside the normal build whenever you touch the admin crates:
 
 ```bash
 rustup target add x86_64-pc-windows-gnu   # once
-cargo check -p netidx-tools -p netidx-admin --target x86_64-pc-windows-gnu --all-targets
+cargo check -p netidx-tools -p netidx-admin -p graphix-package-netidx-admin --target x86_64-pc-windows-gnu --all-targets
 ```
 
 Baseline is zero errors and zero warnings. Gate an item `#[cfg(unix)]` only when
@@ -40,8 +40,12 @@ the boundary the wrong way.
 ### The admin layering rule
 
 `netidx-admin` owns every decision. `netidx-tools/src/admin/` (the strict CLI)
-and `netidx-tools/src/admin/tui/` are presentation, and a third GUI frontend is
-planned, so anything implemented in a frontend has to be written again for it.
+and the TUI are presentation, and a third GUI frontend is planned, so anything
+implemented in a frontend has to be written again for it. The TUI is the Graphix
+program in `graphix-package-netidx-admin`, run by `netidx admin tui` (and bare
+`netidx admin`) through the driver in `netidx-tools/src/admin/tui.rs`. The Rust
+TUI it replaces is `netidx admin tui-old` (`netidx-tools/src/admin/tui_old/`)
+and goes before release; do not add to it.
 
 When you are unsure which side something belongs on, ask:
 

@@ -1,5 +1,6 @@
 #![recursion_limit = "2048"]
 mod browser;
+mod gx;
 mod log_errors;
 mod publisher;
 mod record_client;

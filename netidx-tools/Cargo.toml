@@ -65,6 +65,7 @@ graphix-rt = { workspace = true }
 graphix-compiler = { workspace = true }
 graphix-package = { workspace = true }
 graphix-package-core = { workspace = true }
+graphix-package-netidx-admin = { path = "../graphix-package-netidx-admin", version = "0.32.0" }
 hdrhistogram = { workspace = true }
 log = { workspace = true }
 netidx-activation = { path = "../netidx-activation", version = "0.32.0" }

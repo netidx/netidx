@@ -19,8 +19,10 @@ use crossterm::{
     },
 };
 use netidx_activation::runtime::default_units_dir;
+#[cfg(unix)]
+use netidx_admin::privileged::sh_quote;
 use netidx_admin::{
-    privileged::{install_service_argv, sh_quote, system_service_outcome},
+    privileged::{install_service_argv, system_service_outcome},
     service::{self, ServiceParams, ServiceScope},
 };
 #[cfg(unix)]

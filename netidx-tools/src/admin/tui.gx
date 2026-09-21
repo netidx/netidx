@@ -1,0 +1,6 @@
+let server = select sys::args() {
+    [s, ..] => s,
+    _ => ""
+};
+
+netidx_admin::tui::app::app(#server)
