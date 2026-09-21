@@ -59,6 +59,7 @@ use std::{
 enum InstallOutcomeV {
     Preview { service: Option<ScopeV> },
     Installed { service: Option<ScopeV> },
+    #[cfg(unix)]
     CaAwaitingSignature { csr: String },
 }
 
@@ -149,7 +150,9 @@ impl LocalOp for InstallOp {
                         out.service
                     }
                     #[cfg(not(unix))]
-                    InstallRole::Ca => bail!("the CA role is supported only on unix"),
+                    InstallRole::Ca => {
+                        anyhow::bail!("the CA role is supported only on unix")
+                    }
                     InstallRole::Resolver => {
                         run_resolver(ans, resolver_input(common)).await?
                     }

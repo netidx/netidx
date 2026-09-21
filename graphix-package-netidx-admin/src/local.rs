@@ -24,7 +24,6 @@ use netidx_admin::{
         self, ActivationDir, Environment, ProcessCfg, Restart, Trigger as UnitTrigger,
         Unit,
     },
-    answer::{Answerer, Field},
     install_bundle::{BundleScope, Component},
     paths,
     plan::bundle,
@@ -1025,6 +1024,7 @@ pub(crate) type Backup = LocalCeremony<BackupOp>;
 
 // ── the local CA ops (unix only) ─────────────────────────────────
 
+#[cfg(unix)]
 #[derive(Debug, Clone, IntoValue)]
 enum AutorenewWiringV {
     Updated(String),
@@ -1032,18 +1032,21 @@ enum AutorenewWiringV {
     Failed(String),
 }
 
+#[cfg(unix)]
 #[derive(Debug, Clone, IntoValue)]
 enum AutoApproveOutcomeV {
     HotSwapped { warning: Option<String> },
     Offline { rotate: bool, keytab: String, wiring: AutorenewWiringV },
 }
 
+#[cfg(unix)]
 #[derive(Debug, Clone, IntoValue)]
 enum RecoveryRotateOutcomeV {
     HotSwapped,
     Offline,
 }
 
+#[cfg(unix)]
 #[derive(Debug, Clone, IntoValue)]
 enum ExternalInstallOutcomeV {
     FirstInstall { cfg_path: String, service_scope: Option<ScopeV> },
@@ -1181,8 +1184,9 @@ impl LocalOp for ExternalInstallOp {
 
     #[cfg(unix)]
     fn op(args: &[Option<Value>]) -> Result<BoxOp> {
-        use netidx_admin::ops::slots::{
-            CaAccess, ExternalInstallOutcome, external_install,
+        use netidx_admin::{
+            answer::{Answerer, Field},
+            ops::slots::{CaAccess, ExternalInstallOutcome, external_install},
         };
         let signed = opt_path(args[0].as_ref())?;
         let root = opt_path(args[1].as_ref())?;
