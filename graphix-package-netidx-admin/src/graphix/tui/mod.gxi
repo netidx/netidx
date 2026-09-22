@@ -1,11 +1,24 @@
 use super::{
-  AdminDomain, AdminError, CaIdentity, Fingerprint, identicon,
-  ceremony::{
-    Answer, Ceremony, FieldInfo, OneTimeSecretKind, Question, QuestionId, Stage, answer,
-    questions, result
-  }
+    AdminDomain,
+    AdminError,
+    CaIdentity,
+    Fingerprint,
+    ceremony::{
+        Answer,
+        Ceremony,
+        FieldInfo,
+        OneTimeSecretKind,
+        Question,
+        QuestionId,
+        Stage,
+        answer,
+        questions,
+        result
+    },
+    identicon
 };
-use tui::{line, span, style, overlay::{self, Layer, layer}};
+
+use tui::{line, overlay::{self, Layer, layer}, span, style};
 
 /// An admin error as one line for the operator.
 val admin_text: fn(a: AdminError) -> string;
@@ -21,12 +34,15 @@ type Confirm<'a> = { message: [string, Array<tui::Line>], action: 'a };
 /// The toast modal over `t`: one layer while a toast is up, none
 /// otherwise. Enter, Esc or space clears it (through the reference);
 /// every other key is swallowed.
-val toast_layers: fn(t: &[Toast, null]) -> Array<Layer>;
+val toast_layers: fn(t: &[null, Toast]) -> Array<Layer>;
 
 /// The confirm modal over `c`: one layer while a confirmation is up.
 /// `y` or Enter calls `#on_confirm` with the held action and clears
 /// it; `n` or Esc clears it.
-val confirm_layers: fn(#on_confirm: fn(a: 'a) -> null, c: &[Confirm<'a>, null]) -> Array<Layer>;
+val confirm_layers: fn(
+    #on_confirm: fn(a: 'a) -> null,
+    c: &[null, Confirm<'a>]
+) -> Array<Layer>;
 
 /// Conduct a ceremony: its questions go to the bus `q`, and its result is
 /// the value. Observing the result is what starts it.
@@ -48,28 +64,35 @@ val hint: tui::Style;
 
 /// The style of the row a cursor rests on; optional, as a list's
 /// `#highlight_style` reference is.
-val selstyle: [tui::Style, null];
+val selstyle: [null, tui::Style];
 
 /// How many rows there are; none while they are absent.
-val opt_len: fn(o: [Array<'a>, null]) -> i64;
+val opt_len: fn(o: [null, Array<'a>]) -> i64;
 
 /// The row a cursor rests on, clamped to the list; null while there is
 /// none (the rows are absent, or empty).
-val selected: fn(rows: [Array<'a>, null], i: i64) -> ['a, null];
+val selected: fn(rows: [null, Array<'a>], i: i64) -> [null, 'a];
 
 /// The nine blocking question shapes — the subset of `Question` the
 /// pump can have open as a modal. The presentation events never land
 /// here.
 type Blocking = [
-  `Text({ id: QuestionId, field: FieldInfo, default: [string, null], required: bool }),
-  `Secret({ id: QuestionId, field: FieldInfo }),
-  `Choice({ id: QuestionId, field: FieldInfo, choices: Array<string>, default: [string, null] }),
-  `Confirm({ id: QuestionId, field: FieldInfo, default: bool }),
-  `SelectAdminDomain({ id: QuestionId, domains: Array<AdminDomain> }),
-  `Announce({ id: QuestionId, title: string, body: string }),
-  `AnnounceIdentity({ id: QuestionId, body: string, fp: Fingerprint }),
-  `ConfirmIdentity({ id: QuestionId, identity: CaIdentity }),
-  `OneTimeSecret({ id: QuestionId, kind: OneTimeSecretKind, password: string })
+    `Text({ id: QuestionId, field: FieldInfo, default: [null, string], required: bool }),
+    `Secret({ id: QuestionId, field: FieldInfo }),
+    `Choice(
+        {
+            id: QuestionId,
+            field: FieldInfo,
+            choices: Array<string>,
+            default: [null, string]
+        }
+    ),
+    `Confirm({ id: QuestionId, field: FieldInfo, default: bool }),
+    `SelectAdminDomain({ id: QuestionId, domains: Array<AdminDomain> }),
+    `Announce({ id: QuestionId, title: string, body: string }),
+    `AnnounceIdentity({ id: QuestionId, body: string, fp: Fingerprint }),
+    `ConfirmIdentity({ id: QuestionId, identity: CaIdentity }),
+    `OneTimeSecret({ id: QuestionId, kind: OneTimeSecretKind, password: string })
 ];
 
 /// What the question pump holds for the app: the overlay layers of
@@ -77,11 +100,11 @@ type Blocking = [
 /// note/warning log, the latest progress report, the standing
 /// verification code, and whether a blocking question is up.
 type Pump = {
-  layers: Array<tui::overlay::Layer>,
-  notes: Array<string>,
-  progress: [{ stage: Stage, message: string, duration: [duration, null] }, null],
-  code: [{ purpose: string, fp: Fingerprint }, null],
-  busy: bool
+    layers: Array<tui::overlay::Layer>,
+    notes: Array<string>,
+    progress: [null, { stage: Stage, message: string, duration: [null, duration] }],
+    code: [null, { purpose: string, fp: Fingerprint }],
+    busy: bool
 };
 
 /// The shared modal question pump: ONE pump serves every ceremony the
@@ -98,4 +121,4 @@ mod panels;
 mod remote;
 mod services;
 mod local;
-mod app;
+mod app
