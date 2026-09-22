@@ -59,14 +59,16 @@ pub async fn issued(
         transport::list_issued(sess.server, sess.credential.clone(), &sess.identity)
             .await?;
     let filt = name_filter.map(str::to_lowercase);
-    Ok(entries
+    let mut entries: Vec<IssuedEntry> = entries
         .into_iter()
         .filter(|e| include_revoked || !e.revoked)
         .filter(|e| match &filt {
             Some(f) => e.name.to_lowercase().contains(f.as_str()),
             None => true,
         })
-        .collect())
+        .collect();
+    entries.sort_by_key(|e| e.serial);
+    Ok(entries)
 }
 
 /// The outcome of a revocation.
