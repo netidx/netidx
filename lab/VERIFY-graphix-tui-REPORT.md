@@ -2,7 +2,7 @@
 
 Plan: `VERIFY-graphix-tui.md`. Lab on washu-chan (moved from mazikeen
 2026-09-22). Binary: the `quick` profile built on the devbox, redeployed
-after each fix. **In progress** — Phases 0 and 1 are done; Phases 2–4
+after each fix. **In progress** — Phases 0–2 are done; Phases 3–4
 remain.
 
 ## Phase 0 — bring-up
@@ -64,27 +64,56 @@ F2 comparison: a CA founded through the **old** TUI shows the identical
 "CA credentials: another netidx administrative process owns …" line and
 no Rotate items right after its install.
 
+## Phase 2 — Pass 2 mirror, krb5, three resolvers, through the new TUI
+
+Same dedicated-CA topology, rebuilt after the Phase 1 fixes landed. CA on
+`.11`: this time the credential probe's retry (F2) found the daemon a few
+seconds after the install — Rotate items present, "Auto-approve: active /
+Recovery slot: set" — and the status line was the legend, never a stale
+"working…" (F4). `.12` as the krb5 resolver at `/`: SPN default
+`netidx/resolver-hq-b.netidx.test@NETIDX.TEST` equal to the keytab's,
+id-map `none`, admin-server round queued and approved. (A first attempt
+landed on TLS because the auth list defaults to `tls` and my `Down`
+clamped — my sequence, not the TUI; the server was removed from the Admin
+Servers panel — F11/F12's new confirm and CA-row message verified — its
+stale resolver cert revoked from the sorted Issued panel — F13 verified —
+and the box reinstalled.) EU and AP delegated as krb5 children **reaching
+the dedicated CA** (F8's case): the subtree offer appears and `.12` is
+the parent. That exposed two more library bugs, both fixed (`d58f0e66`):
+the delegation looked the parent up by the confirmed identity's server id
+(the CA's) and found no cluster, and `get_map_pinned` handed back a
+member's stale copy of the map whenever the confirmed identity was the
+CA. Both HQ resolver restarts from the Services panel; the unit rows came
+back in the same order on two loads (F9 verified). Four krb5 leaves (a
+krb5 publisher asks only its bind; no enrollment). Enrollment queue and
+certificate panels show the new detail pane (F7 verified).
+
+Data plane with `kinit eric`, publishers on the publisher hosts with their
+keytab SPN: `AP ws → HQ → EU` delivered `EU-DATA-krb5`, `EU ws → HQ → AP`
+delivered `AP-DATA-krb5`. (A publisher without `--spn` fails with
+"kerberos error": the writer's SPN requirement, as recorded in Pass 2.)
+
 ## Findings
 
 | # | Where | Old | New | Verdict / fix |
 |---|---|---|---|---|
-| F1 | preview cancel | — | "Install failed — the operator cancelled" after Esc in a *preview* | wording; not compared yet |
-| F2 | CA install done | **same** | Status card "CA credentials: another netidx administrative process owns …", Rotate actions absent; a fresh process shows "Auto-approve: active / Recovery slot: set" + both actions | pre-existing in both: the probe runs at install completion before the daemon's control socket is up, falls to the lock path, and the result is kept. Fix belongs where the install completes: re-probe once the service is active (or make `R` the documented recovery). Open. |
+| F1 | preview cancel | — | "Install failed — the operator cancelled" after Esc in a *preview* | **fixed** `15f50522`: a cancel is its own error variant; "Preview cancelled / Nothing was changed" |
+| F2 | CA install done | **same** | Status card "CA credentials: another netidx administrative process owns …", Rotate actions absent; a fresh process shows "Auto-approve: active / Recovery slot: set" + both actions | pre-existing in both: the probe runs at install completion before the daemon's control socket is up, falls to the lock path, and the result is kept. **fixed** `15f50522`: a failed probe is retried a few times, seconds apart; verified in Phase 2 |
 | F3 | Local CA actions | lists "Permissions" on a CA-only host; opening it fails "a target path is required for the perms panel" | hides it (no own resolver base) | new is right |
-| F4 | every ceremony | progress line replaced per stage | "working… searching for a netidx admin domain…" stays through every later question and after completion | **bug (new)**, open |
+| F4 | every ceremony | progress line replaced per stage | "working… searching for a netidx admin domain…" stays through every later question and after completion | **fixed** `15f50522`: a question, the code's clearing and the ceremony's end each drop the note; verified in Phase 2 |
 | F5 | enrollment queued | progress box shows identicon + code | nothing: `Pump.code` was never rendered | **fixed** `b80ec201`; verified on `.17`, `.13`, `.60.15`, `.70.11`, four leaves |
 | F6 | approve confirm | paragraphs, full code, glyph | sentences run together, no glyph | **fixed** `b80ec201` + graphix `96944ba2` (string paragraphs dropped newlines); verified on `.60.15` |
 | F6b | approved toast | two lines | "…approvedid-map groups:" | fixed by the same graphix change |
-| F7 | enrollment queue | one card per request with glyph + full code | a table with an 8-char short code | design point for Eric; the confirm now carries the full glyph/code either way |
-| F8 | EU delegation | same | same | **library**: the install-time delegation offer (`plan/install/resolver.rs:198`) is gated on the *reached* admin server running a resolver; reaching the dedicated CA skips it although the domain has resolvers. Eric's call. |
+| F7 | enrollment queue | one card per request with glyph + full code | a table with an 8-char short code | **fixed** `15f50522`: the detail pane (identicon beside summary + grouped code) under the queue, delegation and certificate tables, as the old one; verified in Phase 2 |
+| F8 | EU delegation | same | same | **library**: the install-time delegation offer (`plan/install/resolver.rs:198`) is gated on the *reached* admin server running a resolver; reaching the dedicated CA skipped it although the domain had resolvers. **fixed** `8d6f93b7` + `d58f0e66` (Eric: only a resolver can delegate; a pure CA is filtered out); verified in Phase 2 |
 | F9 | Services panel | same | same | **library, fixed** `1650b90b`: the supervisor answered an all-units request in `HashMap` order; three loads gave three orders and `R` on row 1 restarted `.12`'s admin server instead of its resolver |
 | F10 | Services panel | same | same | restarting the admin server one is connected through loses the reply: "the CA refused … peer closed connection without sending TLS close_notify" although the restart happened. Expected; the message could say what happened. |
 | — | workstation-eu | — | `netidx@root` reported `failed` | a ghost of the teardown's `pkill -9` (unit file gone, `reset-failed` not run); not a TUI matter |
 
-| F11 | Admin Servers | ? | `x` on the CA row does nothing, silently | minor; check whether the old says "protected" |
-| F12 | Admin Servers remove | UUID, last address, resolver cluster | only the UUID | less context in an irreversible confirm; minor |
-| F13 | Issued Certificates | ? | rows in hash order (6, 14, 7, 8, 2, 9, 13, 3, 11, 5, 10, 12, 4); `Expires` truncated to "UT" | sort (library rows or panel) and widen; check old |
-| F14 | client login refused | ? | after "login refused" the connect screen's address field is empty; retry retypes it | minor |
+| F11 | Admin Servers | ? | `x` on the CA row does nothing, silently | **fixed** `15f50522`: "The active CA stays — removed by uninstalling its host" |
+| F12 | Admin Servers remove | UUID, last address, resolver cluster | only the UUID | **fixed** `15f50522`: address, cluster, "there is no undo" |
+| F13 | Issued Certificates | ? | rows in hash order (6, 14, 7, 8, 2, 9, 13, 3, 11, 5, 10, 12, 4); `Expires` truncated to "UT" | **fixed** `2e0fe622` (library sorts by serial; both TUIs were unsorted) + the column widened |
+| F14 | client login refused | ? | after "login refused" the connect screen's address field is empty; retry retypes it | **fixed** `15f50522` |
 | F15 | CA uninstall | `u` → one confirm whose text folds in "also destroy it?" → `y` destroys | `u` → confirm → chooser Keep / DESTROY → Enter destroys | new is one step more careful; a typed confirmation is still worth considering |
 | F16 | any modal / list | the first key after a screen transition is sometimes eaten | same (observed on `Up` after the CA status card, `q` after the Uninstalled overlay, and the admin-name prompt on `.13`) | pre-existing in both; worth a look at where the first event after a layer change goes |
 
@@ -95,9 +124,10 @@ would collide under the one-live-cert-per-name rule. Set explicitly here.
 
 ## Remaining
 
-Phase 2 (krb5), Phase 3 (failure modes: 3.1–3.4 partly covered — no-TTY
-refusal, `--server` on a fresh and an installed box; 3.5 wrong password
-covered), Phase 4 (parity table).
+Phase 3 (failure modes: 3.1–3.5 covered — no-TTY refusal, dropped
+session, `--server` on a fresh and an installed box, wrong password; 3.6–
+3.12 open), Phase 4 (parity table). Still open from the findings: F10
+(message wording), F16 (first key after a transition, both TUIs).
 
 Driving harness: `scratchpad/tui.sh` (tmux over ssh; **zsh does not
 word-split unquoted variables — use arrays**), `scratchpad/drive.sh`
