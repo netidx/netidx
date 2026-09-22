@@ -8,9 +8,13 @@ DEV=192.168.50.14
 # refuses after a host restore, which should not prevent deploying to guests.
 SSH="ssh -F /dev/null -o BatchMode=yes -o StrictHostKeyChecking=no -o ConnectTimeout=15"
 
-echo "[1/4] sync repo -> devbox ($DEV)"
-rsync -az --delete --exclude '/target/' --exclude '/.git/' \
-  -e "$SSH" /home/eric/proj/netidx/ root@$DEV:/root/netidx/
+echo "[1/4] sync repos -> devbox ($DEV)"
+# netidx depends on the sibling graphix checkout by path (../graphix), so
+# the devbox needs both, side by side under /root.
+for repo in netidx graphix; do
+  rsync -az --delete --exclude '/target/' --exclude '/.git/' \
+    -e "$SSH" /home/eric/proj/$repo/ root@$DEV:/root/$repo/
+done
 
 echo "[2/4] incremental build on devbox"
 t0=$(date +%s)

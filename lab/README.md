@@ -14,6 +14,12 @@ paths, so they must live in `/tmp` to run as written.
 The stripped lab binary itself (`/tmp/netidx.deploy`, ~43 MB) is **not** kept
 in the tree — rebuild it with `scripts/redeploy.sh`.
 
+## Host
+
+The lab runs on **washu-chan** since 2026-09-22 (moved from mazikeen; the
+mazikeen copies are still defined there, shut off, and stale). `win11` was not
+moved — it is still only on mazikeen.
+
 ## libvirt
 
 Everything is on the **system** libvirt instance, not the session one:
