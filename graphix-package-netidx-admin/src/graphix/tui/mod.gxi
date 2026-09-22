@@ -16,7 +16,7 @@ type Toast = { title: string, lines: Array<string>, error: bool };
 
 /// A destructive action held behind a yes/no: the question and the
 /// action to run on yes.
-type Confirm<'a> = { message: string, action: 'a };
+type Confirm<'a> = { message: [string, Array<tui::Line>], action: 'a };
 
 /// The toast modal over `t`: one layer while a toast is up, none
 /// otherwise. Enter, Esc or space clears it (through the reference);

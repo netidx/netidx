@@ -1,5 +1,5 @@
 use package::{
-  AdminError, Target, info,
+  AdminError, Fingerprint, Target, info,
   admins::{self, Policy, SlotKind, change_password, reset_password},
   certs::{approve, approve_renewals, deny, issued, list_queue, revoke},
   perms::{self, list_resolver_clusters},
@@ -11,8 +11,8 @@ use package::{
   units::{ServiceOp, UnitState}
 };
 use super::{
-  Confirm, Toast, admin_text, conduct, confirm_layers, hint, opt_len, selected, selstyle,
-  toast_layers
+  Confirm, Toast, admin_text, conduct, confirm_layers, hint, identity_lines, opt_len,
+  selected, selstyle, toast_layers
 };
 use tui::{
   line, style,
@@ -424,17 +424,24 @@ let panels = |
   // when the rows arrived
   let now = sys::time::now(server_rows);
   // ── the selected row's action key, per panel ──
-  let queue_code = select selected(queue_rows, row_sel) {
+  let queue_fp = select selected(queue_rows, row_sel) {
     null as _ => null,
-    i => select i.code {
-      null as _ => null,
-      c => c.code
-    }
+    i => i.code
   };
-  let deleg_code = select selected(deleg_rows, row_sel) {
+  let deleg_fp = select selected(deleg_rows, row_sel) {
     null as _ => null,
-    i => (i.code).code
+    i => i.code
   };
+  // the approver reads the glyph and code against the enrollee's screen
+  let verify_lines = |question: string, whose: string, fp: Fingerprint| array::concat(
+    [
+      line(question),
+      line(""),
+      line("Verify this glyph and code match the screenshot [whose] sent you, out of band:"),
+      line("")
+    ],
+    identity_lines(fp)
+  );
   let roster_sel = selected(roster_rows, row_sel);
   let roster_name = select roster_sel {
     null as _ => null,
@@ -665,15 +672,15 @@ let panels = |
   };
   let queue_keys = |k: KeyEvent| select k.code {
     kk@ `Char("a") => {
-      let code = (kk ~ queue_code)$;
+      let fp = (kk ~ queue_fp)$;
       confirm <- {
-        message: "Approve this enrollment?\n\nVerify this glyph and code match the screenshot the enrollee sent you, out of band:\n\n[code]",
-        action: `Approve(code)
+        message: verify_lines("Approve this enrollment?", "the enrollee", fp),
+        action: `Approve(fp.code)
       };
       `Stop
     },
     kk@ `Char("d") => {
-      run <- `Deny((kk ~ queue_code)$);
+      run <- `Deny(((kk ~ queue_fp)$).code);
       `Stop
     },
     kk@ `Char("R") => { run <- kk ~ `Renewals; `Stop },
@@ -681,15 +688,15 @@ let panels = |
   };
   let deleg_keys = |k: KeyEvent| select k.code {
     kk@ `Char("a") => {
-      let code = (kk ~ deleg_code)$;
+      let fp = (kk ~ deleg_fp)$;
       confirm <- {
-        message: "Approve or reconcile this delegation?\n\nVerify this glyph and code match the screenshot the child resolver's operator sent you, out of band:\n\n[code]",
-        action: `ApproveDelegation(code)
+        message: verify_lines("Approve or reconcile this delegation?", "the child resolver's operator", fp),
+        action: `ApproveDelegation(fp.code)
       };
       `Stop
     },
     kk@ `Char("d") => {
-      run <- `DenyDelegation((kk ~ deleg_code)$);
+      run <- `DenyDelegation(((kk ~ deleg_fp)$).code);
       `Stop
     },
     _ => `Continue

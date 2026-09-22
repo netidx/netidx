@@ -19,8 +19,8 @@ let glyph = |fp: Fingerprint| -> Array<tui::Line> select identicon(fp)$ {
       #bg: `Black
     );
     let off = style(#bg: `Black);
-    let border = line(#style: off, "                    ");
-    let rows = array::map(cells, |row| line(array::concat(
+    let border = line(#style: off, #alignment: `Center, "                    ");
+    let rows = array::map(cells, |row| line(#alignment: `Center, array::concat(
       [span(#style: off, "  ")],
       array::map(row, |c| select c {
         true => span(#style: on, "██"),
@@ -413,8 +413,25 @@ let pump = |q: Question| -> Pump {
     `ConfirmIdentity({ identity, .. }) => confirm_identity_modal(identity),
     `OneTimeSecret({ kind, password, .. }) => secret_modal(kind, password)
   };
+  // the standing code, while nothing is asked: the operator reads it to
+  // the approving admin, who sees the same one in their confirmation
+  let code_box = |c: { purpose: string, fp: Fingerprint }| block(
+    #border: &`All,
+    #title: &line("Verification code — [c.purpose]"),
+    #title_bottom: &line(#style: hint, " waiting for approval "),
+    &layout(#direction: &`Vertical, &[
+      child(#constraint: `Length(2), paragraph(#style: &hint,
+        &"Read this code to the approving admin out of band; they must see the same one before they approve.")),
+      child(#constraint: `Length(13),
+        paragraph(#alignment: &`Center, #trim: &false, &identity_lines(c.fp)))
+    ])
+  );
   let layers = select modal {
-    null as _ => [],
+    null as _ => select code {
+      null as _ => [],
+      c => [layer(#width: &`Percentage(70), #height: &`Length(17),
+        input_handler(#handle: &handle, &code_box(c)))]
+    },
     w => [layer(#width: &`Percentage(70), #height: &`Percentage(70),
       input_handler(#handle: &handle, &w))]
   };
