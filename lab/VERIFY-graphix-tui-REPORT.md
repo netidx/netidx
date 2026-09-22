@@ -2,8 +2,7 @@
 
 Plan: `VERIFY-graphix-tui.md`. Lab on washu-chan (moved from mazikeen
 2026-09-22). Binary: the `quick` profile built on the devbox, redeployed
-after each fix. **In progress** — Phases 0–2 are done; Phases 3–4
-remain.
+after each fix. Phases 0–4 are done.
 
 ## Phase 0 — bring-up
 
@@ -113,6 +112,23 @@ had passed the login's 8-hour absolute lifetime, and the first panel
 after that asked the password with no error first — the same F17 shape
 from the client side (the process cache expires it locally).
 
+**3.7 — WAN loss during a delegation approve.** The EU workstation
+box `.60.18` re-installed as a krb5 child resolver at `/eu/lab`, reached
+through its own site's admin server (mDNS found `.60.15`), its admin
+server approved from HQ, its delegation request pending. Then `wan loss
+100%` and `a` on the request from HQ: "Delegation approved — /eu/lab
+approved · failed b41dc13e…: timed out connecting to admin server
+192.168.60.15:4565: deadline has elapsed" — the approval is recorded at
+the CA (the CA is authoritative; the parent converges on its next
+register) and the peer that could not be told is named; the row stays
+as "approved — a reconciles". `wan clear`, `a` again: "updated
+b41dc13e…". The child, whose poll of the CA had crossed the cut the
+whole time, went on to "register OS service" by itself, and its
+`resolver.json` carries the parent referral. Lab put back afterwards:
+the child uninstalled, its dead server row removed from Admin Servers
+(F12's confirm: address, cluster, no undo → "revoked 1 certificates ·
+updated b41dc13e…"), the workstation leaf re-installed.
+
 **3.8 — Esc at every question of the resolver install.** On the fresh
 `.13`, the krb5 resolver ceremony (subtree `/lab`), cancelled at each of
 its twelve questions in turn, the box's config dir and units checked
@@ -133,6 +149,27 @@ dialog is the same).
 resized to 80×24: the modal re-lays out with its text wrapped, the table
 and detail pane behind it clipped cleanly; back to 150×45, the same
 frame as before. No panic.
+
+**3.10 — as `eric`, a system service.** `netidx admin tui` under
+`su - eric` on `.13`, publisher role (krb5, no enrollment), "register OS
+service? Yes": the TUI releases the terminal, prints "Administrator
+privileges are needed to install the system service." and sudo asks
+eric's password on the plain terminal; the escalated command (in `ps`)
+is `netidx admin host service install --scope system --for-user eric
+--service-name netidx --netidx-binary /usr/local/bin/netidx
+--activation-dir /home/eric/.config/netidx/activation` under a shell
+that prefers a cached sudo credential, then sudo, then su. After the
+password the TUI resumes on "Publisher (running)" with "OS service
+registered — registered the system service (netidx)";
+`netidx@eric.service` active. `u` → confirm → the uninstall escalates
+the same way (sudo's cached credential, no second prompt), the terminal
+is released and resumed again, the box is back on the role menu with no
+units and no config. Keys after each resume (Enter, `u`, `y`) all
+arrived.
+
+**3.11 — `$EDITOR`.** No subject: the new TUI edits permissions,
+policies and units in forms, never in an editor (see the parity table);
+the suspend/resume path it does have is the escalation of 3.10, above.
 
 **3.12 — Ctrl-C.** Inside a confirm modal and on the panel menu: the
 process exits 0, the alternate screen is left, the shell prompt is back
@@ -217,7 +254,9 @@ would collide under the one-live-cert-per-name rule. Set explicitly here.
 
 ## Remaining
 
-Phase 3 (3.7–3.12 open). A verdict on F18. Still open from the findings: F10
+Phases 0–4 are done. Open: a verdict on F18 (one parent member or
+several), F10 (message wording), F16 (first key after a transition,
+both TUIs). Still open from the findings: F10
 (message wording), F16 (first key after a transition, both TUIs).
 
 Driving harness: `scratchpad/tui.sh` (tmux over ssh; **zsh does not
