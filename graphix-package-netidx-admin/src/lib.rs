@@ -400,8 +400,8 @@ impl<R: Rt, E: UserEvent> EvalCached<R, E> for ParseFingerprintEv {
     const EFFECT: Effect = Effect::Stateless(Some(FastCall::Plain(fc_parse_fingerprint)));
     const NAME: &str = "netidx_admin_parse_fingerprint";
 
-    fn eval(&mut self, _ctx: &mut ExecCtx<R, E>, from: &CachedVals) -> Option<Value> {
-        fast_eval(fc_parse_fingerprint, from)
+    fn eval(&mut self, ctx: &mut ExecCtx<R, E>, from: &CachedVals) -> Option<Value> {
+        fast_eval(ctx, fc_parse_fingerprint, from)
     }
 }
 
@@ -444,8 +444,8 @@ impl<R: Rt, E: UserEvent> EvalCached<R, E> for IdenticonEv {
     const EFFECT: Effect = Effect::Stateless(Some(FastCall::Plain(fc_identicon)));
     const NAME: &str = "netidx_admin_identicon";
 
-    fn eval(&mut self, _ctx: &mut ExecCtx<R, E>, from: &CachedVals) -> Option<Value> {
-        fast_eval(fc_identicon, from)
+    fn eval(&mut self, ctx: &mut ExecCtx<R, E>, from: &CachedVals) -> Option<Value> {
+        fast_eval(ctx, fc_identicon, from)
     }
 }
 
@@ -486,8 +486,8 @@ impl<R: Rt, E: UserEvent> EvalCached<R, E> for InfoEv {
     const EFFECT: Effect = Effect::Stateless(Some(FastCall::Plain(fc_info)));
     const NAME: &str = "netidx_admin_info";
 
-    fn eval(&mut self, _ctx: &mut ExecCtx<R, E>, from: &CachedVals) -> Option<Value> {
-        fast_eval(fc_info, from)
+    fn eval(&mut self, ctx: &mut ExecCtx<R, E>, from: &CachedVals) -> Option<Value> {
+        fast_eval(ctx, fc_info, from)
     }
 }
 

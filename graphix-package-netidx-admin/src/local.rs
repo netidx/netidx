@@ -470,8 +470,8 @@ impl<R: Rt, E: UserEvent> EvalCached<R, E> for InstallableRolesEv {
     const EFFECT: Effect = Effect::Stateless(Some(FastCall::Plain(fc_installable_roles)));
     const NAME: &str = "netidx_admin_installable_roles";
 
-    fn eval(&mut self, _ctx: &mut ExecCtx<R, E>, from: &CachedVals) -> Option<Value> {
-        fast_eval(fc_installable_roles, from)
+    fn eval(&mut self, ctx: &mut ExecCtx<R, E>, from: &CachedVals) -> Option<Value> {
+        fast_eval(ctx, fc_installable_roles, from)
     }
 }
 
