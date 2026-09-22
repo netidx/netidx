@@ -82,7 +82,7 @@ let change_text = |c: Change| select c {
   `Reauth(s) => "~ change [s]"
 };
 
-let fresh_choices: Array<{ act: Act, title: string, blurb: string }> = [
+let all_fresh_choices: Array<{ act: Act, title: string, blurb: string }> = [
   {
     act: `Install(`Ca, false),
     title: "CA",
@@ -458,6 +458,13 @@ let welcome = |fresh: bool| -> Array<Layer> {
 };
 
 let local = |#q: &Question| {
+  // the roles this platform can install, from the library; the rest
+  // of the menu is the same everywhere
+  let roles = install::installable_roles(true);
+  let fresh_choices = array::filter(all_fresh_choices, |c| select c.act {
+    `Install(r, _) => array::find(roles, |x| x == r) != null,
+    _ => true
+  });
   let toast: [Toast, null] = null;
   let fail = |title, a| {
     toast <- { title, lines: [admin_text(a)], error: true };

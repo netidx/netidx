@@ -12,11 +12,12 @@ use crate::{
 use anyhow::{Context, Result, bail};
 use arcstr::ArcStr;
 use graphix_compiler::{
-    Apply, BuiltIn, Event, ExecCtx, Node, Rt, Scope, TagValue, UserEvent,
+    Apply, BuiltIn, Event, ExecCtx, FastCall, Node, Rt, Scope, TagValue, UserEvent,
     effects::Effect, errf, expr::ExprId, image::ImageBuf, typ::FnType,
 };
 use graphix_package_core::{
-    CachedArgsAsync, CachedVals, EvalCachedAsync, unit_image_state,
+    CachedArgs, CachedArgsAsync, CachedVals, EvalCached, EvalCachedAsync, fast_eval,
+    unit_image_state,
 };
 use netidx_activation::control::{ControlOp, UnitState};
 use netidx_admin::{
@@ -271,6 +272,7 @@ unit_image_state!(
     CaCredentialsEv,
     UnitsDirEv,
     LocalResolverBaseEv,
+    InstallableRolesEv,
     ListUnitsEv,
     ControlUnitsEv,
     InstallUnitEv,
@@ -450,6 +452,30 @@ impl EvalCachedAsync for LocalResolverBaseEv {
 }
 
 pub(crate) type LocalResolverBase = CachedArgsAsync<LocalResolverBaseEv>;
+
+// ── the roles this platform can install (sync, pure) ─────────────
+
+fn fc_installable_roles(_: &[Value]) -> Option<Value> {
+    Some(Value::Array(ValArray::from_iter_exact(
+        netidx_admin::plan::install::installable_roles()
+            .iter()
+            .map(|r| InstallRoleV::from(*r).into()),
+    )))
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct InstallableRolesEv;
+
+impl<R: Rt, E: UserEvent> EvalCached<R, E> for InstallableRolesEv {
+    const EFFECT: Effect = Effect::Stateless(Some(FastCall::Plain(fc_installable_roles)));
+    const NAME: &str = "netidx_admin_installable_roles";
+
+    fn eval(&mut self, _ctx: &mut ExecCtx<R, E>, from: &CachedVals) -> Option<Value> {
+        fast_eval(fc_installable_roles, from)
+    }
+}
+
+pub(crate) type InstallableRoles = CachedArgs<InstallableRolesEv>;
 
 // ── this host's activation units ─────────────────────────────────
 

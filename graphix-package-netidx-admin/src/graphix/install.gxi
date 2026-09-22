@@ -38,6 +38,9 @@ type Install = {
 /// per `trigger`.
 val list: fn(trigger: Any) -> Result<Array<Install>, AdminError>;
 
+/// The roles this platform can install: the CA needs unix.
+val installable_roles: fn(trigger: Any) -> Array<InstallRole>;
+
 /// The base path of the resolver this host runs, from its resolver
 /// config, or null when it runs none. Re-reads per `trigger`.
 val local_resolver_base: fn(trigger: Any) -> [string, null];

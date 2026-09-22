@@ -739,6 +739,7 @@ graphix_derive::defpackage! {
         local::CaCredentials,
         local::UnitsDir,
         local::LocalResolverBase,
+        local::InstallableRoles,
         local::ListUnits,
         local::ControlUnits,
         local::InstallUnit,

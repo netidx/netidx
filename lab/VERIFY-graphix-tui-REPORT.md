@@ -220,6 +220,35 @@ krb5 lab, through the new TUI.
   `Space` in `/ap` starts over there, `Enter` with nothing ticked takes
   the cluster under the cursor (F18 on real data).
 
+## Phase 6 — Windows
+
+The `win11` VM moved from mazikeen (disk + NVRAM copied; the TPM state
+was root-only there, so it started with a fresh TPM; trimmed to 8 GiB /
+4 vCPUs after the host OOM-killed it at 32 GiB). Both executables
+cross-built in the `quick` profile, deployed to `C:\bin`, driven over
+`ssh -tt` on a host-side pty (`scratchpad/winpty.py` keeps one session
+open and takes keys through a FIFO; frames rendered with
+`lab/scripts/win-tui-render.py`, which garbles a title now and then).
+
+The first run died with `0xC0000005` before drawing a frame (F27); with
+that fixed the next run refused its own registration image (F28). On the
+rebuilt binary: welcome → role menu (no CA row on Windows — F29) →
+Workstation → Join → both admin domains discovered over the
+`netidx-test` NIC (`ext.test` and `netidx.test`) → glyph → no questions
+(the krb5 domain imports its auth) → "register OS service? yes" →
+"registered the user service (netidx)": the `netidx` logon task
+Running, `netidx-activation.exe` with the resolver and container under
+it, `%APPDATA%\netidx` populated. Admin Domain tab: `c` connect direct
+to `192.168.50.11:4565`, glyph, `eric`, password → the panel menu; Admin
+Servers listed all five servers; Permissions' cluster pick listed the
+three clusters. `u` → confirm → "Removed 7 path(s) and the OS service";
+no task, no process, no config afterwards. A data-plane check from
+Windows is not meaningful against the krb5 lab (the guest is not
+domain-joined; the earlier Windows pass proved the Local-auth
+workstation).
+
+`netidx browser` also failed to compile on both platforms (F30).
+
 ## Phase 4 — parity inventory
 
 Every key the old TUI binds, walked from its legends and its `KeyCode`
@@ -297,6 +326,11 @@ Findings from the table:
 | F24 | external CA install | — | after "Install Signed Certificate" the toast told the operator to run `netidx admin service install --scope system` (not even the right command); nothing registered the service | **fixed**: the outcome goes through the same "register OS service?" path as an install |
 | F25 | pump | — | the "Verification code — CA identity" box (the CA's own glyph, shown at the end of the CA ceremony) stood on screen after the ceremony ended, over the result toast, taking no keys | **fixed**: a ceremony's end clears the code box |
 | F26 | status card | — | after the certificate install the card still said "External CA: awaiting signature" and the menu still offered "Install Signed Certificate", through `R` re-detect | **fixed**: the CA credential probe ran once per row, never on a re-detection; it now runs on every detection |
+
+| F27 | Windows | n/a | the Graphix TUI exits with `0xC0000005` (access violation) right after the terminal init | **graphix, fixed** (`9bbd471d`): the JIT helpers' wire ABI is System V — a 16-byte `TagValue` as two registers — while Win64 passes it by hidden pointer and returns it through `sret`, so every fused kernel handed its helpers garbage. Fusion is off on Windows until the helper ABI is portable (67 helpers take or return such structs) |
+| F28 | Windows | n/a | "loading initial modules: reading the registration image: UnknownTag" on the run after a rebuild | **graphix, fixed** (`9bbd471d`): a PE executable has no GNU build id, so every Windows build shared the cache key `v0.9.0` and read another build's image; the COFF link stamp and file length key it now |
+| F29 | Windows role menu | no CA row | CA offered; choosing it would fail `Unsupported` at the first step | **fixed**: the library states which roles a platform can install (`plan::install::installable_roles`), the menu filters by it |
+| F30 | `netidx browser` | — | "undefined type MoveCursor", then "style not defined": the program's `use tui;` no longer brings the names in | **fixed**: explicit imports; draws again on Linux and Windows |
 
 Also observed, same for both TUIs (library defaults): the resolver's
 default cert name is `resolver.<domain>` (role.domain) while a

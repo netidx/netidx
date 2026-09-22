@@ -1,7 +1,9 @@
-use tui;
-use tui::block;
-use tui::input_handler;
-use tui::browser;
+use tui::{
+  Size, line, span, style,
+  block::block,
+  browser::{MoveCursor, browser},
+  input_handler::{Event, KeyCode, input_handler}
+};
 
 let path = "/";
 let command_error: error = never();

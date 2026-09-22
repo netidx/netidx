@@ -30,6 +30,25 @@ use std::{
 
 #[cfg(unix)]
 pub mod ca;
+
+/// The roles this platform can install. The CA needs the unix-only
+/// facilities (openssl, the control socket, the daemon), so a Windows host
+/// is offered the other three.
+pub fn installable_roles() -> &'static [InstallRole] {
+    #[cfg(unix)]
+    {
+        &[
+            InstallRole::Ca,
+            InstallRole::Workstation,
+            InstallRole::Resolver,
+            InstallRole::Publisher,
+        ]
+    }
+    #[cfg(not(unix))]
+    {
+        &[InstallRole::Workstation, InstallRole::Resolver, InstallRole::Publisher]
+    }
+}
 /// role install cascades.
 pub mod publisher;
 pub mod resolver;
