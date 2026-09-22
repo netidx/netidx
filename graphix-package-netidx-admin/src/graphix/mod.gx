@@ -2,5 +2,6 @@ let local = |#cfg_path: [string, null] = null, trigger: Any| -> Result<Target, A
 let parse_fingerprint = |code: string| -> Result<Fingerprint, `Admin(string)> 'netidx_admin_parse_fingerprint;
 let identicon = |fp: Fingerprint| -> Result<{cells: Array<Array<bool>>, color: {r: u8, g: u8, b: u8}}, `Admin(string)> 'netidx_admin_identicon;
 let info = |t: Target| -> TargetInfo 'netidx_admin_info;
+let logout = |t: Target| -> Result<LogoutOutcome, AdminError> 'netidx_admin_logout;
 let connect = |#admin: [string, null] = null, #password: [string, null] = null, #ca_dir: [string, null] = null, #glyph: [Fingerprint, null] = null, server: string| -> Ceremony<Target> 'netidx_admin_connect;
 let change_password_at = |#admin: [string, null] = null, #password: [string, null] = null, #ca_dir: [string, null] = null, #glyph: [Fingerprint, null] = null, #new_password: [string, null] = null, server: string| -> Ceremony<null> 'netidx_admin_change_password_at

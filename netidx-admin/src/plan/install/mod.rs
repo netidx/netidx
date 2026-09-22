@@ -14,7 +14,7 @@ use crate::{
         enroll::{self, AdminServers},
         service::{ServiceGate, ServiceNeed, offer},
     },
-    provenance::{AdminDomainIdentity, InstallRecord},
+    provenance::{AdminDomainIdentity, InstallRecord, InstallRole},
     resolver_probe,
     service::ServiceScope,
     template::RenderedTemplate,
@@ -369,6 +369,37 @@ pub async fn finish_with(
     finish_with_record_path(ans, rt, common, need, record, None, post_apply).await
 }
 
+/// The core install is on disk and recorded, and the setup that follows it —
+/// the admin server, a delegation, the renewal agent — stopped before it
+/// finished, whether it failed or the operator cancelled it. Typed so a
+/// frontend can never report it as "nothing was changed". Recover it with
+/// [`install_incomplete`].
+#[derive(Debug)]
+pub struct InstallIncomplete {
+    pub role: InstallRole,
+    pub record_path: PathBuf,
+    pub cause: anyhow::Error,
+}
+
+impl std::fmt::Display for InstallIncomplete {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "the {} core install completed and is recorded at {}, but its \
+             post-install setup did not finish: {:#}",
+            self.role.as_str(),
+            self.record_path.display(),
+            self.cause
+        )
+    }
+}
+
+impl std::error::Error for InstallIncomplete {}
+
+pub fn install_incomplete(e: &anyhow::Error) -> Option<&InstallIncomplete> {
+    e.downcast_ref::<InstallIncomplete>()
+}
+
 async fn finish_with_record_path(
     ans: &mut dyn Answerer,
     rt: RenderedTemplate,
@@ -396,14 +427,13 @@ async fn finish_with_record_path(
                 .await
                 .context("writing the install record")?;
             ans.note("ok");
-            post_apply(ans, config_lock).await.with_context(|| {
-                format!(
-                    "the {} core install completed and is recorded at {}, but its \
-                     post-install setup did not finish",
-                    record.role.as_str(),
-                    record_path.display()
-                )
-            })?;
+            if let Err(cause) = post_apply(ans, config_lock).await {
+                return Err(anyhow::Error::new(InstallIncomplete {
+                    role: record.role,
+                    record_path,
+                    cause,
+                }));
+            }
         }
     }
     offer(

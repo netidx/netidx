@@ -240,6 +240,30 @@ async fn remote_tab_drives_the_panels() -> Result<()> {
             && lines.iter().any(|l| l.contains("may manage admins"))
     })
     .await?;
+    // `L` on the menu revokes the login and lands on the domain list; the
+    // next connect (`c`, direct) asks the password again rather than
+    // reusing a cached one
+    h.dispatch_event(key(KeyCode::Esc)).await?;
+    wait_render(&mut h, Duration::from_secs(60), "the menu again", |lines| {
+        lines.iter().any(|l| l.contains("L logout"))
+    })
+    .await?;
+    h.dispatch_event(key(KeyCode::Char('L'))).await?;
+    wait_render(&mut h, Duration::from_secs(60), "the logged-out toast", |lines| {
+        lines.iter().any(|l| l.contains("revoked at the CA"))
+    })
+    .await?;
+    h.dispatch_event(key(KeyCode::Enter)).await?;
+    wait_render(&mut h, Duration::from_secs(60), "the domain list", |lines| {
+        lines.iter().any(|l| l.contains("c connect direct"))
+    })
+    .await?;
+    h.dispatch_event(key(KeyCode::Char('c'))).await?;
+    connect_via_modals(&mut h, &d.admin, &d.password).await?;
+    wait_render(&mut h, Duration::from_secs(60), "the panel menu", |lines| {
+        lines.iter().any(|l| l.contains(&format!("as {admin}")))
+    })
+    .await?;
     Ok(())
 }
 

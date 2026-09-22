@@ -5,11 +5,15 @@ use ceremony::Ceremony;
 /// on it (open the change-password flow); the payload is the admin name.
 /// `LoginRequired` is the CA no longer honouring the session's login
 /// (expired, or the admin server restarted): the cached login is gone
-/// and the frontend connects again. `Unsupported` is a unix-only
-/// operation invoked on another platform.
+/// and the frontend connects again. `InstallIncomplete` is a core
+/// install that is on disk and recorded whose post-install setup did
+/// not finish (it failed, or the operator cancelled it): the machine is
+/// installed, and a frontend never reports it as unchanged.
+/// `Unsupported` is a unix-only operation invoked on another platform.
 type AdminError = [
   `Admin(string),
   `Cancelled(string),
+  `InstallIncomplete(string),
   `LoginRequired(string),
   `PasswordChangeRequired(string),
   `Unsupported(string)
@@ -75,6 +79,15 @@ val connect: fn(
   ?#glyph: [Fingerprint, null],
   server: string
 ) -> Ceremony<Target>;
+
+/// What became of the login `logout` acted on: revoked at the CA and
+/// forgotten here; forgotten here only, with why the CA could not be
+/// told; or nothing was cached for this CA.
+type LogoutOutcome = [`Revoked, `NotRevoked(string), `NotCached];
+
+/// End a remote session's login: revoke the cached login for its CA
+/// and forget it, so a later connect asks the password again.
+val logout: fn(t: Target) -> Result<LogoutOutcome, AdminError>;
 
 /// Change an admin's password from scratch — the route when `connect`
 /// fails with `PasswordChangeRequired`: the CA refuses every session

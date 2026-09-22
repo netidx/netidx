@@ -1,5 +1,5 @@
 use package::{
-  AdminError, Fingerprint, Target, info, parse_fingerprint,
+  AdminError, Fingerprint, Target, info, logout, parse_fingerprint,
   admins::{self, Policy, SlotKind, change_password, reset_password},
   certs::{QueueItem, approve, approve_renewals, deny, issued, list_queue, revoke},
   perms::{self, list_resolver_clusters},
@@ -306,7 +306,7 @@ let panels = |
   #on_close: fn(why: CloseReason) -> null,
   target: Target
 | -> Panels {
-  let menu_legend = line(#style: hint, " ↑/↓ move · Enter open · Esc disconnect ");
+  let menu_legend = line(#style: hint, " ↑/↓ move · Enter open · L logout · Esc disconnect ");
   let pick_legend = line(#style: hint, " ↑/↓ move · Enter open · Esc back ");
   let bold = style(#add_modifier: [`Bold]);
   let at_entry: Screen = select entry {
@@ -342,6 +342,8 @@ let panels = |
   let perm_fields = never();
   let perm_open = false;
   let run = never<Act>();
+  let logout_go = never<Target>();
+  let logout_r = logout(logout_go);
   let perm_form = form(
     #title: "Permission entry",
     #help: "Bits are a permission string such as swlpd; an empty entity is anonymous.",
@@ -607,6 +609,18 @@ let panels = |
       |units| note(fmt_service_op(op), array::map(units, |u| "[u.unit]: [fmt_unit_state(u.state)]")))
   };
   {
+    catch(e) fail("Logout failed", (e.0).error);
+    seq logout_r {
+      let o = logout_r?;
+      toast <- note("Logged out", [select o {
+        `Revoked => "The login was revoked at the CA.",
+        `NotRevoked(why) => "The login was forgotten here, but the CA could not be told: [why]",
+        `NotCached => "No login was cached for this admin domain."
+      }]);
+      on_close(o ~ `Back)
+    }
+  };
+  {
     catch(e) fail("Changing the password failed", (e.0).error);
     seq chpw_r {
       chpw_r?;
@@ -650,6 +664,7 @@ let panels = |
       pick_sel <- p ~ 0;
       `Stop
     },
+    kk@ `Char("L") => { logout_go <- kk ~ target; `Stop },
     kk@ `Esc => { on_close(kk ~ `Back); `Stop },
     _ => `Continue
   };

@@ -620,7 +620,7 @@ pub(crate) struct ConnInfo {
 impl TargetValue {
     /// The remote session's facts, or an error for a Local target —
     /// these ops live on the admin plane.
-    fn remote(&self) -> Result<(ConnInfo, Fingerprint)> {
+    pub(crate) fn remote(&self) -> Result<(ConnInfo, Fingerprint)> {
         match &*self.0 {
             AdminTarget::Remote { session } => Ok((
                 ConnInfo { server: session.server, admin: session.admin.clone() },

@@ -635,6 +635,25 @@ pub async fn run_resolver(
         resolver.as_file_mut().children =
             joining_children.into_iter().map(edge_into_file).collect();
     }
+    // The admin-server step's questions, before anything is written: a
+    // cancel at them leaves the machine as it was. Our own admin domain's
+    // CA host merges roles instead and asks nothing.
+    #[cfg(unix)]
+    let admin_listen = match probe.have() {
+        Some(net) if !host_holds_ca(net).await => {
+            admin_server_listen(
+                ans,
+                net,
+                kind,
+                no_admin_server,
+                with_admin_server,
+                listen,
+                None,
+            )
+            .await?
+        }
+        _ => None,
+    };
     // A standalone resolver is an network-facing daemon — system-scope is what
     // makes it boot-triggered and visible to the OS.
     finish_with(
@@ -657,7 +676,7 @@ pub async fn run_resolver(
                     probe.have(),
                     kind,
                     no_admin_server,
-                    with_admin_server,
+                    admin_listen,
                     listen,
                     resolver_base,
                     post_apply_units_dir.as_deref(),
@@ -1296,7 +1315,7 @@ async fn post_apply_admin_server(
     discovered: Option<&DiscoveredAdminDomain>,
     kind: AuthKind,
     no_admin_server: bool,
-    with_admin_server: bool,
+    admin_listen: Option<SocketAddr>,
     resolver_listen: SocketAddr,
     resolver_base: String,
     units_dir: Option<&Path>,
@@ -1323,24 +1342,24 @@ async fn post_apply_admin_server(
                 }
             }
         }
-        Some(net) => {
-            enroll_admin_server(
-                ans,
-                net,
-                kind,
-                no_admin_server,
-                with_admin_server,
-                resolver_listen,
-                resolver_base,
-                units_dir,
-                resolver_config,
-                id_map,
-                None,
-                None,
-                config_lock,
-            )
-            .await
-        }
+        Some(net) => match admin_listen {
+            None => Ok(false),
+            Some(listen) => {
+                enroll_admin_server(
+                    ans,
+                    net,
+                    listen,
+                    resolver_listen,
+                    resolver_base,
+                    units_dir,
+                    resolver_config,
+                    id_map,
+                    None,
+                    config_lock,
+                )
+                .await
+            }
+        },
         None => {
             merge_resolver_roles(ans, resolver_config, id_map, config_lock).await?;
             Ok(paths::discover_admin_server_config_async().await.is_ok())
@@ -1399,33 +1418,34 @@ async fn merge_resolver_roles(
 /// otherwise the enrollment **queues** for remote approval. A denied or expired
 /// enrollment is a note, not a failure — the resolver this install produced
 /// works; it just isn't advertised to discovery from this host.
+///
+/// Its questions are [`admin_server_listen`], asked before the install is
+/// written; `listen` is their answer.
+///
+/// Whether this host runs an admin server, and where it listens: the
+/// questions of the admin-server step, asked before any of the install is
+/// written so that a cancel here changes nothing. `None` is the operator (or
+/// the auth scheme) declining an admin server on this host.
 #[cfg(unix)]
-#[allow(clippy::too_many_arguments)]
-pub async fn enroll_admin_server(
+pub async fn admin_server_listen(
     ans: &mut dyn Answerer,
     net: &DiscoveredAdminDomain,
     kind: AuthKind,
     no_admin_server: bool,
     with_admin_server: bool,
     resolver_listen: SocketAddr,
-    resolver_base: String,
-    units_dir: Option<&Path>,
-    resolver_config: PathBuf,
-    id_map: Option<PathBuf>,
     listen_override: Option<SocketAddr>,
-    replaces: Option<netidx_admin_proto::AdminServerId>,
-    config_lock: &ConfigDirLock,
-) -> Result<bool> {
-    let Some(ca_addr) = net.info.ca_addr else {
+) -> Result<Option<SocketAddr>> {
+    if net.info.ca_addr.is_none() {
         ans.note(&format_compact!(
             "note: admin domain {:?} reported no CA; skipping admin-server setup on this \
              host",
             net.identity.domain,
         ));
-        return Ok(false);
-    };
+        return Ok(None);
+    }
     match admin_plane_decision(kind, no_admin_server) {
-        AdminPlane::Skip => return Ok(false),
+        AdminPlane::Skip => return Ok(None),
         AdminPlane::Mandatory => ans.note(
             "enrolling an admin server on this host — it advertises this resolver to \
              future installs and renews its certificates. (expert opt-out: \
@@ -1441,7 +1461,7 @@ pub async fn enroll_admin_server(
                      server, so future installs won't learn about this resolver \
                      from this host",
                 );
-                return Ok(false);
+                return Ok(None);
             }
         }
     }
@@ -1470,7 +1490,24 @@ pub async fn enroll_admin_server(
         .transpose()
         .context("invalid admin server listen port")?
         .unwrap_or(netidx_admin_proto::DEFAULT_PORT);
-    let listen = SocketAddr::new(ip, port);
+    Ok(Some(SocketAddr::new(ip, port)))
+}
+
+#[cfg(unix)]
+#[allow(clippy::too_many_arguments)]
+pub async fn enroll_admin_server(
+    ans: &mut dyn Answerer,
+    net: &DiscoveredAdminDomain,
+    listen: SocketAddr,
+    resolver_listen: SocketAddr,
+    resolver_base: String,
+    units_dir: Option<&Path>,
+    resolver_config: PathBuf,
+    id_map: Option<PathBuf>,
+    replaces: Option<netidx_admin_proto::AdminServerId>,
+    config_lock: &ConfigDirLock,
+) -> Result<bool> {
+    let ca_addr = net.info.ca_addr.context("the admin domain reported no CA")?;
     let resolver = crate::resolver::ResolverConfig::load_async(&resolver_config).await?;
     let resolver_members = resolver.resolver_addrs();
     let resolver_member = resolver_members

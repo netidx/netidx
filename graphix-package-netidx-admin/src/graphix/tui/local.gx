@@ -1002,6 +1002,10 @@ let local = |#q: &Question| {
         lines: ["Nothing was changed."],
         error: false
       },
+      `InstallIncomplete(m) => {
+        toast <- { title: "Install incomplete", lines: [m], error: true };
+        refresh <- m
+      },
       other => fail("Install failed", other)
     };
     seq install_r {

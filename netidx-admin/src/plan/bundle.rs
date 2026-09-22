@@ -36,7 +36,10 @@ use std::{
 };
 
 #[cfg(unix)]
-use crate::plan::{AuthKind, install::resolver::enroll_admin_server};
+use crate::plan::{
+    AuthKind,
+    install::resolver::{admin_server_listen, enroll_admin_server},
+};
 #[cfg(unix)]
 use std::str::FromStr;
 
@@ -643,18 +646,26 @@ pub async fn reenroll_satellite_admin(
     let units = root.join("activation");
     let units = units.is_dir().then_some(units.as_path());
     let auth = AuthKind::from_str(&manifest.install.auth)?;
-    if !enroll_admin_server(
+    let listen = admin_server_listen(
         ans,
         net,
         auth,
         false,
         true,
         resolver_listen,
+        listen_override.or(manifest.admin_listen),
+    )
+    .await?
+    .context("the restored resolver's admin server was declined")?;
+    if !enroll_admin_server(
+        ans,
+        net,
+        listen,
+        resolver_listen,
         resolver.base_path(),
         units,
         resolver_path,
         id_map,
-        listen_override.or(manifest.admin_listen),
         manifest.previous_admin_server,
         config_lock,
     )

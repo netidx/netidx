@@ -51,6 +51,7 @@ let fingerprint_lines = |#alignment: tui::Alignment = `Center, fp: Fingerprint| 
 let admin_text = |a: AdminError| -> string select a {
   `Admin(m) => m,
   `Cancelled(m) => m,
+  `InstallIncomplete(m) => m,
   `LoginRequired(m) => m,
   `PasswordChangeRequired(name) => "[name]'s password must be changed first",
   `Unsupported(m) => "unsupported on this platform: [m]"

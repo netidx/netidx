@@ -113,6 +113,78 @@ had passed the login's 8-hour absolute lifetime, and the first panel
 after that asked the password with no error first — the same F17 shape
 from the client side (the process cache expires it locally).
 
+**3.8 — Esc at every question of the resolver install.** On the fresh
+`.13`, the krb5 resolver ceremony (subtree `/lab`), cancelled at each of
+its twelve questions in turn, the box's config dir and units checked
+after each: questions 1–9 (choose an admin domain, select, the CA
+glyph, subtree, auth, SPN, listen address, port, id-map) all end in
+"Install cancelled / Nothing was changed." with nothing on disk — the
+glyph question is the exception in wording only: Esc there is a reject,
+"Install failed — the admin domain identity was not confirmed; nothing
+was sent". Question 10, "admin server listen IP", ended in the same
+"Nothing was changed" **with `resolver.json`, `client.json`,
+`install.json`, `perms.json` and the activation units on disk** and the
+box thereafter detected as an installed resolver without an admin server
+(F20). The verification-code box takes no keys, so a queued enrollment
+cannot be cancelled from the keyboard (both TUIs; the old one's progress
+dialog is the same).
+
+**3.9 — resize mid-modal.** The revoke confirm at 150×45, the window
+resized to 80×24: the modal re-lays out with its text wrapped, the table
+and detail pane behind it clipped cleanly; back to 150×45, the same
+frame as before. No panic.
+
+**3.12 — Ctrl-C.** Inside a confirm modal and on the panel menu: the
+process exits 0, the alternate screen is left, the shell prompt is back
+and typed input echoes. The exit status is 0 rather than the 130 a shell
+would expect of an interrupt; harmless, worth a thought.
+
+## Phase 4 — parity inventory
+
+Every key the old TUI binds, walked from its legends and its `KeyCode`
+matches, against the new one. **same** = same key, same action;
+**moved** = reached another way; **missing** = not there (with a
+verdict); **new** = the new TUI only.
+
+| Screen | Old | New | Verdict |
+|---|---|---|---|
+| global | `Tab` switch, `q` quit, `Ctrl-C` | same | same |
+| global | `l` opens a Log pane of past results (`↑/↓`, `PgUp/PgDn` scroll) | none; each result is a toast, dismissed and gone | **missing** — verdict: drop, unless a scrollable history is wanted; the strict CLI is the record |
+| global | every key but `Ctrl-C` swallowed while an op runs ("working… · Ctrl-C quit") | status line says "working… [stage]"; keys still reach the layers | differs; the new one lets the operator cancel with `Esc` at the question, which is the better behaviour |
+| Welcome | any key | any key | same |
+| Set Up This Machine | `↑↓/kj`, `Enter` install, `p` preview | same; plus `F` finish a staged restore, `R` re-detect | same + **new** |
+| installed home | `↑↓/kj`, `←/→` switch install, `Enter` run, `u` uninstall, `U` update, `r` renew | same; plus `R` re-detect, `F` finish restore | same + **new** |
+| installed home, menu items | Status · Update Resolvers · Join · Preview Join · Add a Parent · Renew · Services · Admins · Permissions · Auto-Renew enable/rotate · Rotate Recovery · External-CA CSR/Install · Back Up · Uninstall | same list | same |
+| status card | any key closes | same | same |
+| uninstall on a CA host | one three-way prompt `y` destroy / `n` keep / `Esc` | confirm, then a Keep / DESTROY chooser | **moved** (F15: new is fine) |
+| Add a Parent | one modal ticks **several** parent members (`Space`), `Enter` confirms the set, manual row at the end | "Pick a parent" picks **one** member (or manual), then an "Add a parent" form (parent, subtree) | differs — see F18 |
+| Local Services | `s t R c e d r Esc` | same keys | same |
+| Local Services `c` create | name prompt, then the template opens in `$EDITOR` | a "New unit" form (all fields), `Enter` saves | **moved**: form instead of `$EDITOR` |
+| Local Services `e` edit | the unit file in `$EDITOR` (terminal suspended) | an "Edit [name]" form | **moved**: form instead of `$EDITOR`; nothing in the new TUI suspends the terminal, so probe 3.11 has no subject |
+| Admin Domains landing | `↑↓/kj`, `Enter` connect, `d` discover, `c` connect direct, `r` refresh | same; plus `Esc` clears a discovery report | same + **new** |
+| connect direct | host and port fields, `Tab` between | one `host:port` field | **moved** |
+| panel menu | `↑↓/kj`, `Enter`, `Esc` disconnect, **`L` logout** (revoke the cached login) | `↑↓/kj`, `Enter`, `Esc` disconnect | **missing** `L` — verdict: port it; the new TUI keeps a cached login for the process lifetime (and sealed on disk where the platform can), and an operator leaving a shared box has nothing but `netidx admin logout` |
+| every panel | `↑↓/kj`, `r`, `Esc` | same | same |
+| Enrollment Queue | `a d R r Esc`; `d` asks a reason | same keys; the reason is the library's `refusal_reason` question, through the pump | same |
+| Delegation Requests | `a d r Esc`; `d` asks a reason | same | same |
+| Admin Roster | `a e p d r Esc`; `a`/`e` edit the policy as JSON in `$EDITOR` | `a e p d r Esc` with a policy form; plus **`c` change my password** | **moved** (form) + **new** `c` |
+| Admin Servers | `g c x r Esc` | same | same |
+| read gate | Open / Shut / Shut until (a typed duration, `1h` default) | Open / Shut / 5 m / 30 m / 2 h / 8 h | **moved**: fixed choices instead of a typed duration; verdict: fine, add a typed row only if asked |
+| Issued Certificates | `x r Esc`; revoke asks a reason | same; revoke asks a reason | same |
+| Permissions | `e` edits the whole document in `$EDITOR`, `r`, `Esc` | `a` add, `e` edit one entry, `d` remove, `r`, `Esc` | **moved**: per-entry form; the whole-document edit is the CLI's `perms edit` |
+| remote Services | `s t R r Esc` | same | same |
+| question modals | text/secret (`Ctrl-U` clears), choice, confirm (`←/→`/`Tab`/`h`/`l` toggle), select domain, identity confirm (`a`/`Enter`, `r`/`n`/`Esc`), announce, one-time secret | same set; text fields have `Home`/`End`/`←/→`/`Delete`, no `Ctrl-U`; confirm toggles with `←/→`/`Tab` (no `h`/`l`) | same in substance |
+| verification code | progress dialog with the code, no keys | code box, no keys | same |
+| id-map, drift | no panel in either | no panel in either | same (CLI only) |
+
+Findings from the table:
+
+| # | Where | Old | New | Verdict / fix |
+|---|---|---|---|---|
+| F18 | Add a Parent | ticks several members of the parent cluster | picks one | the delegation's `parent_resolvers` is the referral the child writes; naming one member of a multi-member cluster is a weaker referral. Verdict wanted: port the multi-select, or have the library expand the picked member to its cluster (a decision, so the library's) |
+| F19 | panel menu `L` | logs out (revokes the cached login) | none | **fixed**: ported — `L` on the menu revokes the login at the CA, forgets it, toasts the outcome and lands on the domain list; the next connect asks the password |
+| F20 | 3.8, resolver install | same | same | **library, fixed**: the resolver config was written before the admin-server questions, so a cancel there left a half install that the TUI reported as "Nothing was changed". Two fixes: the admin-server questions (whether, listen IP, port) are asked before anything is written, and a post-write stop of any kind is a typed `InstallIncomplete` — "the resolver core install completed and is recorded at …, but its post-install setup did not finish: …" — which the TUI shows as "Install incomplete" and re-detects on; only a pre-write cancel says "Nothing was changed" |
+
 ## Findings
 
 | # | Where | Old | New | Verdict / fix |
@@ -145,7 +217,7 @@ would collide under the one-live-cert-per-name rule. Set explicitly here.
 
 ## Remaining
 
-Phase 3 (3.7–3.12 open), Phase 4 (parity table). Still open from the findings: F10
+Phase 3 (3.7–3.12 open). A verdict on F18. Still open from the findings: F10
 (message wording), F16 (first key after a transition, both TUIs).
 
 Driving harness: `scratchpad/tui.sh` (tmux over ssh; **zsh does not

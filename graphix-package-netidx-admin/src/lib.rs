@@ -52,6 +52,9 @@ pub(crate) fn admin_err(e: Error) -> Value {
     if let Some(p) = aops::password_change_required(&e) {
         return errf!("PasswordChangeRequired", "{}", p.admin);
     }
+    if netidx_admin::plan::install::install_incomplete(&e).is_some() {
+        return errf!("InstallIncomplete", "{e:#}");
+    }
     match aops::login_required(&e) {
         Some(_) => errf!("LoginRequired", "{e:#}"),
         None => errf!("Admin", "{e:#}"),
@@ -274,6 +277,7 @@ unit_image_state!(
     LocalEv,
     DriftEv,
     ListAdminsEv,
+    LogoutEv,
     ParseFingerprintEv,
     IdenticonEv,
     InfoEv
@@ -332,6 +336,52 @@ impl EvalCachedAsync for ListAdminsEv {
 }
 
 type ListAdmins = CachedArgsAsync<ListAdminsEv>;
+
+// ── logout (async) ───────────────────────────────────────────────
+
+#[derive(Debug, Clone, IntoValue)]
+enum LogoutOutcomeV {
+    Revoked,
+    NotRevoked(String),
+    NotCached,
+}
+
+#[derive(Debug, Default)]
+struct LogoutEv;
+
+impl EvalCachedAsync for LogoutEv {
+    type Args = TargetValue;
+
+    const NAME: &str = "netidx_admin_logout";
+
+    fn prepare_args(&mut self, cached: &CachedVals) -> Option<Self::Args> {
+        get_target(cached, 0)
+    }
+
+    fn eval(t: Self::Args) -> impl Future<Output = Value> + Send {
+        async move {
+            let (_, fingerprint) = match t.remote() {
+                Ok(r) => r,
+                Err(e) => return admin_err(e),
+            };
+            match aops::logout(aops::LogoutSelection::Ca(fingerprint)).await {
+                Ok(out) => match out.into_iter().next().map(|l| l.outcome) {
+                    Some(aops::LogoutOutcome::Revoked) => LogoutOutcomeV::Revoked,
+                    Some(aops::LogoutOutcome::NotRevoked(why)) => {
+                        LogoutOutcomeV::NotRevoked(why)
+                    }
+                    Some(aops::LogoutOutcome::NotCached) | None => {
+                        LogoutOutcomeV::NotCached
+                    }
+                }
+                .into(),
+                Err(e) => admin_err(e),
+            }
+        }
+    }
+}
+
+type Logout = CachedArgsAsync<LogoutEv>;
 
 // ── parse_fingerprint (sync, pure) ───────────────────────────────
 
@@ -641,6 +691,7 @@ graphix_derive::defpackage! {
         Local,
         Drift,
         ListAdmins,
+        Logout,
         ParseFingerprint,
         Identicon,
         Info,
