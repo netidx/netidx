@@ -481,7 +481,9 @@ async fn handle_control_conn(
     // (suffix-insensitive) to a known unit, failing the whole request on an
     // unknown name so a typo isn't reported as success.
     let targets: Vec<String> = if units.is_empty() {
-        senders.keys().cloned().collect()
+        let mut all: Vec<String> = senders.keys().cloned().collect();
+        all.sort();
+        all
     } else {
         let mut out = Vec::new();
         for want in &units {
