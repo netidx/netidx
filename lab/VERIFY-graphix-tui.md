@@ -1,8 +1,9 @@
 # Lab verification plan — the Graphix admin TUI against the ratatui one
 
-Both TUIs are built into one binary: `netidx admin tui` (Graphix, the
-subject) and `netidx admin tui-old` (ratatui, the reference, deleted before
-release). The question is whether the new one can replace the old one: the
+During this verification both TUIs were built into one binary: `netidx
+admin tui` (Graphix, the subject) and `netidx admin tui-old` (ratatui, the
+reference). The reference was deleted afterwards and the Graphix TUI is bare
+`netidx admin`. The question is whether the new one can replace the old one: the
 same build-outs, the same operations, the same failures handled — and where
 the two differ, which is right.
 

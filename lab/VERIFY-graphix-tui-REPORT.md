@@ -249,6 +249,29 @@ workstation).
 
 `netidx browser` also failed to compile on both platforms (F30).
 
+## Phase 7 — a CA restore, and the removal
+
+The one ceremony no phase had driven: restoring a bundle that holds a
+CA. On the scratch `.17`: a CA-only domain backed up, torn down and
+restored — "Restore plan: Components [Ca], fresh enrollment for 0
+credentials" → "old CA is fenced? yes" → the restored CA address → the
+recovery password → the no-TPM override → "Restore complete — CA is
+installed and ready", auto-approve active. A wrong recovery password
+(the first attempt; I had the password of an earlier scratch install)
+is refused: "no signing keyslot accepts that password". Then the
+two-step path: a resolver that founds its own domain (CA + resolver +
+id-map on one host), backed up, torn down, restored — "fresh enrollment
+for 1 credential", the restore parks, the CA's service is registered,
+the finish runs on the service coming up (the TLS name, key protection,
+admin-present approval and id-map questions of the re-enrollment), and
+the resolver is back: "Restore complete — Resolver is installed and
+ready". `F` with nothing parked says so. The backup of that host found
+F31.
+
+With that, the ratatui TUI is deleted (`netidx-tools/src/admin/tui_old/`,
+the `tui` and `tui-old` subcommands, ratatui out of netidx-tools). The
+Graphix TUI is bare `netidx admin`; `--server` is its flag.
+
 ## Phase 4 — parity inventory
 
 Every key the old TUI binds, walked from its legends and its `KeyCode`
@@ -332,6 +355,8 @@ Findings from the table:
 | F29 | Windows role menu | no CA row | CA offered; choosing it would fail `Unsupported` at the first step | **fixed**: the library states which roles a platform can install (`plan::install::installable_roles`), the menu filters by it |
 | F30 | `netidx browser` | — | "undefined type MoveCursor", then "style not defined": the program's `use tui;` no longer brings the names in | **fixed**: explicit imports; draws again on Linux and Windows |
 
+| F31 | backup | same | same | **library, fixed**: the backup refused "special file … id-map.sock.control" — it skipped sockets by the `.sock` extension, and the id-mapper's control socket is not named that way. A socket is skipped for what it is (`is_socket`) |
+
 Also observed, same for both TUIs (library defaults): the resolver's
 default cert name is `resolver.<domain>` (role.domain) while a
 publisher's is `<hostname>.<domain>`; two resolvers accepting the default
@@ -339,7 +364,7 @@ would collide under the one-live-cert-per-name rule. Set explicitly here.
 
 ## Remaining
 
-Phases 0–4 are done and every finding is closed. Still open from the findings: F10
+Phases 0–7 are done and every finding is closed; the ratatui TUI is gone. Still open from the findings: F10
 (message wording), F16 (first key after a transition, both TUIs).
 
 Driving harness: `scratchpad/tui.sh` (tmux over ssh; **zsh does not

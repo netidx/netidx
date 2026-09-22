@@ -42,10 +42,8 @@ the boundary the wrong way.
 `netidx-admin` owns every decision. `netidx-tools/src/admin/` (the strict CLI)
 and the TUI are presentation, and a third GUI frontend is planned, so anything
 implemented in a frontend has to be written again for it. The TUI is the Graphix
-program in `graphix-package-netidx-admin`, run by `netidx admin tui` (and bare
-`netidx admin`) through the driver in `netidx-tools/src/admin/tui.rs`. The Rust
-TUI it replaces is `netidx admin tui-old` (`netidx-tools/src/admin/tui_old/`)
-and goes before release; do not add to it.
+program in `graphix-package-netidx-admin`, run by bare `netidx admin` through
+the driver in `netidx-tools/src/admin/tui.rs`.
 
 When you are unsure which side something belongs on, ask:
 

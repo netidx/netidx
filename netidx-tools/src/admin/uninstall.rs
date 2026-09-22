@@ -326,7 +326,8 @@ fn reexec(_p: &Params, _e: &Escalation) -> Result<()> {
     )
 }
 
-pub(crate) use netidx_admin::uninstall::elevated_argv;
+#[cfg(any(unix, test))]
+use netidx_admin::uninstall::elevated_argv;
 
 #[cfg(test)]
 mod tests {

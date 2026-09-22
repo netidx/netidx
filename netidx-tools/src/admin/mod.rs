@@ -44,16 +44,12 @@ mod service;
 mod session;
 mod tls;
 mod tui;
-/// The ratatui admin TUI that `tui` replaces; goes before release.
-mod tui_old;
 mod uninstall;
+
+pub(crate) use tui::Params as TuiParams;
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum Params {
-    /// the interactive TUI (what bare `netidx admin` runs)
-    Tui(tui::Params),
-    /// the previous interactive TUI, kept until the new one is reviewed
-    TuiOld,
     /// back up the currently installed netidx role
     Backup(backup_restore::BackupArgs),
     /// restore a netidx role from a backup bundle
@@ -120,10 +116,11 @@ pub(crate) enum Params {
     },
 }
 
-pub(crate) fn run(p: Option<Params>) -> Result<()> {
-    match p.unwrap_or(Params::Tui(tui::Params::default())) {
-        Params::Tui(p) => tui::run(p),
-        Params::TuiOld => tui_old::run(),
+/// Bare `netidx admin` is the TUI; `tui` carries its flags, which mean
+/// nothing to a subcommand.
+pub(crate) fn run(tui: TuiParams, p: Option<Params>) -> Result<()> {
+    let Some(p) = p else { return tui::run(tui) };
+    match p {
         Params::Backup(args) => backup_restore::backup(args),
         Params::Restore(args) => backup_restore::restore(args),
         Params::Login(flags) => session::login(flags),

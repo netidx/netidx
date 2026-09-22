@@ -430,16 +430,28 @@ fn capture_tree(
                 bytes: fs::read(&path)?,
                 mode: file_mode(&meta),
             });
-        } else if path.extension().is_some_and(|extension| extension == "sock") {
-            // Local-auth and protected CA sockets are runtime state.
-            // They commonly live beside their config and may be active during
-            // an online backup; recreating them is the daemon's job.
+        } else if is_socket(&meta) {
+            // Local-auth, control and protected CA sockets are runtime
+            // state. They commonly live beside their config and may be
+            // active during an online backup; recreating them is the
+            // daemon's job.
             continue;
         } else {
             bail!("refusing special file in backup source: {}", path.display());
         }
     }
     Ok(())
+}
+
+#[cfg(unix)]
+fn is_socket(meta: &fs::Metadata) -> bool {
+    use std::os::unix::fs::FileTypeExt;
+    meta.file_type().is_socket()
+}
+
+#[cfg(not(unix))]
+fn is_socket(_: &fs::Metadata) -> bool {
+    false
 }
 
 /// A permissions file the resolver config includes from under the config
@@ -1358,9 +1370,12 @@ mod tests {
         fs::create_dir_all(&root).unwrap();
         let rec = record();
         fs::write(root.join("install.json"), serde_json::to_vec(&rec).unwrap()).unwrap();
-        let _socket =
-            match std::os::unix::net::UnixListener::bind(root.join("admin.sock")) {
-                Ok(socket) => socket,
+        // the id-mapper's control socket is not named `.sock`: a socket
+        // is known by what it is, not what it is called
+        let mut sockets = vec![];
+        for name in ["admin.sock", "id-map.sock.control"] {
+            match std::os::unix::net::UnixListener::bind(root.join(name)) {
+                Ok(socket) => sockets.push(socket),
                 // Some hermetic test runners prohibit AF_UNIX even below a writable
                 // temporary directory. The behavior is exercised wherever the
                 // platform permits constructing the special file.
@@ -1368,10 +1383,12 @@ mod tests {
                     return;
                 }
                 Err(error) => panic!("binding test socket: {error}"),
-            };
+            }
+        }
         let bundle = td.path().join("bundle");
         create(&root, rec, BundleScope::User, None, None, &bundle).unwrap();
         assert!(!bundle.join("files/admin.sock").exists());
+        assert!(!bundle.join("files/id-map.sock.control").exists());
     }
 
     #[test]

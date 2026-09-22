@@ -134,6 +134,8 @@ enum Opt {
     },
     /// administrative control plane (run with no subcommand for the interactive TUI)
     Admin {
+        #[command(flatten)]
+        tui: admin::TuiParams,
         #[command(subcommand)]
         params: Option<admin::Params>,
     },
@@ -190,7 +192,7 @@ fn main() -> Result<()> {
             let (cfg, auth) = common.load();
             container::run(cfg, auth, params)
         }
-        Opt::Admin { params } => admin::run(params),
+        Opt::Admin { tui, params } => admin::run(tui, params),
         Opt::RecordClient { cmd } => record_client::run(cmd),
         #[cfg(unix)]
         Opt::Record { config, example } => recorder::run(config, example),

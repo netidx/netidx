@@ -1,5 +1,6 @@
 //! The interactive `netidx admin` TUI: the Graphix program in
-//! `graphix-package-netidx-admin`, run by an embedded shell.
+//! `graphix-package-netidx-admin`, run by an embedded shell. Its flags
+//! sit on the bare command; a subcommand runs instead of it.
 
 use crate::gx;
 use anyhow::Result;
