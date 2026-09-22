@@ -824,7 +824,15 @@ let panels = |
   };
   let services_keys = |k: KeyEvent| select k.code {
     kk@ `Char("s") => { service_act(kk, `Start); `Stop },
-    kk@ `Char("t") => { service_act(kk, `Stop); `Stop },
+    kk@ `Char("t") => {
+      let u = (kk ~ unit_sel)$;
+      let at = ((kk ~ service_server)$).addr;
+      confirm <- {
+        message: "Stop unit [u.unit] on [at]? It stays down until started.",
+        action: `Service({ server: u.server, unit: u.unit, op: `Stop })
+      };
+      `Stop
+    },
     kk@ `Char("R") => { service_act(kk, `Restart); `Stop },
     _ => `Continue
   };

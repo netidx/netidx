@@ -194,7 +194,7 @@ verdict); **new** = the new TUI only.
 | installed home, menu items | Status · Update Resolvers · Join · Preview Join · Add a Parent · Renew · Services · Admins · Permissions · Auto-Renew enable/rotate · Rotate Recovery · External-CA CSR/Install · Back Up · Uninstall | same list | same |
 | status card | any key closes | same | same |
 | uninstall on a CA host | one three-way prompt `y` destroy / `n` keep / `Esc` | confirm, then a Keep / DESTROY chooser | **moved** (F15: new is fine) |
-| Add a Parent | one modal ticks **several** parent members (`Space`), `Enter` confirms the set, manual row at the end | "Pick a parent" picks **one** member (or manual), then an "Add a parent" form (parent, subtree) | differs — see F18 |
+| Add a Parent | one modal ticks **several** parent members (`Space`), `Enter` confirms the set, manual row at the end | "Pick a parent" ticks a whole cluster on the first `Space`, single members after, `Enter` confirms; then an "Add a parent" form (parent, subtree) | same, cluster-first (F18) |
 | Local Services | `s t R c e d r Esc` | same keys | same |
 | Local Services `c` create | name prompt, then the template opens in `$EDITOR` | a "New unit" form (all fields), `Enter` saves | **moved**: form instead of `$EDITOR` |
 | Local Services `e` edit | the unit file in `$EDITOR` (terminal suspended) | an "Edit [name]" form | **moved**: form instead of `$EDITOR`; nothing in the new TUI suspends the terminal, so probe 3.11 has no subject |
@@ -209,7 +209,7 @@ verdict); **new** = the new TUI only.
 | read gate | Open / Shut / Shut until (a typed duration, `1h` default) | Open / Shut / 5 m / 30 m / 2 h / 8 h | **moved**: fixed choices instead of a typed duration; verdict: fine, add a typed row only if asked |
 | Issued Certificates | `x r Esc`; revoke asks a reason | same; revoke asks a reason | same |
 | Permissions | `e` edits the whole document in `$EDITOR`, `r`, `Esc` | `a` add, `e` edit one entry, `d` remove, `r`, `Esc` | **moved**: per-entry form; the whole-document edit is the CLI's `perms edit` |
-| remote Services | `s t R r Esc` | same | same |
+| remote Services | `s t R r Esc`; `t` confirm-gated | same; `t` now confirm-gated too (was immediate) | same |
 | question modals | text/secret (`Ctrl-U` clears), choice, confirm (`←/→`/`Tab`/`h`/`l` toggle), select domain, identity confirm (`a`/`Enter`, `r`/`n`/`Esc`), announce, one-time secret | same set; text fields have `Home`/`End`/`←/→`/`Delete`, no `Ctrl-U`; confirm toggles with `←/→`/`Tab` (no `h`/`l`) | same in substance |
 | verification code | progress dialog with the code, no keys | code box, no keys | same |
 | id-map, drift | no panel in either | no panel in either | same (CLI only) |
@@ -218,7 +218,7 @@ Findings from the table:
 
 | # | Where | Old | New | Verdict / fix |
 |---|---|---|---|---|
-| F18 | Add a Parent | ticks several members of the parent cluster | picks one | the delegation's `parent_resolvers` is the referral the child writes; naming one member of a multi-member cluster is a weaker referral. Verdict wanted: port the multi-select, or have the library expand the picked member to its cluster (a decision, so the library's) |
+| F18 | Add a Parent | ticks several members of the parent cluster | picks one | **fixed** (Eric: every known member of the cluster is the default; removing one is a deliberate act): the picker's first `Space` ticks every member of that row's cluster, later `Space`s untick or re-tick single members, a tick in another cluster starts over with that one; `Enter` with nothing ticked takes the whole cluster of the row it is on. Lab-verified on `.12` (every cluster there has one member, so the cluster-wide tick is covered by the code, the switch and untick by the frames); the form comes up with the first ticked member's admin server |
 | F19 | panel menu `L` | logs out (revokes the cached login) | none | **fixed**: ported — `L` on the menu revokes the login at the CA, forgets it, toasts the outcome and lands on the domain list; the next connect asks the password |
 | F20 | 3.8, resolver install | same | same | **library, fixed**: the resolver config was written before the admin-server questions, so a cancel there left a half install that the TUI reported as "Nothing was changed". Two fixes: the admin-server questions (whether, listen IP, port) are asked before anything is written, and a post-write stop of any kind is a typed `InstallIncomplete` — "the resolver core install completed and is recorded at …, but its post-install setup did not finish: …" — which the TUI shows as "Install incomplete" and re-detects on; only a pre-write cancel says "Nothing was changed" |
 
@@ -236,7 +236,7 @@ Findings from the table:
 | F7 | enrollment queue | one card per request with glyph + full code | a table with an 8-char short code | **fixed** `15f50522`: the detail pane (identicon beside summary + grouped code) under the queue, delegation and certificate tables, as the old one; verified in Phase 2 |
 | F8 | EU delegation | same | same | **library**: the install-time delegation offer (`plan/install/resolver.rs:198`) is gated on the *reached* admin server running a resolver; reaching the dedicated CA skipped it although the domain had resolvers. **fixed** `8d6f93b7` + `d58f0e66` (Eric: only a resolver can delegate; a pure CA is filtered out); verified in Phase 2 |
 | F9 | Services panel | same | same | **library, fixed** `1650b90b`: the supervisor answered an all-units request in `HashMap` order; three loads gave three orders and `R` on row 1 restarted `.12`'s admin server instead of its resolver |
-| F10 | Services panel | same | same | restarting the admin server one is connected through loses the reply: "the CA refused … peer closed connection without sending TLS close_notify" although the restart happened. Expected; the message could say what happened. |
+| F10 | Services panel | same | same | restarting a server's `admin-server` unit loses the reply — that unit is what answers — "the CA refused … peer closed connection without sending TLS close_notify" although the restart happened. **library, fixed**: the case is recognised before sending; a lost reply to a restart is answered by reading the units back once the admin server is up again (30 s budget), so the toast is the statuses the operator asked about; a remote *stop* of that unit is refused with what to run on its host instead, since nothing over the admin plane could start it again. Lab-verified: `R` on `.12`'s admin-server → "Restarted — admin-server: running (pid 11481)" (new pid); `t` on it → the refusal naming the host command |
 | — | workstation-eu | — | `netidx@root` reported `failed` | a ghost of the teardown's `pkill -9` (unit file gone, `reset-failed` not run); not a TUI matter |
 
 | F11 | Admin Servers | ? | `x` on the CA row does nothing, silently | **fixed** `15f50522`: "The active CA stays — removed by uninstalling its host" |
@@ -244,7 +244,7 @@ Findings from the table:
 | F13 | Issued Certificates | ? | rows in hash order (6, 14, 7, 8, 2, 9, 13, 3, 11, 5, 10, 12, 4); `Expires` truncated to "UT" | **fixed** `2e0fe622` (library sorts by serial; both TUIs were unsorted) + the column widened |
 | F14 | client login refused | ? | after "login refused" the connect screen's address field is empty; retry retypes it | **fixed** `15f50522` |
 | F15 | CA uninstall | `u` → one confirm whose text folds in "also destroy it?" → `y` destroys | `u` → confirm → chooser Keep / DESTROY → Enter destroys | new is one step more careful; a typed confirmation is still worth considering |
-| F16 | any modal / list | the first key after a screen transition is sometimes eaten | same (observed on `Up` after the CA status card, `q` after the Uninstalled overlay, and the admin-name prompt on `.13`) | pre-existing in both; worth a look at where the first event after a layer change goes |
+| F16 | any modal / list | the first key after a screen transition is sometimes eaten | same (observed on `Up` after the CA status card, `q` after the Uninstalled overlay, and the admin-name prompt on `.13`) | **explained, not a bug**: probed on the rebuilt binary with a key sent within 100 ms of the transition — the admin-name modal took `xyz` 12 times of 12, and `Down` right after `Esc` from a panel moved the menu cursor 10 of 10. The observations were the any-key overlays (status card, welcome) and toasts, which close on Enter/Esc/Space and swallow other keys; the "admin-name" case was my own capture filter hiding the value row at the bottom of the modal. Same rule as the old TUI's any-key result overlay |
 | F17 | 3.6, session lost | after the CA's admin server restarts, `r` says "login required: session is unknown", then **every** later panel load asks the password, and none logs in again | same, except roster/servers stayed silent: the connect target kept the *password* and re-sent it per op while the other ops used the dead cached token | pre-existing in both, **fixed** (library + TUI): the refusal is a typed `LoginRequired`, the connect target holds the token it minted (the password is dropped), a change-password drops the cached login the CA just closed, and the panels close to the connect screen on `LoginRequired` — one login, at the connect, never a prompt per op |
 
 Also observed, same for both TUIs (library defaults): the resolver's
@@ -254,9 +254,7 @@ would collide under the one-live-cert-per-name rule. Set explicitly here.
 
 ## Remaining
 
-Phases 0–4 are done. Open: a verdict on F18 (one parent member or
-several), F10 (message wording), F16 (first key after a transition,
-both TUIs). Still open from the findings: F10
+Phases 0–4 are done and every finding is closed. Still open from the findings: F10
 (message wording), F16 (first key after a transition, both TUIs).
 
 Driving harness: `scratchpad/tui.sh` (tmux over ssh; **zsh does not

@@ -232,14 +232,14 @@ pub async fn install_unit(
     let units_dir_owned = units_dir.to_path_buf();
     tokio::task::spawn_blocking(move || {
         let dir = activation::ActivationDir::open(Some(&units_dir_owned))?;
-        dir.save("admin-server", &unit)
+        dir.save(activation::ADMIN_SERVER_UNIT, &unit)
             .context("writing the admin-server activation unit")
     })
     .await
     .context("activation-unit write task panicked")??;
     ans.note(&format_compact!(
         "  unit:     {}",
-        activation::unit_path_in(units_dir, "admin-server").display()
+        activation::unit_path_in(units_dir, activation::ADMIN_SERVER_UNIT).display()
     ));
     Ok(())
 }

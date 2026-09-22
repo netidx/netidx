@@ -25,6 +25,9 @@ pub use netidx_activation::file::{
 
 const UNIT_SUFFIX: &str = ".unit";
 
+/// The activation unit that runs this host's admin server.
+pub const ADMIN_SERVER_UNIT: &str = "admin-server";
+
 /// Tell a running supervisor to re-read `units_dir`.
 ///
 /// It has no directory watch — it re-reads on SIGHUP or this control op —

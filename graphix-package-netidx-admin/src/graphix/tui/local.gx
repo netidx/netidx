@@ -206,6 +206,37 @@ let parent_picker = |
   let sel = 0;
   picking <- root ~ true;
   sel <- root ~ 0;
+  // which candidates make up the referral: the first tick takes every
+  // member of that candidate's cluster, and members are unticked one at
+  // a time from there; a tick in another cluster starts over with it
+  let ticked: Array<bool> = [];
+  ticked <- select cands {
+    null as _ => [],
+    cs => array::map(cs, |_| false)
+  };
+  let cluster_of = |cs: Array<ParentCandidate>, i: i64| -> Array<bool> {
+    let base = (cs[i]$).base;
+    array::map(cs, |c| c.base == base)
+  };
+  let tick = |cs: Array<ParentCandidate>, t: Array<bool>, i: i64| -> Array<bool> {
+    let picked_base = array::find_map(array::zip(cs, t), |(c, b)| select b {
+      true => c.base,
+      false => null
+    });
+    select picked_base {
+      null as _ => cluster_of(cs, i),
+      b if b == (cs[i]$).base => array::map(array::enumerate(t), |(j, on)| select j == i {
+        true => !on,
+        false => on
+      }),
+      _ => cluster_of(cs, i)
+    }
+  };
+  let chosen = |cs: Array<ParentCandidate>, t: Array<bool>| -> Array<ParentCandidate>
+    array::filter_map(array::zip(cs, t), |(c, on)| select on {
+      true => c,
+      false => null
+    });
   let resolvers: [Array<string>, null] = null;
   let fields = never();
   let filling = false;
@@ -224,14 +255,27 @@ let parent_picker = |
     on_press(e, |k| select k.code {
       `Up | `Char("k") => { sel <- k ~ max(0, sel - 1); `Stop },
       `Down | `Char("j") => { sel <- k ~ min(opt_len(cands), sel + 1); `Stop },
+      kk@ `Char(" ") => {
+        ticked <- select kk ~ (opt::or_default(cands, []), ticked, sel) {
+          (cs, t, i) if i < array::len(cs) => tick(cs, t, i),
+          (_, t, _) => t
+        };
+        `Stop
+      },
       kk@ `Enter => {
-        select kk ~ (opt::or_default(cands, []), sel) {
-          (cs, i) if i < array::len(cs) => {
-            let c = cs[i]$;
-            resolvers <- [c.resolver];
-            fields <- [{ label: "parent admin server", value: c.admin }, { label: "subtree path", value: "" }]
+        select kk ~ (opt::or_default(cands, []), ticked, sel) {
+          (cs, t, i) if i < array::len(cs) => {
+            let members = select chosen(cs, t) {
+              [] => chosen(cs, cluster_of(cs, i)),
+              m => m
+            };
+            resolvers <- array::map(members, |c| c.resolver);
+            fields <- [
+              { label: "parent admin server", value: (members[0]$).admin },
+              { label: "subtree path", value: "" }
+            ]
           },
-          (cs, _) => {
+          (cs, _, _) => {
             resolvers <- cs ~ null;
             fields <- cs ~ [{ label: "parent admin server", value: "" }, { label: "subtree path", value: "" }]
           }
@@ -252,13 +296,19 @@ let parent_picker = |
         let manual = line("Enter an address manually…");
         let items = select cands {
           null as _ => [line(#style: hint, "looking for parents in the admin domain's map…"), manual],
-          cs => array::push(array::map(cs, |c| line("[c.resolver]  [c.base]  via [c.admin]")), manual)
+          cs => array::push(array::map(array::zip(cs, ticked), |(c, on)| {
+            let mark = select on {
+              true => "\[x\]",
+              false => "\[ \]"
+            };
+            line("[mark] [c.resolver]  [c.base]  via [c.admin]")
+          }), manual)
         };
         [layer(#width: &`Percentage(70), #height: &`Percentage(50),
           input_handler(#handle: &handle, &block(
             #border: &`All,
             #title: &line("Pick a parent"),
-            #title_bottom: &line(#style: hint, " ↑/↓ move · Enter choose · Esc cancel "),
+            #title_bottom: &line(#style: hint, " ↑/↓ move · Space tick a cluster, then untick members · Enter choose · Esc cancel "),
             &list(#highlight_style: &selstyle, #selected: &sel, &items))))]
       }
     },

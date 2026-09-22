@@ -10,14 +10,15 @@
 
 use super::open_admin_session;
 use crate::{
+    activation::ADMIN_SERVER_UNIT,
     admin_proto::{AdminServerId, Role, Secret, ServerState},
     answer::Answerer,
     transport,
 };
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use enumflags2::BitFlags;
 use netidx_activation::control::ControlOp;
-use std::{net::SocketAddr, path::PathBuf};
+use std::{net::SocketAddr, path::PathBuf, time::Duration};
 
 /// One admin server the operator can control services on — its listen address,
 /// its resolver cluster's base path (the authorization scope), and its roles.
@@ -62,6 +63,15 @@ pub async fn list_service_servers(
 /// server identity `target_server`. The CA enforces the caller's `service_control_scopes`
 /// covering that server's resolver cluster base. Returns that server's per-unit statuses.
 #[allow(clippy::too_many_arguments)]
+///
+/// The unit that answers a service-control request on the target is its own
+/// admin server, so a restart of that unit takes the reply down with it: the
+/// restart happens and the connection carrying it closes first. That case is
+/// recognised before sending, and a lost reply is answered by reading the
+/// units back once the admin server is up again, which is the outcome the
+/// operator asked about. A stop of it is refused: a stopped admin server can
+/// be told nothing, so only its host could start it again.
+#[allow(clippy::too_many_arguments)]
 pub async fn control_remote(
     ans: &mut dyn Answerer,
     server: SocketAddr,
@@ -73,17 +83,56 @@ pub async fn control_remote(
     op: ControlOp,
 ) -> Result<Vec<netidx_admin_proto::ServiceUnit>> {
     let sess = open_admin_session(ans, Some(server), ca_dir, admin, password).await?;
-    transport::control_service(
-        sess.server,
-        netidx_admin_proto::NodeKind::Client,
-        &sess.identity,
-        sess.credential.clone(),
-        target_server,
-        units,
-        op,
-    )
-    .await
+    let its_admin_server =
+        units.is_empty() || units.iter().any(|u| u == ADMIN_SERVER_UNIT);
+    if its_admin_server && op == ControlOp::Stop {
+        bail!(
+            "a stopped admin server can be told nothing over the admin plane, so \
+             nothing here could start it again — stop it on its host with `netidx \
+             admin host activation stop {ADMIN_SERVER_UNIT}`"
+        );
+    }
+    let control = |units: Vec<String>, op: ControlOp| {
+        transport::control_service(
+            sess.server,
+            netidx_admin_proto::NodeKind::Client,
+            &sess.identity,
+            sess.credential.clone(),
+            target_server,
+            units,
+            op,
+        )
+    };
+    match control(units.clone(), op).await {
+        Ok(units) => Ok(units),
+        Err(e) if its_admin_server && op == ControlOp::Restart => {
+            ans.note(
+                "the target's admin server restarted before it could answer; waiting \
+                 for it to come back",
+            );
+            let deadline = tokio::time::Instant::now() + RESTART_WAIT;
+            loop {
+                tokio::time::sleep(RESTART_POLL).await;
+                match control(units.clone(), ControlOp::Status).await {
+                    Ok(units) => return Ok(units),
+                    Err(status_err) if tokio::time::Instant::now() >= deadline => {
+                        return Err(status_err.context(format!(
+                            "the target's admin server restarted ({e:#}) and was not \
+                             back within {}s",
+                            RESTART_WAIT.as_secs()
+                        )));
+                    }
+                    Err(_) => (),
+                }
+            }
+        }
+        Err(e) => Err(e),
+    }
 }
+
+/// How long a restarted admin server is given to answer again.
+const RESTART_WAIT: Duration = Duration::from_secs(30);
+const RESTART_POLL: Duration = Duration::from_secs(2);
 
 /// Open or shut one member's read gate over the admin plane. Same session,
 /// same target, same scope as `control_remote` — a resolver that is running
