@@ -1182,6 +1182,61 @@ mod tests {
         validate_pem_cert_file(&issued.certificate).unwrap();
     }
 
+    /// An external PKI's answer as one file — `[intermediate, root]` — is
+    /// accepted without a separate root, and with the root given as well.
+    #[test]
+    fn validate_external_ca_cert_takes_the_chain_in_one_file() {
+        use openssl::{
+            asn1::Asn1Time,
+            ec::{EcGroup, EcKey},
+            hash::MessageDigest,
+            nid::Nid,
+            x509::extension::BasicConstraints,
+        };
+        let group = EcGroup::from_curve_name(Nid::X9_62_PRIME256V1).unwrap();
+        let root_key = PKey::from_ec_key(EcKey::generate(&group).unwrap()).unwrap();
+        let ca_key = PKey::from_ec_key(EcKey::generate(&group).unwrap()).unwrap();
+        let name = |cn: &str| {
+            let mut n = X509NameBuilder::new().unwrap();
+            n.append_entry_by_text("CN", cn).unwrap();
+            n.build()
+        };
+        let mut b = X509Builder::new().unwrap();
+        b.set_version(2).unwrap();
+        b.set_subject_name(&name("root")).unwrap();
+        b.set_issuer_name(&name("root")).unwrap();
+        b.set_pubkey(&root_key).unwrap();
+        b.set_not_before(&Asn1Time::days_from_now(0).unwrap()).unwrap();
+        b.set_not_after(&Asn1Time::days_from_now(10).unwrap()).unwrap();
+        b.append_extension(BasicConstraints::new().critical().ca().build().unwrap())
+            .unwrap();
+        b.sign(&root_key, MessageDigest::sha256()).unwrap();
+        let root = b.build();
+        let mut b = X509Builder::new().unwrap();
+        b.set_version(2).unwrap();
+        b.set_subject_name(&name("sub")).unwrap();
+        b.set_issuer_name(root.subject_name()).unwrap();
+        b.set_pubkey(&ca_key).unwrap();
+        b.set_not_before(&Asn1Time::days_from_now(0).unwrap()).unwrap();
+        b.set_not_after(&Asn1Time::days_from_now(5).unwrap()).unwrap();
+        b.append_extension(BasicConstraints::new().critical().ca().build().unwrap())
+            .unwrap();
+        b.sign(&root_key, MessageDigest::sha256()).unwrap();
+        let sub = b.build();
+        let key_pem = ca_key.private_key_to_pem_pkcs8().unwrap();
+        let mut chain = sub.to_pem().unwrap();
+        chain.extend(root.to_pem().unwrap());
+        let (inter, r) = validate_external_ca_cert(&chain, None, &key_pem).unwrap();
+        assert_eq!(inter, sub.to_pem().unwrap());
+        assert_eq!(r, root.to_pem().unwrap());
+        validate_external_ca_cert(
+            &sub.to_pem().unwrap(),
+            Some(&root.to_pem().unwrap()),
+            &key_pem,
+        )
+        .unwrap();
+    }
+
     #[test]
     fn init_and_open_round_trip() {
         let dir = tempfile::tempdir().unwrap();

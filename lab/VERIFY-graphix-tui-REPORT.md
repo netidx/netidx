@@ -176,6 +176,50 @@ process exits 0, the alternate screen is left, the shell prompt is back
 and typed input echoes. The exit status is 0 rather than the 130 a shell
 would expect of an interrupt; harmless, worth a thought.
 
+## Phase 5 — the installed-home lifecycle, and a second cluster member
+
+Everything on the installed home that Phases 1–3 had not driven, on the
+krb5 lab, through the new TUI.
+
+- **Back Up This Install / Restore from Backup** on the AP resolver
+  `.70.11`: backup to `/root/ap-backup` (toast: components, "Fresh
+  enrollment on restore: 1 credential(s)", manifest SHA-256); the box
+  torn down; Restore from Backup → bundle path → "Restore plan" announce
+  → admin-server listen questions → the re-enrollment queued and
+  approved from HQ → service registered; `/ap` in the Admin Servers
+  panel under a new id, the old one gone; `EU ws → HQ → AP` delivered
+  `AP-DATA-krb5` through the restored resolver. Two library defects
+  behind it, both found by `admin drift` afterwards (F22, F23).
+- **Renew Certificates** on it: "Every certificate on this host is
+  outside its renewal window" — the truthful answer for a two-year cert
+  (a real renewal is the short-cert recipe of the admin-agent lab).
+- **Update Resolvers** on the EU workstation after the second `/eu`
+  member joined: "Up to date" — the admin agent had already converged
+  its referral on both members before the key was pressed.
+- **Join an Admin Domain / Preview Join** on `.13`, installed
+  stand-alone first: the preview ends in "Preview only — nothing was
+  written"; the join writes the parent referral and the workstation's
+  local resolver picks it up without a restart (`/ap` data readable
+  from it). The join ceremony re-asks "stand-alone or join"; a nit.
+- **Rotate Auto-Renew Credential / Rotate Recovery Password** on the
+  CA: both confirm-gated, the new recovery password shown once.
+- **External-CA CSR / Install** on the clean `.17` as a second admin
+  domain `ext.test`: CA role → "use an external root CA? yes" → no-TPM
+  override → recovery password → root user → "CA awaiting external
+  signature" with the CSR path; signed with a scratch root; Install
+  Signed Certificate (chain file, blank root) → listen questions →
+  service registered → "CA (running)", `certificate.pem` issued by
+  `ext-root`. Three TUI defects on the way (F24–F26).
+- **A second `/eu` member** (`.60.17`, the EU publisher re-installed
+  as a resolver reaching its site's admin server, subtree blank): the
+  auth scheme came from the cluster (no question), the admin-server
+  round approved from HQ; the HQ parent's `/eu` referral converged on
+  both members with nothing restarted, and the EU workstation's local
+  resolver too. The Add-a-Parent picker on `.12` then showed the
+  two-member cluster: `Space` ticks both, `Space` on one unticks it,
+  `Space` in `/ap` starts over there, `Enter` with nothing ticked takes
+  the cluster under the cursor (F18 on real data).
+
 ## Phase 4 — parity inventory
 
 Every key the old TUI binds, walked from its legends and its `KeyCode`
@@ -246,6 +290,13 @@ Findings from the table:
 | F15 | CA uninstall | `u` → one confirm whose text folds in "also destroy it?" → `y` destroys | `u` → confirm → chooser Keep / DESTROY → Enter destroys | new is one step more careful; a typed confirmation is still worth considering |
 | F16 | any modal / list | the first key after a screen transition is sometimes eaten | same (observed on `Up` after the CA status card, `q` after the Uninstalled overlay, and the admin-name prompt on `.13`) | **explained, not a bug**: probed on the rebuilt binary with a key sent within 100 ms of the transition — the admin-name modal took `xyz` 12 times of 12, and `Down` right after `Esc` from a panel moved the menu cursor 10 of 10. The observations were the any-key overlays (status card, welcome) and toasts, which close on Enter/Esc/Space and swallow other keys; the "admin-name" case was my own capture filter hiding the value row at the bottom of the modal. Same rule as the old TUI's any-key result overlay |
 | F17 | 3.6, session lost | after the CA's admin server restarts, `r` says "login required: session is unknown", then **every** later panel load asks the password, and none logs in again | same, except roster/servers stayed silent: the connect target kept the *password* and re-sent it per op while the other ops used the dead cached token | pre-existing in both, **fixed** (library + TUI): the refusal is a typed `LoginRequired`, the connect target holds the token it minted (the password is dropped), a change-password drops the cached login the CA just closed, and the panels close to the connect screen on `LoginRequired` — one login, at the connect, never a prompt per op |
+
+| F21 | wording | — | "A new directory on this ca for the recovery bundle"; "the admin domain's one active ca and certificate authority" | **fixed**: host; certificate authority |
+| F22 | restore | same | same | **library, fixed**: the bundle carried `resolver.json.version`, but a restore re-enrolls as a new server identity whose rendered config the CA versions from 1, so the restored member read as AHEAD (v2 > v1) and would have missed the next topology change. The stamp is cleared at the re-enrollment |
+| F23 | restore | same | same | **library, fixed**: the backup flattened `perms.json` into `resolver.json` (`include_permissions: []`), so the restored member had no perms file for the CA to converge and reported `none < v1 BEHIND` for good — an edit at the CA would never reach it. An include under the config root travels in the bundle and is kept; only one from elsewhere is absorbed; and a restore of a bundle that carries `perms.json` re-includes it, so older bundles and already-flattened members heal. Verified: a second backup → teardown → restore of `.70.11` on the rebuilt binary, `admin drift` shows it at perms v1 / config v1, current |
+| F24 | external CA install | — | after "Install Signed Certificate" the toast told the operator to run `netidx admin service install --scope system` (not even the right command); nothing registered the service | **fixed**: the outcome goes through the same "register OS service?" path as an install |
+| F25 | pump | — | the "Verification code — CA identity" box (the CA's own glyph, shown at the end of the CA ceremony) stood on screen after the ceremony ended, over the result toast, taking no keys | **fixed**: a ceremony's end clears the code box |
+| F26 | status card | — | after the certificate install the card still said "External CA: awaiting signature" and the menu still offered "Install Signed Certificate", through `R` re-detect | **fixed**: the CA credential probe ran once per row, never on a re-detection; it now runs on every detection |
 
 Also observed, same for both TUIs (library defaults): the resolver's
 default cert name is `resolver.<domain>` (role.domain) while a

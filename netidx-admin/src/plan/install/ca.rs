@@ -116,8 +116,8 @@ pub async fn run_ca(ans: &mut dyn Answerer, input: CaInput) -> Result<CaInstalle
         ans.confirm(Field::ExternalSign, input.external_sign, false).await?;
     ans.announce(
         "CA / Certificate Authority",
-        "This machine will be the admin domain's one active ca and \
-         certificate authority. It does not need to run a resolver.",
+        "This machine will be the admin domain's one active certificate \
+         authority. It does not need to run a resolver.",
     )
     .await?;
     if input.common.mode.is_dry_run() {

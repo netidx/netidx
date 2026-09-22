@@ -442,6 +442,12 @@ fn capture_tree(
     Ok(())
 }
 
+/// A permissions file the resolver config includes from under the config
+/// root travels in the bundle and is relocated with it, so the include is
+/// kept: the admin domain's perms converge on that file, and a restored
+/// member with no such file could never take an edit. An include from
+/// anywhere else would dangle after a restore, so those are merged into the
+/// config and dropped.
 fn flatten_resolver_permissions(root: &Path, captured: &mut [Captured]) -> Result<()> {
     let Some(file) =
         captured.iter_mut().find(|file| file.relative == Path::new("resolver.json"))
@@ -452,6 +458,14 @@ fn flatten_resolver_permissions(root: &Path, captured: &mut [Captured]) -> Resul
     let resolver = crate::resolver::ResolverConfig::load(&source)?;
     let mut config = resolver.into_file();
     netidx::resolver_server::config::resolve_relative_includes(&mut config, &source)?;
+    let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    let travels = config
+        .include_permissions
+        .iter()
+        .all(|include| Path::new(include.as_str()).starts_with(&root));
+    if travels {
+        return Ok(());
+    }
     config.perms = netidx::resolver_server::config::merge_perms_only(&config)?;
     config.include_permissions.clear();
     file.bytes = serde_json::to_vec_pretty(&config)
@@ -954,6 +968,21 @@ fn restored_bytes(
             restored = serde_json::to_vec_pretty(&install)?;
         }
     }
+    // A bundle written when the permissions were folded into the resolver
+    // config still carries the file itself; the restored config includes it
+    // again, so the admin domain's perms have their file to converge on.
+    if file.path == "resolver.json"
+        && manifest.files.iter().any(|f| f.path == "perms.json")
+    {
+        let mut config: netidx::resolver_server::config::file::Config =
+            serde_json::from_slice(&restored)?;
+        if config.include_permissions.is_empty() {
+            config.include_permissions =
+                vec![root.join("perms.json").to_string_lossy().into_owned().into()];
+            config.perms = crate::perms::empty();
+            restored = serde_json::to_vec_pretty(&config)?;
+        }
+    }
     let Some(replacement) = addresses.resolver else { return Ok(restored) };
     let original = manifest
         .resolver_endpoint
@@ -1357,13 +1386,17 @@ mod tests {
         assert!(!root.join("backups").exists());
     }
 
+    /// A bundle written when the permissions were folded into the config
+    /// (`include_permissions: []`, perms inline) and that carries the file
+    /// comes back with the file included again and the inline copy gone.
     #[test]
-    fn resolver_permission_includes_are_made_self_contained() {
+    fn a_restore_re_includes_a_bundled_permissions_file() {
         use netidx::resolver_server::config::file as rfile;
         let td = tempfile::tempdir().unwrap();
         let root = td.path().join("source");
         fs::create_dir_all(&root).unwrap();
-        let rec = record();
+        let mut rec = record();
+        rec.set_managed_paths(vec![root.join("resolver.json"), root.join("perms.json")]);
         fs::write(root.join("install.json"), serde_json::to_vec(&rec).unwrap()).unwrap();
         fs::write(root.join("perms.json"), r#"{"/eu":{"alice":"swl"}}"#).unwrap();
         let member = rfile::MemberServerBuilder::default()
@@ -1372,21 +1405,70 @@ mod tests {
             .auth(rfile::Auth::Anonymous)
             .build()
             .unwrap();
-        let config = rfile::ConfigBuilder::default()
-            .member_servers(vec![member])
-            .include_permissions(vec!["perms.json".into()])
-            .build()
-            .unwrap();
+        let mut config =
+            rfile::ConfigBuilder::default().member_servers(vec![member]).build().unwrap();
+        config.perms = serde_json::from_str(r#"{"/eu":{"alice":"swl"}}"#).unwrap();
         fs::write(root.join("resolver.json"), serde_json::to_vec(&config).unwrap())
             .unwrap();
         let bundle = td.path().join("bundle");
         create(&root, rec, BundleScope::User, None, None, &bundle).unwrap();
-        let restored: rfile::Config = serde_json::from_slice(
-            &fs::read(bundle.join("files/resolver.json")).unwrap(),
-        )
-        .unwrap();
-        assert!(restored.include_permissions.is_empty());
-        assert!(restored.perms.0.contains_key("/eu"));
+        let dest = td.path().join("dest");
+        restore_files(&bundle, &dest).unwrap();
+        let restored: rfile::Config =
+            serde_json::from_slice(&fs::read(dest.join("resolver.json")).unwrap())
+                .unwrap();
+        assert_eq!(
+            restored.include_permissions.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+            vec![dest.join("perms.json").to_str().unwrap()]
+        );
+        assert!(restored.perms.0.is_empty());
+        assert!(dest.join("perms.json").is_file());
+    }
+
+    /// A bundled config keeps an include that travels with it (the file the
+    /// admin domain's perms converge on), and absorbs one that would dangle.
+    #[test]
+    fn resolver_permission_includes_travel_or_are_absorbed() {
+        use netidx::resolver_server::config::file as rfile;
+        let member = || {
+            rfile::MemberServerBuilder::default()
+                .addr("127.0.0.1:4564".parse().unwrap())
+                .bind_addr("127.0.0.1".parse().unwrap())
+                .auth(rfile::Auth::Anonymous)
+                .build()
+                .unwrap()
+        };
+        let bundled = |include: &str, perms_at: &Path| -> rfile::Config {
+            let td = tempfile::tempdir().unwrap();
+            let root = td.path().join("source");
+            fs::create_dir_all(&root).unwrap();
+            let rec = record();
+            fs::write(root.join("install.json"), serde_json::to_vec(&rec).unwrap())
+                .unwrap();
+            fs::write(perms_at, r#"{"/eu":{"alice":"swl"}}"#).unwrap();
+            let config = rfile::ConfigBuilder::default()
+                .member_servers(vec![member()])
+                .include_permissions(vec![include.into()])
+                .build()
+                .unwrap();
+            fs::write(root.join("resolver.json"), serde_json::to_vec(&config).unwrap())
+                .unwrap();
+            let bundle = td.path().join("bundle");
+            create(&root, rec, BundleScope::User, None, None, &bundle).unwrap();
+            serde_json::from_slice(&fs::read(bundle.join("files/resolver.json")).unwrap())
+                .unwrap()
+        };
+        let td = tempfile::tempdir().unwrap();
+        let travelling = td.path().join("source").join("perms.json");
+        fs::create_dir_all(travelling.parent().unwrap()).unwrap();
+        let kept = bundled("perms.json", &travelling);
+        assert_eq!(kept.include_permissions.len(), 1);
+        assert!(kept.perms.0.is_empty());
+        let outside = tempfile::tempdir().unwrap();
+        let elsewhere = outside.path().join("perms.json");
+        let absorbed = bundled(elsewhere.to_str().unwrap(), &elsewhere);
+        assert!(absorbed.include_permissions.is_empty());
+        assert!(absorbed.perms.0.contains_key("/eu"));
     }
 
     #[test]

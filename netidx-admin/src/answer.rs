@@ -494,7 +494,7 @@ impl Field {
             BackupTarget => FieldInfo {
                 flag: "--target",
                 label: "backup target directory",
-                help: "A new directory on this ca for the recovery bundle. \
+                help: "A new directory on this host for the recovery bundle. \
                        Existing paths are never overwritten.",
             },
             RestoreSource => FieldInfo {

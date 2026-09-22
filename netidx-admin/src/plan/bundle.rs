@@ -619,6 +619,10 @@ pub async fn reenroll_satellite_admin(
     }
     let resolver_path = root.join("resolver.json");
     let resolver = crate::resolver::ResolverConfig::load(&resolver_path)?;
+    // The enrollment below mints a new admin-server identity, whose rendered
+    // config the CA versions from 1; the stamp the bundle carried belongs to
+    // the identity it replaces and would read as ahead of every render.
+    crate::version_stamp::clear(&resolver_path).await?;
     let resolver_listen = match (manifest.previous_admin_server, net.info.ca_addr) {
         (Some(old), Some(ca)) => {
             let map = transport::get_map_pinned(ca, NodeKind::AdminServer, &net.identity)

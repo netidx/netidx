@@ -200,9 +200,9 @@ let pump = |q: Question| -> Pump {
     `OneTimeSecret(o) => { active <- `OneTimeSecret(o); err <- o ~ null },
     `VerificationCode(v) => code <- v,
     v@ `ClearVerificationCode => { code <- v ~ null; progress <- v ~ null },
-    `Progress(p) => progress <- select p.stage {
-      `Done => null,
-      _ => p
+    `Progress(p) => select p.stage {
+      `Done => { progress <- p ~ null; code <- p ~ null },
+      _ => progress <- p
     },
     `Note(s) => notes <- array::window(#n: 100, s ~ notes, s),
     `Warn(s) => notes <- array::window(#n: 100, s ~ notes, "⚠ [s]")

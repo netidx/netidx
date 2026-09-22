@@ -46,6 +46,17 @@ pub async fn record<P: AsRef<Path>>(subject: P, version: u64) -> Result<()> {
         .await
 }
 
+/// Forget which version `subject` reflects, so its host reads as behind
+/// everything and is reconciled from the start. For a copy of the file that
+/// now serves a different identity than the one it was stamped under.
+pub async fn clear<P: AsRef<Path>>(subject: P) -> Result<()> {
+    match tokio::fs::remove_file(path(subject)).await {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e.into()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

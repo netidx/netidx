@@ -502,14 +502,16 @@ let local = |#q: &Question| {
         null as _ => `None,
         lca => {
           let p: Probe = `Probing;
-          // the daemon that answers for the CA may not be up yet when the
-          // install has just finished, so a failed probe is tried again,
-          // a few times, a few seconds apart
+          // every detection probes again; the daemon that answers for the
+          // CA may not be up yet when the install has just finished, so a
+          // failed probe is tried again, a few times, a few seconds apart
           let tries = 0;
+          tries <- lca ~ 0;
           let retry_in: [duration, null] = null;
           let again = sys::time::timer(retry_in$, false);
           tries <- again ~ tries + 1;
-          let go: Any = true;
+          let go: Any = never();
+          go <- lca;
           go <- again;
           {
             catch(e) {
@@ -761,6 +763,11 @@ let local = |#q: &Question| {
     let x = select run { x@ `ExternalCsr => x, _ => never() };
     external_csr((x ~ lca)$.ca_dir)
   });
+  let svc_req = never<{ scope: Scope, name: [string, null], for_user: [string, null] }>();
+  let need_service = |t, scope: [Scope, null]| {
+    svc_req <- { scope: (t ~ scope)$, name: null, for_user: null };
+    null
+  };
   let extinstall_r = conduct(q, {
     let x = select run { x@ `ExternalInstall => x, _ => never() };
     external_install(#signed: null, #root: null, (x ~ lca)$.ca_dir)
@@ -902,17 +909,20 @@ let local = |#q: &Question| {
     catch(e) fail("Installing the certificate failed", (e.0).error);
     seq extinstall_r {
       let r = extinstall_r?;
+      select r {
+        `FirstInstall({ service_scope, .. }) => need_service(r, service_scope),
+        _ => null
+      };
       toast <- select r {
         `FirstInstall({ cfg_path, service_scope }) => {
           title: "CA certificate installed",
-          lines: array::concat(
-            ["Installed the externally-signed CA certificate; CA configured at [cfg_path]."],
+          lines: [
+            "Installed the externally-signed CA certificate; CA configured at [cfg_path].",
             select service_scope {
-              null as _ => [],
-              `User => ["Register its OS service: netidx admin service install --scope user"],
-              `System => ["Register its OS service: netidx admin service install --scope system"]
+              null as _ => "No OS service is needed.",
+              _ => "Registering the OS service…"
             }
-          ),
+          ],
           error: false
         },
         `OfflineCa => {
@@ -949,7 +959,6 @@ let local = |#q: &Question| {
   // ── the OS service a role needs afterwards: registered here at user
   // scope; at system scope the invocation runs privileged on the
   // released terminal and the service manager's state judges it ──
-  let svc_req = never<{ scope: Scope, name: [string, null], for_user: [string, null] }>();
   let svc_r = install_service(#scope: svc_req.scope, #name: svc_req.name, #for_user: svc_req.for_user, svc_req);
   let svc_ok = never();
   // a privileged step: what it is, the netidx invocation, and what
@@ -1013,10 +1022,6 @@ let local = |#q: &Question| {
   {
     catch(e) fail("The system service is not running", (e.0).error);
     svc_ok <- verified?
-  };
-  let need_service = |t, scope: [Scope, null]| {
-    svc_req <- { scope: (t ~ scope)$, name: null, for_user: null };
-    null
   };
   // ── the lifecycle ceremonies ──
   let install_r = conduct(q, {
