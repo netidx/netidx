@@ -46,6 +46,9 @@ use std::{
 /// [`aops::password_change_required`] becomes its own variant because
 /// frontends must route on it, not on message text.
 pub(crate) fn admin_err(e: Error) -> Value {
+    if e.downcast_ref::<ceremony::Cancelled>().is_some() {
+        return errf!("Cancelled", "{e}");
+    }
     match aops::password_change_required(&e) {
         Some(p) => errf!("PasswordChangeRequired", "{}", p.admin),
         None => errf!("Admin", "{e:#}"),

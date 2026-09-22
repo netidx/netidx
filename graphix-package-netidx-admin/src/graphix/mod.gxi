@@ -6,6 +6,7 @@ use ceremony::Ceremony;
 /// `Unsupported` is a unix-only operation invoked on another platform.
 type AdminError = [
   `Admin(string),
+  `Cancelled(string),
   `PasswordChangeRequired(string),
   `Unsupported(string)
 ];

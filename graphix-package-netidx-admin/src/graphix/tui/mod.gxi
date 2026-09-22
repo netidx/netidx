@@ -36,6 +36,13 @@ val conduct: fn(q: &Question, c: Ceremony<'r>) -> Result<'r, AdminError>;
 /// gesture: its 8x8 identicon glyph over its grouped fingerprint code.
 val identity_lines: fn(fp: Fingerprint) -> Array<tui::Line>;
 
+/// The identicon alone, seven centered rows in a 20-column band.
+val glyph: fn(fp: Fingerprint) -> Array<tui::Line>;
+
+/// The code alone, grouped four to a row, bold; centered unless told
+/// otherwise.
+val fingerprint_lines: fn(?#alignment: tui::Alignment, fp: Fingerprint) -> Array<tui::Line>;
+
 /// The dim style of hints, legends and secondary text.
 val hint: tui::Style;
 

@@ -32,7 +32,7 @@ let glyph = |fp: Fingerprint| -> Array<tui::Line> select identicon(fp)$ {
   }
 };
 
-let fingerprint_lines = |fp: Fingerprint| -> Array<tui::Line> {
+let fingerprint_lines = |#alignment: tui::Alignment = `Center, fp: Fingerprint| -> Array<tui::Line> {
   let groups = str::split(#pat: " ", fp.code);
   let chunks = array::fold(groups, [], |acc, g| select acc {
     [] => [[g]],
@@ -43,20 +43,25 @@ let fingerprint_lines = |fp: Fingerprint| -> Array<tui::Line> {
   });
   array::map(chunks, |c| line(
     #style: style(#add_modifier: [`Bold]),
-    #alignment: `Center,
+    #alignment: alignment,
     str::join(#sep: " ", c)
   ))
 };
 
 let admin_text = |a: AdminError| -> string select a {
   `Admin(m) => m,
+  `Cancelled(m) => m,
   `PasswordChangeRequired(name) => "[name]'s password must be changed first",
   `Unsupported(m) => "unsupported on this platform: [m]"
 };
 
 let conduct = |q: &Question, c: Ceremony<'r>| -> Result<'r, AdminError> {
   *q <- questions(c);
-  result(c)
+  let r = result(c);
+  // the ceremony's end is a terminal progress note, so the pump drops
+  // whatever it was last told the ceremony was doing
+  *q <- r ~ `Progress({ stage: `Done, message: "", duration: null });
+  r
 };
 
 let identity_lines = |fp: Fingerprint| array::concat(glyph(fp), fingerprint_lines(fp));
@@ -148,6 +153,9 @@ let pump = |q: Question| -> Pump {
   let code: [{ purpose: string, fp: Fingerprint }, null] = null;
   // ── the outstanding blocking question and its per-modal state ──
   let active: [Blocking, null] = null;
+  // a question supersedes the progress note: the ceremony is waiting on
+  // the operator, not working
+  progress <- active ~ null;
   let ed = line_edit::state("");
   let sel = 0;
   let yes = false;
@@ -189,8 +197,11 @@ let pump = |q: Question| -> Pump {
     `ConfirmIdentity(i) => { active <- `ConfirmIdentity(i); err <- i ~ null },
     `OneTimeSecret(o) => { active <- `OneTimeSecret(o); err <- o ~ null },
     `VerificationCode(v) => code <- v,
-    v@ `ClearVerificationCode => code <- v ~ null,
-    `Progress(p) => progress <- p,
+    v@ `ClearVerificationCode => { code <- v ~ null; progress <- v ~ null },
+    `Progress(p) => progress <- select p.stage {
+      `Done => null,
+      _ => p
+    },
     `Note(s) => notes <- array::window(#n: 100, s ~ notes, s),
     `Warn(s) => notes <- array::window(#n: 100, s ~ notes, "⚠ [s]")
   };

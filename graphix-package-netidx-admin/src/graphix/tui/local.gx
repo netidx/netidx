@@ -452,9 +452,24 @@ let local = |#q: &Question| {
         null as _ => `None,
         lca => {
           let p: Probe = `Probing;
+          // the daemon that answers for the CA may not be up yet when the
+          // install has just finished, so a failed probe is tried again,
+          // a few times, a few seconds apart
+          let tries = 0;
+          let retry_in: [duration, null] = null;
+          let again = sys::time::timer(retry_in$, false);
+          tries <- again ~ tries + 1;
+          let go: Any = true;
+          go <- again;
           {
-            catch(e) p <- `Failed(admin_text((e.0).error));
-            p <- `Ready(ca::credentials(#cfg: lca.cfg, lca.ca_dir)?)
+            catch(e) {
+              p <- `Failed(admin_text((e.0).error));
+              retry_in <- e ~ select tries {
+                n if n < 3 => duration:3.s,
+                _ => null
+              }
+            };
+            p <- `Ready(ca::credentials(#cfg: go ~ lca.cfg, go ~ lca.ca_dir)?)
           };
           p
         }
@@ -978,7 +993,17 @@ let local = |#q: &Question| {
     uninstall(#scope: d.scope, #config_dir: d.config_dir, #remove_ca: remove_ca, d)
   });
   {
-    catch(e) fail("Install failed", (e.0).error);
+    catch(e) select (e.0).error {
+      `Cancelled(_) => toast <- {
+        title: select (e ~ run) {
+          `Install(_, true) => "Preview cancelled",
+          _ => "Install cancelled"
+        },
+        lines: ["Nothing was changed."],
+        error: false
+      },
+      other => fail("Install failed", other)
+    };
     seq install_r {
       let r = install_r?;
       select r {

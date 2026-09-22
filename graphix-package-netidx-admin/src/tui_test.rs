@@ -797,7 +797,7 @@ async fn a_server_argument_on_a_fresh_machine_leaves_the_keys_with_the_install()
 /// A fresh machine: the welcome dialog, the role menu, and a dry-run
 /// preview of the Workstation role reaching the guided install's first
 /// question through the pump — cancelled there, which the tab reports
-/// as the install failing. Then, with a CA install recorded, the
+/// as a cancelled preview. Then, with a CA install recorded, the
 /// teardown's chained question: the confirmation, then whether to
 /// destroy the CA, cancelled before anything runs.
 #[tokio::test(flavor = "multi_thread")]
@@ -850,8 +850,11 @@ async fn fresh_machine_previews_an_install_and_a_teardown_asks_about_the_ca() ->
     .await?;
     if !h.render_lines()?.iter().any(|l| l.contains("Workstation preview")) {
         h.dispatch_event(key(KeyCode::Esc)).await?;
-        wait_render(&mut h, Duration::from_secs(60), "the cancelled install", |lines| {
-            lines.iter().any(|l| l.contains("Install failed"))
+        // a cancelled preview is not a failure: it says so, and that
+        // nothing changed
+        wait_render(&mut h, Duration::from_secs(60), "the cancelled preview", |lines| {
+            lines.iter().any(|l| l.contains("Preview cancelled"))
+                && lines.iter().any(|l| l.contains("Nothing was changed"))
         })
         .await?;
     }

@@ -14,7 +14,7 @@
 //! Dropping the last reference to the ceremony value cancels the op.
 
 use crate::{FingerprintV, admin_err};
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Error, Result, anyhow, bail};
 use arcstr::ArcStr;
 use futures::{SinkExt, channel::mpsc};
 use graphix_compiler::{
@@ -50,6 +50,19 @@ use std::{
     time::Duration,
 };
 use tokio::sync::{mpsc as tmpsc, oneshot};
+
+/// The operator dismissed a question, so the ceremony cannot go on: not
+/// a failure of anything, and routed by type, never by message.
+#[derive(Debug)]
+pub(crate) struct Cancelled;
+
+impl std::fmt::Display for Cancelled {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("the operator cancelled")
+    }
+}
+
+impl std::error::Error for Cancelled {}
 
 static BATCHES: LazyLock<Pool<Vec<(BindId, Value)>>> =
     LazyLock::new(|| Pool::new(32, 128));
@@ -446,7 +459,7 @@ impl GxAnswerer {
         let id = QUESTION_ID_WRAPPER
             .wrap(QuestionIdValue { shared: Arc::downgrade(&self.shared), seq });
         self.emit(build(id));
-        rx.await.map_err(|_| anyhow!("the operator cancelled"))
+        rx.await.map_err(|_| Error::new(Cancelled))
     }
 }
 

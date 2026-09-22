@@ -1,7 +1,7 @@
 use package::{
-  AdminError, Fingerprint, Target, info,
+  AdminError, Fingerprint, Target, info, parse_fingerprint,
   admins::{self, Policy, SlotKind, change_password, reset_password},
-  certs::{approve, approve_renewals, deny, issued, list_queue, revoke},
+  certs::{QueueItem, approve, approve_renewals, deny, issued, list_queue, revoke},
   perms::{self, list_resolver_clusters},
   servers::{
     self, PeerResult, ReadGate, ServerInfo, ServiceServer, approve_delegation,
@@ -11,8 +11,8 @@ use package::{
   units::{ServiceOp, UnitState}
 };
 use super::{
-  Confirm, Toast, admin_text, conduct, confirm_layers, hint, identity_lines, opt_len,
-  selected, selstyle, toast_layers
+  Confirm, Toast, admin_text, conduct, confirm_layers, fingerprint_lines, glyph, hint,
+  identity_lines, opt_len, selected, selstyle, toast_layers
 };
 use tui::{
   line, style,
@@ -451,11 +451,6 @@ let panels = |
     }
   };
   let server_sel = selected(server_rows, row_sel);
-  let server_id = select server_sel {
-    null as _ => null,
-    s if s.ca => null,
-    s => s.id
-  };
   let unit_sel = select service_server {
     null as _ => null,
     s => select selected(unit_rows, row_sel) {
@@ -756,10 +751,24 @@ let panels = |
       `Stop
     },
     kk@ `Char("x") => {
-      let id = (kk ~ server_id)$;
-      confirm <- {
-        message: "Permanently remove server [id]? Its certificates are revoked and the removal is pushed domain-wide.",
-        action: `RemoveServer(id)
+      select kk ~ server_sel {
+        null as _ => never(),
+        s if s.ca => toast <- {
+          title: "The active CA stays",
+          lines: ["The CA is removed by uninstalling its host, never from here."],
+          error: false
+        },
+        s => confirm <- {
+          message: [
+            line("Permanently remove server [s.id]?"),
+            line(""),
+            line("last address: [s.addr]"),
+            line("resolver cluster: [opt::or(s.cluster_base, "(none)")]"),
+            line(""),
+            line("Its certificates are revoked and the removal is pushed domain-wide. There is no undo.")
+          ],
+          action: `RemoveServer(s.id)
+        }
       };
       `Stop
     },
@@ -933,13 +942,14 @@ let panels = |
       ])
     )
   };
+  let queue_name = |i: QueueItem| select i.enroll_listen {
+    null as _ => i.requested_name,
+    l => "admin-server enrollment @ [l]"
+  };
   let queue_trs = select queue_rows {
     null as _ => [],
     rows => array::map(rows, |i| {
-      let name = select i.enroll_listen {
-        null as _ => i.requested_name,
-        l => "admin-server enrollment @ [l]"
-      };
+      let name = queue_name(i);
       let mark = select i.verified_renewal {
         true => "renewal ",
         false => ""
@@ -957,7 +967,34 @@ let panels = |
       ])
     })
   };
-  let queue_view = table(
+  // the detail pane under a glyph-bearing list: the selected row's
+  // identicon beside its summary and grouped code
+  let detail_pane = |title: string, fp: [Fingerprint, null], summary: string, none: string| {
+    let left = select fp {
+      null as _ => [],
+      f => glyph(f)
+    };
+    let hash = select fp {
+      null as _ => [line(#style: hint, none)],
+      f => fingerprint_lines(#alignment: `Left, f)
+    };
+    block(#border: &`All, #title: &line(title),
+      &layout(#direction: &`Horizontal, &[
+        child(#constraint: `Length(20), paragraph(#trim: &false, &left)),
+        child(#constraint: `Min(20), paragraph(&array::concat([line(summary), line("")], hash)))
+      ]))
+  };
+  let with_detail = |t, d| layout(#direction: &`Vertical, &[
+    child(#constraint: `Min(3), t),
+    child(#constraint: `Length(12), d)
+  ]);
+  let queue_detail = select selected(queue_rows, row_sel) {
+    null as _ => detail_pane("Request", null, "", "(no request selected)"),
+    i => detail_pane("Request", i.code,
+      "[queue_name(i)]  [i.kind]  ([fmt_age(i.age_secs)], from [i.peer])",
+      "(unparseable CSR — deny only)")
+  };
+  let queue_view = with_detail(table(
     #header: &row(#style: bold, [
       cell(line("Name")), cell(line("Kind")), cell(line("Code")),
       cell(line("Age")), cell(line("From"))
@@ -966,7 +1003,7 @@ let panels = |
     #selected: &row_sel,
     #widths: &[`Percentage(40), `Length(10), `Length(24), `Length(8), `Percentage(25)],
     &queue_trs
-  );
+  ), queue_detail);
   let deleg_trs = select deleg_rows {
     null as _ => [],
     rows => array::map(rows, |i| {
@@ -983,7 +1020,12 @@ let panels = |
       ])
     })
   };
-  let deleg_view = table(
+  let deleg_detail = select selected(deleg_rows, row_sel) {
+    null as _ => detail_pane("Request", null, "", "(no request selected)"),
+    i => detail_pane("Request", i.code,
+      "[i.proposed_path] under [i.parent_base]  ([fmt_age(i.age_secs)], from [i.peer])", "")
+  };
+  let deleg_view = with_detail(table(
     #header: &row(#style: bold, [
       cell(line("Path")), cell(line("State")), cell(line("Code")),
       cell(line("Age")), cell(line("From"))
@@ -992,7 +1034,7 @@ let panels = |
     #selected: &row_sel,
     #widths: &[`Percentage(35), `Length(24), `Length(24), `Length(8), `Percentage(20)],
     &deleg_trs
-  );
+  ), deleg_detail);
   let roster_trs = select roster_rows {
     null as _ => [],
     rows => array::map(rows, |a| {
@@ -1097,16 +1139,23 @@ let panels = |
       ])
     })
   };
-  let certs_view = table(
+  let certs_detail = select selected(cert_rows, row_sel) {
+    null as _ => detail_pane("Certificate", null, "", "(no certificate selected)"),
+    c => detail_pane("Certificate",
+      select parse_fingerprint(c.spki_fp) { error as _ => null, f => f },
+      "#[c.serial]  [c.name]  expires [cast<datetime>(c.not_after_unix)$]",
+      "(no glyph)")
+  };
+  let certs_view = with_detail(table(
     #header: &row(#style: bold, [
       cell(line("Serial")), cell(line("Name")), cell(line("Expires")),
       cell(line(""))
     ]),
     #row_highlight_style: &selstyle,
     #selected: &row_sel,
-    #widths: &[`Length(10), `Percentage(40), `Length(22), `Length(10)],
+    #widths: &[`Length(10), `Percentage(40), `Length(24), `Length(10)],
     &cert_trs
-  );
+  ), certs_detail);
   let unit_trs = select unit_rows {
     null as _ => [],
     rows => array::map(rows, |u| {

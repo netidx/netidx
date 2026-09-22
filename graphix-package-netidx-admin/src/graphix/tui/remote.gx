@@ -36,6 +36,7 @@ let remote = |#q: &Question, #book_dir: [string, null], #server: string = ""| ->
     #connected: &connected,
     #on_connect: |c| {
       connect_req <- { server: c.server, glyph: c.glyph };
+      ed <- { value: c.server, cursor: str::len(c.server) };
       screen <- c ~ `Connect;
       null
     },
