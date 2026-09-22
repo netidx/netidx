@@ -624,7 +624,12 @@ pub async fn get_map_pinned(
         GetMapResponse::Ok(map) => map,
         GetMapResponse::Err { reason } => bail!("map query refused: {reason}"),
     };
-    if expected.ca && expected.server_id == hint.ca {
+    // The hint is the authoritative map only when it came from the CA
+    // itself; a member's copy converges on its next register.
+    if expected.ca
+        && expected.server_id == hint.ca
+        && hint.ca_entry().is_some_and(|c| c.addr == addr)
+    {
         return Ok(hint);
     }
     let ca = hint
@@ -1347,7 +1352,8 @@ fn cluster_topology(
         .find(|c| c.id == cluster_id)
         .filter(|c| c.state == admin_proto::ResolverClusterState::Active)
         .context("resolver cluster is not active")?;
-    let (members, admin_servers) = registered_members(map, cluster_id).into_iter().unzip();
+    let (members, admin_servers) =
+        registered_members(map, cluster_id).into_iter().unzip();
     let edge_addrs = |id| -> Vec<ResolverAddr> {
         registered_members(map, id).into_iter().map(|(r, _)| r).collect()
     };

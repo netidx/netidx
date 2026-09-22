@@ -165,10 +165,14 @@ pub async fn delegate_under_parent(
     };
     let map =
         transport::get_map_pinned(parent_conf_addr, NodeKind::Client, &identity).await?;
+    // The parent is the server at the address given, which need not be
+    // the one whose identity was confirmed: a child that reached the
+    // domain through its dedicated CA delegates under a resolver member.
     let parent_id = map
         .admin_servers
         .iter()
-        .find(|s| s.id == identity.server_id)
+        .find(|s| s.addr == parent_conf_addr)
+        .or_else(|| map.admin_servers.iter().find(|s| s.id == identity.server_id))
         .and_then(|s| s.cluster)
         .context("the selected parent server has no resolver cluster")?;
     let servers = match selected {
