@@ -93,6 +93,26 @@ keytab SPN: `AP ws → HQ → EU` delivered `EU-DATA-krb5`, `EU ws → HQ → AP
 delivered `AP-DATA-krb5`. (A publisher without `--spn` fails with
 "kerberos error": the writer's SPN requirement, as recorded in Pass 2.)
 
+## Phase 3 — failure modes
+
+3.1–3.5 were covered while the driver was built (no-TTY refusal, dropped
+session, `--server` on a fresh and an installed box, wrong password).
+
+**3.6 — admin server stopped while the Admin Domain tab is open.** On
+`.11`, session at the CA's own admin server, `netidx admin host
+activation stop admin-server`. Every panel's load fails with a readable
+dialog — "Loading the queue failed: contacting admin server
+192.168.50.11:4565: … Connection refused (os error 111)" — with the
+rows of the last successful load still behind it. `start admin-server`
+and `r`: the panel loads again without restarting the TUI. But the
+admin server's session table is in memory, so the first load after the
+restart is refused "login required: session is unknown", and from then
+on every panel load asked the admin password (F17, both TUIs). A
+second observation on the way: a session from the previous evening
+had passed the login's 8-hour absolute lifetime, and the first panel
+after that asked the password with no error first — the same F17 shape
+from the client side (the process cache expires it locally).
+
 ## Findings
 
 | # | Where | Old | New | Verdict / fix |
@@ -116,6 +136,7 @@ delivered `AP-DATA-krb5`. (A publisher without `--spn` fails with
 | F14 | client login refused | ? | after "login refused" the connect screen's address field is empty; retry retypes it | **fixed** `15f50522` |
 | F15 | CA uninstall | `u` → one confirm whose text folds in "also destroy it?" → `y` destroys | `u` → confirm → chooser Keep / DESTROY → Enter destroys | new is one step more careful; a typed confirmation is still worth considering |
 | F16 | any modal / list | the first key after a screen transition is sometimes eaten | same (observed on `Up` after the CA status card, `q` after the Uninstalled overlay, and the admin-name prompt on `.13`) | pre-existing in both; worth a look at where the first event after a layer change goes |
+| F17 | 3.6, session lost | after the CA's admin server restarts, `r` says "login required: session is unknown", then **every** later panel load asks the password, and none logs in again | same, except roster/servers stayed silent: the connect target kept the *password* and re-sent it per op while the other ops used the dead cached token | pre-existing in both, **fixed** (library + TUI): the refusal is a typed `LoginRequired`, the connect target holds the token it minted (the password is dropped), a change-password drops the cached login the CA just closed, and the panels close to the connect screen on `LoginRequired` — one login, at the connect, never a prompt per op |
 
 Also observed, same for both TUIs (library defaults): the resolver's
 default cert name is `resolver.<domain>` (role.domain) while a
@@ -124,9 +145,7 @@ would collide under the one-live-cert-per-name rule. Set explicitly here.
 
 ## Remaining
 
-Phase 3 (failure modes: 3.1–3.5 covered — no-TTY refusal, dropped
-session, `--server` on a fresh and an installed box, wrong password; 3.6–
-3.12 open), Phase 4 (parity table). Still open from the findings: F10
+Phase 3 (3.7–3.12 open), Phase 4 (parity table). Still open from the findings: F10
 (message wording), F16 (first key after a transition, both TUIs).
 
 Driving harness: `scratchpad/tui.sh` (tmux over ssh; **zsh does not

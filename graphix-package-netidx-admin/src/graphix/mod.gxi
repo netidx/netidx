@@ -3,10 +3,14 @@ use ceremony::Ceremony;
 /// The error union every admin operation can fail with.
 /// `PasswordChangeRequired` is its own variant because frontends route
 /// on it (open the change-password flow); the payload is the admin name.
-/// `Unsupported` is a unix-only operation invoked on another platform.
+/// `LoginRequired` is the CA no longer honouring the session's login
+/// (expired, or the admin server restarted): the cached login is gone
+/// and the frontend connects again. `Unsupported` is a unix-only
+/// operation invoked on another platform.
 type AdminError = [
   `Admin(string),
   `Cancelled(string),
+  `LoginRequired(string),
   `PasswordChangeRequired(string),
   `Unsupported(string)
 ];

@@ -334,16 +334,7 @@ impl TestAdminDomain {
     /// requires to be changed at first login. Nothing is left in the
     /// session cache.
     pub async fn mint_role_admin(&self, name: &str) -> Result<String> {
-        let mut ans = SetupAnswerer::new(&self.password);
-        let session = crate::ops::open_admin_password_session(
-            &mut ans,
-            Some(self.listen),
-            None,
-            Some(self.admin.clone()),
-            Some(Secret(self.password.clone())),
-        )
-        .await?;
-        let target = crate::ops::AdminTarget::Remote { session };
+        let target = self.superuser_target().await?;
         let policy = netidx_admin_proto::policy::Policy {
             allowed_san: vec![],
             max_validity: Duration::from_secs(3600),
@@ -356,6 +347,30 @@ impl TestAdminDomain {
         };
         let pw = crate::ops::roster::add_role_admin(&target, name, policy).await?;
         Ok(pw.to_string())
+    }
+
+    /// Reset a role admin's password as the founding superuser, which
+    /// closes every session that admin holds; returns the new one-time
+    /// password.
+    pub async fn reset_role_admin(&self, name: &str) -> Result<String> {
+        let target = self.superuser_target().await?;
+        let pw = crate::ops::roster::reset_password(&target, name).await?;
+        Ok(pw.to_string())
+    }
+
+    /// A password session of the founding superuser. Nothing is left in
+    /// the session cache.
+    async fn superuser_target(&self) -> Result<crate::ops::AdminTarget> {
+        let mut ans = SetupAnswerer::new(&self.password);
+        let session = crate::ops::open_admin_password_session(
+            &mut ans,
+            Some(self.listen),
+            None,
+            Some(self.admin.clone()),
+            Some(Secret(self.password.clone())),
+        )
+        .await?;
+        Ok(crate::ops::AdminTarget::Remote { session })
     }
 
     /// Wait until the daemon accepts connections (or fails to start).

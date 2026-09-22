@@ -13,8 +13,9 @@ type PanelKind = [`Queue, `Delegations, `Roster, `Servers, `Certs, `Services, `P
 type Entry = [`Menu, `Roster, `Perms(string)];
 
 /// Why the surface closed: the operator backed out of its entry
-/// screen, or the session's credential is gone (the admin changed
-/// their own password) and the caller must connect again.
+/// screen, or the session's login is gone (the admin changed their
+/// own password, or the CA stopped honouring the login) and the
+/// caller must connect again.
 type CloseReason = [`Back, `SessionLost];
 
 /// The panel surface: its view and status line, the key handler, and

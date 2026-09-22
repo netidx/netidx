@@ -87,7 +87,7 @@ async fn founding_serving_and_ops_round_trip() -> Result<()> {
     // refused at the first authenticated use (which is why connect
     // flows verify via cache_session before declaring victory).
     let mut bad = SetupAnswerer::new("not-the-password");
-    let bad_target = ops::resolve_admin_target(
+    let mut bad_target = ops::resolve_admin_target(
         &mut bad,
         Some(d.listen),
         None,
@@ -99,7 +99,7 @@ async fn founding_serving_and_ops_round_trip() -> Result<()> {
         ops::roster::list_admins(&bad_target).await.is_err(),
         "a wrong password was accepted by an authenticated op"
     );
-    match &bad_target {
+    match &mut bad_target {
         ops::AdminTarget::Remote { session } => assert!(
             ops::cache_session(session, ops::Retention::ProcessLifetime).await.is_err(),
             "a wrong password minted a bearer token"
@@ -110,7 +110,7 @@ async fn founding_serving_and_ops_round_trip() -> Result<()> {
     // replacement — the typed error frontends route on, surfaced at
     // the same verification step connect uses.
     let mut ot = SetupAnswerer::new(one_time.as_str());
-    let ot_target = ops::resolve_admin_target(
+    let mut ot_target = ops::resolve_admin_target(
         &mut ot,
         Some(d.listen),
         None,
@@ -118,7 +118,7 @@ async fn founding_serving_and_ops_round_trip() -> Result<()> {
         None,
     )
     .await?;
-    let e = match &ot_target {
+    let e = match &mut ot_target {
         ops::AdminTarget::Remote { session } => {
             match ops::cache_session(session, ops::Retention::ProcessLifetime).await {
                 Ok(_) => panic!("a one-time key minted a normal session token"),

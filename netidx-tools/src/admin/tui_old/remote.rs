@@ -650,7 +650,7 @@ async fn connect(
     // `open_admin_session` repeats the identity fetch so its own trust ceremony
     // stays self-contained, resolves and verifies the exact CA, and
     // only then asks for a password (unless a valid cache already exists).
-    let session = ops::open_admin_session(ans, Some(server), None, None, None).await?;
+    let mut session = ops::open_admin_session(ans, Some(server), None, None, None).await?;
     let admin = session.admin.clone();
     let conn = RemoteConn {
         server: session.server,
@@ -660,7 +660,7 @@ async fn connect(
     };
     // The TUI outlives the login, so an unsealable token is still worth holding
     // for the run rather than refusing to connect.
-    match ops::cache_session(&session, ops::Retention::ProcessLifetime).await {
+    match ops::cache_session(&mut session, ops::Retention::ProcessLifetime).await {
         Ok(Some(logged)) => {
             if let Some(why) = logged.unsealed {
                 ans.note(&format!(

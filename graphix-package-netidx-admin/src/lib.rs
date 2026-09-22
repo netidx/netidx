@@ -49,8 +49,11 @@ pub(crate) fn admin_err(e: Error) -> Value {
     if e.downcast_ref::<ceremony::Cancelled>().is_some() {
         return errf!("Cancelled", "{e}");
     }
-    match aops::password_change_required(&e) {
-        Some(p) => errf!("PasswordChangeRequired", "{}", p.admin),
+    if let Some(p) = aops::password_change_required(&e) {
+        return errf!("PasswordChangeRequired", "{}", p.admin);
+    }
+    match aops::login_required(&e) {
+        Some(_) => errf!("LoginRequired", "{e:#}"),
         None => errf!("Admin", "{e:#}"),
     }
 }
@@ -562,7 +565,7 @@ impl SessionKind for ConnectKind {
     ) -> Result<ceremony::BoxOp> {
         Ok(Box::new(move |ans| {
             Box::pin(async move {
-                let session =
+                let mut session =
                     aops::open_admin_session(ans, Some(addr), ca_dir, admin, password)
                         .await?;
                 // Exchange the password for a bearer token — which is also
@@ -570,7 +573,7 @@ impl SessionKind for ConnectKind {
                 // credential holder; the server checks on first use) and
                 // where PasswordChangeRequired surfaces. The cached token
                 // is what keeps every later op on this target quiet.
-                match aops::cache_session(&session, aops::Retention::ProcessLifetime)
+                match aops::cache_session(&mut session, aops::Retention::ProcessLifetime)
                     .await
                 {
                     Ok(Some(logged)) => {

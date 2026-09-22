@@ -82,6 +82,29 @@ pub fn password_change_required(e: &anyhow::Error) -> Option<&PasswordChangeRequ
     e.downcast_ref::<PasswordChangeRequired>()
 }
 
+/// The CA no longer honours the cached login this operation presented: the
+/// session expired, the admin server restarted and lost its session table, or
+/// the admin's credential was reset. The cache is already dropped by the time
+/// this is returned; a frontend that holds a session routes on it to log in
+/// again once, instead of every later operation asking for the password.
+/// Recover it with [`login_required`].
+#[derive(Debug, Clone)]
+pub struct LoginRequired {
+    pub reason: String,
+}
+
+impl std::fmt::Display for LoginRequired {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.reason)
+    }
+}
+
+impl std::error::Error for LoginRequired {}
+
+pub fn login_required(e: &anyhow::Error) -> Option<&LoginRequired> {
+    e.downcast_ref::<LoginRequired>()
+}
+
 /// The outcome of an edit: the model version the CA recorded, and whether that
 /// was a change.
 ///
@@ -393,10 +416,13 @@ pub struct CachedLogin {
 }
 
 /// Exchange a password session for a bearer token and cache it, so later
-/// commands against this CA need no password. A session that already carries a
-/// token came from the cache and is left alone (`None`).
+/// commands against this CA need no password. The session itself carries the
+/// token from here on: the password it was opened with is dropped, and every
+/// operation on the session, cached or not, presents the one credential the
+/// CA can withdraw. A session that already carries a token came from the
+/// cache and is left alone (`None`).
 pub async fn cache_session(
-    session: &AdminSession,
+    session: &mut AdminSession,
     retention: Retention,
 ) -> Result<Option<CachedLogin>> {
     let AdminCredential::Password { admin, password } = &session.credential else {
@@ -406,6 +432,7 @@ pub async fn cache_session(
         transport::login(session.server, &session.identity, admin, password.as_str())
             .await?;
     let ca_fingerprint = session.identity.fingerprint.text();
+    session.credential = AdminCredential::Session { token: logged.token.clone() };
     let cached = crate::session_cache::CachedSession {
         ca_fingerprint: ca_fingerprint.clone(),
         bootstrap: session.server,

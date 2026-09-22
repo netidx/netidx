@@ -189,7 +189,13 @@ pub async fn change_password(
         old_password.as_str(),
         new_password.as_str(),
     )
-    .await
+    .await?;
+    // the CA closed every session this admin held, the cached one included
+    let ca = session.identity.fingerprint.text();
+    if crate::session_cache::load(&ca, Some(&session.admin))?.is_some() {
+        crate::session_cache::delete(&ca)?;
+    }
+    Ok(())
 }
 
 /// Ask for a new password and its confirmation, re-prompting an interactive

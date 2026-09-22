@@ -27,7 +27,7 @@ pub(crate) fn login(flags: RemoteAuthFlags) -> Result<()> {
         Some(password) => password,
         None => Zeroizing::new(rpassword::prompt_password("Administrator password: ")?),
     };
-    let session = AdminSession {
+    let mut session = AdminSession {
         server,
         identity,
         admin: admin.clone(),
@@ -39,7 +39,7 @@ pub(crate) fn login(flags: RemoteAuthFlags) -> Result<()> {
     // A one-shot command has nowhere to keep a token it cannot seal, so it
     // refuses rather than silently falling back to password auth next time.
     let logged = runtime
-        .block_on(ops::cache_session(&session, Retention::Sealed))?
+        .block_on(ops::cache_session(&mut session, Retention::Sealed))?
         .context("a password login always mints a token")?;
     println!("logged in as {}", logged.admin);
     println!("admin domain: {}", logged.ca_fingerprint);

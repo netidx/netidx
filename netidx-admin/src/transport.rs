@@ -534,6 +534,8 @@ fn admin_refusal(
         && reason.contains("login required")
     {
         let _ = crate::session_cache::delete(&expected.fingerprint.text());
+        return anyhow::Error::new(crate::ops::LoginRequired { reason })
+            .context(context.to_string());
     }
     anyhow!("{context}: {reason}")
 }

@@ -275,8 +275,9 @@ async fn remote_tab_routes_a_reset_password() -> Result<()> {
         lines.iter().any(|l| l.contains("as alice"))
     })
     .await?;
-    // the roster's own-password change: new password twice, then back
-    // to the connect screen
+    // the roster's own-password change: the session holds a token, not
+    // the password, so the current one is proved first, then the new
+    // one twice, then back to the connect screen
     h.dispatch_event(key(KeyCode::Char('j'))).await?;
     h.dispatch_event(key(KeyCode::Char('j'))).await?;
     h.dispatch_event(key(KeyCode::Enter)).await?;
@@ -285,6 +286,7 @@ async fn remote_tab_routes_a_reset_password() -> Result<()> {
     })
     .await?;
     h.dispatch_event(key(KeyCode::Char('c'))).await?;
+    answer_text(&mut h, "admin password", "a-brand-new-password").await?;
     answer_text(&mut h, "new password", "yet-another-password").await?;
     answer_text(&mut h, "confirm password", "yet-another-password").await?;
     wait_render(&mut h, Duration::from_secs(60), "the changed toast", |lines| {
@@ -294,6 +296,33 @@ async fn remote_tab_routes_a_reset_password() -> Result<()> {
     h.dispatch_event(key(KeyCode::Enter)).await?;
     wait_render(&mut h, Duration::from_secs(60), "the connect screen", |lines| {
         lines.iter().any(|l| l.contains("Connect to an admin domain"))
+    })
+    .await?;
+    // a login the CA stops honouring underneath the panels (here: the
+    // superuser resets alice, closing her sessions) is one route back to
+    // the connect screen, not a password prompt at every later operation
+    connect_via_modals(&mut h, "alice", "yet-another-password").await?;
+    wait_render(&mut h, Duration::from_secs(60), "alice's menu", |lines| {
+        lines.iter().any(|l| l.contains("as alice"))
+    })
+    .await?;
+    h.dispatch_event(key(KeyCode::Char('j'))).await?;
+    h.dispatch_event(key(KeyCode::Char('j'))).await?;
+    h.dispatch_event(key(KeyCode::Enter)).await?;
+    wait_render(&mut h, Duration::from_secs(60), "the roster panel", |lines| {
+        lines.iter().any(|l| l.contains("change my password"))
+    })
+    .await?;
+    d.reset_role_admin("alice").await?;
+    h.dispatch_event(key(KeyCode::Char('r'))).await?;
+    wait_render(&mut h, Duration::from_secs(60), "the lost-login toast", |lines| {
+        lines.iter().any(|l| l.contains("login required"))
+    })
+    .await?;
+    h.dispatch_event(key(KeyCode::Enter)).await?;
+    wait_render(&mut h, Duration::from_secs(60), "the connect screen", |lines| {
+        lines.iter().any(|l| l.contains("Connect to an admin domain"))
+            && !lines.iter().any(|l| l.contains("admin password"))
     })
     .await?;
     Ok(())
