@@ -1289,6 +1289,10 @@ pub struct AdminDomainInfo {
     /// map and restricted to active, registered routing targets.
     pub resolver_parent: Option<admin_proto::ResolverClusterEdge>,
     pub resolver_children: Vec<admin_proto::ResolverClusterEdge>,
+    /// The admin servers of that cluster's registered members: the ones a
+    /// resolver can be delegated a subtree from. A dedicated CA is not
+    /// among them.
+    pub resolver_admin_servers: Vec<SocketAddr>,
     /// The admin servers actually reached.
     pub reached: Vec<SocketAddr>,
 }
@@ -1297,10 +1301,11 @@ pub struct AdminDomainInfo {
 /// a runaway backstop.
 const MAX_WALK: usize = 64;
 
+/// An active cluster's registered members, each with its admin server.
 fn registered_members(
     map: &AdminDomainMap,
     cluster_id: admin_proto::ResolverClusterId,
-) -> Vec<ResolverAddr> {
+) -> Vec<(ResolverAddr, SocketAddr)> {
     let Some(cluster) = map.resolver_clusters.iter().find(|cluster| {
         cluster.id == cluster_id
             && cluster.state == admin_proto::ResolverClusterState::Active
@@ -1314,10 +1319,10 @@ fn registered_members(
             server.cluster == Some(cluster_id)
                 && server.state == admin_proto::ServerState::Registered
         })
-        .filter_map(|server| server.resolver.clone())
-        .filter(|resolver| cluster.members.contains(resolver))
+        .filter_map(|server| Some((server.resolver.clone()?, server.addr)))
+        .filter(|(resolver, _)| cluster.members.contains(resolver))
         .collect();
-    members.sort_by(|a, b| a.addr.cmp(&b.addr));
+    members.sort_by(|a, b| a.0.addr.cmp(&b.0.addr));
     members
 }
 
@@ -1326,6 +1331,8 @@ fn registered_members(
 /// different resolver cluster than the one they are joining.
 pub struct ResolverClusterTopology {
     pub members: Vec<ResolverAddr>,
+    /// The admin servers of the registered members, in member order.
+    pub admin_servers: Vec<SocketAddr>,
     pub parent: Option<admin_proto::ResolverClusterEdge>,
     pub children: Vec<admin_proto::ResolverClusterEdge>,
 }
@@ -1340,9 +1347,12 @@ fn cluster_topology(
         .find(|c| c.id == cluster_id)
         .filter(|c| c.state == admin_proto::ResolverClusterState::Active)
         .context("resolver cluster is not active")?;
-    let members = registered_members(map, cluster_id);
+    let (members, admin_servers) = registered_members(map, cluster_id).into_iter().unzip();
+    let edge_addrs = |id| -> Vec<ResolverAddr> {
+        registered_members(map, id).into_iter().map(|(r, _)| r).collect()
+    };
     let parent = cluster.parent.and_then(|parent_id| {
-        let addrs = registered_members(map, parent_id);
+        let addrs = edge_addrs(parent_id);
         (!addrs.is_empty()).then(|| admin_proto::ResolverClusterEdge {
             path: cluster.base.clone(),
             addrs,
@@ -1356,7 +1366,7 @@ fn cluster_topology(
                 child.id == *child_id
                     && child.state == admin_proto::ResolverClusterState::Active
             })?;
-            let addrs = registered_members(map, *child_id);
+            let addrs = edge_addrs(*child_id);
             (!addrs.is_empty()).then(|| admin_proto::ResolverClusterEdge {
                 path: child.base.clone(),
                 addrs,
@@ -1364,7 +1374,7 @@ fn cluster_topology(
         })
         .collect();
     children.sort_by(|a, b| a.path.cmp(&b.path));
-    Ok(ResolverClusterTopology { members, parent, children })
+    Ok(ResolverClusterTopology { members, admin_servers, parent, children })
 }
 
 pub fn cluster_topology_by_base(
@@ -1470,6 +1480,7 @@ pub async fn aggregate(
         resolver_base: None,
         resolver_parent: None,
         resolver_children: Vec::new(),
+        resolver_admin_servers: Vec::new(),
         reached: Vec::new(),
     };
     let mut authoritative = None;
@@ -1511,13 +1522,14 @@ pub async fn aggregate(
     info.ca_addr = Some(ca);
     if let Some(ResolverSelection {
         base,
-        topology: ResolverClusterTopology { members, parent, children },
+        topology: ResolverClusterTopology { members, admin_servers, parent, children },
     }) = resolver
     {
         info.resolvers = members;
         info.resolver_base = Some(base);
         info.resolver_parent = parent;
         info.resolver_children = children;
+        info.resolver_admin_servers = admin_servers;
     }
     Ok(info)
 }
@@ -3369,6 +3381,7 @@ mod tests {
             topology:
                 ResolverClusterTopology {
                     members: root_members,
+                    admin_servers: root_admin_servers,
                     parent: root_parent,
                     children: root_children,
                 },
@@ -3378,13 +3391,17 @@ mod tests {
             topology:
                 ResolverClusterTopology {
                     members: child_members,
+                    admin_servers: child_admin_servers,
                     parent: child_parent,
                     children: child_children,
                 },
         } = child_selection.resolver.unwrap();
         let child_by_base = cluster_topology_by_base(&map, "/eu").unwrap();
         assert_eq!(root_members, vec![root.clone()]);
+        // the dedicated CA at .11 is not a member: it cannot be a delegation parent
+        assert_eq!(root_admin_servers, vec!["192.168.50.10:4565".parse().unwrap()]);
         assert_eq!(child_members, vec![child.clone()]);
+        assert_eq!(child_admin_servers, vec!["192.168.60.15:4565".parse().unwrap()]);
         assert_eq!(child_by_base.members, vec![child]);
         assert_eq!(root_base, "/");
         assert_eq!(child_base, "/eu");

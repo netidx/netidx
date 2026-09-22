@@ -187,18 +187,26 @@ pub async fn run_resolver(
     // Interactive delegation offer: if we joined an EXISTING admin domain that runs a
     // resolver, offer to become a delegated SUBTREE of it (its own /path,
     // referred up to the parent) instead of a plain peer member of the root
-    // resolver cluster. Gated on `Role::Resolver` — there must be an upstream resolver to
-    // delegate FROM, else the option is meaningless. The strict CLI drives this
-    // with --parent-admin-server/--delegate-subtree, so it only fires
-    // interactively and when neither is already set. Setting these three inputs
-    // routes the rest of the install down the existing delegated-child path.
+    // resolver cluster. Only a resolver can delegate, so the parent is the
+    // reached admin server when it runs one, else the first of the
+    // bootstrap cluster's members; a dedicated CA is never the parent, and
+    // a domain with no resolver has nothing to delegate FROM. The strict
+    // CLI drives this with --parent-admin-server/--delegate-subtree, so it
+    // only fires interactively and when neither is already set. Setting
+    // these three inputs routes the rest of the install down the existing
+    // delegated-child path.
     #[cfg(unix)]
     if ans.interactive()
         && input.parent_admin_server.is_none()
         && input.delegate_subtree.is_none()
         && let Some(net) = probe.have()
-        && net.identity.roles.contains(Role::Resolver)
-        && let Some(parent_addr) = net.info.reached.first().copied()
+        && let Some(parent_addr) = net
+            .info
+            .reached
+            .first()
+            .filter(|_| net.identity.roles.contains(Role::Resolver))
+            .or(net.info.resolver_admin_servers.first())
+            .copied()
     {
         if let Some(subtree) = ans
             .text(Field::DelegateSubtree, None, None, false)
