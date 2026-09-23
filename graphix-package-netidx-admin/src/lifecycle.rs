@@ -57,10 +57,16 @@ use std::{
 
 #[derive(Debug, Clone, IntoValue)]
 enum InstallOutcomeV {
-    Preview { service: Option<ScopeV> },
-    Installed { service: Option<ScopeV> },
+    Preview {
+        service: Option<ScopeV>,
+    },
+    Installed {
+        service: Option<ScopeV>,
+    },
     #[cfg(unix)]
-    CaAwaitingSignature { csr: String },
+    CaAwaitingSignature {
+        csr: String,
+    },
 }
 
 fn resolver_input(common: InstallCommon) -> ResolverInput {
