@@ -462,7 +462,7 @@ let local = |#q: &Question| {
   // of the menu is the same everywhere
   let roles = install::installable_roles(true);
   let fresh_choices = array::filter(all_fresh_choices, |c| select c.act {
-    `Install(r, _) => array::find(roles, |x| x == r) != null,
+    `Install(r, _) => opt::is_some(array::find(roles, |x| x == r)),
     _ => true
   });
   let toast: [Toast, null] = null;
