@@ -15,7 +15,8 @@
 //! `admin-server.json` at the (test-redirected) user config path, and
 //! the daemon locks the config root. [`TestAdminDomain::start`]
 //! serializes on a global lock, so concurrent tests queue rather than
-//! collide.
+//! collide. A test that begins with [`in_own_process`] runs in a child
+//! process with its own config root, so such tests run in parallel.
 //!
 //! Gated behind the `testing` feature; unix-only like the daemon.
 
@@ -223,6 +224,50 @@ impl Drop for TestAdminDomain {
     fn drop(&mut self) {
         self.server.abort();
     }
+}
+
+const CHILD_VAR: &str = "NETIDX_ADMIN_TEST_CHILD";
+
+/// Run the calling test again, alone, in a child process of this test
+/// binary, and answer its verdict. In the child, and on a thread libtest
+/// did not name after its test, answer `None`: the caller runs its body,
+/// under the process's redirected config root.
+///
+/// ```ignore
+/// if let Some(r) = netidx_admin::testing::in_own_process().await {
+///     return r;
+/// }
+/// ```
+pub async fn in_own_process() -> Option<Result<()>> {
+    let thread = std::thread::current();
+    match thread.name().filter(|n| *n != "main") {
+        Some(name) if std::env::var_os(CHILD_VAR).is_none() => {
+            Some(run_child(name).await)
+        }
+        _ => {
+            ensure_xdg_redirect();
+            None
+        }
+    }
+}
+
+async fn run_child(name: &str) -> Result<()> {
+    let out = tokio::process::Command::new(std::env::current_exe()?)
+        .args([name, "--exact", "--nocapture", "--include-ignored", "--test-threads=1"])
+        .env(CHILD_VAR, "1")
+        .kill_on_drop(true)
+        .output()
+        .await
+        .with_context(|| format!("spawning {name} in a child"))?;
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    if !out.status.success() {
+        bail!("{name} failed in its child ({}):\n{stdout}\n{stderr}", out.status)
+    }
+    if !stdout.contains("test result: ok. 1 passed") {
+        bail!("{name} did not run in its child:\n{stdout}\n{stderr}")
+    }
+    Ok(())
 }
 
 static SERIAL: LazyLock<std::sync::Arc<Mutex<()>>> =

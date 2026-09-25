@@ -41,6 +41,9 @@ pub(crate) async fn run_program(prog: String, timeout_s: u64) -> Result<Value> {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn ceremonies_against_a_live_domain() -> Result<()> {
+    if let Some(r) = netidx_admin::testing::in_own_process().await {
+        return r;
+    }
     let d = TestAdminDomain::start().await?;
     // ── the interactive path: the security gesture and the password
     // arrive as QUESTIONS, answered from graphix ──
@@ -122,6 +125,9 @@ async fn ceremonies_against_a_live_domain() -> Result<()> {
 /// then opens a session whose `info` names the admin.
 #[tokio::test(flavor = "multi_thread")]
 async fn reset_password_routes_to_change_password_at() -> Result<()> {
+    if let Some(r) = netidx_admin::testing::in_own_process().await {
+        return r;
+    }
     let d = TestAdminDomain::start().await?;
     let prog = format!(
         r#"{{

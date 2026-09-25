@@ -1352,3 +1352,33 @@ kernels because each seq is a select machine; still linear, no wall.
 All 28 package tests pass (TUI harness sequential).
 
 **Disposition: ledger 16; seq stays. No graphix change.**
+
+## 2026-09-24 — the package tests took seven minutes, mostly waiting
+
+`cargo test -p graphix-package-netidx-admin` ran 427s at 0.7 of a core.
+The thirteen tests that found a domain were the whole of it (429s summed
+alone), for three reasons:
+
+1. netidx's dev profile was opt-level 0, so the graphix compiler inside
+   every test ran unoptimized (~300s of CPU). It is `"s"` now, as in
+   graphix: a test's CPU fell ~6x. DEV readings in the milestone table
+   above are unoptimized; later ones are not.
+2. The TUI harness's `drain` returned after 100ms with no update, so each
+   key cost 100ms+ asleep (an answered modal ~8s: 64 backspaces and the
+   text). `drain` now returns when the runtime is idle
+   (`GXHandle::wait_idle`, graphix), and `next_update` waits for what a
+   timer or a reply brings, so `wait_render` blocks instead of spinning.
+3. Every domain test held `testing.rs`'s `SERIAL` for its whole run: the
+   config root is ambient (`XDG_CONFIG_HOME`) and the daemon locks it.
+   `testing::in_own_process` runs such a test in a child of the test
+   binary with its own root, so they run in parallel; `SERIAL` still
+   orders domains inside one process.
+
+`a_server_argument_on_a_fresh_machine…` deleted the install record in
+whatever root it found; it founds no domain, so run first or alone that
+was the developer's real `~/.config/netidx`. It runs under
+`in_own_process` now, which redirects the root before the body.
+
+The suite runs in 16s, all 30 passing.
+
+**Disposition: fixed in graphix (`wait_idle`, the harness) and here.**

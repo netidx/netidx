@@ -117,13 +117,14 @@ async fn wait_render(
     pred: impl Fn(&[String]) -> bool,
 ) -> Result<()> {
     let deadline = Instant::now() + timeout;
+    h.drain().await?;
     loop {
-        h.drain().await?;
         let lines = h.render_lines()?;
         if pred(&lines) {
             return Ok(());
         }
-        if Instant::now() > deadline {
+        let left = deadline.saturating_duration_since(Instant::now());
+        if !h.next_update(left).await? {
             bail!("timeout waiting for {what}; last render:\n{}", lines.join("\n"));
         }
     }
@@ -131,6 +132,9 @@ async fn wait_render(
 
 #[tokio::test(flavor = "multi_thread")]
 async fn pump_drives_a_live_connect() -> Result<()> {
+    if let Some(r) = netidx_admin::testing::in_own_process().await {
+        return r;
+    }
     let d = TestAdminDomain::start().await?;
     let prog = format!(
         r#"
@@ -180,14 +184,16 @@ let result = overlay(#layers: &p.layers, paragraph(&"base"))
     // the ceremony finishes: the modal closes and the result lands
     let deadline = Instant::now() + Duration::from_secs(60);
     loop {
-        h.drain().await?;
         match h.get_watched("test::status") {
             Some(Value::String(s)) if &**s == "connected" => break,
             Some(Value::String(s)) if &**s == "failed" => {
                 bail!("the connect ceremony failed")
             }
-            _ if Instant::now() > deadline => bail!("timeout waiting for the result"),
             _ => (),
+        }
+        let left = deadline.saturating_duration_since(Instant::now());
+        if !h.next_update(left).await? {
+            bail!("timeout waiting for the result")
         }
     }
     let lines = h.render_lines()?;
@@ -205,6 +211,9 @@ let result = overlay(#layers: &p.layers, paragraph(&"base"))
 /// roster — every panel load a real ceremony over the session.
 #[tokio::test(flavor = "multi_thread")]
 async fn remote_tab_drives_the_panels() -> Result<()> {
+    if let Some(r) = netidx_admin::testing::in_own_process().await {
+        return r;
+    }
     let d = TestAdminDomain::start().await?;
     let book = TempDir::new()?;
     let prog = remote_tab_program(&d.listen.to_string(), book.path());
@@ -275,6 +284,9 @@ async fn remote_tab_drives_the_panels() -> Result<()> {
 /// session's own password and sends the operator back to connect.
 #[tokio::test(flavor = "multi_thread")]
 async fn remote_tab_routes_a_reset_password() -> Result<()> {
+    if let Some(r) = netidx_admin::testing::in_own_process().await {
+        return r;
+    }
     let d = TestAdminDomain::start().await?;
     let one_time = d.mint_role_admin("alice").await?;
     let book = TempDir::new()?;
@@ -358,6 +370,9 @@ async fn remote_tab_routes_a_reset_password() -> Result<()> {
 /// row refuses a read gate for a server that runs no resolver.
 #[tokio::test(flavor = "multi_thread")]
 async fn remote_tab_opens_the_services_and_perms_screens() -> Result<()> {
+    if let Some(r) = netidx_admin::testing::in_own_process().await {
+        return r;
+    }
     let d = TestAdminDomain::start().await?;
     let book = TempDir::new()?;
     let prog = remote_tab_program(&d.listen.to_string(), book.path());
@@ -421,6 +436,9 @@ async fn remote_tab_opens_the_services_and_perms_screens() -> Result<()> {
 /// the menu comes up with no question asked.
 #[tokio::test(flavor = "multi_thread")]
 async fn landing_remembers_and_reverifies_a_domain() -> Result<()> {
+    if let Some(r) = netidx_admin::testing::in_own_process().await {
+        return r;
+    }
     let d = TestAdminDomain::start().await?;
     let book = TempDir::new()?;
     let prog = remote_tab_program("", book.path());
@@ -453,7 +471,7 @@ async fn landing_remembers_and_reverifies_a_domain() -> Result<()> {
         if Instant::now() > deadline {
             bail!("the bookmarks file never recorded {}", d.domain);
         }
-        h.drain().await?;
+        h.next_update(Duration::from_millis(50)).await?;
     }
     // disconnect: the landing re-verifies the saved domain and lists it
     h.dispatch_event(key(KeyCode::Esc)).await?;
@@ -482,6 +500,9 @@ async fn landing_remembers_and_reverifies_a_domain() -> Result<()> {
 /// shows the new validity, and a second edit opens the form again.
 #[tokio::test(flavor = "multi_thread")]
 async fn roster_adds_and_edits_an_admin() -> Result<()> {
+    if let Some(r) = netidx_admin::testing::in_own_process().await {
+        return r;
+    }
     let d = TestAdminDomain::start().await?;
     let book = TempDir::new()?;
     let prog = remote_tab_program(&d.listen.to_string(), book.path());
@@ -599,6 +620,9 @@ impl Drop for InstallRecordGuard {
 /// whole struct, which must not put the first tab back in front.
 #[tokio::test(flavor = "multi_thread")]
 async fn tab_keeps_the_admin_domain_tab_in_front_when_it_changes() -> Result<()> {
+    if let Some(r) = netidx_admin::testing::in_own_process().await {
+        return r;
+    }
     use netidx_admin::provenance::{AdminDomainIdentity, InstallRecord, InstallRole};
     let d = TestAdminDomain::start().await?;
     let record = InstallRecord::new(
@@ -656,6 +680,9 @@ fn rows_below_status(lines: &[String], label: &str) -> Result<usize> {
 /// probe lands, and Admins opens the roster over the control socket.
 #[tokio::test(flavor = "multi_thread")]
 async fn local_tab_detects_a_ca_install_and_opens_its_roster() -> Result<()> {
+    if let Some(r) = netidx_admin::testing::in_own_process().await {
+        return r;
+    }
     use netidx_admin::provenance::{AdminDomainIdentity, InstallRecord, InstallRole};
     let d = TestAdminDomain::start().await?;
     let record = InstallRecord::new(
@@ -737,6 +764,9 @@ async fn local_tab_detects_a_ca_install_and_opens_its_roster() -> Result<()> {
 /// listed as not loaded, then deleted after a confirmation.
 #[tokio::test(flavor = "multi_thread")]
 async fn services_surface_creates_and_deletes_a_unit() -> Result<()> {
+    if let Some(r) = netidx_admin::testing::in_own_process().await {
+        return r;
+    }
     use netidx_admin::provenance::{AdminDomainIdentity, InstallRecord, InstallRole};
     let d = TestAdminDomain::start().await?;
     let record = InstallRecord::new(
@@ -825,6 +855,9 @@ async fn services_surface_creates_and_deletes_a_unit() -> Result<()> {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_server_argument_on_a_fresh_machine_leaves_the_keys_with_the_install()
 -> Result<()> {
+    if let Some(r) = netidx_admin::testing::in_own_process().await {
+        return r;
+    }
     let _ = std::fs::remove_file(netidx_admin::paths::user_install_record()?);
     let prog = r#"let result = netidx_admin::tui::app::app(#server: "127.0.0.1:1")"#;
     let mut h =
@@ -856,6 +889,9 @@ async fn a_server_argument_on_a_fresh_machine_leaves_the_keys_with_the_install()
 #[tokio::test(flavor = "multi_thread")]
 async fn fresh_machine_previews_an_install_and_a_teardown_asks_about_the_ca() -> Result<()>
 {
+    if let Some(r) = netidx_admin::testing::in_own_process().await {
+        return r;
+    }
     use netidx_admin::provenance::{AdminDomainIdentity, InstallRecord, InstallRole};
     let d = TestAdminDomain::start().await?;
     let record_path = netidx_admin::paths::user_install_record()?;
