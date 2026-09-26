@@ -866,8 +866,6 @@ impl<R: Rt, E: UserEvent, T: LocalOp> Apply<R, E> for LocalCeremony<T> {
     }
 
     fn sleep(&mut self, _ctx: &mut ExecCtx<R, E>) {}
-
-    fn reset_replay(&mut self, _ctx: &mut ExecCtx<R, E>) {}
 }
 
 pub(crate) fn string_arg(v: Option<&Value>, what: &str) -> Result<String> {
