@@ -555,10 +555,6 @@ impl<R: Rt, E: UserEvent, K: SessionKind> BuiltIn<R, E> for SessionCeremony<K> {
 }
 
 impl<R: Rt, E: UserEvent, K: SessionKind> Apply<R, E> for SessionCeremony<K> {
-    fn image_len(&self) -> usize {
-        self.trigger.image_len()
-    }
-
     fn image_encode(&self, buf: &mut ImageBuf) -> Result<(), PackError> {
         self.trigger.image_encode(buf)
     }

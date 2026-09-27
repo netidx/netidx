@@ -683,10 +683,6 @@ impl<R: Rt, E: UserEvent, T: RemoteOp> BuiltIn<R, E> for RemoteCeremony<T> {
 }
 
 impl<R: Rt, E: UserEvent, T: RemoteOp> Apply<R, E> for RemoteCeremony<T> {
-    fn image_len(&self) -> usize {
-        self.trigger.image_len()
-    }
-
     fn image_encode(&self, buf: &mut ImageBuf) -> Result<(), PackError> {
         self.trigger.image_encode(buf)
     }
@@ -1173,10 +1169,6 @@ impl<R: Rt, E: UserEvent> BuiltIn<R, E> for ChangePassword {
 }
 
 impl<R: Rt, E: UserEvent> Apply<R, E> for ChangePassword {
-    fn image_len(&self) -> usize {
-        self.trigger.image_len()
-    }
-
     fn image_encode(&self, buf: &mut ImageBuf) -> Result<(), PackError> {
         self.trigger.image_encode(buf)
     }

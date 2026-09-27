@@ -714,10 +714,6 @@ impl Trigger {
         Trigger { args: CachedVals::new(from), pending: false }
     }
 
-    pub(crate) fn image_len(&self) -> usize {
-        self.args.image_len() + self.pending.encoded_len()
-    }
-
     pub(crate) fn image_encode(&self, buf: &mut ImageBuf) -> Result<(), PackError> {
         self.args.image_encode(buf)?;
         self.pending.encode(buf)
@@ -821,10 +817,6 @@ impl<R: Rt, E: UserEvent> BuiltIn<R, E> for Events {
 }
 
 impl<R: Rt, E: UserEvent> Apply<R, E> for Events {
-    fn image_len(&self) -> usize {
-        self.top_id.encoded_len() + self.cached.image_len()
-    }
-
     /// A bound id is a running ceremony's event channel, which only a
     /// cycle can attach.
     fn image_encode(&self, buf: &mut ImageBuf) -> Result<(), PackError> {
