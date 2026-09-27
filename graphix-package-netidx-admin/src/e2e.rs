@@ -28,7 +28,6 @@ pub(crate) async fn run_program(prog: String, timeout_s: u64) -> Result<Value> {
                     for ev in batch.drain(..) {
                         match ev {
                             GXEvent::Env(_) => (),
-                            GXEvent::Diagnostic(_, d) => eprintln!("{d}"),
                             GXEvent::Updated(id, v) if id == eid => return Ok(v),
                             GXEvent::Updated(id, v) => eprintln!("aux {id:?}: {v}"),
                         }
