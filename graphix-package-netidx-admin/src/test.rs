@@ -296,3 +296,78 @@ async fn milestone_timing() -> anyhow::Result<()> {
     eprintln!("milestone: app-main compile without fusion {:?}", t2.elapsed());
     Ok(())
 }
+
+/// The admin app through one path (`check`) three ways, each in fresh
+/// runtimes, the median of five: the check alone (definition and
+/// call-site checks, `CFlag::CheckOnly`), the full build without
+/// fusion (the check plus elaboration), the full build with fusion.
+/// `cargo test --profile quick -p graphix-package-netidx-admin check_vs_build_timing -- --ignored --nocapture`
+#[tokio::test]
+#[ignore = "check vs build timing, run by hand"]
+async fn check_vs_build_timing() -> anyhow::Result<()> {
+    use enumflags2::BitFlags;
+    use graphix_compiler::{
+        CFlag,
+        expr::{FilesResolver, Source},
+    };
+    let prog = arcstr::literal!("netidx_admin::tui::app::app(#server: \"127.0.0.1:1\")");
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/graphix");
+    let root = Source::File(dir.join("mod.gx"));
+    let modes = [
+        ("check", CFlag::FusionDisabled | CFlag::CheckOnly),
+        ("build, no fusion", BitFlags::from(CFlag::FusionDisabled)),
+        ("build, fusion", BitFlags::empty()),
+    ];
+    // the package's own source, as the language server checks it: the
+    // root as the body of `mod netidx_admin` over the registered copy
+    for (label, flags) in modes {
+        let mut times = Vec::new();
+        for _ in 0..5 {
+            let (tx, _rx) = tokio::sync::mpsc::channel(10);
+            let ctx = graphix_package_core::testing::init_with_flags_and_setup(
+                tx,
+                &crate::TEST_REGISTER,
+                vec![],
+                flags,
+                |_| {},
+            )
+            .await?;
+            let resolvers = vec![FilesResolver::new(dir.clone(), None)];
+            let t = std::time::Instant::now();
+            ctx.rt
+                .check_with_resolvers(
+                    root.clone(),
+                    resolvers,
+                    Some(arcstr::literal!("netidx_admin")),
+                )
+                .await?;
+            times.push(t.elapsed());
+        }
+        times.sort();
+        eprintln!("timing: package {label:<17} median {:?} (runs {times:?})", times[2]);
+    }
+    for (label, flags) in [
+        ("check", CFlag::FusionDisabled | CFlag::CheckOnly),
+        ("build, no fusion", BitFlags::from(CFlag::FusionDisabled)),
+        ("build, fusion", BitFlags::empty()),
+    ] {
+        let mut times = Vec::new();
+        for _ in 0..5 {
+            let (tx, _rx) = tokio::sync::mpsc::channel(10);
+            let ctx = graphix_package_core::testing::init_with_flags_and_setup(
+                tx,
+                &crate::TEST_REGISTER,
+                vec![],
+                flags,
+                |_| {},
+            )
+            .await?;
+            let t = std::time::Instant::now();
+            ctx.rt.check(Source::Internal(prog.clone()), None).await?;
+            times.push(t.elapsed());
+        }
+        times.sort();
+        eprintln!("timing: app {label:<17} median {:?} (runs {times:?})", times[2]);
+    }
+    Ok(())
+}
