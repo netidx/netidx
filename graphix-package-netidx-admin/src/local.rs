@@ -12,8 +12,8 @@ use crate::{
 use anyhow::{Context, Result, bail};
 use arcstr::ArcStr;
 use graphix_compiler::{
-    Apply, BuiltIn, Event, ExecCtx, FastCall, Node, Rt, Scope, TagValue, UserEvent,
-    effects::Effect, errf, expr::ExprId, image::ImageBuf, typ::FnType,
+    Apply, BuiltIn, CompileCtx, Event, ExecCtx, FastCall, Node, Rt, Scope, TagValue,
+    UserEvent, effects::Effect, errf, expr::ExprId, image::ImageBuf, typ::FnType,
 };
 use graphix_package_core::{
     CachedArgs, CachedArgsAsync, CachedVals, EvalCached, EvalCachedAsync, fast_eval,
@@ -812,7 +812,7 @@ impl<R: Rt, E: UserEvent, T: LocalOp> BuiltIn<R, E> for LocalCeremony<T> {
     const NAME: &str = T::NAME;
 
     fn init<'a, 'b, 'c, 'd>(
-        _ctx: &'a mut ExecCtx<R, E>,
+        _ctx: &'a mut CompileCtx<R, E>,
         _typ: &'a FnType,
         _resolved: Option<&'d FnType>,
         _scope: &'b Scope,

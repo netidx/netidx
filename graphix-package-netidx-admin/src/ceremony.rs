@@ -18,7 +18,8 @@ use anyhow::{Error, Result, anyhow, bail};
 use arcstr::ArcStr;
 use futures::{SinkExt, channel::mpsc};
 use graphix_compiler::{
-    Apply, BindId, BuiltIn, Event, ExecCtx, Node, Rt, Scope, TagValue, UserEvent,
+    Apply, BindId, BuiltIn, CompileCtx, Event, ExecCtx, Node, Rt, Scope, TagValue,
+    UserEvent,
     effects::Effect,
     errf,
     expr::ExprId,
@@ -790,7 +791,7 @@ impl<R: Rt, E: UserEvent> BuiltIn<R, E> for Events {
     const NAME: &str = "netidx_admin_events";
 
     fn init<'a, 'b, 'c, 'd>(
-        _ctx: &'a mut ExecCtx<R, E>,
+        _ctx: &'a mut CompileCtx<R, E>,
         _typ: &'a FnType,
         _resolved: Option<&'d FnType>,
         _scope: &'b Scope,
