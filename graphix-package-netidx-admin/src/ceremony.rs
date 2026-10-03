@@ -882,6 +882,7 @@ pub(crate) struct AnswerEv;
 impl<R: Rt, E: UserEvent> EvalCached<R, E> for AnswerEv {
     const EFFECT: Effect = Effect::Sync;
     const NAME: &str = "netidx_admin_answer";
+    const ORDERED: bool = true;
 
     fn eval(
         &mut self,
