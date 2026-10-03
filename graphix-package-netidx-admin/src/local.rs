@@ -12,8 +12,8 @@ use crate::{
 use anyhow::{Context, Result, bail};
 use arcstr::ArcStr;
 use graphix_compiler::{
-    Apply, BuiltIn, CompileCtx, Event, ExecCtx, FastCall, Node, Rt, Scope, TagValue,
-    UserEvent, effects::Effect, errf, expr::ExprId, image::ImageBuf, typ::FnType,
+    Apply, BuiltIn, CompileCtx, ExecCtx, FastCall, Node, Rt, Scope, TagValue, UserEvent,
+    effects::Effect, errf, expr::ExprId, image::ImageBuf, typ::FnType,
 };
 use graphix_package_core::{
     CachedArgs, CachedArgsAsync, CachedVals, EvalCached, EvalCachedAsync, fast_eval,
@@ -470,7 +470,7 @@ impl<R: Rt, E: UserEvent> EvalCached<R, E> for InstallableRolesEv {
     const EFFECT: Effect = Effect::Stateless(Some(FastCall::Plain(fc_installable_roles)));
     const NAME: &str = "netidx_admin_installable_roles";
 
-    fn eval(&mut self, ctx: &mut ExecCtx<R, E>, from: &CachedVals) -> Option<Value> {
+    fn eval(&mut self, ctx: &mut ExecCtx<'_, R, E>, from: &CachedVals) -> Option<Value> {
         fast_eval(ctx, fc_installable_roles, from)
     }
 }
@@ -827,7 +827,7 @@ impl<R: Rt, E: UserEvent, T: LocalOp> BuiltIn<R, E> for LocalCeremony<T> {
     }
 
     fn image_decode(
-        _ctx: &mut ExecCtx<R, E>,
+        _ctx: &mut ExecCtx<'_, R, E>,
         _from: &[Node<R, E>],
         buf: &mut &[u8],
     ) -> Result<Box<dyn Apply<R, E>>, PackError> {
@@ -846,11 +846,10 @@ impl<R: Rt, E: UserEvent, T: LocalOp> Apply<R, E> for LocalCeremony<T> {
 
     fn update(
         &mut self,
-        ctx: &mut ExecCtx<R, E>,
+        ctx: &mut ExecCtx<'_, R, E>,
         from: &mut [Node<R, E>],
-        event: &mut Event<E>,
     ) -> &TagValue {
-        let Some(args) = self.trigger.tick(ctx, from, event) else {
+        let Some(args) = self.trigger.tick(ctx, from) else {
             return self.out.ride();
         };
         match T::op(args) {
@@ -861,7 +860,7 @@ impl<R: Rt, E: UserEvent, T: LocalOp> Apply<R, E> for LocalCeremony<T> {
         }
     }
 
-    fn sleep(&mut self, _ctx: &mut ExecCtx<R, E>) {}
+    fn sleep(&mut self, _ctx: &mut ExecCtx<'_, R, E>) {}
 }
 
 pub(crate) fn string_arg(v: Option<&Value>, what: &str) -> Result<String> {

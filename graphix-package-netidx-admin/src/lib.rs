@@ -10,8 +10,8 @@ use anyhow::{Context, Error, Result};
 use arcstr::ArcStr;
 use compact_str::format_compact;
 use graphix_compiler::{
-    Apply, BuiltIn, CompileCtx, Event, ExecCtx, FastCall, Node, Rt, Scope, TagValue,
-    UserEvent, effects::Effect, errf, expr::ExprId, image::ImageBuf, typ::FnType,
+    Apply, BuiltIn, CompileCtx, ExecCtx, FastCall, Node, Rt, Scope, TagValue, UserEvent,
+    effects::Effect, errf, expr::ExprId, image::ImageBuf, typ::FnType,
 };
 use graphix_package_core::{
     CachedArgs, CachedArgsAsync, CachedVals, EvalCached, EvalCachedAsync, fast_eval,
@@ -400,7 +400,7 @@ impl<R: Rt, E: UserEvent> EvalCached<R, E> for ParseFingerprintEv {
     const EFFECT: Effect = Effect::Stateless(Some(FastCall::Plain(fc_parse_fingerprint)));
     const NAME: &str = "netidx_admin_parse_fingerprint";
 
-    fn eval(&mut self, ctx: &mut ExecCtx<R, E>, from: &CachedVals) -> Option<Value> {
+    fn eval(&mut self, ctx: &mut ExecCtx<'_, R, E>, from: &CachedVals) -> Option<Value> {
         fast_eval(ctx, fc_parse_fingerprint, from)
     }
 }
@@ -444,7 +444,7 @@ impl<R: Rt, E: UserEvent> EvalCached<R, E> for IdenticonEv {
     const EFFECT: Effect = Effect::Stateless(Some(FastCall::Plain(fc_identicon)));
     const NAME: &str = "netidx_admin_identicon";
 
-    fn eval(&mut self, ctx: &mut ExecCtx<R, E>, from: &CachedVals) -> Option<Value> {
+    fn eval(&mut self, ctx: &mut ExecCtx<'_, R, E>, from: &CachedVals) -> Option<Value> {
         fast_eval(ctx, fc_identicon, from)
     }
 }
@@ -486,7 +486,7 @@ impl<R: Rt, E: UserEvent> EvalCached<R, E> for InfoEv {
     const EFFECT: Effect = Effect::Stateless(Some(FastCall::Plain(fc_info)));
     const NAME: &str = "netidx_admin_info";
 
-    fn eval(&mut self, ctx: &mut ExecCtx<R, E>, from: &CachedVals) -> Option<Value> {
+    fn eval(&mut self, ctx: &mut ExecCtx<'_, R, E>, from: &CachedVals) -> Option<Value> {
         fast_eval(ctx, fc_info, from)
     }
 }
@@ -542,7 +542,7 @@ impl<R: Rt, E: UserEvent, K: SessionKind> BuiltIn<R, E> for SessionCeremony<K> {
     }
 
     fn image_decode(
-        _ctx: &mut ExecCtx<R, E>,
+        _ctx: &mut ExecCtx<'_, R, E>,
         _from: &[Node<R, E>],
         buf: &mut &[u8],
     ) -> Result<Box<dyn Apply<R, E>>, PackError> {
@@ -561,11 +561,10 @@ impl<R: Rt, E: UserEvent, K: SessionKind> Apply<R, E> for SessionCeremony<K> {
 
     fn update(
         &mut self,
-        ctx: &mut ExecCtx<R, E>,
+        ctx: &mut ExecCtx<'_, R, E>,
         from: &mut [Node<R, E>],
-        event: &mut Event<E>,
     ) -> &TagValue {
-        let Some(args) = self.trigger.tick(ctx, from, event) else {
+        let Some(args) = self.trigger.tick(ctx, from) else {
             return self.out.ride();
         };
         let started = (|| -> Result<Value> {
@@ -589,7 +588,7 @@ impl<R: Rt, E: UserEvent, K: SessionKind> Apply<R, E> for SessionCeremony<K> {
         }))
     }
 
-    fn sleep(&mut self, _ctx: &mut ExecCtx<R, E>) {}
+    fn sleep(&mut self, _ctx: &mut ExecCtx<'_, R, E>) {}
 }
 
 /// Open an authenticated remote-admin session; `Done` carries the

@@ -21,7 +21,7 @@ use anyhow::{Result, anyhow, bail};
 use arcstr::ArcStr;
 use enumflags2::BitFlags;
 use graphix_compiler::{
-    Apply, BuiltIn, CompileCtx, Event, ExecCtx, Node, Rt, Scope, TagValue, UserEvent,
+    Apply, BuiltIn, CompileCtx, ExecCtx, Node, Rt, Scope, TagValue, UserEvent,
     effects::Effect, errf, expr::ExprId, image::ImageBuf, typ::FnType,
 };
 use graphix_package_core::{
@@ -670,7 +670,7 @@ impl<R: Rt, E: UserEvent, T: RemoteOp> BuiltIn<R, E> for RemoteCeremony<T> {
     }
 
     fn image_decode(
-        _ctx: &mut ExecCtx<R, E>,
+        _ctx: &mut ExecCtx<'_, R, E>,
         _from: &[Node<R, E>],
         buf: &mut &[u8],
     ) -> Result<Box<dyn Apply<R, E>>, PackError> {
@@ -689,11 +689,10 @@ impl<R: Rt, E: UserEvent, T: RemoteOp> Apply<R, E> for RemoteCeremony<T> {
 
     fn update(
         &mut self,
-        ctx: &mut ExecCtx<R, E>,
+        ctx: &mut ExecCtx<'_, R, E>,
         from: &mut [Node<R, E>],
-        event: &mut Event<E>,
     ) -> &TagValue {
-        let Some(args) = self.trigger.tick(ctx, from, event) else {
+        let Some(args) = self.trigger.tick(ctx, from) else {
             return self.out.ride();
         };
         let Some(target) = target_arg(args[T::NCFG].as_ref()) else {
@@ -711,7 +710,7 @@ impl<R: Rt, E: UserEvent, T: RemoteOp> Apply<R, E> for RemoteCeremony<T> {
         }
     }
 
-    fn sleep(&mut self, _ctx: &mut ExecCtx<R, E>) {}
+    fn sleep(&mut self, _ctx: &mut ExecCtx<'_, R, E>) {}
 }
 
 // ── the remote ops ───────────────────────────────────────────────
@@ -1157,7 +1156,7 @@ impl<R: Rt, E: UserEvent> BuiltIn<R, E> for ChangePassword {
     }
 
     fn image_decode(
-        _ctx: &mut ExecCtx<R, E>,
+        _ctx: &mut ExecCtx<'_, R, E>,
         _from: &[Node<R, E>],
         buf: &mut &[u8],
     ) -> Result<Box<dyn Apply<R, E>>, PackError> {
@@ -1175,11 +1174,10 @@ impl<R: Rt, E: UserEvent> Apply<R, E> for ChangePassword {
 
     fn update(
         &mut self,
-        ctx: &mut ExecCtx<R, E>,
+        ctx: &mut ExecCtx<'_, R, E>,
         from: &mut [Node<R, E>],
-        event: &mut Event<E>,
     ) -> &TagValue {
-        let Some(args) = self.trigger.tick(ctx, from, event) else {
+        let Some(args) = self.trigger.tick(ctx, from) else {
             return self.out.ride();
         };
         let Some(target) = target_arg(args[1].as_ref()) else {
@@ -1199,7 +1197,7 @@ impl<R: Rt, E: UserEvent> Apply<R, E> for ChangePassword {
         self.out.set(TagValue::fired(ceremony::start_ceremony(ctx, glyph, op)))
     }
 
-    fn sleep(&mut self, _ctx: &mut ExecCtx<R, E>) {}
+    fn sleep(&mut self, _ctx: &mut ExecCtx<'_, R, E>) {}
 }
 
 // ── plain target-based builtins ──────────────────────────────────
