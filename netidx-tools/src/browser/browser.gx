@@ -96,8 +96,8 @@ let size: Size = never();
 
 let browser = browser(
     #cursor,
-    #selected_row: &selected_row,
-    #selected_path: &selected_path,
+    #selected_row: &mut selected_row,
+    #selected_path: &mut selected_path,
     #size,
     path
 );

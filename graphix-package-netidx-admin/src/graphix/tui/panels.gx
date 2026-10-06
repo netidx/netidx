@@ -285,7 +285,7 @@ let rows_of = |#fail: Fail, #failed: string, r: Result<Array<'a>, AdminError>|
 // what a finished action does: toast what `say` makes of its result and
 // name the panel to reload; a failed one toasts why and reloads nothing
 let outcome = |
-  #toast: &[Toast, null],
+  #toast: &mut [Toast, null],
   #fail: Fail,
   #failed: string,
   #reload: PanelKind,
@@ -301,7 +301,7 @@ let outcome = |
 };
 
 let panels = |
-  #q: &Question,
+  #q: &mut Question,
   #entry: Entry,
   #on_close: fn(why: CloseReason) -> null,
   target: Target
@@ -552,16 +552,16 @@ let panels = |
     perms::remove(#at: (e ~ perms_at)$, #path: e.path, #entity: e.entity, e ~ target)
   };
   // ── action outcomes: toast the summary, then refresh the panel ──
-  load <- outcome(#toast: &toast, #fail: fail, #failed: "Approve failed", #reload: `Queue, approve_r, |r| note(
+  load <- outcome(#toast: &mut toast, #fail: fail, #failed: "Approve failed", #reload: `Queue, approve_r, |r| note(
     "Approved",
     array::concat(
       ["[r.requested_name] approved", "id-map groups: [str::join(#sep: ", ", r.id_map_groups)]"],
       r.warnings
     )
   ));
-  load <- outcome(#toast: &toast, #fail: fail, #failed: "Deny failed", #reload: `Queue, deny_r,
+  load <- outcome(#toast: &mut toast, #fail: fail, #failed: "Deny failed", #reload: `Queue, deny_r,
     |name| note("Denied", ["Denied [name]"]));
-  load <- outcome(#toast: &toast, #fail: fail, #failed: "Approving renewals failed", #reload: `Queue, renewals_r,
+  load <- outcome(#toast: &mut toast, #fail: fail, #failed: "Approving renewals failed", #reload: `Queue, renewals_r,
     |rs| note("Renewals", select array::len(rs) {
       0 => ["No verified renewals were pending"],
       _ => array::map(rs, |r| select r.error {
@@ -569,35 +569,35 @@ let panels = |
         e => "failed [r.requested_name]: [e]"
       })
     }));
-  load <- outcome(#toast: &toast, #fail: fail, #failed: "Approving the delegation failed", #reload: `Delegations, apdel_r,
+  load <- outcome(#toast: &mut toast, #fail: fail, #failed: "Approving the delegation failed", #reload: `Delegations, apdel_r,
     |r| note("Delegation approved", array::concat(["[r.proposed_path] approved"], peer_lines(r.peers))));
-  load <- outcome(#toast: &toast, #fail: fail, #failed: "Denying the delegation failed", #reload: `Delegations, dendel_r,
+  load <- outcome(#toast: &mut toast, #fail: fail, #failed: "Denying the delegation failed", #reload: `Delegations, dendel_r,
     |r| note("Delegation denied", ["Denied [r.proposed_path]"]));
-  load <- outcome(#toast: &toast, #fail: fail, #failed: "Revoke failed", #reload: `Certs, revoke_r, |r| note(
+  load <- outcome(#toast: &mut toast, #fail: fail, #failed: "Revoke failed", #reload: `Certs, revoke_r, |r| note(
     "Revoked",
     array::concat(array::map(r.revoked, |c| "revoked serial [c.serial] ([c.name])"), r.warnings)
   ));
-  load <- outcome(#toast: &toast, #fail: fail, #failed: "Password reset failed", #reload: `Roster, resetpw_r,
+  load <- outcome(#toast: &mut toast, #fail: fail, #failed: "Password reset failed", #reload: `Roster, resetpw_r,
     one_time_password);
-  load <- outcome(#toast: &toast, #fail: fail, #failed: "Adding the admin failed", #reload: `Roster, addadmin_r,
+  load <- outcome(#toast: &mut toast, #fail: fail, #failed: "Adding the admin failed", #reload: `Roster, addadmin_r,
     one_time_password);
-  load <- outcome(#toast: &toast, #fail: fail, #failed: "Removing the admin failed", #reload: `Roster, rmadmin_r,
+  load <- outcome(#toast: &mut toast, #fail: fail, #failed: "Removing the admin failed", #reload: `Roster, rmadmin_r,
     |_| note("Admin removed", ["The keyslot was removed"]));
-  load <- outcome(#toast: &toast, #fail: fail, #failed: "Setting the policy failed", #reload: `Roster, setpolicy_r,
+  load <- outcome(#toast: &mut toast, #fail: fail, #failed: "Setting the policy failed", #reload: `Roster, setpolicy_r,
     |_| note("Policy updated", ["The admin's policy was replaced."]));
-  load <- outcome(#toast: &toast, #fail: fail, #failed: "Removing the server failed", #reload: `Servers, rmserver_r,
+  load <- outcome(#toast: &mut toast, #fail: fail, #failed: "Removing the server failed", #reload: `Servers, rmserver_r,
     |r| note("Server removed", array::concat(["revoked [r.revoked] certificates"], peer_lines(r.peers))));
-  load <- outcome(#toast: &toast, #fail: fail, #failed: "Reconcile failed", #reload: `Servers, reconcile_r,
+  load <- outcome(#toast: &mut toast, #fail: fail, #failed: "Reconcile failed", #reload: `Servers, reconcile_r,
     |r| note("Reconciled", peer_lines(r.peers)));
-  load <- outcome(#toast: &toast, #fail: fail, #failed: "Setting the read gate failed", #reload: `Servers, gate_r,
+  load <- outcome(#toast: &mut toast, #fail: fail, #failed: "Setting the read gate failed", #reload: `Servers, gate_r,
     |_| note("Read gate set",
       ["The member applies it at its next register; the Servers panel shows what it reports."]));
-  load <- outcome(#toast: &toast, #fail: fail, #failed: "Recording the permission failed", #reload: `Perms, setperm_r,
+  load <- outcome(#toast: &mut toast, #fail: fail, #failed: "Recording the permission failed", #reload: `Perms, setperm_r,
     |r| note("Permissions updated", [select r.changed {
       true => "Recorded as version [r.version]. Every member of the cluster converges within a poll interval.",
       false => "Already so — nothing changed (version [r.version])."
     }]));
-  load <- outcome(#toast: &toast, #fail: fail, #failed: "Removing the permission failed", #reload: `Perms, rmperm_r,
+  load <- outcome(#toast: &mut toast, #fail: fail, #failed: "Removing the permission failed", #reload: `Perms, rmperm_r,
     |r| note("Permissions updated", [select r.changed {
       true => "Removed; recorded as version [r.version].",
       false => "There was no such entry (version [r.version])."
@@ -605,7 +605,7 @@ let panels = |
   {
     let op = never();
     op <- select run { `Service(a) => a.op, _ => never() };
-    load <- outcome(#toast: &toast, #fail: fail, #failed: "Service control failed", #reload: `Services, svcc_r,
+    load <- outcome(#toast: &mut toast, #fail: fail, #failed: "Service control failed", #reload: `Services, svcc_r,
       |units| note(fmt_service_op(op), array::map(units, |u| "[u.unit]: [fmt_unit_state(u.state)]")))
   };
   {
@@ -959,8 +959,8 @@ let panels = |
       true => [layer(#width: &`Percentage(70), #height: &`Percentage(70),
         input_handler(#handle: &policy_form.handle, &policy_form.view))]
     };
-    let cl = confirm_layers(#on_confirm: |a| { run <- a; null }, &confirm);
-    let tl = toast_layers(&toast);
+    let cl = confirm_layers(#on_confirm: |a| { run <- a; null }, &mut confirm);
+    let tl = toast_layers(&mut toast);
     array::concat(gl, pl, yl, cl, tl)
   };
   // ── views ──

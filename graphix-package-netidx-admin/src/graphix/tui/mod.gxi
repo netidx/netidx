@@ -34,19 +34,19 @@ type Confirm<'a> = { message: [string, Array<tui::Line>], action: 'a };
 /// The toast modal over `t`: one layer while a toast is up, none
 /// otherwise. Enter, Esc or space clears it (through the reference);
 /// every other key is swallowed.
-val toast_layers: fn(t: &[null, Toast]) -> Array<Layer>;
+val toast_layers: fn(t: &mut [null, Toast]) -> Array<Layer>;
 
 /// The confirm modal over `c`: one layer while a confirmation is up.
 /// `y` or Enter calls `#on_confirm` with the held action and clears
 /// it; `n` or Esc clears it.
 val confirm_layers: fn(
     #on_confirm: fn(a: 'a) -> null,
-    c: &[null, Confirm<'a>]
+    c: &mut [null, Confirm<'a>]
 ) -> Array<Layer>;
 
 /// Conduct a ceremony: its questions go to the bus `q`, and its result is
 /// the value. Observing the result is what starts it.
-val conduct: fn(q: &Question, c: Ceremony<'r>) -> Result<'r, AdminError>;
+val conduct: fn(q: &mut Question, c: Ceremony<'r>) -> Result<'r, AdminError>;
 
 /// A CA identity as lines, the two halves of the out-of-band verification
 /// gesture: its 8x8 identicon glyph over its grouped fingerprint code.

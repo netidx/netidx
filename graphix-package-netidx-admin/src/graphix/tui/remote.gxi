@@ -20,4 +20,4 @@ type Remote = {
 /// the tab starts on the landing screen. Compose with `handle`'s
 /// input_handler INSIDE the overlay wrapping the base view — outside
 /// it, the base consumes keys before an open modal layer sees them.
-val remote: fn(#q: &Question, #book_dir: [string, null], ?#server: string) -> Remote;
+val remote: fn(#q: &mut Question, #book_dir: [string, null], ?#server: string) -> Remote;

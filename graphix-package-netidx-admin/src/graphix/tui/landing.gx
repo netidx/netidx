@@ -36,7 +36,7 @@ let upsert = |book: Book, domain: string, addr: string, fp: string| -> Book
 // then this host's own domain from its install record), and after that
 // whatever `edit` last said, which is also what the file gets. Absent
 // until the load is done, so an edit computed from it waits for the load
-let saved_domains = |#notice: &[string, null], dir: [string, null], edit: Book| -> Book {
+let saved_domains = |#notice: &mut [string, null], dir: [string, null], edit: Book| -> Book {
   let path = sys::join_path(dir$, "admin-domains.json");
   let known: Book = seq {
     let blank: Book = { domains: [] };
@@ -78,7 +78,7 @@ let saved_domains = |#notice: &[string, null], dir: [string, null], edit: Book| 
 // order and the first whose identity matches the saved fingerprint is
 // its row. Checked a quarter second after `known` settles and on every
 // `recheck`; `polling` is true while a check runs
-let reachable = |#polling: &bool, known: Book, recheck: Any| {
+let reachable = |#polling: &mut bool, known: Book, recheck: Any| {
   let verify: Any = known;
   verify <- recheck;
   let visible = [];
@@ -103,7 +103,7 @@ let reachable = |#polling: &bool, known: Book, recheck: Any| {
 // one discovery pass per `at`: the saved domains with every domain that
 // verified recorded at each of its servers, an edit. `toast` gets what
 // the pass found, or why it failed, and a failed pass is no edit
-let discovered = |#toast: &[Report, null], known: Book, at: Any| -> Book {
+let discovered = |#toast: &mut [Report, null], known: Book, at: Any| -> Book {
   catch(e) *toast <- { title: "Discovery failed", lines: [admin_text((e.0).error)] };
   seq at {
     let found = discover_domains(at)?;
@@ -136,11 +136,11 @@ let landing = |
   // ── the bookmarks ──
   let notice: [string, null] = null;
   let edit = never();
-  let known = saved_domains(#notice: &notice, book_dir, edit);
+  let known = saved_domains(#notice: &mut notice, book_dir, edit);
   // ── verification ──
   let polling = true;
   let recheck = never();
-  let visible = reachable(#polling: &polling, known, recheck);
+  let visible = reachable(#polling: &mut polling, known, recheck);
   // ── a session the tab established is remembered, and re-checked ──
   seq let session = (*connected)$ {
     edit <- upsert(known, session.domain, session.server, session.fingerprint)
@@ -148,7 +148,7 @@ let landing = |
   // ── discovery: what verified is recorded ──
   let toast: [Report, null] = null;
   let discover_at = never();
-  edit <- discovered(#toast: &toast, known, discover_at);
+  edit <- discovered(#toast: &mut toast, known, discover_at);
   // ── keys ──
   let sel = 0;
   let row = selected(visible, sel);

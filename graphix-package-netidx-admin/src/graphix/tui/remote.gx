@@ -14,7 +14,7 @@ use tui::{
 
 type Screen = [`Landing, `Connect, `Panels];
 
-let remote = |#q: &Question, #book_dir: [string, null], #server: string = ""| -> Remote {
+let remote = |#q: &mut Question, #book_dir: [string, null], #server: string = ""| -> Remote {
   // ── connection state ──
   let target = never<Target>();
   let screen: Screen = select server {
@@ -98,7 +98,7 @@ let remote = |#q: &Question, #book_dir: [string, null], #server: string = ""| ->
       `Stop
     },
     kk@ `Esc => { screen <- kk ~ `Landing; `Stop },
-    _ => line_edit::handle(&ed, ev)
+    _ => line_edit::handle(&mut ed, ev)
   };
   let pan = panels::panels(
     #q: q,
@@ -146,6 +146,6 @@ let remote = |#q: &Question, #book_dir: [string, null], #server: string = ""| ->
     view: body,
     handle,
     status,
-    layers: array::concat(pan.layers, toast_layers(&toast))
+    layers: array::concat(pan.layers, toast_layers(&mut toast))
   }
 }

@@ -12,9 +12,9 @@ use tui::{
 let app = |#server: string = ""| -> tui::Tui {
   let q = never<Question>();
   let p = pump(q);
-  let loc = local::local(#q: &q);
+  let loc = local::local(#q: &mut q);
   let book_dir = opt::map(sys::dirs::config_dir(), |d| sys::join_path(d, "netidx-admin-tui"));
-  let rem = remote::remote(#q: &q, #book_dir: book_dir, #server: server);
+  let rem = remote::remote(#q: &mut q, #book_dir: book_dir, #server: server);
   // which tab the operator asked for: a tag, never the tab itself,
   // which re-fires with every change inside it
   let front: [`Local, `Remote] = select server {

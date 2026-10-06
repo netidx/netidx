@@ -23,4 +23,4 @@ type Local = {
 /// take. The admin-domain sync check and the CA credential probe run
 /// in the background and the list grows as they land; `R` re-detects.
 /// Ceremonies' questions go to the app's bus `#q`.
-val local: fn(#q: &Question) -> Local;
+val local: fn(#q: &mut Question) -> Local;

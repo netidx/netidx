@@ -189,7 +189,7 @@ let ca_question = |#on_answer: fn(remove_ca: bool) -> null, ask: Any| -> Array<L
 // picker over the admin domain's candidates (or an address typed by
 // hand), and the form that follows calls `#on_pick` with the choice
 let parent_picker = |
-  #toast: &[Toast, null],
+  #toast: &mut [Toast, null],
   #on_pick: fn(c: ParentChoice) -> null,
   root: string
 | -> Array<Layer> {
@@ -457,7 +457,7 @@ let welcome = |fresh: bool| -> Array<Layer> {
   }
 };
 
-let local = |#q: &Question| {
+let local = |#q: &mut Question| {
   // the roles this platform can install, from the library; the rest
   // of the menu is the same everywhere
   let roles = install::installable_roles(true);
@@ -1325,9 +1325,9 @@ let local = |#q: &Question| {
     welcome(fresh),
     status_card(row, select run { x@ `Status => x, _ => never() }),
     ca_question(#on_answer: |remove_ca| { run <- `UninstallWith(remove_ca); null }, ca_ask),
-    parent_picker(#toast: &toast, #on_pick: |c| { run <- `AddParentTo(c); null }, parent_root),
-    confirm_layers(#on_confirm: |a| { run <- a; null }, &confirm),
-    toast_layers(&toast)
+    parent_picker(#toast: &mut toast, #on_pick: |c| { run <- `AddParentTo(c); null }, parent_root),
+    confirm_layers(#on_confirm: |a| { run <- a; null }, &mut confirm),
+    toast_layers(&mut toast)
   );
   { view, handle, status, layers, installed: !fresh }
 }

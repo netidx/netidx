@@ -36,7 +36,7 @@ type Panels = {
 /// entry loads its panel on that delivery. Esc from the entry screen
 /// calls `#on_close`.
 val panels: fn(
-  #q: &Question,
+  #q: &mut Question,
   #entry: Entry,
   #on_close: fn(why: CloseReason) -> null,
   target: Target

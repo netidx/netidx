@@ -51,7 +51,7 @@ use tui::overlay::{{self, *}};
 use tui::text::{{self, *}};
 
 let q: netidx_admin::ceremony::Question = never();
-let r = netidx_admin::tui::remote::remote(#q: &q, #book_dir: "{book}", #server: "{listen}");
+let r = netidx_admin::tui::remote::remote(#q: &mut q, #book_dir: "{book}", #server: "{listen}");
 let p = netidx_admin::tui::pump(q);
 let handle = |e: Event| -> [`Stop, `Continue] r.handle(e);
 let layers = array::concat(r.layers, p.layers);
