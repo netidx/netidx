@@ -728,3 +728,20 @@ fn abstract_ord_across_types() {
     assert_eq!(a.wrap(A(1)).cmp(&a.wrap(A(2))), Ordering::Less);
     assert_eq!(a.wrap(A(3)), a.wrap(A(3)));
 }
+
+/// `==` holds every NaN equal and -0.0 equal to 0.0, so a hash set of
+/// values holds one of each.
+#[test]
+fn equal_floats_hash_alike() {
+    use std::hash::{BuildHasher, BuildHasherDefault};
+    let h = |v: Value| {
+        BuildHasherDefault::<std::collections::hash_map::DefaultHasher>::default()
+            .hash_one(v)
+    };
+    let neg_nan = f64::from_bits(f64::NAN.to_bits() | (1 << 63));
+    assert_eq!(Value::F64(0.0), Value::F64(-0.0));
+    assert_eq!(h(Value::F64(0.0)), h(Value::F64(-0.0)));
+    assert_eq!(h(Value::F64(f64::NAN)), h(Value::F64(neg_nan)));
+    assert_eq!(h(Value::F32(0.0)), h(Value::F32(-0.0)));
+    assert_eq!(h(Value::F32(f32::NAN)), h(Value::F32(-f32::NAN)));
+}

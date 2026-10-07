@@ -58,20 +58,21 @@ impl Hash for Value {
                     7u8.hash(state);
                     v.hash(state)
                 }
+                // == holds every NaN equal and -0.0 equal to 0.0, so they hash alike
                 Value::F32(v) => {
                     8u8.hash(state);
-                    let bits = v.to_bits();
                     match v.classify() {
-                        Nan => ((bits & 0xFF00_0000) | 0x1).hash(state), // normalize NaN
-                        _ => bits.hash(state),
+                        Nan => f32::NAN.to_bits().hash(state),
+                        Zero => 0u32.hash(state),
+                        _ => v.to_bits().hash(state),
                     }
                 }
                 Value::F64(v) => {
                     9u8.hash(state);
-                    let bits = v.to_bits();
                     match v.classify() {
-                        Nan => ((bits & 0xFFE0_0000_0000_0000) | 0x1).hash(state), // normalize NaN
-                        _ => bits.hash(state),
+                        Nan => f64::NAN.to_bits().hash(state),
+                        Zero => 0u64.hash(state),
+                        _ => v.to_bits().hash(state),
                     }
                 }
                 Value::DateTime(d) => {
