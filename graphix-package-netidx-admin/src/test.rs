@@ -151,13 +151,13 @@ async fn milestone_image() -> anyhow::Result<()> {
         tx,
         &crate::TEST_REGISTER,
         CFlag::FusionDisabled.into(),
-        RegistrationImage::Save(reg_tx),
+        RegistrationImage::save(reg_tx),
         Some(Source::Internal(prog)),
         Some(prog_tx),
     )
     .await?;
     let cold_t = t0.elapsed();
-    let image = prog_rx.await??;
+    let image = prog_rx.await??.image;
     cold.shutdown().await;
     let mut warm_t = Vec::new();
     for _ in 0..5 {
@@ -170,7 +170,7 @@ async fn milestone_image() -> anyhow::Result<()> {
             tx,
             &crate::TEST_REGISTER,
             CFlag::FusionDisabled.into(),
-            RegistrationImage::Load(image.clone()),
+            RegistrationImage::load(image.clone()),
             None,
             None,
         )
@@ -202,13 +202,13 @@ async fn milestone_image_fused() -> anyhow::Result<()> {
         tx,
         &crate::TEST_REGISTER,
         Default::default(),
-        RegistrationImage::Save(reg_tx),
+        RegistrationImage::save(reg_tx),
         Some(Source::Internal(prog)),
         Some(prog_tx),
     )
     .await?;
     let cold_t = t0.elapsed();
-    let image = prog_rx.await??;
+    let image = prog_rx.await??.image;
     let stats = cold.rt.fusion_stats().await?;
     cold.shutdown().await;
     let mut warm_t = Vec::new();
@@ -220,7 +220,7 @@ async fn milestone_image_fused() -> anyhow::Result<()> {
             tx,
             &crate::TEST_REGISTER,
             Default::default(),
-            RegistrationImage::Load(image.clone()),
+            RegistrationImage::load(image.clone()),
             None,
             None,
         )
