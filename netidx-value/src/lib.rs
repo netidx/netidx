@@ -794,6 +794,11 @@ impl Value {
                 Typ::String => Some(Value::String(s)),
                 Typ::Error => Some(Value::Error(Value::String(s).into())),
                 Typ::Array => Some(Value::Array([Value::String(s)].into())),
+                // a bare RFC3339 timestamp, as JSON and TOML carry one
+                Typ::DateTime => match DateTime::parse_from_rfc3339(&s) {
+                    Ok(d) => Some(Value::DateTime(Arc::new(d.with_timezone(&Utc)))),
+                    Err(_) => s.parse::<Value>().ok().and_then(|v| v.cast(typ)),
+                },
                 _ => s.parse::<Value>().ok().and_then(|v| v.cast(typ)),
             },
             v if typ == Typ::String => {
@@ -812,6 +817,14 @@ impl Value {
             },
             Value::Array(elts) => match typ {
                 Typ::Array => Some(Value::Array(elts)),
+                // an array of bytes, as JSON carries bytes
+                Typ::Bytes => {
+                    let bytes = elts
+                        .iter()
+                        .map(|v| v.clone().cast_to::<u8>().ok())
+                        .collect::<Option<Vec<u8>>>()?;
+                    Some(Value::Bytes(PBytes::new(bytes::Bytes::from(bytes))))
+                }
                 Typ::Map => {
                     match Value::Array(elts).cast_to::<LPooled<Vec<(Value, Value)>>>() {
                         Err(_) => None,

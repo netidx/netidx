@@ -745,3 +745,18 @@ fn equal_floats_hash_alike() {
     assert_eq!(h(Value::F32(0.0)), h(Value::F32(-0.0)));
     assert_eq!(h(Value::F32(f32::NAN)), h(Value::F32(-f32::NAN)));
 }
+
+/// What JSON and TOML carry for a datetime and for bytes casts back.
+#[test]
+fn text_formats_cast_back() {
+    let d = Value::String(arcstr::literal!("2020-01-02T03:04:05Z")).cast(Typ::DateTime);
+    assert_eq!(
+        d,
+        Some(Value::DateTime(Arc::new(
+            chrono::TimeZone::with_ymd_and_hms(&Utc, 2020, 1, 2, 3, 4, 5).unwrap()
+        )))
+    );
+    let b = Value::Array([Value::I64(1), Value::I64(255)].into()).cast(Typ::Bytes);
+    assert_eq!(b, Some(Value::Bytes(PBytes::new(bytes::Bytes::from(vec![1u8, 255])))));
+    assert_eq!(Value::Array([Value::I64(256)].into()).cast(Typ::Bytes), None);
+}
