@@ -234,7 +234,7 @@ type List<'a> = [`Cons('a, List<'a>), `Nil]   // recursive
 
 // type variables: 'a, 'b, etc.
 // constraints: 'a: Number, 'a: Int, 'a: Float
-// type sets: Number, Int, SInt, UInt, Float, Real
+// type sets: Number, Int, Sint, Uint, Float, Real
 ```
 
 ### Literals
