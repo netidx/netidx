@@ -674,6 +674,11 @@ fn duration_units_round_trip() {
         assert_eq!(back, v, "{text} round trip");
     }
     assert!("duration:3.w".parse::<Value>().is_err());
+    // a count no Duration holds is refused, never a panic
+    for text in ["duration:-1.s", "duration:-0.5ms", "duration:1e300.y", "duration:inf.s"]
+    {
+        assert!(text.parse::<Value>().is_err(), "{text}");
+    }
 }
 
 #[test]

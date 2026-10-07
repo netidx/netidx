@@ -506,7 +506,10 @@ where
                 string("M"),
                 string("y"),
             ))))
-            .map(|(n, suffix)| Value::Duration(Arc::new(duration_of(n, suffix)))),
+            .then(|(n, suffix)| match duration_of(n, suffix) {
+                Some(d) => combine::value(Value::Duration(Arc::new(d))).right(),
+                None => unexpected_any("a duration that is negative or too long").left(),
+            }),
     )))
 }
 
@@ -515,18 +518,20 @@ where
 const DURATION_UNITS: [(&str, f64); 5] =
     [("y", 31_557_600.), ("M", 2_630_016.), ("d", 86_400.), ("h", 3_600.), ("m", 60.)];
 
-/// `n` of the duration literal unit `suffix`.
-pub fn duration_of(n: f64, suffix: &str) -> Duration {
-    match suffix {
-        "ns" => Duration::from_secs_f64(n / 1e9),
-        "us" => Duration::from_secs_f64(n / 1e6),
-        "ms" => Duration::from_secs_f64(n / 1e3),
-        "s" => Duration::from_secs_f64(n),
+/// `n` of the duration literal unit `suffix`; `None` when that is
+/// negative, not finite or past `Duration::MAX`.
+pub fn duration_of(n: f64, suffix: &str) -> Option<Duration> {
+    let secs = match suffix {
+        "ns" => n / 1e9,
+        "us" => n / 1e6,
+        "ms" => n / 1e3,
+        "s" => n,
         unit => match DURATION_UNITS.iter().find(|(u, _)| *u == unit) {
-            Some((_, secs)) => Duration::from_secs_f64(n * secs),
+            Some((_, secs)) => n * secs,
             None => unreachable!("duration unit {unit}"),
         },
-    }
+    };
+    Duration::try_from_secs_f64(secs).ok()
 }
 
 /// How a duration prints: the count and the largest literal unit that
