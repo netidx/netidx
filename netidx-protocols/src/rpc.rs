@@ -411,7 +411,6 @@ pub mod client {
     use ahash::{AHashMap, AHashSet};
     use log::{debug, trace};
     use netidx::subscriber::Event;
-    use once_cell::sync::OnceCell;
     use tokio::time;
 
     /// Convenience macro for calling rpcs.
@@ -430,7 +429,6 @@ pub mod client {
     #[derive(Debug)]
     struct ProcInner {
         call: Dval,
-        args: OnceCell<AHashSet<ArcStr>>,
         subscribe_timeout: Duration,
     }
 
@@ -447,7 +445,6 @@ pub mod client {
             let call = subscriber.subscribe(name.clone());
             Ok(Proc(Arc::new(ProcInner {
                 call,
-                args: OnceCell::new(),
                 subscribe_timeout: Duration::from_secs(10),
             })))
         }
@@ -460,11 +457,7 @@ pub mod client {
             subscribe_timeout: Duration,
         ) -> Result<Proc> {
             let call = subscriber.subscribe(name.clone());
-            Ok(Proc(Arc::new(ProcInner {
-                call,
-                args: OnceCell::new(),
-                subscribe_timeout,
-            })))
+            Ok(Proc(Arc::new(ProcInner { call, subscribe_timeout })))
         }
 
         /**
@@ -495,39 +488,27 @@ pub mod client {
             I: IntoIterator<Item = (K, Value)>,
             K: Borrow<str>,
         {
-            if self.0.args.get().is_none() {
-                loop {
-                    debug!("waiting for subscription to procedure");
-                    time::timeout(
-                        self.0.subscribe_timeout,
-                        self.0.call.wait_subscribed(),
-                    )
-                    .await
-                    .map_err(|_| anyhow!("timeout subscribing to procedure"))??;
-                    debug!("fetching args");
-                    match self.0.call.last() {
-                        Event::Unsubscribed => (),
-                        Event::Update(v) => {
-                            debug!("args are {:?}", v);
-                            let args = v
-                                .clone()
-                                .cast_to::<AHashSet<ArcStr>>()
-                                .ok()
-                                .unwrap_or_else(AHashSet::default);
-                            // Another thread may have set these args already,
-                            // so ignore if `set` returns Err.
-                            let _: Result<(), AHashSet<ArcStr>> = self.0.args.set(args);
-                            break;
-                        }
+            // the procedure's argument names as published now: a server
+            // that republishes with another spec is called by its new names
+            let names = loop {
+                match self.0.call.last() {
+                    Event::Update(v) => {
+                        debug!("args are {:?}", v);
+                        break v.cast_to::<AHashSet<ArcStr>>().ok().unwrap_or_default();
+                    }
+                    Event::Unsubscribed => {
+                        debug!("waiting for subscription to procedure");
+                        time::timeout(
+                            self.0.subscribe_timeout,
+                            self.0.call.wait_subscribed(),
+                        )
+                        .await
+                        .map_err(|_| anyhow!("timeout subscribing to procedure"))??;
                     }
                 }
-            }
+            };
             let args = {
                 let mut set: AHashMap<ArcStr, Value> = AHashMap::default();
-                let names = match self.0.args.get() {
-                    Some(names) => names,
-                    None => bail!("no args set"),
-                };
                 for (name, val) in args {
                     match names.get(name.borrow()) {
                         None => bail!("no such argument {}", name.borrow()),
