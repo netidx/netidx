@@ -25,7 +25,9 @@ use graphix_compiler::{
     image::{self, ImageBuf},
     typ::FnType,
 };
-use graphix_package_core::{CachedArgs, CachedVals, EvalCached, unit_image_state};
+use graphix_package_core::{
+    CachedArgs, CachedVals, EvalCached, Invocation, unit_image_state,
+};
 use netidx_admin::{
     answer::{
         AdminDomainChoice, AdminDomainOption, Answerer, Field, OneTimeSecret, Progress,
@@ -831,7 +833,11 @@ impl<R: Rt, E: UserEvent> Apply<R, E> for Events {
         ctx: &mut ExecCtx<'_, R, E>,
         from: &mut [Node<R, E>],
     ) -> &TagValue {
-        if self.cached.update(ctx, from) {
+        let invocation = self.cached.update(ctx, from);
+        if let Invocation::Bottom { fresh } = invocation {
+            return self.out.set_bottom(fresh);
+        }
+        if invocation == Invocation::Fired {
             if let Some(c) = get_ceremony(&self.cached, 0) {
                 if self.bind_id != Some(c.bind_id) {
                     if let Some(old) = self.bind_id.take() {
