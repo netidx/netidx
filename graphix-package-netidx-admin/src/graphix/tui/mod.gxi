@@ -18,7 +18,7 @@ use super::{
     identicon
 };
 
-use tui::{line, overlay::{self, Layer, layer}, span, style};
+use tui::{line, overlay::{Layer, layer}, span, style};
 
 /// An admin error as one line for the operator.
 val admin_text: fn(a: AdminError) -> string;
