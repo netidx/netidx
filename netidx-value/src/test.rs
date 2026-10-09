@@ -760,3 +760,23 @@ fn text_formats_cast_back() {
     assert_eq!(b, Some(Value::Bytes(PBytes::new(bytes::Bytes::from(vec![1u8, 255])))));
     assert_eq!(Value::Array([Value::I64(256)].into()).cast(Typ::Bytes), None);
 }
+
+/// Maps of different lengths compare as their sorted entries do: pair by
+/// pair from the smallest key, the length breaking a tie.
+#[test]
+fn map_ord_pairs_from_the_front() {
+    let map = |ks: &[i64]| {
+        Value::Map(Map::from_iter(ks.iter().map(|k| (Value::I64(*k), Value::Null))))
+    };
+    let entries = |ks: &[i64]| {
+        let mut ks = ks.to_vec();
+        ks.sort();
+        ks.iter().map(|k| (*k, ())).collect::<Vec<_>>()
+    };
+    let cases: [&[i64]; 7] = [&[], &[1], &[2], &[1, 5], &[1, 2], &[1, 2, 3], &[0, 9, 10]];
+    for a in cases {
+        for b in cases {
+            assert_eq!(map(a).cmp(&map(b)), entries(a).cmp(&entries(b)), "{a:?} {b:?}");
+        }
+    }
+}

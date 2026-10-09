@@ -300,8 +300,18 @@ impl PartialOrd for Value {
                     }
                     (Value::Map(l), Value::Map(r)) => {
                         stack.push(W::LenTie(l.len(), r.len()));
+                        // entries pair from the front: the longer map's tail
+                        // is skipped before pairing from the back
+                        let n = l.len().min(r.len());
+                        let (l_tail, r_tail) = (l.len() - n, r.len() - n);
                         let mut l = l.into_iter();
                         let mut r = r.into_iter();
+                        for _ in 0..l_tail {
+                            l.next_back();
+                        }
+                        for _ in 0..r_tail {
+                            r.next_back();
+                        }
                         while let (Some((kl, vl)), Some((kr, vr))) =
                             (l.next_back(), r.next_back())
                         {
