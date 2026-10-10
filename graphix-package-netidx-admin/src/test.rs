@@ -152,7 +152,7 @@ async fn milestone_image() -> anyhow::Result<()> {
         &crate::TEST_REGISTER,
         CFlag::FusionDisabled.into(),
         RegistrationImage::save(reg_tx),
-        Some(Source::Internal(prog)),
+        Some(Source::Program(prog)),
         Some(prog_tx),
     )
     .await?;
@@ -203,7 +203,7 @@ async fn milestone_image_fused() -> anyhow::Result<()> {
         &crate::TEST_REGISTER,
         Default::default(),
         RegistrationImage::save(reg_tx),
-        Some(Source::Internal(prog)),
+        Some(Source::Program(prog)),
         Some(prog_tx),
     )
     .await?;
@@ -363,7 +363,7 @@ async fn check_vs_build_timing() -> anyhow::Result<()> {
             )
             .await?;
             let t = std::time::Instant::now();
-            ctx.rt.check(Source::Internal(prog.clone()), None).await?;
+            ctx.rt.check(Source::Program(prog.clone()), None).await?;
             times.push(t.elapsed());
         }
         times.sort();
