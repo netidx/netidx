@@ -1672,7 +1672,12 @@ impl Pack for Duration {
 
     fn decode(buf: &mut impl Buf) -> Result<Self, PackError> {
         let secs = Pack::decode(buf)?;
-        let ns = Pack::decode(buf)?;
+        let ns: u32 = Pack::decode(buf)?;
+        // more than a second of nanoseconds is not an encoded Duration, and
+        // would carry into secs past u64::MAX
+        if ns >= 1_000_000_000 {
+            return Err(PackError::InvalidFormat);
+        }
         Ok(Duration::new(secs, ns))
     }
 }

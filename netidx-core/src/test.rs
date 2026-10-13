@@ -132,3 +132,13 @@ fn test_addr_pack_wire_format() {
     );
     assert_eq!(&pack(&v6.ip())[..], &[1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
 }
+
+#[test]
+fn duration_decode_refuses_a_second_of_nanoseconds() {
+    use bytes::BufMut;
+    let mut buf = bytes::BytesMut::new();
+    buf.put_u64(u64::MAX);
+    buf.put_u32(1_000_000_000);
+    let r = <std::time::Duration as Pack>::decode(&mut buf.freeze());
+    assert!(matches!(r, Err(pack::PackError::InvalidFormat)), "{r:?}");
+}
