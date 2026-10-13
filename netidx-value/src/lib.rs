@@ -526,15 +526,30 @@ impl Pack for Value {
         // Construction frames replace the recursion: a container tag
         // opens a frame; completed values bubble into the innermost
         // frame until it fills, then IT completes into its parent.
-        // Frame state lives on the heap, so a hostile deeply-nested
-        // input costs memory (bounded by the existing per-container
-        // size checks) instead of the thread's stack.
+        // Frame state lives on the heap, not the thread's stack. Every
+        // value takes at least a byte of input, so the values the open
+        // frames still expect (`owed`, a container's slot in its parent
+        // passing to its own elements when its frame opens) are held to
+        // what remains: a hostile input costs memory in proportion to its
+        // length.
         enum Frame {
             Array { len: usize, elts: LPooled<Vec<Value>> },
             Map { len: usize, pairs: LPooled<Vec<(Value, Value)>>, key: Option<Value> },
             Error,
         }
         let mut frames: LPooled<Vec<Frame>> = LPooled::take();
+        let mut owed: usize = 0;
+        macro_rules! owe {
+            ($n:expr) => {{
+                if !frames.is_empty() {
+                    owed -= 1;
+                }
+                owed = owed.saturating_add($n);
+                if owed > buf.remaining() {
+                    return Err(PackError::TooBig);
+                }
+            }};
+        }
         loop {
             let done = match <u8 as Pack>::decode(buf)? {
                 0 => Value::U32(Pack::decode(buf)?),
@@ -569,6 +584,7 @@ impl Pack for Value {
                     if elts == 0 {
                         Value::Array(ValArray::from([]))
                     } else {
+                        owe!(elts);
                         let mut values: LPooled<Vec<Value>> = LPooled::take();
                         values.reserve(elts);
                         frames.push(Frame::Array { len: elts, elts: values });
@@ -585,6 +601,7 @@ impl Pack for Value {
                     if elts == 0 {
                         Value::Map(Map::new())
                     } else {
+                        owe!(elts.saturating_mul(2));
                         let mut pairs: LPooled<Vec<(Value, Value)>> = LPooled::take();
                         pairs.reserve(elts);
                         frames.push(Frame::Map { len: elts, pairs, key: None });
@@ -592,6 +609,7 @@ impl Pack for Value {
                     }
                 }
                 22 => {
+                    owe!(1);
                     frames.push(Frame::Error);
                     continue;
                 }
@@ -605,7 +623,13 @@ impl Pack for Value {
             // Bubble the completed value into the innermost frame;
             // each frame that fills completes into ITS parent.
             let mut val = done;
+            // a value a frame built took its slot when the frame opened
+            let mut built = false;
             loop {
+                if !frames.is_empty() && !built {
+                    owed -= 1;
+                }
+                built = true;
                 match frames.last_mut() {
                     None => return Ok(val),
                     Some(Frame::Error) => {

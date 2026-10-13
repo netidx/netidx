@@ -780,3 +780,21 @@ fn map_ord_pairs_from_the_front() {
         }
     }
 }
+
+/// Nested container headers each claiming more than the input holds,
+/// together if not alone, are refused before anything is reserved.
+#[test]
+fn nested_claims_are_bounded_by_the_input() {
+    use bytes::BufMut;
+    use netidx_core::pack::{Pack, PackError, encode_varint};
+    let mut buf = bytes::BytesMut::new();
+    for _ in 0..10_000 {
+        buf.put_u8(19);
+        encode_varint(1_000, &mut buf);
+    }
+    buf.put_u8(16);
+    match Value::decode(&mut buf.freeze()) {
+        Err(PackError::TooBig) => (),
+        r => panic!("{r:?}"),
+    }
+}
