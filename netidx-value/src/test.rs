@@ -798,3 +798,17 @@ fn nested_claims_are_bounded_by_the_input() {
         r => panic!("{r:?}"),
     }
 }
+
+/// A `%s` precision that ends inside a multibyte char cuts before it.
+#[test]
+fn printf_precision_cuts_at_a_char_boundary() {
+    let mut out = String::new();
+    let hearts = Value::String(literal!("💖💖💖💖"));
+    crate::print::printf(
+        &mut out,
+        "%.3s|%.5s|%.*s|",
+        &[hearts.clone(), hearts.clone(), Value::I64(9), hearts],
+    )
+    .unwrap();
+    assert_eq!(out, "|💖|💖💖|");
+}

@@ -108,14 +108,88 @@ pub fn printf(f: &mut impl Write, fmt: &str, args: &[Value]) -> Result<usize> {
             }
         })
     }
-    let mut args: LPooled<Vec<Arg>> = LPooled::take();
+    let mut fish: LPooled<Vec<Arg>> = LPooled::take();
     for t in fish_args.drain(..) {
-        args.push(match t {
+        fish.push(match t {
             T::Arg(a) => a,
             T::Index(i) => strings[i].to_arg(),
         });
     }
-    printf_c_locale(f, fmt, &mut args).map_err(|e| anyhow!(format!("{e:?}")))
+    // fish-printf cuts a `%s` argument at its precision in bytes: cut it
+    // first, back to a char boundary, so it never cuts inside a char
+    let mut cuts: LPooled<Vec<(usize, usize)>> = LPooled::take();
+    str_precisions(fmt, args, &mut cuts);
+    for (i, p) in cuts.drain(..) {
+        if let Some(Arg::Str(s)) = fish.get_mut(i) {
+            let mut cut = p.min(s.len());
+            while !s.is_char_boundary(cut) {
+                cut -= 1;
+            }
+            *s = &s[..cut];
+        }
+    }
+    printf_c_locale(f, fmt, &mut fish).map_err(|e| anyhow!(format!("{e:?}")))
+}
+
+/// Each `%s` conversion in `fmt` that has a precision: its argument's
+/// index and the precision, read as fish-printf reads a format (no `$`
+/// positions; a `*` width or precision takes an argument).
+fn str_precisions(fmt: &str, args: &[Value], out: &mut LPooled<Vec<(usize, usize)>>) {
+    let b = fmt.as_bytes();
+    let (mut i, mut arg) = (0, 0);
+    let star = |arg: &mut usize| {
+        let v = args.get(*arg).and_then(|v| v.clone().cast_to::<i64>().ok());
+        *arg += 1;
+        v
+    };
+    let digits = |i: &mut usize| {
+        let start = *i;
+        while b.get(*i).is_some_and(u8::is_ascii_digit) {
+            *i += 1;
+        }
+        fmt[start..*i].parse::<usize>().unwrap_or(0)
+    };
+    while i < b.len() {
+        if b[i] != b'%' {
+            i += 1;
+            continue;
+        }
+        i += 1;
+        if b.get(i) == Some(&b'%') {
+            i += 1;
+            continue;
+        }
+        while matches!(b.get(i), Some(b'-' | b'+' | b' ' | b'#' | b'0' | b'\'' | b'I')) {
+            i += 1;
+        }
+        if b.get(i) == Some(&b'*') {
+            star(&mut arg);
+            i += 1;
+        } else {
+            digits(&mut i);
+        }
+        let mut prec = None;
+        if b.get(i) == Some(&b'.') {
+            i += 1;
+            prec = match b.get(i) {
+                Some(b'*') => {
+                    i += 1;
+                    star(&mut arg).and_then(|p| usize::try_from(p).ok())
+                }
+                _ => Some(digits(&mut i)),
+            };
+        }
+        while matches!(b.get(i), Some(b'h' | b'l' | b'L' | b'q' | b'j' | b'z' | b't')) {
+            i += 1;
+        }
+        if let (Some(b's' | b'S'), Some(p)) = (b.get(i), prec) {
+            out.push((arg, p));
+        }
+        if i < b.len() {
+            arg += 1;
+            i += 1;
+        }
+    }
 }
 
 impl Value {
