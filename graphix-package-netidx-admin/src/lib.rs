@@ -10,12 +10,11 @@ use anyhow::{Context, Error, Result};
 use arcstr::ArcStr;
 use compact_str::format_compact;
 use graphix_compiler::{
-    Apply, BuiltIn, CompileCtx, ExecCtx, FastCall, Node, Rt, Scope, TagValue, UserEvent,
+    Apply, BuiltIn, CompileCtx, ExecCtx, Node, Rt, Scope, TagValue, UserEvent,
     effects::Effect, errf, expr::ExprId, image::ImageBuf, typ::FnType,
 };
 use graphix_package_core::{
-    CachedArgs, CachedArgsAsync, CachedVals, EvalCached, EvalCachedAsync, fast_eval,
-    unit_image_state,
+    CachedArgsAsync, CachedVals, EvalCachedAsync, unit_image_state,
 };
 use netidx_admin::{
     answer::Answerer as _,
@@ -273,15 +272,7 @@ impl EvalCachedAsync for LocalEv {
     }
 }
 
-unit_image_state!(
-    LocalEv,
-    DriftEv,
-    ListAdminsEv,
-    LogoutEv,
-    ParseFingerprintEv,
-    IdenticonEv,
-    InfoEv
-);
+unit_image_state!(LocalEv, DriftEv, ListAdminsEv, LogoutEv);
 
 type Local = CachedArgsAsync<LocalEv>;
 
@@ -393,19 +384,12 @@ fn fc_parse_fingerprint(args: &[Value]) -> Option<Value> {
     })
 }
 
-#[derive(Debug, Default)]
-struct ParseFingerprintEv;
-
-impl<R: Rt, E: UserEvent> EvalCached<R, E> for ParseFingerprintEv {
-    const EFFECT: Effect = Effect::Stateless(Some(FastCall::Plain(fc_parse_fingerprint)));
-    const NAME: &str = "netidx_admin_parse_fingerprint";
-
-    fn eval(&mut self, ctx: &mut ExecCtx<'_, R, E>, from: &CachedVals) -> Option<Value> {
-        fast_eval(ctx, fc_parse_fingerprint, from)
-    }
-}
-
-type ParseFingerprint = CachedArgs<ParseFingerprintEv>;
+graphix_package_core::fast_builtin!(
+    ParseFingerprint,
+    ParseFingerprintEv,
+    "netidx_admin_parse_fingerprint",
+    fc_parse_fingerprint
+);
 
 // ── identicon (sync, pure) ───────────────────────────────────────
 
@@ -437,19 +421,12 @@ fn fc_identicon(args: &[Value]) -> Option<Value> {
     })
 }
 
-#[derive(Debug, Default)]
-struct IdenticonEv;
-
-impl<R: Rt, E: UserEvent> EvalCached<R, E> for IdenticonEv {
-    const EFFECT: Effect = Effect::Stateless(Some(FastCall::Plain(fc_identicon)));
-    const NAME: &str = "netidx_admin_identicon";
-
-    fn eval(&mut self, ctx: &mut ExecCtx<'_, R, E>, from: &CachedVals) -> Option<Value> {
-        fast_eval(ctx, fc_identicon, from)
-    }
-}
-
-type Identicon = CachedArgs<IdenticonEv>;
+graphix_package_core::fast_builtin!(
+    Identicon,
+    IdenticonEv,
+    "netidx_admin_identicon",
+    fc_identicon
+);
 
 // ── info (sync, pure) ────────────────────────────────────────────
 
@@ -479,19 +456,7 @@ fn fc_info(args: &[Value]) -> Option<Value> {
     )
 }
 
-#[derive(Debug, Default)]
-struct InfoEv;
-
-impl<R: Rt, E: UserEvent> EvalCached<R, E> for InfoEv {
-    const EFFECT: Effect = Effect::Stateless(Some(FastCall::Plain(fc_info)));
-    const NAME: &str = "netidx_admin_info";
-
-    fn eval(&mut self, ctx: &mut ExecCtx<'_, R, E>, from: &CachedVals) -> Option<Value> {
-        fast_eval(ctx, fc_info, from)
-    }
-}
-
-type Info = CachedArgs<InfoEv>;
+graphix_package_core::fast_builtin!(Info, InfoEv, "netidx_admin_info", fc_info);
 
 // ── session ceremonies: connect, change_password_at ──────────────
 
