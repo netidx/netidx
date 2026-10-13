@@ -106,7 +106,7 @@ let block = block(
     #border:&`None,
     #title_bottom:&title_bottom,
     #style:&style(#bg:`Indexed(234)),
-    #size:&size,
+    #size:&mut size,
     &browser
 );
 
