@@ -640,7 +640,7 @@ pub(crate) trait RemoteOp: Debug + Send + Sync + 'static {
     const NCFG: usize;
     /// Build the ceremony's op from the latest config values. An error
     /// becomes the mint site's error value.
-    fn op(cfg: &[Option<Value>], conn: ConnInfo) -> Result<BoxOp>;
+    fn op(cfg: &CachedVals, conn: ConnInfo) -> Result<BoxOp>;
 }
 
 #[derive(Debug)]
@@ -695,14 +695,14 @@ impl<R: Rt, E: UserEvent, T: RemoteOp> Apply<R, E> for RemoteCeremony<T> {
         let Some(args) = self.trigger.tick(ctx, from) else {
             return self.out.ride();
         };
-        let Some(target) = target_arg(args[T::NCFG].as_ref()) else {
+        let Some(target) = target_arg(args.value(T::NCFG)) else {
             return self.out.ride();
         };
         let (conn, fp) = match target.remote() {
             Ok(r) => r,
             Err(e) => return self.out.set(TagValue::fired(admin_err(e))),
         };
-        match T::op(&args[..T::NCFG], conn) {
+        match T::op(args, conn) {
             Ok(op) => {
                 self.out.set(TagValue::fired(ceremony::start_ceremony(ctx, Some(fp), op)))
             }
@@ -722,7 +722,7 @@ impl RemoteOp for ListQueueOp {
     const NAME: &'static str = "netidx_admin_list_queue";
     const NCFG: usize = 0;
 
-    fn op(_cfg: &[Option<Value>], conn: ConnInfo) -> Result<BoxOp> {
+    fn op(_cfg: &CachedVals, conn: ConnInfo) -> Result<BoxOp> {
         Ok(Box::new(move |ans| {
             Box::pin(async move {
                 let rows = ops::queue::list_queue(
@@ -746,10 +746,10 @@ impl RemoteOp for ApproveOp {
     const NAME: &'static str = "netidx_admin_approve";
     const NCFG: usize = 3;
 
-    fn op(cfg: &[Option<Value>], conn: ConnInfo) -> Result<BoxOp> {
-        let groups = string_list(cfg[0].as_ref())?;
-        let no_id_map = opt_bool(cfg[1].as_ref(), false)?;
-        let code = req_string(cfg[2].as_ref(), "the request code")?;
+    fn op(cfg: &CachedVals, conn: ConnInfo) -> Result<BoxOp> {
+        let groups = string_list(cfg.value(0))?;
+        let no_id_map = opt_bool(cfg.value(1), false)?;
+        let code = req_string(cfg.value(2), "the request code")?;
         Ok(Box::new(move |ans| {
             Box::pin(async move {
                 let out = ops::queue::approve(
@@ -776,7 +776,7 @@ impl RemoteOp for ApproveRenewalsOp {
     const NAME: &'static str = "netidx_admin_approve_renewals";
     const NCFG: usize = 0;
 
-    fn op(_cfg: &[Option<Value>], conn: ConnInfo) -> Result<BoxOp> {
+    fn op(_cfg: &CachedVals, conn: ConnInfo) -> Result<BoxOp> {
         Ok(Box::new(move |ans| {
             Box::pin(async move {
                 let rows = ops::queue::approve_renewals(
@@ -800,9 +800,9 @@ impl RemoteOp for DenyOp {
     const NAME: &'static str = "netidx_admin_deny";
     const NCFG: usize = 2;
 
-    fn op(cfg: &[Option<Value>], conn: ConnInfo) -> Result<BoxOp> {
-        let reason = opt_string(cfg[0].as_ref())?;
-        let code = req_string(cfg[1].as_ref(), "the request code")?;
+    fn op(cfg: &CachedVals, conn: ConnInfo) -> Result<BoxOp> {
+        let reason = opt_string(cfg.value(0))?;
+        let code = req_string(cfg.value(1), "the request code")?;
         Ok(Box::new(move |ans| {
             Box::pin(async move {
                 let denied = ops::queue::deny(
@@ -828,9 +828,9 @@ impl RemoteOp for IssuedOp {
     const NAME: &'static str = "netidx_admin_issued";
     const NCFG: usize = 2;
 
-    fn op(cfg: &[Option<Value>], conn: ConnInfo) -> Result<BoxOp> {
-        let include_revoked = opt_bool(cfg[0].as_ref(), false)?;
-        let name_filter = opt_string(cfg[1].as_ref())?;
+    fn op(cfg: &CachedVals, conn: ConnInfo) -> Result<BoxOp> {
+        let include_revoked = opt_bool(cfg.value(0), false)?;
+        let name_filter = opt_string(cfg.value(1))?;
         Ok(Box::new(move |ans| {
             Box::pin(async move {
                 let rows = ops::revoke::issued(
@@ -856,14 +856,14 @@ impl RemoteOp for RevokeOp {
     const NAME: &'static str = "netidx_admin_revoke";
     const NCFG: usize = 3;
 
-    fn op(cfg: &[Option<Value>], conn: ConnInfo) -> Result<BoxOp> {
-        let glyph = match opt_string(cfg[0].as_ref())? {
+    fn op(cfg: &CachedVals, conn: ConnInfo) -> Result<BoxOp> {
+        let glyph = match opt_string(cfg.value(0))? {
             Some(g) => Some(Fingerprint::parse_text(&g)?),
             None => None,
         };
-        let reason = opt_string(cfg[1].as_ref())?;
+        let reason = opt_string(cfg.value(1))?;
         let selector =
-            ops::revoke::parse_selector(&req_string(cfg[2].as_ref(), "the selector")?);
+            ops::revoke::parse_selector(&req_string(cfg.value(2), "the selector")?);
         Ok(Box::new(move |ans| {
             Box::pin(async move {
                 let out = ops::revoke::revoke(
@@ -890,7 +890,7 @@ impl RemoteOp for ListPendingDelegationsOp {
     const NAME: &'static str = "netidx_admin_list_pending_delegations";
     const NCFG: usize = 0;
 
-    fn op(_cfg: &[Option<Value>], conn: ConnInfo) -> Result<BoxOp> {
+    fn op(_cfg: &CachedVals, conn: ConnInfo) -> Result<BoxOp> {
         Ok(Box::new(move |ans| {
             Box::pin(async move {
                 let rows = ops::delegation::list_pending_delegations(
@@ -914,8 +914,8 @@ impl RemoteOp for ApproveDelegationOp {
     const NAME: &'static str = "netidx_admin_approve_delegation";
     const NCFG: usize = 1;
 
-    fn op(cfg: &[Option<Value>], conn: ConnInfo) -> Result<BoxOp> {
-        let code = req_string(cfg[0].as_ref(), "the request code")?;
+    fn op(cfg: &CachedVals, conn: ConnInfo) -> Result<BoxOp> {
+        let code = req_string(cfg.value(0), "the request code")?;
         Ok(Box::new(move |ans| {
             Box::pin(async move {
                 let out = ops::delegation::approve_delegation(
@@ -940,9 +940,9 @@ impl RemoteOp for DenyDelegationOp {
     const NAME: &'static str = "netidx_admin_deny_delegation";
     const NCFG: usize = 2;
 
-    fn op(cfg: &[Option<Value>], conn: ConnInfo) -> Result<BoxOp> {
-        let reason = opt_string(cfg[0].as_ref())?;
-        let code = req_string(cfg[1].as_ref(), "the request code")?;
+    fn op(cfg: &CachedVals, conn: ConnInfo) -> Result<BoxOp> {
+        let reason = opt_string(cfg.value(0))?;
+        let code = req_string(cfg.value(1), "the request code")?;
         Ok(Box::new(move |ans| {
             Box::pin(async move {
                 let out = ops::delegation::deny_delegation(
@@ -968,7 +968,7 @@ impl RemoteOp for ListServersOp {
     const NAME: &'static str = "netidx_admin_list_servers";
     const NCFG: usize = 0;
 
-    fn op(_cfg: &[Option<Value>], conn: ConnInfo) -> Result<BoxOp> {
+    fn op(_cfg: &CachedVals, conn: ConnInfo) -> Result<BoxOp> {
         Ok(Box::new(move |ans| {
             Box::pin(async move {
                 let rows =
@@ -986,8 +986,8 @@ impl RemoteOp for RemoveServerOp {
     const NAME: &'static str = "netidx_admin_remove_server";
     const NCFG: usize = 1;
 
-    fn op(cfg: &[Option<Value>], conn: ConnInfo) -> Result<BoxOp> {
-        let id = server_id(cfg[0].as_ref())?;
+    fn op(cfg: &CachedVals, conn: ConnInfo) -> Result<BoxOp> {
+        let id = server_id(cfg.value(0))?;
         Ok(Box::new(move |ans| {
             Box::pin(async move {
                 let out = ops::servers::remove_server(
@@ -1012,7 +1012,7 @@ impl RemoteOp for ListServiceServersOp {
     const NAME: &'static str = "netidx_admin_list_service_servers";
     const NCFG: usize = 0;
 
-    fn op(_cfg: &[Option<Value>], conn: ConnInfo) -> Result<BoxOp> {
+    fn op(_cfg: &CachedVals, conn: ConnInfo) -> Result<BoxOp> {
         Ok(Box::new(move |ans| {
             Box::pin(async move {
                 let rows =
@@ -1030,10 +1030,10 @@ impl RemoteOp for ServiceControlOp {
     const NAME: &'static str = "netidx_admin_service_control";
     const NCFG: usize = 3;
 
-    fn op(cfg: &[Option<Value>], conn: ConnInfo) -> Result<BoxOp> {
-        let units = string_list(cfg[0].as_ref())?;
-        let op = ServiceOpV::from_value(cfg[1].clone().unwrap_or(Value::Null))?;
-        let server = server_id(cfg[2].as_ref())?;
+    fn op(cfg: &CachedVals, conn: ConnInfo) -> Result<BoxOp> {
+        let units = string_list(cfg.value(0))?;
+        let op = ServiceOpV::from_value(cfg.value(1).cloned().unwrap_or(Value::Null))?;
+        let server = server_id(cfg.value(2))?;
         Ok(Box::new(move |ans| {
             Box::pin(async move {
                 let units = ops::service::control_remote(
@@ -1060,9 +1060,10 @@ impl RemoteOp for SetReadGateOp {
     const NAME: &'static str = "netidx_admin_set_read_gate";
     const NCFG: usize = 2;
 
-    fn op(cfg: &[Option<Value>], conn: ConnInfo) -> Result<BoxOp> {
-        let server = server_id(cfg[0].as_ref())?;
-        let gate = GateRequestV::from_value(cfg[1].clone().unwrap_or(Value::Null))?;
+    fn op(cfg: &CachedVals, conn: ConnInfo) -> Result<BoxOp> {
+        let server = server_id(cfg.value(0))?;
+        let gate =
+            GateRequestV::from_value(cfg.value(1).cloned().unwrap_or(Value::Null))?;
         let gate = ReadGate::try_from(gate)?;
         Ok(Box::new(move |ans| {
             Box::pin(async move {
@@ -1089,7 +1090,7 @@ impl RemoteOp for ReconcileCaOp {
     const NAME: &'static str = "netidx_admin_reconcile_ca";
     const NCFG: usize = 0;
 
-    fn op(_cfg: &[Option<Value>], conn: ConnInfo) -> Result<BoxOp> {
+    fn op(_cfg: &CachedVals, conn: ConnInfo) -> Result<BoxOp> {
         Ok(Box::new(move |ans| {
             Box::pin(async move {
                 let (op_id, peers) = ops::servers::reconcile_ca(
@@ -1180,10 +1181,10 @@ impl<R: Rt, E: UserEvent> Apply<R, E> for ChangePassword {
         let Some(args) = self.trigger.tick(ctx, from) else {
             return self.out.ride();
         };
-        let Some(target) = target_arg(args[1].as_ref()) else {
+        let Some(target) = target_arg(args.value(1)) else {
             return self.out.ride();
         };
-        let new_password = match opt_string(args[0].as_ref()) {
+        let new_password = match opt_string(args.value(0)) {
             Ok(p) => p.map(Secret),
             Err(e) => return self.out.set(TagValue::fired(errf!("Admin", "{e:#}"))),
         };
@@ -1215,7 +1216,7 @@ macro_rules! target_op {
             const NAME: &str = $name;
 
             fn prepare_args(&mut self, cached: &CachedVals) -> Option<Self::Args> {
-                let t = get_target(cached, cached.0.len() - 1)?;
+                let t = get_target(cached, cached.len() - 1)?;
                 let extra = ($prepare)(cached)?;
                 Some((t, extra))
             }
@@ -1323,7 +1324,7 @@ target_op!(
     "netidx_admin_id_map_add_user",
     (Vec<String>, String, String),
     |c: &CachedVals| {
-        let groups = string_list(c.0.first()?.as_ref()).ok()?;
+        let groups = string_list(c.value(0)).ok()?;
         Some((groups, c.get::<String>(1)?, c.get::<String>(2)?))
     },
     |t: TargetValue, (groups, san, primary): (Vec<String>, String, String)| async move {
@@ -1438,12 +1439,12 @@ impl EvalCachedAsync for DiscoverEv {
     const NAME: &str = "netidx_admin_discover";
 
     fn prepare_args(&mut self, cached: &CachedVals) -> Option<Self::Args> {
-        let timeout = match cached.0.first()?.as_ref()? {
+        let timeout = match cached.value(0)? {
             Value::Null => Duration::from_secs(2),
             Value::Duration(d) => **d,
             _ => return None,
         };
-        cached.0.get(1)?.as_ref()?;
+        cached.value(1)?;
         Some(timeout)
     }
 
@@ -1494,9 +1495,8 @@ impl EvalCachedAsync for DiscoverDomainsEv {
     const NAME: &str = "netidx_admin_discover_domains";
 
     fn prepare_args(&mut self, cached: &CachedVals) -> Option<Self::Args> {
-        let timeout =
-            opt_timeout(cached.0.first()?.as_ref(), discovery::DISCOVERY_TIMEOUT)?;
-        cached.0.get(1)?.as_ref()?;
+        let timeout = opt_timeout(cached.value(0), discovery::DISCOVERY_TIMEOUT)?;
+        cached.value(1)?;
         Some(timeout)
     }
 
@@ -1538,7 +1538,7 @@ impl EvalCachedAsync for IdentityAtEv {
     const NAME: &str = "netidx_admin_identity_at";
 
     fn prepare_args(&mut self, cached: &CachedVals) -> Option<Self::Args> {
-        let timeout = opt_timeout(cached.0.first()?.as_ref(), IDENTITY_TIMEOUT)?;
+        let timeout = opt_timeout(cached.value(0), IDENTITY_TIMEOUT)?;
         let addr = cached.get::<String>(1)?.parse().ok()?;
         Some((timeout, addr))
     }
@@ -1577,7 +1577,7 @@ impl EvalCachedAsync for LocalDomainEv {
     const NAME: &str = "netidx_admin_local_domain";
 
     fn prepare_args(&mut self, cached: &CachedVals) -> Option<Self::Args> {
-        cached.0.first()?.as_ref()?;
+        cached.value(0)?;
         Some(())
     }
 

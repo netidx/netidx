@@ -424,7 +424,7 @@ static CEREMONY_WRAPPER: LazyLock<AbstractWrapper<CeremonyValue>> = LazyLock::ne
 });
 
 fn get_ceremony(cached: &CachedVals, idx: usize) -> Option<CeremonyValue> {
-    match cached.0.get(idx)?.as_ref()? {
+    match cached.value(idx)? {
         Value::Abstract(a) => a.downcast_ref::<CeremonyValue>().cloned(),
         _ => None,
     }
@@ -733,13 +733,13 @@ impl Trigger {
         &mut self,
         ctx: &mut ExecCtx<'_, R, E>,
         from: &mut [Node<R, E>],
-    ) -> Option<&[Option<Value>]> {
+    ) -> Option<&CachedVals> {
         self.args.update_full(ctx, from);
         let last = from.len() - 1;
-        self.pending |= self.args.1[last].is_fired();
+        self.pending |= self.args.tag(last).is_some_and(|t| t.is_fired());
         if self.pending && !self.args.any_bottom() {
             self.pending = false;
-            Some(&self.args.0)
+            Some(&self.args)
         } else {
             None
         }
@@ -876,7 +876,7 @@ impl<R: Rt, E: UserEvent> Apply<R, E> for Events {
 // ── answer ───────────────────────────────────────────────────────
 
 fn get_question_id(cached: &CachedVals, idx: usize) -> Option<QuestionIdValue> {
-    match cached.0.get(idx)?.as_ref()? {
+    match cached.value(idx)? {
         Value::Abstract(a) => a.downcast_ref::<QuestionIdValue>().cloned(),
         _ => None,
     }
@@ -896,7 +896,7 @@ impl<R: Rt, E: UserEvent> EvalCached<R, E> for AnswerEv {
         cached: &CachedVals,
     ) -> Option<Value> {
         let qid = get_question_id(cached, 0)?;
-        let a = cached.0.get(1)?.as_ref()?;
+        let a = cached.value(1)?;
         if std::env::var_os("GXDBG_ANSWER").is_some() {
             eprintln!("ANSWER seq={} a={a}", qid.seq);
         }

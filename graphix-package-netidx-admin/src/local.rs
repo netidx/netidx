@@ -250,7 +250,7 @@ impl EvalCachedAsync for InstallsEv {
     const NAME: &str = "netidx_admin_installs";
 
     fn prepare_args(&mut self, cached: &CachedVals) -> Option<Self::Args> {
-        cached.0.first()?.as_ref()?;
+        cached.value(0)?;
         Some(())
     }
 
@@ -321,7 +321,7 @@ impl EvalCachedAsync for SyncCheckEv {
 
     fn prepare_args(&mut self, cached: &CachedVals) -> Option<Self::Args> {
         let root = PathBuf::from(cached.get::<String>(0)?);
-        Some((root, role_arg(cached.0.get(1)?.as_ref())?))
+        Some((root, role_arg(cached.value(1))?))
     }
 
     fn eval((root, role): Self::Args) -> impl Future<Output = Value> + Send {
@@ -364,7 +364,7 @@ impl EvalCachedAsync for CaCredentialsEv {
     const NAME: &str = "netidx_admin_ca_credentials";
 
     fn prepare_args(&mut self, cached: &CachedVals) -> Option<Self::Args> {
-        let cfg = opt_path(cached.0.first()?.as_ref()).ok()?;
+        let cfg = opt_path(cached.value(0)).ok()?;
         Some((cfg, PathBuf::from(cached.get::<String>(1)?)))
     }
 
@@ -410,7 +410,7 @@ impl EvalCachedAsync for UnitsDirEv {
     const NAME: &str = "netidx_admin_units_dir";
 
     fn prepare_args(&mut self, cached: &CachedVals) -> Option<Self::Args> {
-        cached.0.first()?.as_ref()?;
+        cached.value(0)?;
         Some(())
     }
 
@@ -437,7 +437,7 @@ impl EvalCachedAsync for LocalResolverBaseEv {
     const NAME: &str = "netidx_admin_local_resolver_base";
 
     fn prepare_args(&mut self, cached: &CachedVals) -> Option<Self::Args> {
-        cached.0.first()?.as_ref()?;
+        cached.value(0)?;
         Some(())
     }
 
@@ -651,7 +651,7 @@ impl EvalCachedAsync for ListUnitsEv {
 
     fn prepare_args(&mut self, cached: &CachedVals) -> Option<Self::Args> {
         let dir = PathBuf::from(cached.get::<String>(0)?);
-        cached.0.get(1)?.as_ref()?;
+        cached.value(1)?;
         Some(dir)
     }
 
@@ -680,8 +680,8 @@ impl EvalCachedAsync for ControlUnitsEv {
 
     fn prepare_args(&mut self, cached: &CachedVals) -> Option<Self::Args> {
         let dir = PathBuf::from(cached.get::<String>(0)?);
-        let unit = opt_string(cached.0.get(1)?.as_ref()).ok()?;
-        let op = match LocalOpV::from_value(cached.0.get(2)?.clone()?).ok()? {
+        let unit = opt_string(cached.value(1)).ok()?;
+        let op = match LocalOpV::from_value(cached.value(2)?.clone()).ok()? {
             LocalOpV::Start => ControlOp::Start,
             LocalOpV::Stop => ControlOp::Stop,
             LocalOpV::Restart => ControlOp::Restart,
@@ -721,7 +721,7 @@ impl EvalCachedAsync for InstallUnitEv {
     fn prepare_args(&mut self, cached: &CachedVals) -> Option<Self::Args> {
         let dir = PathBuf::from(cached.get::<String>(0)?);
         let name = cached.get::<String>(1)?;
-        let def = UnitDefV::from_value(cached.0.get(2)?.clone()?).ok()?;
+        let def = UnitDefV::from_value(cached.value(2)?.clone()).ok()?;
         Some((dir, name, Unit::try_from(def)))
     }
 
@@ -778,7 +778,7 @@ impl EvalCachedAsync for UnitTemplateEv {
     const NAME: &str = "netidx_admin_unit_template";
 
     fn prepare_args(&mut self, cached: &CachedVals) -> Option<Self::Args> {
-        cached.0.first()?.as_ref()?;
+        cached.value(0)?;
         Some(())
     }
 
@@ -797,7 +797,7 @@ pub(crate) trait LocalOp: Debug + Send + Sync + 'static {
     const NAME: &'static str;
     /// Build the ceremony's op from the argument values, every one
     /// present. An error becomes the mint site's error value.
-    fn op(args: &[Option<Value>]) -> Result<BoxOp>;
+    fn op(args: &CachedVals) -> Result<BoxOp>;
 }
 
 #[derive(Debug)]
@@ -909,7 +909,7 @@ pub(crate) struct RenewOp;
 impl LocalOp for RenewOp {
     const NAME: &'static str = "netidx_admin_renew";
 
-    fn op(_args: &[Option<Value>]) -> Result<BoxOp> {
+    fn op(_args: &CachedVals) -> Result<BoxOp> {
         Ok(Box::new(|_ans| {
             Box::pin(async move {
                 let report = renewd::run_once(renewd::RenewalConfig::default()).await;
@@ -948,9 +948,9 @@ pub(crate) struct UpdateOp;
 impl LocalOp for UpdateOp {
     const NAME: &'static str = "netidx_admin_update";
 
-    fn op(args: &[Option<Value>]) -> Result<BoxOp> {
-        let root = path_arg(args[0].as_ref(), "config_root")?;
-        let role = role_arg(args[1].as_ref()).context("role")?;
+    fn op(args: &CachedVals) -> Result<BoxOp> {
+        let root = path_arg(args.value(0), "config_root")?;
+        let role = role_arg(args.value(1)).context("role")?;
         Ok(Box::new(move |_ans| {
             Box::pin(async move {
                 let plan = sync::plan_for(role, Some(&root)).await?;
@@ -1000,10 +1000,10 @@ pub(crate) struct BackupOp;
 impl LocalOp for BackupOp {
     const NAME: &'static str = "netidx_admin_backup";
 
-    fn op(args: &[Option<Value>]) -> Result<BoxOp> {
-        let root = path_arg(args[0].as_ref(), "config_root")?;
-        let target = opt_path(args[1].as_ref())?;
-        let scope = ScopeV::from_value(args[2].clone().context("scope")?)?;
+    fn op(args: &CachedVals) -> Result<BoxOp> {
+        let root = path_arg(args.value(0), "config_root")?;
+        let target = opt_path(args.value(1))?;
+        let scope = ScopeV::from_value(args.value(2).cloned().context("scope")?)?;
         let scope = match ServiceScope::from(scope) {
             ServiceScope::User => BundleScope::User,
             ServiceScope::System => BundleScope::System,
@@ -1086,13 +1086,13 @@ impl LocalOp for AutoApproveOp {
     const NAME: &'static str = "netidx_admin_auto_approve";
 
     #[cfg(unix)]
-    fn op(args: &[Option<Value>]) -> Result<BoxOp> {
+    fn op(args: &CachedVals) -> Result<BoxOp> {
         use netidx_admin::ops::slots::{
             AutoApproveOutcome, AutorenewWiring, CaAccess, auto_approve,
         };
-        let rotate = bool_arg(args[0].as_ref(), "rotate")?;
-        let cfg = opt_path(args[1].as_ref())?;
-        let ca_dir = path_arg(args[2].as_ref(), "ca_dir")?;
+        let rotate = bool_arg(args.value(0), "rotate")?;
+        let cfg = opt_path(args.value(1))?;
+        let ca_dir = path_arg(args.value(2), "ca_dir")?;
         Ok(Box::new(move |ans| {
             Box::pin(async move {
                 let access = CaAccess::open(&ca_dir, cfg).await?;
@@ -1123,7 +1123,7 @@ impl LocalOp for AutoApproveOp {
     }
 
     #[cfg(not(unix))]
-    fn op(_args: &[Option<Value>]) -> Result<BoxOp> {
+    fn op(_args: &CachedVals) -> Result<BoxOp> {
         unix_only("auto-approve")
     }
 }
@@ -1137,12 +1137,12 @@ impl LocalOp for RecoveryRotateOp {
     const NAME: &'static str = "netidx_admin_recovery_rotate";
 
     #[cfg(unix)]
-    fn op(args: &[Option<Value>]) -> Result<BoxOp> {
+    fn op(args: &CachedVals) -> Result<BoxOp> {
         use netidx_admin::ops::slots::{
             CaAccess, RecoveryRotateOutcome, recovery_rotate,
         };
-        let cfg = opt_path(args[0].as_ref())?;
-        let ca_dir = path_arg(args[1].as_ref(), "ca_dir")?;
+        let cfg = opt_path(args.value(0))?;
+        let ca_dir = path_arg(args.value(1), "ca_dir")?;
         Ok(Box::new(move |ans| {
             Box::pin(async move {
                 let access = CaAccess::open(&ca_dir, cfg).await?;
@@ -1160,7 +1160,7 @@ impl LocalOp for RecoveryRotateOp {
     }
 
     #[cfg(not(unix))]
-    fn op(_args: &[Option<Value>]) -> Result<BoxOp> {
+    fn op(_args: &CachedVals) -> Result<BoxOp> {
         unix_only("rotating the recovery password")
     }
 }
@@ -1174,9 +1174,9 @@ impl LocalOp for ExternalCsrOp {
     const NAME: &'static str = "netidx_admin_external_csr";
 
     #[cfg(unix)]
-    fn op(args: &[Option<Value>]) -> Result<BoxOp> {
+    fn op(args: &CachedVals) -> Result<BoxOp> {
         use netidx_admin::ops::slots::{CaAccess, external_csr};
-        let ca_dir = path_arg(args[0].as_ref(), "ca_dir")?;
+        let ca_dir = path_arg(args.value(0), "ca_dir")?;
         Ok(Box::new(move |ans| {
             Box::pin(async move {
                 let access = CaAccess::open(&ca_dir, None).await?;
@@ -1188,7 +1188,7 @@ impl LocalOp for ExternalCsrOp {
     }
 
     #[cfg(not(unix))]
-    fn op(_args: &[Option<Value>]) -> Result<BoxOp> {
+    fn op(_args: &CachedVals) -> Result<BoxOp> {
         unix_only("emitting a CSR")
     }
 }
@@ -1202,14 +1202,14 @@ impl LocalOp for ExternalInstallOp {
     const NAME: &'static str = "netidx_admin_external_install";
 
     #[cfg(unix)]
-    fn op(args: &[Option<Value>]) -> Result<BoxOp> {
+    fn op(args: &CachedVals) -> Result<BoxOp> {
         use netidx_admin::{
             answer::{Answerer, Field},
             ops::slots::{CaAccess, ExternalInstallOutcome, external_install},
         };
-        let signed = opt_path(args[0].as_ref())?;
-        let root = opt_path(args[1].as_ref())?;
-        let ca_dir = path_arg(args[2].as_ref(), "ca_dir")?;
+        let signed = opt_path(args.value(0))?;
+        let root = opt_path(args.value(1))?;
+        let ca_dir = path_arg(args.value(2), "ca_dir")?;
         Ok(Box::new(move |ans| {
             Box::pin(async move {
                 let signed = match signed {
@@ -1253,7 +1253,7 @@ impl LocalOp for ExternalInstallOp {
     }
 
     #[cfg(not(unix))]
-    fn op(_args: &[Option<Value>]) -> Result<BoxOp> {
+    fn op(_args: &CachedVals) -> Result<BoxOp> {
         unix_only("installing a signed certificate")
     }
 }

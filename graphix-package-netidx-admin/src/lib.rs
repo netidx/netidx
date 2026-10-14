@@ -122,7 +122,7 @@ static TARGET_WRAPPER: LazyLock<AbstractWrapper<TargetValue>> = LazyLock::new(||
 });
 
 pub(crate) fn get_target(cached: &CachedVals, idx: usize) -> Option<TargetValue> {
-    match cached.0.get(idx)?.as_ref()? {
+    match cached.value(idx)? {
         Value::Abstract(a) => a.downcast_ref::<TargetValue>().cloned(),
         _ => None,
     }
@@ -235,12 +235,12 @@ impl EvalCachedAsync for LocalEv {
     const NAME: &str = "netidx_admin_local";
 
     fn prepare_args(&mut self, cached: &CachedVals) -> Option<Self::Args> {
-        let cfg_path = match cached.0.first()?.as_ref()? {
+        let cfg_path = match cached.value(0)? {
             Value::String(s) => Some(PathBuf::from(s.as_str())),
             Value::Null => None,
             _ => return None,
         };
-        cached.0.get(1)?.as_ref()?;
+        cached.value(1)?;
         Some(cfg_path)
     }
 
@@ -471,8 +471,18 @@ pub(crate) trait SessionKind: fmt::Debug + Send + Sync + 'static {
         ca_dir: Option<PathBuf>,
         admin: Option<String>,
         password: Option<netidx_admin_proto::Secret>,
-        extra: &[Option<Value>],
+        extra: Extra<'_>,
     ) -> Result<ceremony::BoxOp>;
+}
+
+/// A remote ceremony's own labeled args, the ones after its four common
+/// args and before `server`.
+pub(crate) struct Extra<'a>(&'a CachedVals);
+
+impl Extra<'_> {
+    fn value(&self, i: usize) -> Option<&Value> {
+        self.0.value(4 + i)
+    }
 }
 
 /// A ceremony that opens a session from scratch. The labeled args
@@ -533,18 +543,18 @@ impl<R: Rt, E: UserEvent, K: SessionKind> Apply<R, E> for SessionCeremony<K> {
             return self.out.ride();
         };
         let started = (|| -> Result<Value> {
-            let (server, extra) = args[4..].split_last().expect("a server arg");
-            let addr: SocketAddr = ops::req_string(server.as_ref(), "server")?
+            let server = args.value(args.len() - 1);
+            let addr: SocketAddr = ops::req_string(server, "server")?
                 .parse()
                 .context("bad server address")?;
             let op = K::run(
                 addr,
-                ops::opt_string(args[2].as_ref())?.map(PathBuf::from),
-                ops::opt_string(args[0].as_ref())?,
-                ops::opt_string(args[1].as_ref())?.map(netidx_admin_proto::Secret),
-                extra,
+                ops::opt_string(args.value(2))?.map(PathBuf::from),
+                ops::opt_string(args.value(0))?,
+                ops::opt_string(args.value(1))?.map(netidx_admin_proto::Secret),
+                Extra(args),
             )?;
-            let glyph = ops::opt_glyph(args[3].as_ref())?;
+            let glyph = ops::opt_glyph(args.value(3))?;
             Ok(ceremony::start_ceremony(ctx, glyph, op))
         })();
         self.out.set(TagValue::fired(match started {
@@ -569,7 +579,7 @@ impl SessionKind for ConnectKind {
         ca_dir: Option<PathBuf>,
         admin: Option<String>,
         password: Option<netidx_admin_proto::Secret>,
-        _extra: &[Option<Value>],
+        _extra: Extra<'_>,
     ) -> Result<ceremony::BoxOp> {
         Ok(Box::new(move |ans| {
             Box::pin(async move {
@@ -618,10 +628,10 @@ impl SessionKind for ChangePasswordAtKind {
         ca_dir: Option<PathBuf>,
         admin: Option<String>,
         password: Option<netidx_admin_proto::Secret>,
-        extra: &[Option<Value>],
+        extra: Extra<'_>,
     ) -> Result<ceremony::BoxOp> {
         let new_password =
-            ops::opt_string(extra[0].as_ref())?.map(netidx_admin_proto::Secret);
+            ops::opt_string(extra.value(0))?.map(netidx_admin_proto::Secret);
         Ok(Box::new(move |ans| {
             Box::pin(async move {
                 let session = aops::open_admin_password_session(

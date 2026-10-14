@@ -130,9 +130,9 @@ pub(crate) struct InstallOp;
 impl LocalOp for InstallOp {
     const NAME: &'static str = "netidx_admin_install";
 
-    fn op(args: &[Option<Value>]) -> Result<BoxOp> {
-        let role = role_arg(args[0].as_ref()).context("role")?;
-        let dry_run = bool_arg(args[1].as_ref(), "dry_run")?;
+    fn op(args: &CachedVals) -> Result<BoxOp> {
+        let role = role_arg(args.value(0)).context("role")?;
+        let dry_run = bool_arg(args.value(1), "dry_run")?;
         Ok(Box::new(move |ans| {
             Box::pin(async move {
                 let common = InstallCommon {
@@ -191,8 +191,8 @@ pub(crate) struct JoinOp;
 impl LocalOp for JoinOp {
     const NAME: &'static str = "netidx_admin_join";
 
-    fn op(args: &[Option<Value>]) -> Result<BoxOp> {
-        let dry_run = bool_arg(args[0].as_ref(), "dry_run")?;
+    fn op(args: &CachedVals) -> Result<BoxOp> {
+        let dry_run = bool_arg(args.value(0), "dry_run")?;
         Ok(Box::new(move |ans| {
             Box::pin(async move {
                 let input = WorkstationJoinInput {
@@ -228,7 +228,7 @@ impl EvalCachedAsync for ParentCandidatesEv {
 
     fn prepare_args(&mut self, cached: &CachedVals) -> Option<Self::Args> {
         let root = PathBuf::from(cached.get::<String>(0)?);
-        cached.0.get(1)?.as_ref()?;
+        cached.value(1)?;
         Some(root)
     }
 
@@ -270,14 +270,14 @@ pub(crate) struct AddParentOp;
 impl LocalOp for AddParentOp {
     const NAME: &'static str = "netidx_admin_add_parent";
 
-    fn op(args: &[Option<Value>]) -> Result<BoxOp> {
-        let root = path_arg(args[0].as_ref(), "config_root")?;
-        let parent = string_arg(args[1].as_ref(), "parent")?;
-        let resolvers = match args[2].as_ref() {
+    fn op(args: &CachedVals) -> Result<BoxOp> {
+        let root = path_arg(args.value(0), "config_root")?;
+        let parent = string_arg(args.value(1), "parent")?;
+        let resolvers = match args.value(2) {
             None | Some(Value::Null) => None,
             Some(v) => Some(Vec::<String>::from_value(v.clone()).context("resolvers")?),
         };
-        let path = string_arg(args[3].as_ref(), "path")?;
+        let path = string_arg(args.value(3), "path")?;
         Ok(Box::new(move |ans| {
             Box::pin(async move {
                 let rpath = paths::discover_resolver_config()?;
@@ -397,8 +397,8 @@ pub(crate) struct RestoreStageOp;
 impl LocalOp for RestoreStageOp {
     const NAME: &'static str = "netidx_admin_restore_stage";
 
-    fn op(args: &[Option<Value>]) -> Result<BoxOp> {
-        let bundle_dir = opt_path(args[0].as_ref())?;
+    fn op(args: &CachedVals) -> Result<BoxOp> {
+        let bundle_dir = opt_path(args.value(0))?;
         Ok(Box::new(move |ans| {
             Box::pin(async move {
                 let input = RestoreInput { bundle: bundle_dir, ..Default::default() };
@@ -433,8 +433,8 @@ pub(crate) struct RestoreFinishOp;
 impl LocalOp for RestoreFinishOp {
     const NAME: &'static str = "netidx_admin_restore_finish";
 
-    fn op(args: &[Option<Value>]) -> Result<BoxOp> {
-        let staged = match args[0].as_ref() {
+    fn op(args: &CachedVals) -> Result<BoxOp> {
+        let staged = match args.value(0) {
             Some(Value::Abstract(a)) => a.downcast_ref::<StagedValue>().cloned(),
             _ => None,
         }
@@ -510,10 +510,10 @@ pub(crate) struct UninstallOp;
 impl LocalOp for UninstallOp {
     const NAME: &'static str = "netidx_admin_uninstall";
 
-    fn op(args: &[Option<Value>]) -> Result<BoxOp> {
-        let scope = ScopeV::from_value(args[0].clone().context("scope")?)?;
-        let config_dir = path_arg(args[1].as_ref(), "config_dir")?;
-        let remove_ca = bool_arg(args[2].as_ref(), "remove_ca")?;
+    fn op(args: &CachedVals) -> Result<BoxOp> {
+        let scope = ScopeV::from_value(args.value(0).cloned().context("scope")?)?;
+        let config_dir = path_arg(args.value(1), "config_dir")?;
+        let remove_ca = bool_arg(args.value(2), "remove_ca")?;
         Ok(Box::new(move |ans| {
             Box::pin(async move {
                 let input = UninstallInput {
@@ -607,10 +607,10 @@ impl EvalCachedAsync for InstallServiceEv {
     const NAME: &str = "netidx_admin_install_service";
 
     fn prepare_args(&mut self, cached: &CachedVals) -> Option<Self::Args> {
-        let scope = ScopeV::from_value(cached.0.first()?.clone()?).ok()?;
-        let name = opt_string(cached.0.get(1)?.as_ref()).ok()?;
-        let for_user = opt_string(cached.0.get(2)?.as_ref()).ok()?;
-        cached.0.get(3)?.as_ref()?;
+        let scope = ScopeV::from_value(cached.value(0)?.clone()).ok()?;
+        let name = opt_string(cached.value(1)).ok()?;
+        let for_user = opt_string(cached.value(2)).ok()?;
+        cached.value(3)?;
         Some((scope.into(), name, for_user))
     }
 
@@ -647,7 +647,7 @@ impl EvalCachedAsync for EscalateCommandEv {
 
     fn prepare_args(&mut self, cached: &CachedVals) -> Option<Self::Args> {
         let args = cached.get::<Vec<String>>(0)?;
-        cached.0.get(1)?.as_ref()?;
+        cached.value(1)?;
         Some(args)
     }
 
