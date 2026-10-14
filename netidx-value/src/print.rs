@@ -213,11 +213,7 @@ impl Value {
             Value::DateTime(v) => write!(f, "{}", v),
             Value::Duration(v) => {
                 let (n, unit) = parser::duration_display(**v);
-                if n.fract() == 0. {
-                    write!(f, "{n}.{unit}")
-                } else {
-                    write!(f, "{n}{unit}")
-                }
+                write!(f, "{n}{unit}")
             }
             Value::String(s) => write!(f, "\"{}\"", parser::VAL_ESC.escape(s)),
             Value::Bytes(b) => write!(f, "{}", BASE64.encode(b)),
@@ -379,11 +375,7 @@ impl Value {
                 Value::Duration(v) => {
                     let pfx = if types { "duration:" } else { "" };
                     let (n, unit) = parser::duration_display(**v);
-                    if n.fract() == 0. {
-                        write!(f, "{pfx}{n}.{unit}")
-                    } else {
-                        write!(f, "{pfx}{n}{unit}")
-                    }
+                    write!(f, "{pfx}{n}{unit}")
                 }
                 Value::String(s) => {
                     write!(f, r#""{}""#, esc.escape(&*s))

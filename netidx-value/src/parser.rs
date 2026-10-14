@@ -21,7 +21,7 @@ use combine::{
     parser::ParseMode,
     stream::{Stream, StreamOnce},
 };
-use compact_str::CompactString;
+use compact_str::{CompactString, format_compact};
 use escaping::Escape;
 use netidx_core::pack::Pack;
 use poolshark::local::LPooled;
@@ -362,7 +362,8 @@ where
     ))
 }
 
-fn flt<I, T: FromStr + Clone + Copy>() -> impl Parser<I, Output = T>
+/// The text of a float literal: digits with a point, an exponent or both.
+fn float_text<I>() -> impl Parser<I, Output = CompactString>
 where
     I: RangeStream<Token = char>,
     I::Error: ParseError<I::Token, I::Range, I::Position>,
@@ -385,7 +386,15 @@ where
             take_while(|c: char| c.is_digit(10)),
         ))),
     ))
-    .then(|s: CompactString| match s.parse::<T>() {
+}
+
+fn flt<I, T: FromStr + Clone + Copy>() -> impl Parser<I, Output = T>
+where
+    I: RangeStream<Token = char>,
+    I::Error: ParseError<I::Token, I::Range, I::Position>,
+    I::Range: Range,
+{
+    float_text().then(|s: CompactString| match s.parse::<T>() {
         Ok(i) => combine::value(i).right(),
         Err(_) => unexpected_any("invalid float").left(),
     })
@@ -495,7 +504,7 @@ where
             .with(from_str(quoted(must_escape, esc)))
             .map(|d| Value::DateTime(Arc::new(d))),
         constant("duration")
-            .with(flt::<_, f64>().and(choice((
+            .with(float_text().and(choice((
                 attempt(string("ms")),
                 string("ns"),
                 string("us"),
@@ -506,7 +515,7 @@ where
                 string("M"),
                 string("y"),
             ))))
-            .then(|(n, suffix)| match duration_of(n, suffix) {
+            .then(|(n, suffix): (CompactString, _)| match duration_of(&n, suffix) {
                 Some(d) => combine::value(Value::Duration(Arc::new(d))).right(),
                 None => unexpected_any("a duration that is negative or too long").left(),
             }),
@@ -515,50 +524,84 @@ where
 
 /// The seconds in a minute, hour, day, month and year — a month is
 /// 30.44 days and a year 365.25 days, humantime's conventions.
-const DURATION_UNITS: [(&str, f64); 5] =
-    [("y", 31_557_600.), ("M", 2_630_016.), ("d", 86_400.), ("h", 3_600.), ("m", 60.)];
+const DURATION_UNITS: [(&str, u64); 5] =
+    [("y", 31_557_600), ("M", 2_630_016), ("d", 86_400), ("h", 3_600), ("m", 60)];
 
-/// `n` of the duration literal unit `suffix`; `None` when that is
-/// negative, not finite or past `Duration::MAX`.
-pub fn duration_of(n: f64, suffix: &str) -> Option<Duration> {
-    let secs = match suffix {
-        "ns" => n / 1e9,
-        "us" => n / 1e6,
-        "ms" => n / 1e3,
-        "s" => n,
+const NANOS: u128 = 1_000_000_000;
+
+/// `n`, a float literal's text, of the duration literal unit `suffix`,
+/// exactly, to the nearest nanosecond; `None` when that is negative or
+/// past `Duration::MAX`.
+pub fn duration_of(n: &str, suffix: &str) -> Option<Duration> {
+    let unit: u128 = match suffix {
+        "ns" => 1,
+        "us" => 1_000,
+        "ms" => 1_000_000,
+        "s" => NANOS,
         unit => match DURATION_UNITS.iter().find(|(u, _)| *u == unit) {
-            Some((_, secs)) => n * secs,
+            Some((_, secs)) => *secs as u128 * NANOS,
             None => unreachable!("duration unit {unit}"),
         },
     };
-    Duration::try_from_secs_f64(secs).ok()
+    let (mantissa, exp) = match n.split_once('e') {
+        Some((m, e)) => (m, e.parse::<i64>().ok()?),
+        None => (n, 0),
+    };
+    let (whole, frac) = mantissa.split_once('.').unwrap_or((mantissa, ""));
+    let negative = whole.starts_with('-');
+    let digits = || whole.trim_start_matches('-').chars().chain(frac.chars());
+    if negative && digits().any(|c| c != '0') {
+        return None;
+    }
+    let mut value: u128 = 0;
+    for c in digits().skip_while(|c| *c == '0') {
+        value = value.checked_mul(10)?.checked_add(c.to_digit(10)? as u128)?;
+    }
+    let value = value.checked_mul(unit)?;
+    // value * 10^-scale nanoseconds
+    let scale = frac.len() as i64 - exp;
+    let nanos = match u32::try_from(scale.unsigned_abs()) {
+        _ if value == 0 => 0,
+        Ok(k) if scale <= 0 => value.checked_mul(10u128.checked_pow(k)?)?,
+        Ok(k) => match 10u128.checked_pow(k) {
+            Some(d) => value / d + u128::from(value % d >= d - d / 2),
+            None => 0,
+        },
+        Err(_) if scale > 0 => 0,
+        Err(_) => return None,
+    };
+    let secs = u64::try_from(nanos / NANOS).ok()?;
+    Some(Duration::new(secs, (nanos % NANOS) as u32))
 }
 
-/// How a duration prints: the count and the largest literal unit that
-/// measures it exactly — whole years down to whole minutes, else whole
-/// seconds, else whole milliseconds, microseconds or nanoseconds below a
-/// second — and fractional seconds when nothing does. Every form parses
-/// back to the same duration.
-pub fn duration_display(d: Duration) -> (f64, &'static str) {
-    let secs = d.as_secs_f64();
-    if secs >= 1. && secs.fract() == 0. {
-        for (unit, len) in DURATION_UNITS {
-            if secs >= len && secs % len == 0. {
-                return (secs / len, unit);
+/// How a duration prints: the count, written with its point, and the
+/// largest literal unit that measures it exactly — whole years down to
+/// whole minutes, else whole seconds, else whole milliseconds,
+/// microseconds or nanoseconds below a second — and exact fractional
+/// seconds when nothing does. Every form parses back to the same
+/// duration.
+pub fn duration_display(d: Duration) -> (CompactString, &'static str) {
+    let (secs, ns) = (d.as_secs(), d.subsec_nanos());
+    match (secs, ns) {
+        (0, 0) => (CompactString::const_new("0."), "s"),
+        (secs, 0) => {
+            for (unit, len) in DURATION_UNITS {
+                if secs % len == 0 {
+                    return (format_compact!("{}.", secs / len), unit);
+                }
             }
+            (format_compact!("{secs}."), "s")
         }
-        (secs, "s")
-    } else if secs > 0. && secs < 1. {
-        let ns = d.subsec_nanos() as f64;
-        if ns % 1e6 == 0. {
-            (ns / 1e6, "ms")
-        } else if ns % 1e3 == 0. {
-            (ns / 1e3, "us")
-        } else {
-            (ns, "ns")
+        (0, ns) if ns % 1_000_000 == 0 => (format_compact!("{}.", ns / 1_000_000), "ms"),
+        (0, ns) if ns % 1_000 == 0 => (format_compact!("{}.", ns / 1_000), "us"),
+        (0, ns) => (format_compact!("{ns}."), "ns"),
+        (secs, ns) => {
+            let mut n = format_compact!("{secs}.{ns:09}");
+            while n.ends_with('0') {
+                n.pop();
+            }
+            (n, "s")
         }
-    } else {
-        (secs, "s")
     }
 }
 

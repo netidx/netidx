@@ -673,6 +673,30 @@ fn duration_units_round_trip() {
         let back: Value = typed.parse().unwrap();
         assert_eq!(back, v, "{text} round trip");
     }
+    // the count is read exactly: no float stands between the literal and
+    // the duration, at any size
+    let exact = |d: Duration| Value::Duration(Arc::new(d));
+    for (text, want, printed) in [
+        (
+            "duration:10000000.000000001s",
+            Duration::new(10_000_000, 1),
+            "10000000.000000001s",
+        ),
+        ("duration:1.5e3ms", Duration::new(1, 500_000_000), "1.5s"),
+        ("duration:2.5ns", Duration::new(0, 3), "3.ns"),
+        ("duration:0.4ns", Duration::ZERO, "0.s"),
+        (
+            "duration:18446744073709551615.999999999s",
+            Duration::MAX,
+            "18446744073709551615.999999999s",
+        ),
+    ] {
+        let v: Value = text.parse().unwrap_or_else(|e| panic!("{text}: {e}"));
+        assert_eq!(v, exact(want), "{text}");
+        assert_eq!(format!("{v}"), format!("duration:{printed}"), "{text} printed");
+        assert_eq!(format!("{v}").parse::<Value>().unwrap(), v, "{text} round trip");
+    }
+    assert!("duration:18446744073709551616.s".parse::<Value>().is_err());
     assert!("duration:3.w".parse::<Value>().is_err());
     // a count no Duration holds is refused, never a panic
     for text in ["duration:-1.s", "duration:-0.5ms", "duration:1e300.y", "duration:inf.s"]
