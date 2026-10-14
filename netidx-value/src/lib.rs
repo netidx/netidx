@@ -855,7 +855,15 @@ impl Value {
                         Ok(mut vals) => Some(Value::Map(Map::from_iter(vals.drain(..)))),
                     }
                 }
-                typ => elts.first().and_then(|v| v.clone().cast(typ)),
+                // the innermost first element, found by a loop: wire data
+                // may nest deeper than the stack
+                typ => {
+                    let mut cur = elts.first()?.clone();
+                    while let Value::Array(a) = cur {
+                        cur = a.first()?.clone();
+                    }
+                    cur.cast(typ)
+                }
             },
             Value::U8(v) => cast_number!(v, typ),
             Value::I8(v) => cast_number!(v, typ),
