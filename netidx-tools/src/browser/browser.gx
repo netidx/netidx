@@ -7,8 +7,8 @@ use tui::{
 
 let path = "/";
 let command_error = "";
-let selected_path: string = never();
-let selected_row: string = never();
+let selected_path: [string, null] = never();
+let selected_row: [string, null] = never();
 let cursor: MoveCursor = never();
 let command_mode = false;
 let command = "";
@@ -30,7 +30,7 @@ let title_bottom = select command_mode {
     true => line(#style:title_style, ":[command]"),
     false => {
         let spans = [
-            span("[path] ([selected_path])"),
+            span(select selected_path { null as _ => path, p => "[path] ([p])" }),
             span(#style:style(#fg:`Red), "  [command_error]")
         ];
         line(#style:title_style, spans)
@@ -42,7 +42,7 @@ let handle_normal_mode_key = |e: KeyCode| -> [`Stop, `Continue] select e {
     e@ `Right => { cursor <- e ~ `Right(1); `Stop },
     e@ `Down => { cursor <- e ~ `Down(1); `Stop },
     e@ `Up => { cursor <- e ~ `Up(1); `Stop },
-    e@ `Enter => { path <- e ~ selected_row; `Stop },
+    e@ `Enter => { path <- (e ~ selected_row)$; `Stop },
     e@ `Backspace => select e ~ str::dirname(path) {
         null as _ => `Stop,
         s => {
@@ -66,7 +66,7 @@ let handle_command_mode_key = |e: KeyCode| -> [`Stop, `Continue] select e {
     },
     x@ `Enter => {
         command_mode <- false;
-        run_command(command, x ~ selected_path);
+        run_command(command, (x ~ selected_path)$);
         `Stop
     },
     e@ `Backspace if command != "" => {
