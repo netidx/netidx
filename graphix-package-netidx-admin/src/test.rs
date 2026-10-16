@@ -140,20 +140,19 @@ async fn abstract_type_predicate_is_nominal() -> anyhow::Result<()> {
 #[ignore = "timing, run by hand"]
 async fn milestone_image() -> anyhow::Result<()> {
     use graphix_compiler::{CFlag, expr::Load};
-    use graphix_package_core::testing::init_with_session;
+    use graphix_package_core::testing::{TestCtx, config};
     use graphix_rt::RegistrationImage;
     let prog = arcstr::literal!("netidx_admin::tui::app::app(#server: \"127.0.0.1:1\")");
     let (tx, _rx) = tokio::sync::mpsc::channel(10);
     let (reg_tx, _reg_rx) = tokio::sync::oneshot::channel();
     let (prog_tx, prog_rx) = tokio::sync::oneshot::channel();
     let t0 = std::time::Instant::now();
-    let cold = init_with_session(
-        tx,
-        &crate::TEST_REGISTER,
-        CFlag::FusionDisabled.into(),
-        RegistrationImage::save(reg_tx),
-        Some(Load::Text(prog)),
-        Some(prog_tx),
+    let cold = TestCtx::start(
+        config(tx, &crate::TEST_REGISTER, vec![], |_| {})?
+            .flags(CFlag::FusionDisabled.into())
+            .registration(RegistrationImage::save(reg_tx))
+            .program(Load::Text(prog))
+            .program_image(prog_tx),
     )
     .await?;
     let cold_t = t0.elapsed();
@@ -166,13 +165,10 @@ async fn milestone_image() -> anyhow::Result<()> {
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
         let (tx, _rx) = tokio::sync::mpsc::channel(10);
         let t = std::time::Instant::now();
-        let warm = init_with_session(
-            tx,
-            &crate::TEST_REGISTER,
-            CFlag::FusionDisabled.into(),
-            RegistrationImage::load(image.clone()),
-            None,
-            None,
+        let warm = TestCtx::start(
+            config(tx, &crate::TEST_REGISTER, vec![], |_| {})?
+                .flags(CFlag::FusionDisabled.into())
+                .registration(RegistrationImage::load(image.clone())),
         )
         .await?;
         warm_t.push(t.elapsed());
@@ -191,20 +187,19 @@ async fn milestone_image() -> anyhow::Result<()> {
 #[ignore = "timing, run by hand"]
 async fn milestone_image_fused() -> anyhow::Result<()> {
     use graphix_compiler::expr::Load;
-    use graphix_package_core::testing::init_with_session;
+    use graphix_package_core::testing::{TestCtx, config};
     use graphix_rt::RegistrationImage;
     let prog = arcstr::literal!("netidx_admin::tui::app::app(#server: \"127.0.0.1:1\")");
     let (tx, _rx) = tokio::sync::mpsc::channel(10);
     let (reg_tx, _reg_rx) = tokio::sync::oneshot::channel();
     let (prog_tx, prog_rx) = tokio::sync::oneshot::channel();
     let t0 = std::time::Instant::now();
-    let cold = init_with_session(
-        tx,
-        &crate::TEST_REGISTER,
-        Default::default(),
-        RegistrationImage::save(reg_tx),
-        Some(Load::Text(prog)),
-        Some(prog_tx),
+    let cold = TestCtx::start(
+        config(tx, &crate::TEST_REGISTER, vec![], |_| {})?
+            .flags(Default::default())
+            .registration(RegistrationImage::save(reg_tx))
+            .program(Load::Text(prog))
+            .program_image(prog_tx),
     )
     .await?;
     let cold_t = t0.elapsed();
@@ -216,13 +211,10 @@ async fn milestone_image_fused() -> anyhow::Result<()> {
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
         let (tx, _rx) = tokio::sync::mpsc::channel(10);
         let t = std::time::Instant::now();
-        let warm = init_with_session(
-            tx,
-            &crate::TEST_REGISTER,
-            Default::default(),
-            RegistrationImage::load(image.clone()),
-            None,
-            None,
+        let warm = TestCtx::start(
+            config(tx, &crate::TEST_REGISTER, vec![], |_| {})?
+                .flags(Default::default())
+                .registration(RegistrationImage::load(image.clone())),
         )
         .await?;
         warm_t.push(t.elapsed());
@@ -283,12 +275,9 @@ async fn milestone_timing() -> anyhow::Result<()> {
     }
     // the same compile with fusion off: the JIT's share of startup
     let (tx, _rx) = tokio::sync::mpsc::channel(10);
-    let ctx = graphix_package_core::testing::init_with_flags_and_setup(
-        tx,
-        &crate::TEST_REGISTER,
-        vec![],
-        enumflags2::BitFlags::from(graphix_compiler::CFlag::FusionDisabled),
-        |_| {},
+    let ctx = graphix_package_core::testing::TestCtx::start(
+        graphix_package_core::testing::config(tx, &crate::TEST_REGISTER, vec![], |_| {})?
+            .flags(enumflags2::BitFlags::from(graphix_compiler::CFlag::FusionDisabled)),
     )
     .await?;
     let t2 = std::time::Instant::now();
@@ -324,12 +313,14 @@ async fn check_vs_build_timing() -> anyhow::Result<()> {
         let mut times = Vec::new();
         for _ in 0..5 {
             let (tx, _rx) = tokio::sync::mpsc::channel(10);
-            let ctx = graphix_package_core::testing::init_with_flags_and_setup(
-                tx,
-                &crate::TEST_REGISTER,
-                vec![],
-                flags,
-                |_| {},
+            let ctx = graphix_package_core::testing::TestCtx::start(
+                graphix_package_core::testing::config(
+                    tx,
+                    &crate::TEST_REGISTER,
+                    vec![],
+                    |_| {},
+                )?
+                .flags(flags),
             )
             .await?;
             let resolvers = vec![FilesResolver::new(dir.clone(), None)];
@@ -354,12 +345,14 @@ async fn check_vs_build_timing() -> anyhow::Result<()> {
         let mut times = Vec::new();
         for _ in 0..5 {
             let (tx, _rx) = tokio::sync::mpsc::channel(10);
-            let ctx = graphix_package_core::testing::init_with_flags_and_setup(
-                tx,
-                &crate::TEST_REGISTER,
-                vec![],
-                flags,
-                |_| {},
+            let ctx = graphix_package_core::testing::TestCtx::start(
+                graphix_package_core::testing::config(
+                    tx,
+                    &crate::TEST_REGISTER,
+                    vec![],
+                    |_| {},
+                )?
+                .flags(flags),
             )
             .await?;
             let t = std::time::Instant::now();
