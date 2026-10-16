@@ -139,7 +139,7 @@ async fn abstract_type_predicate_is_nominal() -> anyhow::Result<()> {
 #[tokio::test]
 #[ignore = "timing, run by hand"]
 async fn milestone_image() -> anyhow::Result<()> {
-    use graphix_compiler::{CFlag, expr::Source};
+    use graphix_compiler::{CFlag, expr::Load};
     use graphix_package_core::testing::init_with_session;
     use graphix_rt::RegistrationImage;
     let prog = arcstr::literal!("netidx_admin::tui::app::app(#server: \"127.0.0.1:1\")");
@@ -152,7 +152,7 @@ async fn milestone_image() -> anyhow::Result<()> {
         &crate::TEST_REGISTER,
         CFlag::FusionDisabled.into(),
         RegistrationImage::save(reg_tx),
-        Some(Source::Program(prog)),
+        Some(Load::Text(prog)),
         Some(prog_tx),
     )
     .await?;
@@ -190,7 +190,7 @@ async fn milestone_image() -> anyhow::Result<()> {
 #[tokio::test]
 #[ignore = "timing, run by hand"]
 async fn milestone_image_fused() -> anyhow::Result<()> {
-    use graphix_compiler::expr::Source;
+    use graphix_compiler::expr::Load;
     use graphix_package_core::testing::init_with_session;
     use graphix_rt::RegistrationImage;
     let prog = arcstr::literal!("netidx_admin::tui::app::app(#server: \"127.0.0.1:1\")");
@@ -203,7 +203,7 @@ async fn milestone_image_fused() -> anyhow::Result<()> {
         &crate::TEST_REGISTER,
         Default::default(),
         RegistrationImage::save(reg_tx),
-        Some(Source::Program(prog)),
+        Some(Load::Text(prog)),
         Some(prog_tx),
     )
     .await?;
@@ -308,11 +308,11 @@ async fn check_vs_build_timing() -> anyhow::Result<()> {
     use enumflags2::BitFlags;
     use graphix_compiler::{
         CFlag,
-        expr::{FilesResolver, Source},
+        expr::{FilesResolver, Load},
     };
     let prog = arcstr::literal!("netidx_admin::tui::app::app(#server: \"127.0.0.1:1\")");
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/graphix");
-    let root = Source::File(dir.join("mod.gx"));
+    let root = Load::File(dir.join("mod.gx"));
     let modes = [
         ("check", CFlag::FusionDisabled | CFlag::CheckOnly),
         ("build, no fusion", BitFlags::from(CFlag::FusionDisabled)),
@@ -363,7 +363,7 @@ async fn check_vs_build_timing() -> anyhow::Result<()> {
             )
             .await?;
             let t = std::time::Instant::now();
-            ctx.rt.check(Source::Program(prog.clone()), None).await?;
+            ctx.rt.check(Load::Text(prog.clone()), None).await?;
             times.push(t.elapsed());
         }
         times.sort();
