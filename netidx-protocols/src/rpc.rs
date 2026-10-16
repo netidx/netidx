@@ -135,12 +135,6 @@ pub mod server {
         pub reply: RpcReply,
     }
 
-    struct Arg {
-        name: ArcStr,
-        _value: Val,
-        _doc: Val,
-    }
-
     struct PendingCall {
         args: GPooled<AHashMap<ArcStr, Value>>,
         initiated: Instant,
@@ -148,9 +142,9 @@ pub mod server {
 
     struct ProcInner<M: FnMut(RpcCall) -> Option<T> + Send + 'static, T: Send + 'static> {
         id: ProcId,
-        call: Arc<Val>,
-        _doc: Val,
-        args: IntMap<Id, Arg>,
+        call: Id,
+        /// each argument's name by the id of its value
+        args: IntMap<Id, ArcStr>,
         arg_names: AHashSet<ArcStr>,
         pending: IntMap<ClId, PendingCall>,
         handler: Option<mpsc::Sender<T>>,
@@ -179,7 +173,7 @@ pub mod server {
                 select_biased! {
                     _ = stop => break,
                     mut batch = self.events.select_next_some() => for req in batch.drain(..) {
-                        if req.id == self.call.id() {
+                        if req.id == self.call {
                             let mut args = self.pending.remove(&req.client).map(|pc| pc.args)
                                 .unwrap_or_else(|| ARGS.take());
 			    match req.value {
@@ -224,7 +218,7 @@ pub mod server {
                                         initiated: Instant::now()
                                     }
                                 });
-                            if let Some(Arg {name, ..}) = self.args.get(&req.id) {
+                            if let Some(name) = self.args.get(&req.id) {
                                 pending.args.insert(name.clone(), req.value);
                             }
                             if gc && self.pending.len() > GC_THRESHOLD {
@@ -246,6 +240,9 @@ pub mod server {
     pub struct Proc {
         _stop: oneshot::Sender<()>,
         id: ProcId,
+        /// everything the procedure publishes: dropping the `Proc` frees
+        /// its paths at once
+        _published: Vec<Val>,
     }
 
     impl Proc {
@@ -343,46 +340,40 @@ pub mod server {
             let id = ProcId::new();
             let (tx_ev, rx_ev) = mpsc::channel(3);
             let (tx_stop, rx_stop) = oneshot::channel();
-            let _doc = publisher.publish_with_flags(
+            let mut published = vec![publisher.publish_with_flags(
                 flags | PublishFlags::USE_EXISTING,
                 name.append("doc"),
                 doc,
-            )?;
+            )?];
             let mut arg_names = AHashSet::default();
-            let args = args
-                .into_iter()
-                .map(|ArgSpec { name: arg, doc, default_value }| {
-                    arg_names.insert(arg.clone());
-                    let base = name.append(&*arg);
-                    let _value = publisher
-                        .publish_with_flags(
-                            flags | PublishFlags::USE_EXISTING,
-                            base.append("val"),
-                            default_value,
-                        )
-                        .map(|val| {
-                            publisher.writes(val.id(), tx_ev.clone());
-                            val
-                        })?;
-                    let _doc = publisher.publish_with_flags(
-                        flags | PublishFlags::USE_EXISTING,
-                        base.append("doc"),
-                        doc,
-                    )?;
-                    Ok((_value.id(), Arg { name: arg, _value, _doc }))
-                })
-                .collect::<Result<IntMap<Id, Arg>>>()?;
-            let call = Arc::new(publisher.publish_with_flags(
+            let mut arg_ids = IntMap::default();
+            for ArgSpec { name: arg, doc, default_value } in args {
+                arg_names.insert(arg.clone());
+                let base = name.append(&*arg);
+                let value = publisher.publish_with_flags(
+                    flags | PublishFlags::USE_EXISTING,
+                    base.append("val"),
+                    default_value,
+                )?;
+                publisher.writes(value.id(), tx_ev.clone());
+                arg_ids.insert(value.id(), arg);
+                published.push(value);
+                published.push(publisher.publish_with_flags(
+                    flags | PublishFlags::USE_EXISTING,
+                    base.append("doc"),
+                    doc,
+                )?);
+            }
+            let call = publisher.publish_with_flags(
                 flags | PublishFlags::USE_EXISTING,
                 name.clone(),
                 arg_names.clone(),
-            )?);
+            )?;
             publisher.writes(call.id(), tx_ev.clone());
             let inner = ProcInner {
                 id,
-                call,
-                _doc,
-                args,
+                call: call.id(),
+                args: arg_ids,
                 arg_names,
                 pending: IntMap::default(),
                 map,
@@ -395,7 +386,8 @@ pub mod server {
                 inner.run().await;
                 info!("rpc proc {} shutdown", name);
             });
-            Ok(Proc { id, _stop: tx_stop })
+            published.push(call);
+            Ok(Proc { id, _stop: tx_stop, _published: published })
         }
 
         /// Get the rpc procedure id
