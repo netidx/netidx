@@ -14,7 +14,7 @@ type OneTimeSecretKind = [`CaRecovery, `AdminPassword(string)];
 
 /// A running interactive admin flow. Inert until the first `events`
 /// observation; dropping every reference cancels it.
-type Ceremony<'r>;
+type Ceremony<'r: NoError>;
 
 /// The identity of one blocking question. Abstract — only an `Event`
 /// can mint one, so an answer can never name a question that was never
