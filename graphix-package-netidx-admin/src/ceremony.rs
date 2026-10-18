@@ -15,7 +15,6 @@
 
 use crate::{FingerprintV, admin_err};
 use anyhow::{Error, Result, anyhow, bail};
-use arcstr::ArcStr;
 use futures::{SinkExt, channel::mpsc};
 use graphix_compiler::{
     Apply, BindId, BuiltIn, CompileCtx, ExecCtx, Node, Rt, Scope, TagValue, UserEvent,
@@ -926,6 +925,7 @@ pub(crate) type Answer = CachedArgs<AnswerEv>;
 #[cfg(test)]
 mod test {
     use super::*;
+    use arcstr::ArcStr;
 
     fn tag1(tag: &str, payload: Value) -> Value {
         Value::Array(netidx_value::ValArray::from([
@@ -977,7 +977,10 @@ mod test {
     }
 
     fn extract_id(ev: &Value) -> QuestionIdValue {
-        let (_, q) = ev.clone().cast_to::<(ArcStr, QuestionV)>().unwrap();
+        let Some((_, [q])) = graphix_compiler::rep::variant(ev) else {
+            panic!("not a question: {ev}")
+        };
+        let q = q.clone().cast_to::<QuestionV>().unwrap();
         match q.id {
             Value::Abstract(a) => a.downcast_ref::<QuestionIdValue>().cloned().unwrap(),
             v => panic!("not a question id: {v}"),
