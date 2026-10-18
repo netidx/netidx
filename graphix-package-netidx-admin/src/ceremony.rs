@@ -72,6 +72,7 @@ static BATCHES: LazyLock<Pool<Vec<(BindId, Value)>>> =
 // ── event mirrors ────────────────────────────────────────────────
 
 #[derive(Debug, Clone, IntoValue)]
+#[value(shape = "graphix_compiler::rep::GraphixShape")]
 struct FieldInfoV {
     flag: String,
     label: String,
@@ -90,6 +91,7 @@ impl From<Field> for FieldInfoV {
 }
 
 #[derive(Debug, Clone, IntoValue)]
+#[value(shape = "graphix_compiler::rep::GraphixShape")]
 pub(crate) struct CaIdentityV {
     fingerprint: FingerprintV,
     domain: String,
@@ -111,12 +113,14 @@ impl From<&CaIdentity> for CaIdentityV {
 }
 
 #[derive(Debug, Clone, IntoValue)]
+#[value(shape = "graphix_compiler::rep::GraphixShape")]
 struct AdminDomainV {
     domain: String,
     identity: CaIdentityV,
 }
 
 #[derive(Debug, Clone, IntoValue)]
+#[value(shape = "graphix_compiler::rep::GraphixShape")]
 enum StageV {
     Discovering,
     Enrolling,
@@ -138,12 +142,14 @@ impl From<Stage> for StageV {
 }
 
 #[derive(Debug, Clone, IntoValue)]
+#[value(shape = "graphix_compiler::rep::GraphixShape")]
 enum OneTimeSecretKindV {
     CaRecovery,
     AdminPassword(String),
 }
 
 #[derive(Debug, IntoValue)]
+#[value(shape = "graphix_compiler::rep::GraphixShape")]
 enum EventV {
     Text { id: Value, field: FieldInfoV, default: Option<String>, required: bool },
     Secret { id: Value, field: FieldInfoV },
@@ -192,6 +198,7 @@ enum ParsedAnswer {
 }
 
 #[derive(Debug, FromValue)]
+#[value(shape = "graphix_compiler::rep::GraphixShape")]
 enum AdminDomainChoiceV {
     Discovered(i64),
     Manual,
@@ -200,6 +207,7 @@ enum AdminDomainChoiceV {
 
 /// The graphix `Answer` variant.
 #[derive(Debug, FromValue)]
+#[value(shape = "graphix_compiler::rep::GraphixShape")]
 enum AnswerV {
     Text(Option<String>),
     Secret(String),
@@ -963,6 +971,7 @@ mod test {
     }
 
     #[derive(FromValue)]
+    #[value(shape = "graphix_compiler::rep::GraphixShape")]
     struct QuestionV {
         id: Value,
     }

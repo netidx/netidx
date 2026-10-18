@@ -47,6 +47,7 @@ use std::{
 // ── the data model ───────────────────────────────────────────────
 
 #[derive(Debug, Clone, Copy, FromValue, IntoValue)]
+#[value(shape = "graphix_compiler::rep::GraphixShape")]
 pub(crate) enum InstallRoleV {
     Ca,
     Workstation,
@@ -77,6 +78,7 @@ impl From<InstallRoleV> for InstallRole {
 }
 
 #[derive(Debug, Clone, Copy, IntoValue)]
+#[value(shape = "graphix_compiler::rep::GraphixShape")]
 enum ServiceStateV {
     Active,
     Inactive,
@@ -84,6 +86,7 @@ enum ServiceStateV {
 }
 
 #[derive(Debug, Clone, Copy, FromValue, IntoValue)]
+#[value(shape = "graphix_compiler::rep::GraphixShape")]
 pub(crate) enum ScopeV {
     User,
     System,
@@ -108,18 +111,21 @@ impl From<ScopeV> for ServiceScope {
 }
 
 #[derive(Debug, Clone, IntoValue)]
+#[value(shape = "graphix_compiler::rep::GraphixShape")]
 struct LocalCaV {
     ca_dir: String,
     cfg: Option<String>,
 }
 
 #[derive(Debug, Clone, IntoValue)]
+#[value(shape = "graphix_compiler::rep::GraphixShape")]
 struct AdminDomainRefV {
     domain: String,
     fingerprint: String,
 }
 
 #[derive(Debug, Clone, IntoValue)]
+#[value(shape = "graphix_compiler::rep::GraphixShape")]
 struct InstallV {
     role: InstallRoleV,
     base: String,
@@ -285,6 +291,7 @@ pub(crate) type Installs = CachedArgsAsync<InstallsEv>;
 // ── the admin-domain sync check ──────────────────────────────────
 
 #[derive(Debug, Clone, IntoValue)]
+#[value(shape = "graphix_compiler::rep::GraphixShape")]
 enum ChangeV {
     Add(String),
     Del(String),
@@ -302,6 +309,7 @@ impl From<Change> for ChangeV {
 }
 
 #[derive(Debug, Clone, IntoValue)]
+#[value(shape = "graphix_compiler::rep::GraphixShape")]
 enum SyncV {
     InSync,
     OutOfSync(Vec<ChangeV>),
@@ -343,6 +351,7 @@ pub(crate) type SyncCheck = CachedArgsAsync<SyncCheckEv>;
 // ── the CA credential probe ──────────────────────────────────────
 
 #[derive(Debug, Clone, IntoValue)]
+#[value(shape = "graphix_compiler::rep::GraphixShape")]
 struct CaCredentialsV {
     auto_approve_present: bool,
     auto_approve_wired: bool,
@@ -480,12 +489,14 @@ pub(crate) type InstallableRoles = CachedArgs<InstallableRolesEv>;
 // ── this host's activation units ─────────────────────────────────
 
 #[derive(Debug, Clone, FromValue, IntoValue)]
+#[value(shape = "graphix_compiler::rep::GraphixShape")]
 enum UnitTriggerV {
     OnStart,
     OnAccess(Vec<String>),
 }
 
 #[derive(Debug, Clone, FromValue, IntoValue)]
+#[value(shape = "graphix_compiler::rep::GraphixShape")]
 enum UnitRestartV {
     No,
     Yes,
@@ -493,12 +504,14 @@ enum UnitRestartV {
 }
 
 #[derive(Debug, Clone, FromValue, IntoValue)]
+#[value(shape = "graphix_compiler::rep::GraphixShape")]
 struct EnvVarV {
     name: String,
     value: String,
 }
 
 #[derive(Debug, Clone, FromValue, IntoValue)]
+#[value(shape = "graphix_compiler::rep::GraphixShape")]
 enum UnitEnvironmentV {
     Inherit(Vec<EnvVarV>),
     Replace(Vec<EnvVarV>),
@@ -507,6 +520,7 @@ enum UnitEnvironmentV {
 /// A unit's definition as the form edits it — every field of the
 /// on-disk unit, none of them a rendered string.
 #[derive(Debug, Clone, FromValue, IntoValue)]
+#[value(shape = "graphix_compiler::rep::GraphixShape")]
 struct UnitDefV {
     exe: String,
     args: Vec<String>,
@@ -603,6 +617,7 @@ impl TryFrom<UnitDefV> for Unit {
 }
 
 #[derive(Debug, Clone, IntoValue)]
+#[value(shape = "graphix_compiler::rep::GraphixShape")]
 enum LocalUnitStateV {
     NotStarted,
     Running(Option<u32>),
@@ -624,6 +639,7 @@ impl From<UnitState> for LocalUnitStateV {
 /// One unit on this host: what is on disk and what the supervisor
 /// reports, either side absent when only the other knows it.
 #[derive(Debug, Clone, IntoValue)]
+#[value(shape = "graphix_compiler::rep::GraphixShape")]
 struct LocalUnitV {
     name: String,
     state: Option<LocalUnitStateV>,
@@ -663,6 +679,7 @@ impl EvalCachedAsync for ListUnitsEv {
 pub(crate) type ListUnits = CachedArgsAsync<ListUnitsEv>;
 
 #[derive(Debug, Clone, FromValue)]
+#[value(shape = "graphix_compiler::rep::GraphixShape")]
 enum LocalOpV {
     Start,
     Stop,
@@ -890,12 +907,14 @@ fn paths_value(ps: &[PathBuf]) -> Vec<String> {
 // ── renew ────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, IntoValue)]
+#[value(shape = "graphix_compiler::rep::GraphixShape")]
 struct RenewFailureV {
     cert: String,
     why: String,
 }
 
 #[derive(Debug, Clone, IntoValue)]
+#[value(shape = "graphix_compiler::rep::GraphixShape")]
 struct RenewReportV {
     summary: Option<String>,
     renewed: Vec<String>,
@@ -937,6 +956,7 @@ pub(crate) type Renew = LocalCeremony<RenewOp>;
 // ── update: reconcile with the admin domain and apply ────────────
 
 #[derive(Debug, Clone, IntoValue)]
+#[value(shape = "graphix_compiler::rep::GraphixShape")]
 enum UpdateOutcomeV {
     UpToDate,
     Applied { changes: Vec<ChangeV>, warnings: Vec<String>, restart_hint: String },
@@ -974,6 +994,7 @@ pub(crate) type Update = LocalCeremony<UpdateOp>;
 // ── backup ───────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, IntoValue)]
+#[value(shape = "graphix_compiler::rep::GraphixShape")]
 struct BackupOutcomeV {
     target: String,
     role: InstallRoleV,
@@ -1045,6 +1066,7 @@ pub(crate) type Backup = LocalCeremony<BackupOp>;
 
 #[cfg(unix)]
 #[derive(Debug, Clone, IntoValue)]
+#[value(shape = "graphix_compiler::rep::GraphixShape")]
 enum AutorenewWiringV {
     Updated(String),
     NoCaConfig,
@@ -1053,6 +1075,7 @@ enum AutorenewWiringV {
 
 #[cfg(unix)]
 #[derive(Debug, Clone, IntoValue)]
+#[value(shape = "graphix_compiler::rep::GraphixShape")]
 enum AutoApproveOutcomeV {
     HotSwapped { warning: Option<String> },
     Offline { rotate: bool, keytab: String, wiring: AutorenewWiringV },
@@ -1060,6 +1083,7 @@ enum AutoApproveOutcomeV {
 
 #[cfg(unix)]
 #[derive(Debug, Clone, IntoValue)]
+#[value(shape = "graphix_compiler::rep::GraphixShape")]
 enum RecoveryRotateOutcomeV {
     HotSwapped,
     Offline,
@@ -1067,6 +1091,7 @@ enum RecoveryRotateOutcomeV {
 
 #[cfg(unix)]
 #[derive(Debug, Clone, IntoValue)]
+#[value(shape = "graphix_compiler::rep::GraphixShape")]
 enum ExternalInstallOutcomeV {
     FirstInstall { cfg_path: String, service_scope: Option<ScopeV> },
     OfflineCa,

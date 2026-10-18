@@ -56,6 +56,7 @@ use std::{
 // ── install ──────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, IntoValue)]
+#[value(shape = "graphix_compiler::rep::GraphixShape")]
 enum InstallOutcomeV {
     Preview {
         service: Option<ScopeV>,
@@ -212,6 +213,7 @@ pub(crate) type Join = LocalCeremony<JoinOp>;
 // ── a parent for this resolver ───────────────────────────────────
 
 #[derive(Debug, Clone, IntoValue)]
+#[value(shape = "graphix_compiler::rep::GraphixShape")]
 struct ParentCandidateV {
     admin: String,
     resolver: String,
@@ -260,6 +262,7 @@ unit_image_state!(
 pub(crate) type ParentCandidates = CachedArgsAsync<ParentCandidatesEv>;
 
 #[derive(Debug, Clone, IntoValue)]
+#[value(shape = "graphix_compiler::rep::GraphixShape")]
 struct AddParentOutcomeV {
     proposed_path: String,
 }
@@ -316,6 +319,7 @@ pub(crate) type AddParent = LocalCeremony<AddParentOp>;
 // ── restore, in two steps around the service a recovered CA needs ─
 
 #[derive(Debug, Clone, IntoValue)]
+#[value(shape = "graphix_compiler::rep::GraphixShape")]
 struct RestoreOutcomeV {
     role: InstallRoleV,
     service: Option<ScopeV>,
@@ -380,12 +384,14 @@ static STAGED_WRAPPER: LazyLock<AbstractWrapper<StagedValue>> = LazyLock::new(||
 });
 
 #[derive(Debug, Clone, IntoValue)]
+#[value(shape = "graphix_compiler::rep::GraphixShape")]
 struct ServiceIntentV {
     name: String,
     for_user: Option<String>,
 }
 
 #[derive(Debug, IntoValue)]
+#[value(shape = "graphix_compiler::rep::GraphixShape")]
 enum RestoreStagedV {
     Finish(RestoreOutcomeV),
     ServiceThenFinish { scope: ScopeV, service: ServiceIntentV, staged: Value },
@@ -458,12 +464,14 @@ pub(crate) type RestoreFinish = LocalCeremony<RestoreFinishOp>;
 // ── uninstall ────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, IntoValue)]
+#[value(shape = "graphix_compiler::rep::GraphixShape")]
 struct KeptV {
     path: String,
     why: String,
 }
 
 #[derive(Debug, Clone, IntoValue)]
+#[value(shape = "graphix_compiler::rep::GraphixShape")]
 struct UninstallReportV {
     service_was_installed: bool,
     removed: Vec<String>,
@@ -492,12 +500,14 @@ impl From<UninstallReport> for UninstallReportV {
 }
 
 #[derive(Debug, Clone, IntoValue)]
+#[value(shape = "graphix_compiler::rep::GraphixShape")]
 enum CoversV {
     Everything,
     SystemServiceOnly,
 }
 
 #[derive(Debug, Clone, IntoValue)]
+#[value(shape = "graphix_compiler::rep::GraphixShape")]
 enum UninstallOutcomeV {
     Nothing,
     Removed(UninstallReportV),
@@ -551,6 +561,7 @@ pub(crate) type Uninstall = LocalCeremony<UninstallOp>;
 /// needs root and the terminal, so the frontend runs the named
 /// invocation privileged and then verifies the service.
 #[derive(Debug, Clone, IntoValue)]
+#[value(shape = "graphix_compiler::rep::GraphixShape")]
 enum ServiceRegistrationV {
     Registered(String),
     Privileged { what: String, argv: Vec<String>, name: String, for_user: String },
@@ -632,6 +643,7 @@ impl EvalCachedAsync for InstallServiceEv {
 pub(crate) type InstallService = CachedArgsAsync<InstallServiceEv>;
 
 #[derive(Debug, Clone, IntoValue)]
+#[value(shape = "graphix_compiler::rep::GraphixShape")]
 struct CommandV {
     program: String,
     args: Vec<String>,

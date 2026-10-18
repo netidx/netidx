@@ -65,6 +65,7 @@ fn parse_roles(names: &[String]) -> Result<BitFlags<Role>> {
 }
 
 #[derive(Debug, Clone, IntoValue)]
+#[value(shape = "graphix_compiler::rep::GraphixShape")]
 struct PeerResultV {
     server: String,
     addr: String,
@@ -82,6 +83,7 @@ impl From<PeerResult> for PeerResultV {
 }
 
 #[derive(Debug, Clone, IntoValue)]
+#[value(shape = "graphix_compiler::rep::GraphixShape")]
 struct QueueItemV {
     code: Option<FingerprintV>,
     kind: String,
@@ -115,6 +117,7 @@ impl From<ops::queue::QueueItem> for QueueItemV {
 }
 
 #[derive(Debug, Clone, IntoValue)]
+#[value(shape = "graphix_compiler::rep::GraphixShape")]
 struct ApproveOutcomeV {
     requested_name: String,
     enroll_listen: Option<String>,
@@ -134,6 +137,7 @@ impl From<ops::queue::ApproveOutcome> for ApproveOutcomeV {
 }
 
 #[derive(Debug, Clone, IntoValue)]
+#[value(shape = "graphix_compiler::rep::GraphixShape")]
 struct RenewalResultV {
     requested_name: String,
     error: Option<String>,
@@ -146,6 +150,7 @@ impl From<ops::queue::RenewalResult> for RenewalResultV {
 }
 
 #[derive(Debug, Clone, IntoValue)]
+#[value(shape = "graphix_compiler::rep::GraphixShape")]
 struct IssuedEntryV {
     serial: u64,
     name: String,
@@ -167,6 +172,7 @@ impl From<netidx_admin_proto::IssuedEntry> for IssuedEntryV {
 }
 
 #[derive(Debug, Clone, IntoValue)]
+#[value(shape = "graphix_compiler::rep::GraphixShape")]
 struct RevokeOutcomeV {
     revoked: Vec<IssuedEntryV>,
     warnings: Vec<String>,
@@ -186,6 +192,7 @@ impl From<ops::revoke::RevokeOutcome> for RevokeOutcomeV {
 }
 
 #[derive(Debug, Clone, IntoValue)]
+#[value(shape = "graphix_compiler::rep::GraphixShape")]
 struct PendingDelegationV {
     code: FingerprintV,
     proposed_path: String,
@@ -215,6 +222,7 @@ impl From<ops::delegation::PendingDelegation> for PendingDelegationV {
 }
 
 #[derive(Debug, Clone, IntoValue)]
+#[value(shape = "graphix_compiler::rep::GraphixShape")]
 struct DelegationDecisionV {
     proposed_path: String,
     peers: Vec<PeerResultV>,
@@ -230,6 +238,7 @@ impl From<ops::delegation::DelegationDecision> for DelegationDecisionV {
 }
 
 #[derive(Debug, Clone, IntoValue)]
+#[value(shape = "graphix_compiler::rep::GraphixShape")]
 struct ServerInfoV {
     id: String,
     addr: String,
@@ -244,6 +253,7 @@ struct ServerInfoV {
 
 /// A read gate as a server reports it.
 #[derive(Debug, Clone, IntoValue)]
+#[value(shape = "graphix_compiler::rep::GraphixShape")]
 enum ReadGateV {
     Open,
     Shut,
@@ -262,6 +272,7 @@ impl From<ReadGate> for ReadGateV {
 
 /// A gate to set: the reported forms, or shut for a while from now.
 #[derive(Debug, Clone, FromValue)]
+#[value(shape = "graphix_compiler::rep::GraphixShape")]
 enum GateRequestV {
     Open,
     Shut,
@@ -283,6 +294,7 @@ impl TryFrom<GateRequestV> for ReadGate {
 }
 
 #[derive(Debug, Clone, IntoValue)]
+#[value(shape = "graphix_compiler::rep::GraphixShape")]
 struct ServiceServerV {
     id: String,
     addr: String,
@@ -302,6 +314,7 @@ impl From<ops::service::ServiceServer> for ServiceServerV {
 }
 
 #[derive(Debug, Clone, IntoValue)]
+#[value(shape = "graphix_compiler::rep::GraphixShape")]
 enum UnitStateV {
     NotStarted,
     Running(Option<u32>),
@@ -310,6 +323,7 @@ enum UnitStateV {
 }
 
 #[derive(Debug, Clone, IntoValue)]
+#[value(shape = "graphix_compiler::rep::GraphixShape")]
 struct ServiceUnitDefV {
     exe: String,
     args: Vec<String>,
@@ -318,6 +332,7 @@ struct ServiceUnitDefV {
 }
 
 #[derive(Debug, Clone, IntoValue)]
+#[value(shape = "graphix_compiler::rep::GraphixShape")]
 struct ServiceUnitV {
     unit: String,
     state: UnitStateV,
@@ -348,6 +363,7 @@ impl From<ServiceUnit> for ServiceUnitV {
 }
 
 #[derive(Debug, Clone, FromValue)]
+#[value(shape = "graphix_compiler::rep::GraphixShape")]
 enum ServiceOpV {
     Start,
     Stop,
@@ -368,6 +384,7 @@ impl From<ServiceOpV> for netidx_activation::control::ControlOp {
 }
 
 #[derive(Debug, Clone, IntoValue)]
+#[value(shape = "graphix_compiler::rep::GraphixShape")]
 struct PermEntryV {
     path: String,
     entity: String,
@@ -403,6 +420,7 @@ impl From<ops::servers::ServerInfo> for ServerInfoV {
 }
 
 #[derive(Debug, Clone, IntoValue)]
+#[value(shape = "graphix_compiler::rep::GraphixShape")]
 struct RemoveServerOutcomeV {
     version: u64,
     operation_id: Option<String>,
@@ -430,12 +448,14 @@ impl From<netidx_admin::transport::RemoveServerOutcome> for RemoveServerOutcomeV
 }
 
 #[derive(Debug, Clone, IntoValue)]
+#[value(shape = "graphix_compiler::rep::GraphixShape")]
 struct ReconcileOutcomeV {
     operation: String,
     peers: Vec<PeerResultV>,
 }
 
 #[derive(Debug, Clone, IntoValue, FromValue)]
+#[value(shape = "graphix_compiler::rep::GraphixShape")]
 pub(crate) struct PolicyV {
     pub(crate) allowed_san: Vec<String>,
     pub(crate) max_validity: Duration,
@@ -480,6 +500,7 @@ impl TryFrom<PolicyV> for Policy {
 }
 
 #[derive(Debug, Clone, IntoValue)]
+#[value(shape = "graphix_compiler::rep::GraphixShape")]
 struct IdentityV {
     name: String,
     primary_group: String,
@@ -487,6 +508,7 @@ struct IdentityV {
 }
 
 #[derive(Debug, Clone, IntoValue)]
+#[value(shape = "graphix_compiler::rep::GraphixShape")]
 struct IdMapV {
     default_group: Option<String>,
     groups: Vec<String>,
@@ -512,6 +534,7 @@ impl From<netidx_id_map::file::IdMap> for IdMapV {
 }
 
 #[derive(Debug, Clone, IntoValue)]
+#[value(shape = "graphix_compiler::rep::GraphixShape")]
 struct RecordedEditV {
     version: u64,
     changed: bool,
@@ -524,6 +547,7 @@ impl From<RecordedEdit> for RecordedEditV {
 }
 
 #[derive(Debug, Clone, IntoValue)]
+#[value(shape = "graphix_compiler::rep::GraphixShape")]
 struct DiscoveredV {
     addrs: Vec<String>,
     port: u16,
@@ -1465,6 +1489,7 @@ pub(crate) type Discover = CachedArgsAsync<DiscoverEv>;
 // ── verified discovery, identity fetch, this host's domain ───────
 
 #[derive(Debug, Clone, IntoValue)]
+#[value(shape = "graphix_compiler::rep::GraphixShape")]
 struct DomainReportV {
     domain: String,
     servers: Vec<String>,
@@ -1473,6 +1498,7 @@ struct DomainReportV {
 }
 
 #[derive(Debug, Clone, IntoValue)]
+#[value(shape = "graphix_compiler::rep::GraphixShape")]
 struct DiscoveryV {
     domains: Vec<DomainReportV>,
     diagnosis: Vec<String>,
@@ -1562,6 +1588,7 @@ impl EvalCachedAsync for IdentityAtEv {
 pub(crate) type IdentityAt = CachedArgsAsync<IdentityAtEv>;
 
 #[derive(Debug, Clone, IntoValue)]
+#[value(shape = "graphix_compiler::rep::GraphixShape")]
 struct LocalDomainV {
     domain: String,
     fingerprint: String,

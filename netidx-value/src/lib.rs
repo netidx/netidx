@@ -96,6 +96,7 @@ mod op;
 pub mod parser;
 pub mod pbuf;
 mod print;
+pub mod shape;
 #[cfg(test)]
 mod test;
 mod typ;
@@ -108,6 +109,7 @@ pub use convert::derive_struct_field;
 pub use error::ValError;
 pub use pbuf::PBytes;
 pub use print::{NakedValue, printf};
+pub use shape::{NetidxShape, Shape};
 pub use typ::Typ;
 
 #[macro_export]

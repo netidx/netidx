@@ -95,6 +95,7 @@ async fn ceremonies_against_a_live_domain() -> Result<()> {
         pw = d.password,
     );
     #[derive(FromValue)]
+    #[value(shape = "graphix_compiler::rep::GraphixShape")]
     struct AdminsQueue {
         admins: Value,
         queue: Value,

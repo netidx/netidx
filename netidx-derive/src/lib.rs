@@ -687,10 +687,6 @@ fn value_variant_name(v: &syn::Variant) -> String {
     v.attrs.iter().find_map(get_value_rename).unwrap_or_else(|| v.ident.to_string())
 }
 
-fn is_pure_unit_enum(data: &syn::DataEnum) -> bool {
-    data.variants.iter().all(|v| matches!(v.fields, Fields::Unit))
-}
-
 fn check_no_tuple_field_attrs(fields: &syn::FieldsUnnamed) {
     for (i, f) in fields.unnamed.iter().enumerate() {
         if f.attrs.iter().any(|a| is_value_attr(a, "skip")) {
@@ -718,116 +714,121 @@ fn sorted_named_fields(fields: &syn::FieldsNamed) -> Vec<(String, Ident, bool)> 
     triples
 }
 
-fn into_value_named_struct(fields: &syn::FieldsNamed) -> TokenStream {
+/// The shape a type's derives write it in: `#[value(shape = "path")]`
+/// on the type, else netidx's own.
+fn value_shape(attrs: &[Attribute]) -> TokenStream {
+    for att in attrs.iter().filter(|a| a.path().is_ident("value")) {
+        let mut shape = None;
+        att.parse_nested_meta(|meta| {
+            if meta.path.is_ident("shape") {
+                let lit: syn::LitStr = meta.value()?.parse()?;
+                shape = Some(lit.parse::<syn::Path>()?);
+                Ok(())
+            } else {
+                Err(meta.error("the only value attribute on a type is shape"))
+            }
+        })
+        .unwrap_or_else(|e| panic!("{e}"));
+        if let Some(shape) = shape {
+            return quote! { #shape };
+        }
+    }
+    quote! { netidx_value::NetidxShape }
+}
+
+fn into_value_named_struct(
+    shape: &TokenStream,
+    fields: &syn::FieldsNamed,
+) -> TokenStream {
     let sorted = sorted_named_fields(fields);
     let entries = sorted.iter().map(|(name, ident, _)| {
         quote! {
             (netidx_value::arcstr::literal!(#name), Into::<netidx_value::Value>::into(v.#ident))
         }
     });
-    let n = sorted.len();
     quote! {
-        let arr: [(netidx_value::arcstr::ArcStr, netidx_value::Value); #n] = [#(#entries),*];
-        arr.into()
+        <#shape as netidx_value::Shape>::make_struct([#(#entries),*])
     }
 }
 
-fn into_value_unnamed_struct(fields: &syn::FieldsUnnamed) -> TokenStream {
+fn into_value_unnamed_struct(
+    shape: &TokenStream,
+    fields: &syn::FieldsUnnamed,
+) -> TokenStream {
     check_no_tuple_field_attrs(fields);
     let entries = fields.unnamed.iter().enumerate().map(|(i, _)| {
         let idx = Index::from(i);
         quote! { Into::<netidx_value::Value>::into(v.#idx) }
     });
-    let n = fields.unnamed.len();
+    if fields.unnamed.len() == 1 {
+        return quote! { #(#entries)* };
+    }
     quote! {
-        let arr: [netidx_value::Value; #n] = [#(#entries),*];
-        arr.into()
+        <#shape as netidx_value::Shape>::make_tuple([#(#entries),*])
     }
 }
 
-fn into_value_body(type_name: &Ident, data: &Data) -> TokenStream {
+fn into_value_body(shape: &TokenStream, type_name: &Ident, data: &Data) -> TokenStream {
+    let variant = |vname: &str, payload: TokenStream| {
+        quote! {
+            <#shape as netidx_value::Shape>::make_variant(
+                netidx_value::arcstr::literal!(#vname),
+                #payload,
+            )
+        }
+    };
     match data {
         Data::Struct(st) => match &st.fields {
-            Fields::Named(fields) => into_value_named_struct(fields),
-            Fields::Unnamed(fields) => into_value_unnamed_struct(fields),
+            Fields::Named(fields) => into_value_named_struct(shape, fields),
+            Fields::Unnamed(fields) => into_value_unnamed_struct(shape, fields),
             Fields::Unit => panic!("unit structs are not supported by IntoValue"),
         },
         Data::Enum(en) => {
-            if is_pure_unit_enum(en) {
-                let arms = en.variants.iter().map(|v| {
-                    let ident = &v.ident;
-                    let vname = value_variant_name(v);
-                    quote! { #type_name::#ident => netidx_value::Value::from(#vname) }
-                });
-                quote! { match v { #(#arms),* } }
-            } else {
-                let arms = en.variants.iter().map(|v| {
-                    let ident = &v.ident;
-                    let vname = value_variant_name(v);
-                    match &v.fields {
-                        Fields::Unit => quote! {
-                            #type_name::#ident => netidx_value::Value::String(
-                                netidx_value::arcstr::literal!(#vname)
-                            )
-                        },
-                        Fields::Named(fields) => {
-                            let sorted = sorted_named_fields(fields);
-                            let match_idents = sorted.iter().map(|(_, fident, _)| fident);
-                            let entries = sorted.iter().map(|(wire, fident, _)| {
-                                quote! {
-                                    (netidx_value::arcstr::literal!(#wire),
-                                     Into::<netidx_value::Value>::into(#fident))
-                                }
-                            });
-                            let n = sorted.len();
-                            quote! {
-                                #type_name::#ident { #(#match_idents),*, .. } => {
-                                    let __arr: [(netidx_value::arcstr::ArcStr, netidx_value::Value); #n] =
-                                        [#(#entries),*];
-                                    (
-                                        netidx_value::arcstr::literal!(#vname),
-                                        netidx_value::Value::from(__arr),
-                                    ).into()
-                                }
-                            }
-                        }
-                        Fields::Unnamed(fields) if fields.unnamed.len() == 1 => {
-                            check_no_tuple_field_attrs(fields);
-                            quote! {
-                                #type_name::#ident(f0) => (
-                                    netidx_value::arcstr::literal!(#vname),
-                                    Into::<netidx_value::Value>::into(f0),
-                                ).into()
-                            }
-                        }
-                        Fields::Unnamed(fields) => {
-                            check_no_tuple_field_attrs(fields);
-                            let bindings: Vec<_> = fields
-                                .unnamed
-                                .iter()
-                                .enumerate()
-                                .map(|(i, _)| format_ident!("f{}", i))
-                                .collect();
-                            let entries = bindings.iter().map(|b| {
-                                quote! { Into::<netidx_value::Value>::into(#b) }
-                            });
-                            let total = fields.unnamed.len() + 1; // tag + args
-                            quote! {
-                                #type_name::#ident(#(#bindings),*) => {
-                                    let __arr: [netidx_value::Value; #total] = [
-                                        netidx_value::Value::String(
-                                            netidx_value::arcstr::literal!(#vname)
-                                        ),
-                                        #(#entries),*
-                                    ];
-                                    __arr.into()
-                                }
-                            }
-                        }
+            let arms = en.variants.iter().map(|v| {
+                let ident = &v.ident;
+                let vname = value_variant_name(v);
+                match &v.fields {
+                    Fields::Unit => {
+                        let body = variant(
+                            &vname,
+                            quote! { std::iter::empty::<netidx_value::Value>() },
+                        );
+                        quote! { #type_name::#ident => #body }
                     }
-                });
-                quote! { match v { #(#arms),* } }
-            }
+                    Fields::Named(fields) => {
+                        let sorted = sorted_named_fields(fields);
+                        let match_idents = sorted.iter().map(|(_, fident, _)| fident);
+                        let entries = sorted.iter().map(|(wire, fident, _)| {
+                            quote! {
+                                (netidx_value::arcstr::literal!(#wire),
+                                 Into::<netidx_value::Value>::into(#fident))
+                            }
+                        });
+                        let body = variant(
+                            &vname,
+                            quote! {
+                                [<#shape as netidx_value::Shape>::make_struct([#(#entries),*])]
+                            },
+                        );
+                        quote! { #type_name::#ident { #(#match_idents),*, .. } => #body }
+                    }
+                    Fields::Unnamed(fields) => {
+                        check_no_tuple_field_attrs(fields);
+                        let bindings: Vec<_> = fields
+                            .unnamed
+                            .iter()
+                            .enumerate()
+                            .map(|(i, _)| format_ident!("f{}", i))
+                            .collect();
+                        let entries = bindings.iter().map(|b| {
+                            quote! { Into::<netidx_value::Value>::into(#b) }
+                        });
+                        let body = variant(&vname, quote! { [#(#entries),*] });
+                        quote! { #type_name::#ident(#(#bindings),*) => #body }
+                    }
+                }
+            });
+            quote! { match v { #(#arms),* } }
         }
         Data::Union(_) => panic!("unions are not supported by IntoValue"),
     }
@@ -835,6 +836,7 @@ fn into_value_body(type_name: &Ident, data: &Data) -> TokenStream {
 
 /// Decode the named fields of `ctor` from the struct value `src`.
 fn from_value_named_fields(
+    shape: &TokenStream,
     ctor: TokenStream,
     fields: &syn::FieldsNamed,
     src: TokenStream,
@@ -848,7 +850,7 @@ fn from_value_named_fields(
         };
         quote! {
             let #fident = match netidx_value::derive_struct_field(
-                &__fields, &mut __cursor, #wire
+                __fields, &mut __cursor, #wire
             )? {
                 Some(v) => netidx_value::FromValue::from_value(v.clone())?,
                 None => #missing,
@@ -865,166 +867,107 @@ fn from_value_named_fields(
             quote! { #fident: std::default::Default::default() }
         });
     quote! {
-        let __fields =
-            <netidx_value::ValArray as netidx_value::FromValue>::from_value(#src)?;
+        let __src: &netidx_value::Value = #src;
+        let __fields = <#shape as netidx_value::Shape>::struct_fields(__src)
+            .ok_or_else(|| anyhow::anyhow!("expected a struct, got {}", __src))?;
         let mut __cursor = 0usize;
         #(#extractions)*
         Ok(#ctor { #(#construct,)* #(#skipped,)* })
     }
 }
 
-fn from_value_unnamed_struct(name: &Ident, fields: &syn::FieldsUnnamed) -> TokenStream {
+/// Decode the positional `fields` of `ctor` from the values `src`.
+fn from_value_positional(
+    ctor: TokenStream,
+    fields: &syn::FieldsUnnamed,
+    src: TokenStream,
+    what: &str,
+) -> TokenStream {
     check_no_tuple_field_attrs(fields);
     let n = fields.unnamed.len();
-    if n == 1 {
-        let ty = &fields.unnamed[0].ty;
+    let bindings: Vec<_> = (0..n).map(|i| format_ident!("f{}", i)).collect();
+    let conversions = fields.unnamed.iter().enumerate().map(|(i, f)| {
+        let binding = &bindings[i];
+        let ty = &f.ty;
         quote! {
-            Ok(#name(<#ty as netidx_value::FromValue>::from_value(v)?))
+            let #binding = <#ty as netidx_value::FromValue>::from_value(__elems[#i].clone())?;
         }
-    } else {
-        let bindings: Vec<_> = (0..n).map(|i| format_ident!("f{}", i)).collect();
-        let field_types: Vec<_> = fields.unnamed.iter().map(|f| &f.ty).collect();
-        let construct = bindings.iter().map(|b| quote! { #b });
-        quote! {
-            let (#(#bindings),*) = v.cast_to::<(#(#field_types),*)>()?;
-            Ok(#name(#(#construct),*))
+    });
+    quote! {
+        let __elems: &[netidx_value::Value] = #src;
+        if __elems.len() != #n {
+            anyhow::bail!("expected {} values for {}, got {}", #n, #what, __elems.len());
         }
+        #(#conversions)*
+        Ok(#ctor(#(#bindings),*))
     }
 }
 
-fn from_value_body(name: &Ident, data: &Data) -> TokenStream {
+fn from_value_body(shape: &TokenStream, name: &Ident, data: &Data) -> TokenStream {
     match data {
         Data::Struct(st) => match &st.fields {
             Fields::Named(fields) => {
-                from_value_named_fields(quote! { #name }, fields, quote! { v })
+                from_value_named_fields(shape, quote! { #name }, fields, quote! { &v })
             }
-            Fields::Unnamed(fields) => from_value_unnamed_struct(name, fields),
+            Fields::Unnamed(fields) if fields.unnamed.len() == 1 => {
+                check_no_tuple_field_attrs(fields);
+                let ty = &fields.unnamed[0].ty;
+                quote! {
+                    Ok(#name(<#ty as netidx_value::FromValue>::from_value(v)?))
+                }
+            }
+            Fields::Unnamed(fields) => {
+                let what = name.to_string();
+                let body = from_value_positional(
+                    quote! { #name },
+                    fields,
+                    quote! { __elems },
+                    &what,
+                );
+                quote! {
+                    let __elems = <#shape as netidx_value::Shape>::tuple_elems(&v)
+                        .ok_or_else(|| anyhow::anyhow!("expected a tuple for {}", #what))?;
+                    #body
+                }
+            }
             Fields::Unit => panic!("unit structs are not supported by FromValue"),
         },
         Data::Enum(en) => {
-            if is_pure_unit_enum(en) {
-                let arms = en.variants.iter().map(|v| {
-                    let ident = &v.ident;
-                    let vname = value_variant_name(v);
-                    quote! { #vname => Ok(#name::#ident) }
-                });
-                let enum_name = name.to_string();
-                quote! {
-                    match &v {
-                        netidx_value::Value::String(s) => match s.as_str() {
-                            #(#arms,)*
-                            s => anyhow::bail!("unknown {} variant '{s}'", #enum_name),
-                        },
-                        _ => anyhow::bail!("expected string for {}", #enum_name),
+            let enum_name = name.to_string();
+            let arms = en.variants.iter().map(|v| {
+                let ident = &v.ident;
+                let vname = value_variant_name(v);
+                match &v.fields {
+                    Fields::Unit => quote! {
+                        (#vname, []) => Ok(#name::#ident)
+                    },
+                    Fields::Named(fields) => {
+                        let body = from_value_named_fields(
+                            shape,
+                            quote! { #name::#ident },
+                            fields,
+                            quote! { __data },
+                        );
+                        quote! { (#vname, [__data]) => { #body } }
+                    }
+                    Fields::Unnamed(fields) => {
+                        let what = format!("{enum_name}::{vname}");
+                        let body = from_value_positional(
+                            quote! { #name::#ident },
+                            fields,
+                            quote! { __payload },
+                            &what,
+                        );
+                        quote! { (#vname, __payload) if !__payload.is_empty() => { #body } }
                     }
                 }
-            } else {
-                let enum_name = name.to_string();
-                let has_unit =
-                    en.variants.iter().any(|v| matches!(v.fields, Fields::Unit));
-                let unit_arms: Vec<_> = en
-                    .variants
-                    .iter()
-                    .filter(|v| matches!(v.fields, Fields::Unit))
-                    .map(|v| {
-                        let ident = &v.ident;
-                        let vname = value_variant_name(v);
-                        quote! { #vname => Ok(#name::#ident) }
-                    })
-                    .collect();
-                let non_unit_arms: Vec<_> = en.variants.iter()
-                    .filter(|v| !matches!(v.fields, Fields::Unit))
-                    .map(|v| {
-                        let ident = &v.ident;
-                        let vname = value_variant_name(v);
-                        match &v.fields {
-                            Fields::Unit => unreachable!(),
-                            Fields::Named(fields) => {
-                                let body = from_value_named_fields(
-                                    quote! { #name::#ident },
-                                    fields,
-                                    quote! {
-                                        __arr.get(1).cloned().ok_or_else(|| anyhow::anyhow!(
-                                            "expected variant data for {}", #vname
-                                        ))?
-                                    },
-                                );
-                                quote! { #vname => { #body } }
-                            }
-                            Fields::Unnamed(fields) if fields.unnamed.len() == 1 => {
-                                check_no_tuple_field_attrs(fields);
-                                let ty = &fields.unnamed[0].ty;
-                                quote! {
-                                    #vname => {
-                                        let __data = __arr.get(1).cloned()
-                                            .ok_or_else(|| anyhow::anyhow!(
-                                                "expected variant data for {}", #vname
-                                            ))?;
-                                        Ok(#name::#ident(
-                                            <#ty as netidx_value::FromValue>::from_value(__data)?
-                                        ))
-                                    }
-                                }
-                            }
-                            Fields::Unnamed(fields) => {
-                                check_no_tuple_field_attrs(fields);
-                                let field_conversions: Vec<_> = fields.unnamed.iter()
-                                    .enumerate()
-                                    .map(|(i, f)| {
-                                        let binding = format_ident!("f{}", i);
-                                        let ty = &f.ty;
-                                        let idx = i + 1; // skip tag at index 0
-                                        quote! {
-                                            let #binding = <#ty as netidx_value::FromValue>::from_value(
-                                                __arr.get(#idx).cloned()
-                                                    .ok_or_else(|| anyhow::anyhow!(
-                                                        "missing tuple field {} for variant {}",
-                                                        #i, #vname
-                                                    ))?
-                                            )?;
-                                        }
-                                    })
-                                    .collect();
-                                let bindings: Vec<_> = (0..fields.unnamed.len())
-                                    .map(|i| format_ident!("f{}", i))
-                                    .collect();
-                                quote! {
-                                    #vname => {
-                                        #(#field_conversions)*
-                                        Ok(#name::#ident(#(#bindings),*))
-                                    }
-                                }
-                            }
-                        }
-                    })
-                    .collect();
-                let string_check = if has_unit {
-                    quote! {
-                        if let netidx_value::Value::String(ref __tag) = v {
-                            return match __tag.as_str() {
-                                #(#unit_arms,)*
-                                s => anyhow::bail!("unknown {} variant '{s}'", #enum_name),
-                            };
-                        }
-                    }
-                } else {
-                    quote! {}
-                };
-                quote! {
-                    #string_check
-                    let __arr =
-                        <netidx_value::ValArray as netidx_value::FromValue>::from_value(v)?;
-                    if __arr.is_empty() {
-                        anyhow::bail!("empty variant array for {}", #enum_name);
-                    }
-                    let __tag = match &__arr[0] {
-                        netidx_value::Value::String(s) => s.clone(),
-                        _ => anyhow::bail!("expected string tag for {}", #enum_name),
-                    };
-                    match __tag.as_str() {
-                        #(#non_unit_arms,)*
-                        s => anyhow::bail!("unknown {} variant '{s}'", #enum_name),
-                    }
+            });
+            quote! {
+                let (__tag, __payload) = <#shape as netidx_value::Shape>::variant(&v)
+                    .ok_or_else(|| anyhow::anyhow!("expected a {} variant, got {}", #enum_name, v))?;
+                match (__tag.as_str(), __payload) {
+                    #(#arms,)*
+                    (s, _) => anyhow::bail!("unknown {} variant '{s}'", #enum_name),
                 }
             }
         }
@@ -1042,7 +985,8 @@ pub fn derive_into_value(input: proc_macro::TokenStream) -> proc_macro::TokenStr
         }
     }
     let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
-    let body = into_value_body(&name, &input.data);
+    let shape = value_shape(&input.attrs);
+    let body = into_value_body(&shape, &name, &input.data);
     let expanded = quote! {
         impl #impl_generics From<#name #ty_generics> for netidx_value::Value #where_clause {
             fn from(v: #name #ty_generics) -> netidx_value::Value {
@@ -1063,7 +1007,8 @@ pub fn derive_from_value(input: proc_macro::TokenStream) -> proc_macro::TokenStr
         }
     }
     let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
-    let body = from_value_body(&name, &input.data);
+    let shape = value_shape(&input.attrs);
+    let body = from_value_body(&shape, &name, &input.data);
     let expanded = quote! {
         impl #impl_generics netidx_value::FromValue for #name #ty_generics #where_clause {
             fn from_value(v: netidx_value::Value) -> anyhow::Result<Self> {

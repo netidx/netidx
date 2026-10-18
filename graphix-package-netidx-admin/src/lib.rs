@@ -136,6 +136,7 @@ pub(crate) fn get_target(cached: &CachedVals, idx: usize) -> Option<TargetValue>
 // and payload variants `(tag, payload)` — the graphix variant forms.
 
 #[derive(Debug, Clone, IntoValue, FromValue)]
+#[value(shape = "graphix_compiler::rep::GraphixShape")]
 pub(crate) struct FingerprintV {
     pub(crate) code: String,
     pub(crate) short: String,
@@ -148,6 +149,7 @@ impl From<&Fingerprint> for FingerprintV {
 }
 
 #[derive(Debug, Clone, IntoValue)]
+#[value(shape = "graphix_compiler::rep::GraphixShape")]
 enum AgreementV {
     Current { version: u64 },
     Behind { reported: Option<u64>, want: u64 },
@@ -168,6 +170,7 @@ impl From<aops::drift::Agreement> for AgreementV {
 }
 
 #[derive(Debug, Clone, IntoValue)]
+#[value(shape = "graphix_compiler::rep::GraphixShape")]
 struct ServerDriftV {
     server: String,
     addr: String,
@@ -191,12 +194,14 @@ impl From<aops::drift::ServerDrift> for ServerDriftV {
 }
 
 #[derive(Debug, Clone, IntoValue)]
+#[value(shape = "graphix_compiler::rep::GraphixShape")]
 enum SlotKindV {
     Signing,
     Role,
 }
 
 #[derive(Debug, Clone, IntoValue)]
+#[value(shape = "graphix_compiler::rep::GraphixShape")]
 struct AdminInfoV {
     slot_id: String,
     admin: String,
@@ -331,6 +336,7 @@ type ListAdmins = CachedArgsAsync<ListAdminsEv>;
 // ── logout (async) ───────────────────────────────────────────────
 
 #[derive(Debug, Clone, IntoValue)]
+#[value(shape = "graphix_compiler::rep::GraphixShape")]
 enum LogoutOutcomeV {
     Revoked,
     NotRevoked(String),
@@ -394,6 +400,7 @@ graphix_package_core::fast_builtin!(
 // ── identicon (sync, pure) ───────────────────────────────────────
 
 #[derive(Debug, Clone, IntoValue)]
+#[value(shape = "graphix_compiler::rep::GraphixShape")]
 struct RgbV {
     r: u8,
     g: u8,
@@ -401,6 +408,7 @@ struct RgbV {
 }
 
 #[derive(Debug, Clone, IntoValue)]
+#[value(shape = "graphix_compiler::rep::GraphixShape")]
 struct IdenticonV {
     cells: Vec<Vec<bool>>,
     color: RgbV,
@@ -432,6 +440,7 @@ graphix_package_core::fast_builtin!(
 
 #[cfg_attr(not(unix), allow(dead_code))]
 #[derive(Debug, Clone, IntoValue)]
+#[value(shape = "graphix_compiler::rep::GraphixShape")]
 enum TargetInfoV {
     Local { cfg_path: String },
     Remote { server: String, admin: String, identity: ceremony::CaIdentityV },

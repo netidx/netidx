@@ -28,15 +28,18 @@ where
 // --- Type definitions ---
 
 #[derive(Debug, Clone, PartialEq, IntoValue, FromValue)]
+#[value(shape = "graphix_compiler::rep::GraphixShape")]
 struct NamedStruct {
     y: String,
     x: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, IntoValue, FromValue)]
+#[value(shape = "graphix_compiler::rep::GraphixShape")]
 struct TupleStruct(f64, f64);
 
 #[derive(Debug, Clone, PartialEq, IntoValue, FromValue)]
+#[value(shape = "graphix_compiler::rep::GraphixShape")]
 enum UnitEnum {
     Red,
     Green,
@@ -44,6 +47,7 @@ enum UnitEnum {
 }
 
 #[derive(Debug, Clone, PartialEq, IntoValue, FromValue)]
+#[value(shape = "graphix_compiler::rep::GraphixShape")]
 enum MixedEnum {
     Circle { radius: f64 },
     Point(f64, f64),
@@ -52,6 +56,7 @@ enum MixedEnum {
 }
 
 #[derive(Debug, Clone, PartialEq, IntoValue, FromValue)]
+#[value(shape = "graphix_compiler::rep::GraphixShape")]
 struct SmallInts {
     a: u8,
     b: i8,
@@ -60,12 +65,14 @@ struct SmallInts {
 }
 
 #[derive(Debug, Clone, PartialEq, IntoValue, FromValue)]
+#[value(shape = "graphix_compiler::rep::GraphixShape")]
 enum NullPayload {
     Close(()),
     Open(i64),
 }
 
 #[derive(Debug, Clone, PartialEq, IntoValue, FromValue)]
+#[value(shape = "graphix_compiler::rep::GraphixShape")]
 struct WithAttrs {
     a: i64,
     #[value(rename = "bravo")]
@@ -75,6 +82,7 @@ struct WithAttrs {
 }
 
 #[derive(Debug, Clone, PartialEq, IntoValue, FromValue)]
+#[value(shape = "graphix_compiler::rep::GraphixShape")]
 enum RenamedVariant {
     #[value(rename = "circle")]
     Circle { radius: f64 },
@@ -83,17 +91,20 @@ enum RenamedVariant {
 }
 
 #[derive(Debug, Clone, PartialEq, IntoValue, FromValue)]
+#[value(shape = "graphix_compiler::rep::GraphixShape")]
 struct Inner {
     x: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, IntoValue, FromValue)]
+#[value(shape = "graphix_compiler::rep::GraphixShape")]
 struct Outer {
     inner: Inner,
     label: String,
 }
 
 #[derive(Debug, Clone, PartialEq, IntoValue, FromValue)]
+#[value(shape = "graphix_compiler::rep::GraphixShape")]
 struct WithDefault {
     a: i64,
     #[value(default)]
@@ -102,6 +113,7 @@ struct WithDefault {
 }
 
 #[derive(Debug, Clone, PartialEq, IntoValue, FromValue)]
+#[value(shape = "graphix_compiler::rep::GraphixShape")]
 enum EnumWithSkip {
     Named {
         x: i64,
@@ -112,14 +124,17 @@ enum EnumWithSkip {
 }
 
 #[derive(Debug, Clone, PartialEq, IntoValue, FromValue)]
+#[value(shape = "graphix_compiler::rep::GraphixShape")]
 struct Wrapper(i64);
 
 #[derive(Debug, Clone, PartialEq, IntoValue, FromValue)]
+#[value(shape = "graphix_compiler::rep::GraphixShape")]
 struct Generic<T> {
     x: T,
 }
 
 #[derive(Debug, Clone, PartialEq, IntoValue, FromValue)]
+#[value(shape = "graphix_compiler::rep::GraphixShape")]
 struct Empty {}
 
 // --- Tests ---
