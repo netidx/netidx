@@ -57,7 +57,7 @@ let admin_text = |a: AdminError| -> string select a {
   `Unsupported(m) => "unsupported on this platform: [m]"
 };
 
-let conduct = |q: &mut Question, c: Ceremony<'r>| -> Result<'r, AdminError> {
+let conduct = |q: &mut Question, c: Result<Ceremony<'r>, AdminError>| -> Result<'r, AdminError> {
   *q <- questions(c);
   let r = result(c);
   // the ceremony's end is a terminal progress note, so the pump drops

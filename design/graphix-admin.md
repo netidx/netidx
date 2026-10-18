@@ -179,13 +179,17 @@ delivering each mDNS-browsed admin domain as it appears (the
 ### Layer 3: ceremonies (the `Answerer` bridge)
 
 The design centerpiece. Each interactive flow is a builtin returning
-an opaque `Ceremony<'r>` (`'r` = the flow's typed result):
+an opaque `Ceremony<'r>` (`'r` = the flow's typed result), or the
+`AdminError` that kept it from starting (a remote op on a local target,
+a bad address): the mint site refuses with a value, never a ceremony.
+`ceremony::questions` and `ceremony::result` take either, so a flow that
+did not start asks nothing and its result is that error:
 
 ```graphix
-val install: fn(#role: Role, #dry_run: bool) -> Ceremony<InstallReport>;
-val join: fn(#dry_run: bool) -> Ceremony<JoinReport>;
-val connect: fn(#server: string) -> Ceremony<Session>;   // identity confirm + password
-val renew: fn() -> Ceremony<RenewReport>;
+val install: fn(#role: Role, #dry_run: bool) -> Result<Ceremony<InstallReport>, AdminError>;
+val join: fn(#dry_run: bool) -> Result<Ceremony<JoinReport>, AdminError>;
+val connect: fn(#server: string) -> Result<Ceremony<Session>, AdminError>;   // identity confirm + password
+val renew: fn() -> Result<Ceremony<RenewReport>, AdminError>;
 // … add_parent, backup, restore, uninstall, change_password
 ```
 

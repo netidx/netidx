@@ -68,14 +68,14 @@ type RemoveServerOutcome = {
 type ReconcileOutcome = { operation: string, peers: Array<PeerResult> };
 
 /// Every registered admin server.
-val list: fn(t: Target) -> Ceremony<Array<ServerInfo>>;
+val list: fn(t: Target) -> Result<Ceremony<Array<ServerInfo>>, AdminError>;
 
 /// Remove a server from the admin domain by its id (revokes its certs
 /// and pushes the removal domain-wide).
-val remove: fn(id: string, t: Target) -> Ceremony<RemoveServerOutcome>;
+val remove: fn(id: string, t: Target) -> Result<Ceremony<RemoveServerOutcome>, AdminError>;
 
 /// Push the CA's state to every registered server.
-val reconcile_ca: fn(t: Target) -> Ceremony<ReconcileOutcome>;
+val reconcile_ca: fn(t: Target) -> Result<Ceremony<ReconcileOutcome>, AdminError>;
 
 /// Open or shut one resolver member's read gate. `ShutFor` shuts it
 /// now and opens it that long from now. The ceremony warns (a `Warn`
@@ -84,7 +84,7 @@ val set_read_gate: fn(
   #server: string,
   gate: [ReadGate, `ShutFor(duration)],
   t: Target
-) -> Ceremony<null>;
+) -> Result<Ceremony<null>, AdminError>;
 
 /// A pending delegation request from a child resolver hierarchy.
 type PendingDelegation = {
@@ -103,17 +103,17 @@ type PendingDelegation = {
 type DelegationDecision = { proposed_path: string, peers: Array<PeerResult> };
 
 /// Pending delegation requests from child resolver hierarchies.
-val list_pending_delegations: fn(t: Target) -> Ceremony<Array<PendingDelegation>>;
+val list_pending_delegations: fn(t: Target) -> Result<Ceremony<Array<PendingDelegation>>, AdminError>;
 
 /// Approve the pending delegation whose code matches.
-val approve_delegation: fn(#code: string, t: Target) -> Ceremony<DelegationDecision>;
+val approve_delegation: fn(#code: string, t: Target) -> Result<Ceremony<DelegationDecision>, AdminError>;
 
 /// Deny the pending delegation whose code matches.
 val deny_delegation: fn(
   ?#reason: [string, null],
   #code: string,
   t: Target
-) -> Ceremony<PendingDelegation>;
+) -> Result<Ceremony<PendingDelegation>, AdminError>;
 
 /// One admin server whose activation units the operator can control:
 /// its id (what a control op targets), its address, its resolver
@@ -133,7 +133,7 @@ type ServiceUnit = {
 
 /// Every registered admin server running a resolver, from the CA's
 /// map — the pick list for service control.
-val list_service_servers: fn(t: Target) -> Ceremony<Array<ServiceServer>>;
+val list_service_servers: fn(t: Target) -> Result<Ceremony<Array<ServiceServer>>, AdminError>;
 
 /// Apply `#op` to `#units` (empty: every unit) on the admin server
 /// `#server`, and return that server's per-unit states. The CA
@@ -143,4 +143,4 @@ val service_control: fn(
   #op: ServiceOp,
   #server: string,
   t: Target
-) -> Ceremony<Array<ServiceUnit>>;
+) -> Result<Ceremony<Array<ServiceUnit>>, AdminError>;

@@ -78,7 +78,7 @@ val connect: fn(
   ?#ca_dir: [string, null],
   ?#glyph: [Fingerprint, null],
   server: string
-) -> Ceremony<Target>;
+) -> Result<Ceremony<Target>, AdminError>;
 
 /// What became of the login `logout` acted on: revoked at the CA and
 /// forgotten here; forgotten here only, with why the CA could not be
@@ -102,7 +102,7 @@ val change_password_at: fn(
   ?#glyph: [Fingerprint, null],
   ?#new_password: [string, null],
   server: string
-) -> Ceremony<null>;
+) -> Result<Ceremony<null>, AdminError>;
 
 /// The interactive-flow protocol: a `Ceremony` and the questions,
 /// answers and progress it exchanges with a frontend.

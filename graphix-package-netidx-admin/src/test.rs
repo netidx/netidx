@@ -55,7 +55,7 @@ run!(
 
 const CONNECT_REFUSED: &str = r#"
 {
-  let c = netidx_admin::connect("127.0.0.1:1");
+  let c = netidx_admin::connect("127.0.0.1:1")$;
   select netidx_admin::ceremony::events(c) {
     `Done(r) => r,
     _ => never()

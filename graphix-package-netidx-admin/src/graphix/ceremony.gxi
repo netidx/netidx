@@ -69,12 +69,14 @@ val events: fn(c: Ceremony<'r>) -> Event<'r>;
 
 /// The ceremony's questions and presentation events, without the
 /// terminal `Done` — feed these to a shared question pump and read the
-/// outcome from `result`. The same observation rules as `events`.
-val questions: fn(c: Ceremony<'r>) -> Question;
+/// outcome from `result`. The same observation rules as `events`. A
+/// ceremony that could not start asks nothing.
+val questions: fn(c: Result<Ceremony<'r>, AdminError>) -> Question;
 
-/// The ceremony's result: fires exactly once, when the flow finishes.
-/// Observing it starts the flow, like `events`.
-val result: fn(c: Ceremony<'r>) -> Result<'r, AdminError>;
+/// The ceremony's result: fires exactly once, when the flow finishes,
+/// or with the error that kept it from starting. Observing it starts
+/// the flow, like `events`.
+val result: fn(c: Result<Ceremony<'r>, AdminError>) -> Result<'r, AdminError>;
 
 /// Answer the outstanding question `id`. The id routes to its own
 /// ceremony, so there is no ceremony argument. Errors (as a value) if

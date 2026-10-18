@@ -1,5 +1,9 @@
 let events = |c: Ceremony<'r>| -> Event<'r> 'netidx_admin_events;
-let questions = |c: Ceremony<'r>| -> Question select events(c) {
+let started = |c: Result<Ceremony<'r>, AdminError>| -> Ceremony<'r> select c {
+  error as _ => never(),
+  c => c
+};
+let questions = |c: Result<Ceremony<'r>, AdminError>| -> Question select events(started(c)) {
   `Done(_) => never(),
   `Text(q) => `Text(q),
   `Secret(q) => `Secret(q),
@@ -16,8 +20,8 @@ let questions = |c: Ceremony<'r>| -> Question select events(c) {
   `Note(s) => `Note(s),
   `Warn(s) => `Warn(s)
 };
-let result = |c: Ceremony<'r>| -> Result<'r, AdminError> select events(c) {
-  `Done(r) => r,
-  _ => never()
-};
+let result = |c: Result<Ceremony<'r>, AdminError>| -> Result<'r, AdminError> any(
+  select c { error as e => e, _ => never() },
+  select events(started(c)) { `Done(r) => r, _ => never() }
+);
 let answer = |id: QuestionId, a: Answer| -> [null, Error<`Admin(string)>] 'netidx_admin_answer

@@ -68,11 +68,11 @@ type InstallOutcome = [
 
 /// Install a role on this host — the guided flow: its questions
 /// arrive as events. `#dry_run` shows the plan and writes nothing.
-val install: fn(#role: InstallRole, #dry_run: bool, trigger: Any) -> Ceremony<InstallOutcome>;
+val install: fn(#role: InstallRole, #dry_run: bool, trigger: Any) -> Result<Ceremony<InstallOutcome>, AdminError>;
 
 /// Graduate this local-only workstation onto an admin domain,
 /// enrolling a TLS identity. `#dry_run` previews.
-val join: fn(#dry_run: bool, trigger: Any) -> Ceremony<null>;
+val join: fn(#dry_run: bool, trigger: Any) -> Result<Ceremony<null>, AdminError>;
 
 /// A resolver this host's map offers as a parent: its admin server,
 /// its resolver endpoint, and its cluster's base path.
@@ -96,7 +96,7 @@ val add_parent: fn(
   #resolvers: [Array<string>, null],
   #path: string,
   trigger: Any
-) -> Ceremony<AddParentOutcome>;
+) -> Result<Ceremony<AddParentOutcome>, AdminError>;
 
 /// What a finished restore leaves: the role now installed, the OS
 /// service it still needs (null when none), and the CA hierarchy
@@ -121,11 +121,11 @@ type RestoreStaged = [
 /// Restore a backup bundle onto this host. With `#bundle` null the
 /// ceremony asks for the bundle directory. A bundle with a CA stages,
 /// hands back the service the CA needs, and waits for `restore_finish`.
-val restore_stage: fn(#bundle: [string, null], trigger: Any) -> Ceremony<RestoreStaged>;
+val restore_stage: fn(#bundle: [string, null], trigger: Any) -> Result<Ceremony<RestoreStaged>, AdminError>;
 
 /// Finish a staged restore once its CA's service runs: re-enroll the
 /// co-located identities.
-val restore_finish: fn(staged: Staged) -> Ceremony<RestoreOutcome>;
+val restore_finish: fn(staged: Staged) -> Result<Ceremony<RestoreOutcome>, AdminError>;
 
 /// What an uninstall removed and kept.
 type UninstallReport = {
@@ -149,7 +149,7 @@ type UninstallOutcome = [
 /// Tear down the install at `#scope` under `#config_dir`: its OS
 /// service and its configuration; `#remove_ca` also destroys the CA
 /// directory, irreversibly.
-val uninstall: fn(#scope: Scope, #config_dir: string, #remove_ca: bool, trigger: Any) -> Ceremony<UninstallOutcome>;
+val uninstall: fn(#scope: Scope, #config_dir: string, #remove_ca: bool, trigger: Any) -> Result<Ceremony<UninstallOutcome>, AdminError>;
 
 /// A service registration: done in-process (the summary line), or a
 /// `netidx` invocation to run privileged — `what` names the step for
@@ -192,7 +192,7 @@ type RenewReport = {
 };
 
 /// Renew this host's TLS certificates from the admin domain's CA now.
-val renew: fn(trigger: Any) -> Ceremony<RenewReport>;
+val renew: fn(trigger: Any) -> Result<Ceremony<RenewReport>, AdminError>;
 
 /// What `update` did: nothing, or the edits it applied with the
 /// reconcile's warnings and what must be restarted for them to take
@@ -204,7 +204,7 @@ type UpdateOutcome = [
 
 /// Reconcile a joined install's configs with the admin domain's map
 /// and apply the edits.
-val update: fn(#config_root: string, role: InstallRole) -> Ceremony<UpdateOutcome>;
+val update: fn(#config_root: string, role: InstallRole) -> Result<Ceremony<UpdateOutcome>, AdminError>;
 
 /// A backup bundle as written.
 type BackupOutcome = {
@@ -219,4 +219,4 @@ type BackupOutcome = {
 
 /// Back up the complete managed installation at `#config_root`. With
 /// `#target` null the ceremony asks where to write the bundle.
-val backup: fn(#config_root: string, #target: [string, null], scope: Scope) -> Ceremony<BackupOutcome>;
+val backup: fn(#config_root: string, #target: [string, null], scope: Scope) -> Result<Ceremony<BackupOutcome>, AdminError>;

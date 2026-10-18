@@ -48,7 +48,7 @@ async fn ceremonies_against_a_live_domain() -> Result<()> {
     // arrive as QUESTIONS, answered from graphix ──
     let prog = format!(
         r#"{{
-  let c = netidx_admin::connect(#admin: "{admin}", "{listen}");
+  let c = netidx_admin::connect(#admin: "{admin}", "{listen}")$;
   let ev = netidx_admin::ceremony::events(c);
   let answers = select ev {{
     `ConfirmIdentity(q) => netidx_admin::ceremony::answer(q.id, `Confirm(true)),
@@ -73,7 +73,7 @@ async fn ceremonies_against_a_live_domain() -> Result<()> {
     // drives a real roster query and a remote ceremony ──
     let prog = format!(
         r#"{{
-  let c = netidx_admin::connect(#admin: "{admin}", #password: "{pw}", "{listen}");
+  let c = netidx_admin::connect(#admin: "{admin}", #password: "{pw}", "{listen}")$;
   let ev = netidx_admin::ceremony::events(c);
   let answers = select ev {{
     `ConfirmIdentity(q) => netidx_admin::ceremony::answer(q.id, `Confirm(true)),
@@ -84,7 +84,7 @@ async fn ceremonies_against_a_live_domain() -> Result<()> {
     _ => never()
   }};
   let admins = netidx_admin::admins::list(t);
-  let queue = select netidx_admin::ceremony::events(netidx_admin::certs::list_queue(t)) {{
+  let queue = select netidx_admin::ceremony::events(netidx_admin::certs::list_queue(t)$) {{
     `Done(r) => r,
     _ => never()
   }};
@@ -135,7 +135,7 @@ async fn reset_password_routes_to_change_password_at() -> Result<()> {
     `ConfirmIdentity(q) => netidx_admin::ceremony::answer(q.id, `Confirm(true)),
     _ => never()
   }};
-  let c = netidx_admin::connect(#admin: "{admin}", #password: "{pw}", "{listen}");
+  let c = netidx_admin::connect(#admin: "{admin}", #password: "{pw}", "{listen}")$;
   let ev = netidx_admin::ceremony::events(c);
   confirm(ev);
   let glyph: [netidx_admin::Fingerprint, null] = null;
@@ -155,7 +155,7 @@ async fn reset_password_routes_to_change_password_at() -> Result<()> {
     service_control_scopes: []
   }};
   let one_time = netidx_admin::admins::add("alice", policy, t)$;
-  let refused = netidx_admin::connect(#admin: "alice", #password: one_time, "{listen}");
+  let refused = netidx_admin::connect(#admin: "alice", #password: one_time, "{listen}")$;
   confirm(netidx_admin::ceremony::events(refused));
   let must_change: string = never();
   {{
@@ -171,7 +171,7 @@ async fn reset_password_routes_to_change_password_at() -> Result<()> {
     #glyph: must_change ~ glyph,
     #new_password: "a-brand-new-password",
     must_change ~ "{listen}"
-  );
+  )$;
   confirm(netidx_admin::ceremony::events(changed));
   let done = netidx_admin::ceremony::result(changed)$;
   let again = netidx_admin::connect(
@@ -179,7 +179,7 @@ async fn reset_password_routes_to_change_password_at() -> Result<()> {
     #password: "a-brand-new-password",
     #glyph: done ~ glyph,
     done ~ "{listen}"
-  );
+  )$;
   confirm(netidx_admin::ceremony::events(again));
   select netidx_admin::info(netidx_admin::ceremony::result(again)$) {{
     `Remote({{ admin, identity, .. }}) => "[admin]@[identity.domain]",

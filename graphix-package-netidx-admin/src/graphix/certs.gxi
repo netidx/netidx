@@ -1,5 +1,5 @@
 use super::{
-  Fingerprint, Target,
+  AdminError, Fingerprint, Target,
   ceremony::Ceremony,
   servers::PeerResult
 };
@@ -51,7 +51,7 @@ type RevokeOutcome = {
 
 /// The pending enrollment queue, each row keyed by its code. Requires
 /// a connected (remote) target; re-list per `t` delivery.
-val list_queue: fn(t: Target) -> Ceremony<Array<QueueItem>>;
+val list_queue: fn(t: Target) -> Result<Ceremony<Array<QueueItem>>, AdminError>;
 
 /// Approve the queued request whose recomputed code matches. Passing
 /// `#groups` skips the id-map-groups question; a server enrollment or
@@ -61,21 +61,21 @@ val approve: fn(
   ?#no_id_map: [bool, null],
   #code: string,
   t: Target
-) -> Ceremony<ApproveOutcome>;
+) -> Result<Ceremony<ApproveOutcome>, AdminError>;
 
 /// Approve every verified renewal — code-free by construction (a
 /// verified renewal is cryptographic proof of possession).
-val approve_renewals: fn(t: Target) -> Ceremony<Array<RenewalResult>>;
+val approve_renewals: fn(t: Target) -> Result<Ceremony<Array<RenewalResult>>, AdminError>;
 
 /// Deny the queued request whose code matches; returns the denied name.
-val deny: fn(?#reason: [string, null], #code: string, t: Target) -> Ceremony<string>;
+val deny: fn(?#reason: [string, null], #code: string, t: Target) -> Result<Ceremony<string>, AdminError>;
 
 /// The CA's issued certificates.
 val issued: fn(
   ?#include_revoked: [bool, null],
   ?#name_filter: [string, null],
   t: Target
-) -> Ceremony<Array<IssuedEntry>>;
+) -> Result<Ceremony<Array<IssuedEntry>>, AdminError>;
 
 /// Revoke by serial or name. `selector` is a serial number or an
 /// identity name; a name that matches several certs with different
@@ -85,4 +85,4 @@ val revoke: fn(
   ?#reason: [string, null],
   selector: string,
   t: Target
-) -> Ceremony<RevokeOutcome>;
+) -> Result<Ceremony<RevokeOutcome>, AdminError>;
