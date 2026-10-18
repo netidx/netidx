@@ -848,9 +848,9 @@ impl<R: Rt, E: UserEvent> Apply<R, E> for Events {
             if let Some(c) = get_ceremony(&self.cached, 0) {
                 if self.bind_id != Some(c.bind_id) {
                     if let Some(old) = self.bind_id.take() {
-                        ctx.rt.unref_var(old, self.top_id);
+                        ctx.unref_var(old, self.top_id);
                     }
-                    ctx.rt.ref_var(c.bind_id, self.top_id);
+                    ctx.ref_var(c.bind_id, self.top_id);
                     self.bind_id = Some(c.bind_id);
                 }
                 // the ceremony has a listener now — run the parked op
@@ -867,7 +867,7 @@ impl<R: Rt, E: UserEvent> Apply<R, E> for Events {
 
     fn sleep(&mut self, ctx: &mut ExecCtx<'_, R, E>) {
         if let Some(id) = self.bind_id.take() {
-            ctx.rt.unref_var(id, self.top_id);
+            ctx.unref_var(id, self.top_id);
         }
         self.cached.clear();
         self.out = TagValue::phantom();
@@ -875,7 +875,7 @@ impl<R: Rt, E: UserEvent> Apply<R, E> for Events {
 
     fn delete(&mut self, ctx: &mut ExecCtx<'_, R, E>) {
         if let Some(id) = self.bind_id.take() {
-            ctx.rt.unref_var(id, self.top_id);
+            ctx.unref_var(id, self.top_id);
         }
     }
 }
