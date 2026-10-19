@@ -785,7 +785,7 @@ let panels = |
     kk@ `Char("x") => {
       select kk ~ server_sel {
         null as _ => never(),
-        s if s.ca => toast <- {
+        s if s.ca => toast <- s ~ {
           title: "The active CA stays",
           lines: ["The CA is removed by uninstalling its host, never from here."],
           error: false

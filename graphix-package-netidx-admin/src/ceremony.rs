@@ -790,6 +790,8 @@ pub(crate) struct Events {
     top_id: ExprId,
     cached: CachedVals,
     bind_id: Option<BindId>,
+    /// The ceremony a sleep detached from, attached again at the wake.
+    paused: Option<BindId>,
     out: TagValue,
 }
 
@@ -809,6 +811,7 @@ impl<R: Rt, E: UserEvent> BuiltIn<R, E> for Events {
             top_id,
             cached: CachedVals::new(from),
             bind_id: None,
+            paused: None,
             out: TagValue::phantom(),
         }))
     }
@@ -820,7 +823,13 @@ impl<R: Rt, E: UserEvent> BuiltIn<R, E> for Events {
     ) -> Result<Box<dyn Apply<R, E>>, PackError> {
         let top_id = ExprId::decode(buf)?;
         let cached = CachedVals::image_decode(buf)?;
-        Ok(Box::new(Events { top_id, cached, bind_id: None, out: TagValue::phantom() }))
+        Ok(Box::new(Events {
+            top_id,
+            cached,
+            bind_id: None,
+            paused: None,
+            out: TagValue::phantom(),
+        }))
     }
 }
 
@@ -840,6 +849,10 @@ impl<R: Rt, E: UserEvent> Apply<R, E> for Events {
         ctx: &mut ExecCtx<'_, R, E>,
         from: &mut [Node<R, E>],
     ) -> &TagValue {
+        if let Some(id) = self.paused.take() {
+            ctx.ref_var(id, self.top_id);
+            self.bind_id = Some(id);
+        }
         let invocation = self.cached.update(ctx, from);
         if let Invocation::Bottom { fresh } = invocation {
             return self.out.set_bottom(fresh);
@@ -868,7 +881,12 @@ impl<R: Rt, E: UserEvent> Apply<R, E> for Events {
     fn sleep(&mut self, ctx: &mut ExecCtx<'_, R, E>) {
         if let Some(id) = self.bind_id.take() {
             ctx.unref_var(id, self.top_id);
+            self.paused = Some(id);
         }
+    }
+
+    fn reborn(&mut self, _ctx: &mut ExecCtx<'_, R, E>) {
+        self.paused = None;
         self.cached.clear();
         self.out = TagValue::phantom();
     }
