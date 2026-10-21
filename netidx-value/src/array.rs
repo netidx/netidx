@@ -4,16 +4,12 @@ use bytes::{Buf, BufMut};
 use netidx_core::pack::{
     MAX_VEC, Pack, PackError, decode_varint, encode_varint, varint_len,
 };
-use poolshark::{
-    Poolable, RawPoolable,
-    global::{RawPool, WeakPool, arc::TArc as PArc},
-    local::LPooled,
-};
-use seq_macro::seq;
+use poolshark::local::LPooled;
 use serde::{Deserialize, Serialize, de::Visitor, ser::SerializeSeq};
 use smallvec::{SmallVec, smallvec};
 use std::{
     borrow::Borrow,
+    cell::RefCell,
     collections::BTreeMap,
     fmt::Debug,
     hash::{Hash, Hasher},
@@ -29,35 +25,68 @@ use std::{
 use triomphe::{Arc, ThinArc};
 
 const MAX_LEN: usize = 128;
+const MAX_FREE_ARCS: usize = 1024;
 
-static POOLS: [LazyLock<RawPool<ValArrayBase>>; 129] = seq!(N in 0..=128 {
-    [
-        #(LazyLock::new(|| RawPool::new(32 * (MAX_LEN + 1 - N), 1)),)*
-    ]
-});
+type Base = ThinArc<(), Value>;
 
-static APOOL: LazyLock<RawPool<PArc<ValArrayInner>>> =
-    LazyLock::new(|| RawPool::new(1024, 64));
+/// The free arrays of each length (every element `Null`) and the free
+/// outer arcs (each holding `empty`), per thread: a worker that builds
+/// and drops arrays never touches another thread's lists or counts.
+struct Free {
+    bases: [Vec<Base>; MAX_LEN + 1],
+    arcs: Vec<Arc<ValArrayInner>>,
+    empty: ValArrayBase,
+}
+
+thread_local! {
+    static FREE: RefCell<Free> = RefCell::new(Free {
+        bases: std::array::from_fn(|_| Vec::new()),
+        arcs: Vec::new(),
+        empty: ValArrayBase(ManuallyDrop::new(new_base(0))),
+    });
+}
+
+fn max_free(len: usize) -> usize {
+    32 * (MAX_LEN + 1 - len)
+}
 
 static EMPTY: LazyLock<ValArrayBase> =
-    LazyLock::new(|| ValArrayBase::new_with_len(POOLS[0].downgrade(), 0));
+    LazyLock::new(|| ValArrayBase(ManuallyDrop::new(new_base(0))));
+
+static EMPTY_ARRAY: LazyLock<ValArray> = LazyLock::new(|| {
+    ValArray(ManuallyDrop::new(Arc::new(ValArrayInner::Base(EMPTY.clone()))))
+});
+
+fn new_base(len: usize) -> Base {
+    ThinArc::from_header_and_iter((), (0..len).map(|_| Value::Null))
+}
 
 fn get_by_size(len: usize) -> ValArrayBase {
     if len == 0 {
-        EMPTY.clone()
-    } else if len <= MAX_LEN {
-        let pool = &POOLS[len];
-        match pool.try_take() {
-            Some(t) => t,
-            None => ValArrayBase::new_with_len(pool.downgrade(), len),
-        }
-    } else {
-        ValArrayBase::new_with_len(WeakPool::new(), len)
+        return EMPTY.clone();
     }
+    let free = (len <= MAX_LEN)
+        .then(|| {
+            FREE.try_with(|f| f.try_borrow_mut().ok()?.bases[len].pop()).ok().flatten()
+        })
+        .flatten();
+    ValArrayBase(ManuallyDrop::new(free.unwrap_or_else(|| new_base(len))))
+}
+
+fn new_arc(inner: ValArrayInner) -> ValArray {
+    let free = FREE.try_with(|f| f.try_borrow_mut().ok()?.arcs.pop()).ok().flatten();
+    let a = match free {
+        None => Arc::new(inner),
+        Some(mut a) => {
+            *Arc::get_mut(&mut a).unwrap() = inner;
+            a
+        }
+    };
+    ValArray(ManuallyDrop::new(a))
 }
 
 #[derive(Debug, Clone)]
-pub struct ValArrayBase(ManuallyDrop<ThinArc<WeakPool<Self>, Value>>);
+pub struct ValArrayBase(ManuallyDrop<Base>);
 
 impl Default for ValArrayBase {
     fn default() -> Self {
@@ -219,14 +248,23 @@ impl ValArrayBase {
     /// The unguarded destructor body; only called from `drop`, under
     /// the DepthGuard whenever the TLS is accessible.
     fn really_drop(&mut self) {
-        if ThinArc::strong_count(&self.0) > 1 {
-            unsafe { ManuallyDrop::drop(&mut self.0) }
-        } else {
-            match self.0.header.header.upgrade() {
-                Some(pool) => pool.insert(unsafe { ptr::read(self) }),
-                None => unsafe { ManuallyDrop::drop(&mut self.0) },
-            }
+        let mut t = unsafe { ManuallyDrop::take(&mut self.0) };
+        let len = t.slice.len();
+        if len == 0 || len > MAX_LEN || ThinArc::strong_count(&t) > 1 {
+            return;
         }
+        t.with_arc_mut(|t| {
+            for v in Arc::get_mut(t).unwrap().slice_mut() {
+                *v = Value::Null;
+            }
+        });
+        let _ = FREE.try_with(|f| {
+            if let Ok(mut f) = f.try_borrow_mut()
+                && f.bases[len].len() < max_free(len)
+            {
+                f.bases[len].push(t)
+            }
+        });
     }
 }
 
@@ -235,40 +273,6 @@ impl Deref for ValArrayBase {
 
     fn deref(&self) -> &Self::Target {
         &self.0.slice
-    }
-}
-
-unsafe impl RawPoolable for ValArrayBase {
-    fn capacity(&self) -> usize {
-        1
-    }
-
-    fn empty(pool: WeakPool<Self>) -> Self {
-        let t = ThinArc::from_header_and_iter(pool, [].into_iter());
-        ValArrayBase(ManuallyDrop::new(t))
-    }
-
-    fn reset(&mut self) {
-        self.0.with_arc_mut(|t| {
-            // reset can only be called if the arc is unique
-            for v in Arc::get_mut(t).unwrap().slice_mut().iter_mut() {
-                // ensure we drop any allocated values
-                *v = Value::Null;
-            }
-        })
-    }
-
-    fn really_drop(self) {
-        let mut t = ManuallyDrop::new(self);
-        unsafe { ManuallyDrop::drop(&mut t.0) }
-    }
-}
-
-impl ValArrayBase {
-    fn new_with_len(pool: WeakPool<Self>, len: usize) -> Self {
-        let iter = (0..len).map(|_| Value::Null);
-        let t = ThinArc::from_header_and_iter(pool, iter);
-        Self(ManuallyDrop::new(t))
     }
 }
 
@@ -319,27 +323,33 @@ pub enum ValArrayInner {
     Slice(ValArraySlice),
 }
 
-impl Poolable for ValArrayInner {
-    fn capacity(&self) -> usize {
-        1
-    }
-
-    fn empty() -> Self {
-        Self::Base(EMPTY.clone())
-    }
-
-    fn reset(&mut self) {
-        *self = Self::Base(EMPTY.clone())
-    }
-}
-
 #[derive(Debug, Clone)]
 #[repr(transparent)]
-pub struct ValArray(PArc<ValArrayInner>);
+pub struct ValArray(ManuallyDrop<Arc<ValArrayInner>>);
 
 impl Default for ValArray {
     fn default() -> Self {
-        Self(APOOL.take())
+        EMPTY_ARRAY.clone()
+    }
+}
+
+impl Drop for ValArray {
+    fn drop(&mut self) {
+        let mut a = unsafe { ManuallyDrop::take(&mut self.0) };
+        let Some(inner) = Arc::get_mut(&mut a) else { return };
+        let empty = FREE.try_with(|f| {
+            let f = f.try_borrow().ok()?;
+            (f.arcs.len() < MAX_FREE_ARCS).then(|| f.empty.clone())
+        });
+        let Ok(Some(empty)) = empty else { return };
+        drop(mem::replace(inner, ValArrayInner::Base(empty)));
+        let _ = FREE.try_with(|f| {
+            if let Ok(mut f) = f.try_borrow_mut()
+                && f.arcs.len() < MAX_FREE_ARCS
+            {
+                f.arcs.push(a)
+            }
+        });
     }
 }
 
@@ -347,7 +357,7 @@ impl Deref for ValArray {
     type Target = [Value];
 
     fn deref(&self) -> &Self::Target {
-        match &*self.0 {
+        match &**self.0 {
             ValArrayInner::Base(a) => &*a,
             ValArrayInner::Slice(s) => &**s,
         }
@@ -525,16 +535,17 @@ impl ValArray {
         iter: I,
     ) -> Self {
         let len = iter.len();
-        let mut res = get_by_size(iter.len());
-        if len > 0 {
-            res.0.with_arc_mut(|res| {
-                let res = Arc::get_mut(res).unwrap();
-                for (i, v) in iter.enumerate() {
-                    res.slice_mut()[i] = v;
-                }
-            })
+        if len == 0 {
+            return EMPTY_ARRAY.clone();
         }
-        Self(PArc::new(&APOOL, ValArrayInner::Base(res)))
+        let mut res = get_by_size(len);
+        res.0.with_arc_mut(|res| {
+            let res = Arc::get_mut(res).unwrap();
+            for (i, v) in iter.enumerate() {
+                res.slice_mut()[i] = v;
+            }
+        });
+        new_arc(ValArrayInner::Base(res))
     }
 
     /// create a zero copy owned subslice of the array. Returns an
@@ -593,13 +604,13 @@ impl ValArray {
             }
             Ok(())
         }
-        match &*self.0 {
+        match &**self.0 {
             ValArrayInner::Base(a) => {
                 let (start, end) =
                     (r.start_bound().map(|i| *i), r.end_bound().map(|i| *i));
                 let t = ValArraySlice { base: a.clone(), start, end };
                 check_bounds(&a, start, end)?;
-                Ok(Self(PArc::new(&APOOL, ValArrayInner::Slice(t))))
+                Ok(new_arc(ValArrayInner::Slice(t)))
             }
             ValArrayInner::Slice(s) => {
                 let max_i = match s.end {
@@ -729,7 +740,7 @@ impl ValArray {
                     }
                 };
                 let t = ValArraySlice { base: s.base.clone(), start, end };
-                Ok(Self(PArc::new(&APOOL, ValArrayInner::Slice(t))))
+                Ok(new_arc(ValArrayInner::Slice(t)))
             }
         }
     }
@@ -812,6 +823,6 @@ impl Pack for ValArray {
                 Ok(())
             })?
         }
-        Ok(Self(PArc::new(&APOOL, ValArrayInner::Base(data))))
+        Ok(new_arc(ValArrayInner::Base(data)))
     }
 }
