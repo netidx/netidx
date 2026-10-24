@@ -1002,7 +1002,7 @@ let local = |#q: &mut Question| {
     priv_exit <- seq let req = priv_req {
       let cmd = escalate_command(req.argv, req)?;
       suspended <- true;
-      until released;
+      until live(released);
       println("\nAdministrator privileges are needed to [req.what].");
       let child = sys::process::spawn(sys::process::options(#args: cmd.args, cmd.program))?;
       let status = sys::process::wait(child.proc)?;
