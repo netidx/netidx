@@ -40,6 +40,20 @@ async fn answer_text(h: &mut TuiTestHarness, label: &str, s: &str) -> Result<()>
     h.dispatch_event(key(KeyCode::Enter)).await
 }
 
+/// [`answer_text`], the answer pasted in one `Paste` event.
+async fn answer_pasted(h: &mut TuiTestHarness, label: &str, s: &str) -> Result<()> {
+    let what = format!("the {label} modal");
+    wait_render(h, Duration::from_secs(60), &what, |lines| {
+        lines.iter().any(|l| l.contains(label))
+    })
+    .await?;
+    for _ in 0..64 {
+        h.dispatch_event(key(KeyCode::Backspace)).await?;
+    }
+    h.dispatch_event(Event::Paste(s.into())).await?;
+    h.dispatch_event(key(KeyCode::Enter)).await
+}
+
 /// The remote tab's app-main composition: the tab under the shared pump.
 fn remote_tab_program(listen: &str, book_dir: &Path) -> String {
     let book = book_dir.display();
@@ -105,7 +119,7 @@ async fn connect_via_modals(
     // no #admin was passed, so the ceremony asks for the name too; the
     // field pre-seeds the question's default (the OS username)
     answer_text(h, "admin name", admin).await?;
-    answer_text(h, "admin password", password).await
+    answer_pasted(h, "admin password", password).await
 }
 
 /// Drain + render until `pred` is true of the buffer lines, or fail

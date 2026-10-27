@@ -290,18 +290,24 @@ let pump = |q: Question| -> Pump {
     `Char("r") | `Char("n") | `Esc => { confirm_answer(k, false); `Stop },
     _ => `Continue
   };
-  let handle = |e: Event| on_press(e, |k| select k ~ active {
-    null as _ => `Continue,
-    `Text(_) => text_keys(e, k),
-    `Secret(_) => text_keys(e, k),
-    `Choice({ choices, .. }) => list_keys(k, array::len(choices) - 1),
-    `Confirm(_) => confirm_keys(k),
-    `SelectAdminDomain({ domains, .. }) => list_keys(k, array::len(domains) + 1),
-    `Announce(_) => ack_keys(k),
-    `AnnounceIdentity(_) => ack_keys(k),
-    `ConfirmIdentity(_) => identity_keys(k),
-    `OneTimeSecret(_) => ack_keys(k)
-  });
+  let handle = |e: Event| select e {
+    `Paste(_) => select e ~ active {
+      `Text(_) | `Secret(_) => line_edit::handle(&mut ed, e),
+      _ => e ~ `Continue
+    },
+    _ => on_press(e, |k| select k ~ active {
+      null as _ => `Continue,
+      `Text(_) => text_keys(e, k),
+      `Secret(_) => text_keys(e, k),
+      `Choice({ choices, .. }) => list_keys(k, array::len(choices) - 1),
+      `Confirm(_) => confirm_keys(k),
+      `SelectAdminDomain({ domains, .. }) => list_keys(k, array::len(domains) + 1),
+      `Announce(_) => ack_keys(k),
+      `AnnounceIdentity(_) => ack_keys(k),
+      `ConfirmIdentity(_) => identity_keys(k),
+      `OneTimeSecret(_) => ack_keys(k)
+    })
+  };
   // ── the modal views ──
   let err_lines = select err {
     null as _ => [],
