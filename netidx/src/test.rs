@@ -838,6 +838,16 @@ mod republish {
         converges_to("b", &rb, &paths, &paths).await;
     }
 
+    // CR claude for claude: [test-gap/medium] This test fails about one run in
+    // three, alone or with the suite: "the subscriber never converged; missing
+    // [Path("/t/one"), Path("/t/two")], stale []" after converges_to's deadline. It
+    // fails on the subscriber code before and after 756773bd (the replay change),
+    // so it is not that. Either the subscriber takes up the added member later than
+    // the deadline allows under load, or it sometimes never does. Find which (log
+    // the config reload and the member set the resolver uses), then fix the code
+    // or wait on the event that means the member was taken up. repro: `cargo test
+    // -p netidx --lib -- a_subscriber_takes_up_a_member` a few times.
+    // (netidx-test-flake-01)
     /// A subscriber must likewise start using a member added to its config,
     /// which is what lets it survive losing the one it had.
     #[tokio::test(flavor = "multi_thread")]
@@ -2559,6 +2569,15 @@ mod errors {
         Ok(())
     }
 
+    // CR claude for claude: [bug/medium] This test fails about one run in two:
+    // "expected silence, got (Path("/nopub/v0"), PublishErrors(Denied))" at the
+    // final expect_quiet. The path settled on Denied, and the publisher then
+    // reported the same Denied again, which the errors channel promises not to
+    // do (say a reason once, not once per retry). It fails on the code before
+    // 756773bd too. Look for the second report's source: the refusing member
+    // answering a re-publish, or a report sent before the error set is compared
+    // with the last one reported. repro: `cargo test -p netidx --lib --
+    // one_member_refusing` a few times. (netidx-test-flake-02)
     /// One member accepting is enough, so a path a single member refuses is
     /// degraded, not gone — and it really is still resolvable through the
     /// member that took it.

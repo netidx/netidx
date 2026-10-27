@@ -9,6 +9,16 @@ use netidx_value::{FromValue, Value};
 
 const TEST_REGISTER: &[testing::PackageRef] = &[&graphix_package_core::P];
 
+// CR claude for claude: [test-gap/high] 12 of this file's 16 tests fail, and have
+// since graphix's kind-markers change: graphix_package_core::testing::eval now
+// returns the value as data, markers stripped (testing::observed), while IntoValue
+// under GraphixShape writes the marked runtime form. named_struct: left [#struct,
+// ["x", 42], ["y", "hi"]], right [["x", 42], ["y", "hi"]]. So the suite compares
+// nothing it means to. Compare against the runtime form (a raw eval entry point in
+// testing, if one is kept for Rust readers, as next_update_raw is), or compare data
+// with data (rep::strip the derive's value) and check FromValue reads both. Nothing
+// runs this file in graphix's gate. repro: `cargo test -p netidx-tools --test
+// derive_graphix_compat`. (derive-compat-01)
 /// Check that a Rust value's IntoValue representation matches the graphix
 /// evaluation of `graphix_expr`, and that FromValue round-trips back to the
 /// original.
