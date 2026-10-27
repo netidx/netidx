@@ -571,11 +571,15 @@ mod republish {
     /// Write a client config the way the admin agent does — to a temporary
     /// file, then renamed into place — so a reader can never see a partial
     /// one.
+    /// Replace the client config as every netidx writer does: by rename,
+    /// settling past the coarse clock that stamps the file, so the next
+    /// write's modification time differs (`crate::config_file`).
     fn write_client_cfg(path: &std::path::Path, addrs: &[SocketAddr]) {
         let tmp = path.with_extension("tmp");
         std::fs::write(&tmp, serde_json::to_string(&client_cfg_file(addrs)).unwrap())
             .unwrap();
         std::fs::rename(&tmp, path).unwrap();
+        std::thread::sleep(netidx_core::utils::FS_TIMESTAMP_SETTLE);
     }
 
     /// Start member `id`, retrying while a previous incarnation's listener is
@@ -838,7 +842,7 @@ mod republish {
         converges_to("b", &rb, &paths, &paths).await;
     }
 
-    // CR claude for claude: [test-gap/medium] This test fails about one run in
+    // XCR claude for claude: [test-gap/medium] This test fails about one run in
     // three, alone or with the suite: "the subscriber never converged; missing
     // [Path("/t/one"), Path("/t/two")], stale []" after converges_to's deadline. It
     // fails on the subscriber code before and after 756773bd (the replay change),
@@ -848,6 +852,16 @@ mod republish {
     // or wait on the event that means the member was taken up. repro: `cargo test
     // -p netidx --lib -- a_subscriber_takes_up_a_member` a few times.
     // (netidx-test-flake-01)
+    // 2026-10-27 claude: Cause: the config watcher never saw the second write (no
+    // "resolvers are now" line in a failing run's log). Both writes of the client
+    // config landed within one tick of the coarse clock that stamps mtimes, so they
+    // got the same modification time, and the watcher compares that alone.
+    // config_file documents the contract: a writer settles past a tick
+    // (FS_TIMESTAMP_SETTLE, as netidx-admin's atomic write and netidx-id-map do).
+    // The test's write_client_cfg did not; it now sleeps FS_TIMESTAMP_SETTLE after
+    // its rename. 10 of 10 runs pass (about 1 in 3 failed before). A stamp that
+    // also held the inode would catch a rename without the settle; not changed
+    // here, since the documented design is the settle.
     /// A subscriber must likewise start using a member added to its config,
     /// which is what lets it survive losing the one it had.
     #[tokio::test(flavor = "multi_thread")]
@@ -2569,7 +2583,7 @@ mod errors {
         Ok(())
     }
 
-    // CR claude for claude: [bug/medium] This test fails about one run in two:
+    // XCR claude for claude: [bug/medium] This test fails about one run in two:
     // "expected silence, got (Path("/nopub/v0"), PublishErrors(Denied))" at the
     // final expect_quiet. The path settled on Denied, and the publisher then
     // reported the same Denied again, which the errors channel promises not to
@@ -2578,6 +2592,14 @@ mod errors {
     // answering a re-publish, or a report sent before the error set is compared
     // with the last one reported. repro: `cargo test -p netidx --lib --
     // one_member_refusing` a few times. (netidx-test-flake-02)
+    // 2026-10-27 claude: Not a publisher bug: its edge-triggered record_error
+    // reports each change once. The test stopped waiting when pb.publish_errors
+    // (the current state) read Denied, which can happen while the event for
+    // that change is still queued: the refusing member answers first
+    // (NotPublished|Denied, one event), the other member's answer takes it to
+    // Denied (a second, legitimate event), and expect_quiet then saw the
+    // second. The loop now waits for the event that says Denied, then checks
+    // the state. 8 of 8 runs pass (1 in 2 failed before).
     /// One member accepting is enough, so a path a single member refuses is
     /// degraded, not gone — and it really is still resolvable through the
     /// member that took it.
@@ -2599,10 +2621,11 @@ mod errors {
         loop {
             match e.next(TO).await {
                 None => panic!("never settled on {degraded}"),
-                Some(_) if pb.publish_errors(v.id()) == degraded => break,
+                Some((_, errors)) if errors == degraded => break,
                 Some(_) => (),
             }
         }
+        assert_eq!(pb.publish_errors(v.id()), degraded);
         // ask the member that took it, not whichever the cluster picks. A
         // publish is answered by whichever member answers first, so the one
         // that took it may not have finished storing it yet.
