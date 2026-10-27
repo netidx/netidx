@@ -1230,6 +1230,65 @@ mod publisher {
         drop(server);
     }
 
+    /// A channel joining a busy subscription gets the last value first and
+    /// every later update after it, in order, and a channel already on the
+    /// subscription gets no replay.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_joining_channel_gets_its_replay_alone_in_order() -> Result<()> {
+        const N: u64 = 3000;
+        let _ = env_logger::try_init();
+        let env = crate::InternalOnly::new().await?;
+        let v = env.publisher().publish(Path::from("/busy"), 0u64)?;
+        let pb = env.publisher().clone();
+        let dv = env.subscriber().subscribe(Path::from("/busy"));
+        dv.wait_subscribed().await?;
+        // every reader drains on its own: a full channel holds the
+        // connection back
+        let reader = |r: usize| {
+            let (tx, mut rx) = mpsc::channel::<GPooled<Vec<(SubId, Event)>>>(10);
+            dv.updates(UpdatesFlags::BEGIN_WITH_LAST, tx);
+            task::spawn(async move {
+                let mut seen = None;
+                while seen != Some(N) {
+                    let batch = time::timeout(Duration::from_secs(10), rx.next())
+                        .await
+                        .expect("no update")
+                        .expect("the subscription ended");
+                    for (_, ev) in batch.iter() {
+                        let Event::Update(Value::U64(i)) = ev else { panic!("{ev:?}") };
+                        if let Some(prev) = seen {
+                            assert_eq!(prev + 1, *i, "reader {r} out of order");
+                        }
+                        seen = Some(*i);
+                    }
+                }
+            })
+        };
+        let mut readers = vec![reader(0)];
+        let publish = task::spawn(async move {
+            for i in 1..=N {
+                let mut b = pb.start_batch();
+                v.update(&mut b, i);
+                b.commit(None).await;
+                if i % 64 == 0 {
+                    task::yield_now().await;
+                }
+            }
+            v
+        });
+        for r in 1..4u64 {
+            while !matches!(dv.last(), Event::Update(Value::U64(i)) if i >= 500 * r) {
+                time::sleep(Duration::from_millis(1)).await;
+            }
+            readers.push(reader(r as usize));
+        }
+        let _v = publish.await?;
+        for r in readers {
+            r.await?;
+        }
+        Ok(())
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn tls_publish_subscribe() {
         let _ = env_logger::try_init();

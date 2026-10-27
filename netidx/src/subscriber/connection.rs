@@ -354,13 +354,16 @@ impl ConnectionCtx {
         Ok(())
     }
 
+    /// Register `tx` on the subscription `id`. A replay of the last value
+    /// goes to `tx` alone, queued behind every update sent before it joined
+    /// and ahead of every update after. Returns whether a replay was queued.
     fn handle_connect_stream(
         &mut self,
-        stream_batch: &mut Vec<From>,
         id: Id,
         tx: WUpdateChan,
         flags: UpdatesFlags,
-    ) -> Result<()> {
+    ) -> Result<bool> {
+        let mut replayed = false;
         if let Some(sub) = self.subscriptions.get_mut(&id) {
             let mut already_have = false;
             for (id, c) in sub.streams.iter() {
@@ -374,12 +377,18 @@ impl ConnectionCtx {
                     self.gc_chan.insert(*id);
                 }
             }
+            let chan_id = *self.by_receiver.entry(tx.clone()).or_insert_with(ChanId::new);
             if flags.contains(UpdatesFlags::BEGIN_WITH_LAST)
                 && !(already_have && flags.contains(UpdatesFlags::NO_SPURIOUS))
             {
                 if let Some(last) = &sub.last {
                     if let Event::Update(v) = last.lock().clone() {
-                        stream_batch.push(From::Update(id, v.clone()));
+                        self.by_chan
+                            .entry(chan_id)
+                            .or_insert_with(|| (tx.clone(), BATCHES.take()))
+                            .1
+                            .push((sub.sub_id, Event::Update(v)));
+                        replayed = true;
                     }
                 }
             }
@@ -389,11 +398,10 @@ impl ConnectionCtx {
             }
             if !already_have {
                 trace!("adding new channel to streams");
-                let id = self.by_receiver.entry(tx.clone()).or_insert_with(ChanId::new);
-                sub.streams.push((*id, tx));
+                sub.streams.push((chan_id, tx));
             }
         }
-        Ok(())
+        Ok(replayed)
     }
 
     fn handle_from_sub(
@@ -401,7 +409,7 @@ impl ConnectionCtx {
         write_con: &mut WriteChannel,
         mut batch: GPooled<Vec<ToCon>>,
     ) -> Result<()> {
-        let mut stream_batch = DECODE_BATCHES.take();
+        let mut replayed = false;
         for msg in batch.drain(..) {
             match msg {
                 ToCon::Subscribe(req) => {
@@ -422,7 +430,7 @@ impl ConnectionCtx {
                     write_con.queue_send(&To::Unsubscribe(id))?
                 }
                 ToCon::Stream { id, tx, flags } => {
-                    self.handle_connect_stream(&mut stream_batch, id, tx, flags)?
+                    replayed |= self.handle_connect_stream(id, tx, flags)?
                 }
                 ToCon::Write(id, v, wid, tx) => {
                     write_con.queue_send(&To::Write(id, tx.is_some(), v, wid))?;
@@ -436,8 +444,8 @@ impl ConnectionCtx {
                 ToCon::Flush(tx) => self.pending_flushes.push(tx),
             }
         }
-        if stream_batch.len() > 0 {
-            self.process_updates_batch(stream_batch)
+        if replayed {
+            self.send_updates()
         }
         Ok(())
     }
@@ -452,7 +460,6 @@ impl ConnectionCtx {
         subscriber: &Subscriber,
         unsub_reason: SubscribeError,
     ) -> Result<()> {
-        let mut stream_batch = DECODE_BATCHES.take();
         for m in batch.drain(..) {
             trace!("processing from publisher {m:?}");
             match m {
@@ -520,11 +527,10 @@ impl ConnectionCtx {
                                     // we ignore last in this case because we already have it
                                     for (f, c) in req.streams {
                                         self.handle_connect_stream(
-                                            &mut stream_batch,
                                             id,
                                             c,
                                             f | UpdatesFlags::BEGIN_WITH_LAST,
-                                        )?
+                                        )?;
                                     }
                                     let _ = req.finished.send(Ok(val));
                                 }
@@ -573,11 +579,10 @@ impl ConnectionCtx {
                                 trace!("connecting {} streams", req.streams.len());
                                 for (f, c) in req.streams {
                                     self.handle_connect_stream(
-                                        &mut stream_batch,
                                         id,
                                         c,
                                         f | UpdatesFlags::BEGIN_WITH_LAST,
-                                    )?
+                                    )?;
                                 }
                             }
                         },
@@ -585,11 +590,7 @@ impl ConnectionCtx {
                 }
             }
         }
-        if stream_batch.len() > 0 {
-            self.process_updates_batch(stream_batch)
-        } else {
-            self.send_updates();
-        }
+        self.send_updates();
         Ok(())
     }
 
