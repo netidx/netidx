@@ -3,22 +3,13 @@
 
 use anyhow::Result;
 use arcstr::ArcStr;
+use graphix_compiler::rep;
 use graphix_package_core::testing;
 use netidx_derive::{FromValue, IntoValue};
 use netidx_value::{FromValue, Value};
 
 const TEST_REGISTER: &[testing::PackageRef] = &[&graphix_package_core::P];
 
-// CR claude for claude: [test-gap/high] 12 of this file's 16 tests fail, and have
-// since graphix's kind-markers change: graphix_package_core::testing::eval now
-// returns the value as data, markers stripped (testing::observed), while IntoValue
-// under GraphixShape writes the marked runtime form. named_struct: left [#struct,
-// ["x", 42], ["y", "hi"]], right [["x", 42], ["y", "hi"]]. So the suite compares
-// nothing it means to. Compare against the runtime form (a raw eval entry point in
-// testing, if one is kept for Rust readers, as next_update_raw is), or compare data
-// with data (rep::strip the derive's value) and check FromValue reads both. Nothing
-// runs this file in graphix's gate. repro: `cargo test -p netidx-tools --test
-// derive_graphix_compat`. (derive-compat-01)
 /// Check that a Rust value's IntoValue representation matches the graphix
 /// evaluation of `graphix_expr`, and that FromValue round-trips back to the
 /// original.
@@ -27,7 +18,7 @@ where
     T: Clone + PartialEq + std::fmt::Debug + Into<Value> + FromValue,
 {
     let derive_val: Value = original.clone().into();
-    let (gx_val, ctx) = testing::eval(graphix_expr, &TEST_REGISTER).await?;
+    let (gx_val, ctx) = testing::eval_raw(graphix_expr, &TEST_REGISTER).await?;
     assert_eq!(derive_val, gx_val, "IntoValue must match graphix wire format");
     let roundtrip = T::from_value(gx_val)?;
     assert_eq!(roundtrip, original);
@@ -195,7 +186,7 @@ async fn rename_attr() -> Result<()> {
     let derive_val: Value = orig.into();
     // c is skipped; b is renamed to "bravo"
     let (gx_val, ctx) =
-        testing::eval("{ a: 1, bravo: \"hello\" }", &TEST_REGISTER).await?;
+        testing::eval_raw("{ a: 1, bravo: \"hello\" }", &TEST_REGISTER).await?;
     assert_eq!(derive_val, gx_val, "IntoValue must match graphix wire format");
     let back = WithAttrs::from_value(gx_val)?;
     assert_eq!(back.a, 1);
@@ -211,7 +202,7 @@ fn renamed_variant() {
     // (graphix backtick syntax requires uppercase, so no graphix compat check)
     let orig = RenamedVariant::Circle { radius: 1.5 };
     let v: Value = orig.clone().into();
-    let (tag, _) = v.clone().cast_to::<(ArcStr, Value)>().unwrap();
+    let (tag, _) = rep::variant(&v).expect("a variant");
     assert_eq!(tag.as_str(), "circle");
     let back = RenamedVariant::from_value(v).unwrap();
     assert_eq!(back, orig);
@@ -239,7 +230,8 @@ async fn value_default_attr() -> Result<()> {
         .await?;
 
     // Wire data missing the #[value(default)] field 'b'
-    let (gx_val, ctx) = testing::eval("{ a: 10, c: \"world\" }", &TEST_REGISTER).await?;
+    let (gx_val, ctx) =
+        testing::eval_raw("{ a: 10, c: \"world\" }", &TEST_REGISTER).await?;
     let back = WithDefault::from_value(gx_val)?;
     assert_eq!(back.a, 10);
     assert_eq!(back.b, 0); // Default::default() for i64
@@ -253,13 +245,13 @@ async fn enum_variant_skip() -> Result<()> {
     let orig = EnumWithSkip::Named { x: 42, y: 99 };
     let derive_val: Value = orig.into();
     // y should not be in the wire data
-    let (tag, data) = derive_val.clone().cast_to::<(ArcStr, Value)>()?;
+    let Some((tag, [data])) = rep::variant(&derive_val) else { panic!("{derive_val}") };
     assert_eq!(tag.as_str(), "Named");
-    let pairs: Vec<(ArcStr, Value)> = data.cast_to()?;
-    assert_eq!(pairs.len(), 1);
-    assert_eq!(pairs[0].0.as_str(), "x");
+    let fields = rep::struct_fields(data).expect("a struct");
+    assert_eq!(fields.len(), 1);
+    assert_eq!(rep::field_at(fields, 0).map(|(n, _)| n.as_str()), Some("x"));
 
-    let (gx_val, ctx) = testing::eval("`Named({x: 42})", &TEST_REGISTER).await?;
+    let (gx_val, ctx) = testing::eval_raw("`Named({x: 42})", &TEST_REGISTER).await?;
     assert_eq!(derive_val, gx_val, "IntoValue must match graphix wire format");
     // roundtrip: y gets Default
     let back = EnumWithSkip::from_value(gx_val)?;
