@@ -17,7 +17,7 @@ use crate::{FingerprintV, admin_err};
 use anyhow::{Error, Result, anyhow, bail};
 use futures::{SinkExt, channel::mpsc};
 use graphix_compiler::{
-    Apply, BindId, BuiltIn, CompileCtx, ExecCtx, Node, Rt, Scope, TagValue, UserEvent,
+    Apply, BindId, BuiltIn, CompileCtx, ExecCtx, Node, Rt, Scope, TagValue,
     effects::Effect,
     errf,
     expr::ExprId,
@@ -719,7 +719,7 @@ pub(crate) struct Trigger {
 }
 
 impl Trigger {
-    pub(crate) fn new<R: Rt, E: UserEvent>(from: &[Node<R, E>]) -> Self {
+    pub(crate) fn new<R: Rt>(from: &[Node<R>]) -> Self {
         Trigger { args: CachedVals::new(from), pending: false }
     }
 
@@ -736,10 +736,10 @@ impl Trigger {
 
     /// Update the argument slots; `Some` when the ceremony starts this
     /// cycle, holding every argument's value.
-    pub(crate) fn tick<R: Rt, E: UserEvent>(
+    pub(crate) fn tick<R: Rt>(
         &mut self,
-        ctx: &mut ExecCtx<'_, R, E>,
-        from: &mut [Node<R, E>],
+        ctx: &mut ExecCtx<'_, R>,
+        from: &mut [Node<R>],
     ) -> Option<&CachedVals> {
         self.args.update_full(ctx, from);
         let last = from.len() - 1;
@@ -753,8 +753,8 @@ impl Trigger {
     }
 }
 
-pub(crate) fn start_ceremony<R: Rt, E: UserEvent>(
-    ctx: &mut ExecCtx<'_, R, E>,
+pub(crate) fn start_ceremony<R: Rt>(
+    ctx: &mut ExecCtx<'_, R>,
     accept_glyph: Option<netidx_admin_proto::fingerprint::Fingerprint>,
     op: BoxOp,
 ) -> Value {
@@ -795,18 +795,18 @@ pub(crate) struct Events {
     out: TagValue,
 }
 
-impl<R: Rt, E: UserEvent> BuiltIn<R, E> for Events {
+impl<R: Rt> BuiltIn<R> for Events {
     const EFFECT: Effect = Effect::Async;
     const NAME: &str = "netidx_admin_events";
 
     fn init<'a, 'b, 'c, 'd>(
-        _ctx: &'a mut CompileCtx<R, E>,
+        _ctx: &'a mut CompileCtx<R>,
         _typ: &'a FnType,
         _resolved: Option<&'d FnType>,
         _scope: &'b Scope,
-        from: &'c [Node<R, E>],
+        from: &'c [Node<R>],
         top_id: ExprId,
-    ) -> Result<Box<dyn Apply<R, E>>> {
+    ) -> Result<Box<dyn Apply<R>>> {
         Ok(Box::new(Events {
             top_id,
             cached: CachedVals::new(from),
@@ -817,10 +817,10 @@ impl<R: Rt, E: UserEvent> BuiltIn<R, E> for Events {
     }
 
     fn image_decode(
-        _ctx: &mut ExecCtx<'_, R, E>,
-        _from: &[Node<R, E>],
+        _ctx: &mut ExecCtx<'_, R>,
+        _from: &[Node<R>],
         buf: &mut &[u8],
-    ) -> Result<Box<dyn Apply<R, E>>, PackError> {
+    ) -> Result<Box<dyn Apply<R>>, PackError> {
         let top_id = ExprId::decode(buf)?;
         let cached = CachedVals::image_decode(buf)?;
         Ok(Box::new(Events {
@@ -833,7 +833,7 @@ impl<R: Rt, E: UserEvent> BuiltIn<R, E> for Events {
     }
 }
 
-impl<R: Rt, E: UserEvent> Apply<R, E> for Events {
+impl<R: Rt> Apply<R> for Events {
     /// A bound id is a running ceremony's event channel, which only a
     /// cycle can attach.
     fn image_encode(&self, buf: &mut ImageBuf) -> Result<(), PackError> {
@@ -844,11 +844,7 @@ impl<R: Rt, E: UserEvent> Apply<R, E> for Events {
         self.cached.image_encode(buf)
     }
 
-    fn update(
-        &mut self,
-        ctx: &mut ExecCtx<'_, R, E>,
-        from: &mut [Node<R, E>],
-    ) -> &TagValue {
+    fn update(&mut self, ctx: &mut ExecCtx<'_, R>, from: &mut [Node<R>]) -> &TagValue {
         if let Some(id) = self.paused.take() {
             ctx.ref_var(id, self.top_id);
             self.bind_id = Some(id);
@@ -878,20 +874,20 @@ impl<R: Rt, E: UserEvent> Apply<R, E> for Events {
         }
     }
 
-    fn sleep(&mut self, ctx: &mut ExecCtx<'_, R, E>) {
+    fn sleep(&mut self, ctx: &mut ExecCtx<'_, R>) {
         if let Some(id) = self.bind_id.take() {
             ctx.unref_var(id, self.top_id);
             self.paused = Some(id);
         }
     }
 
-    fn reborn(&mut self, _ctx: &mut ExecCtx<'_, R, E>) {
+    fn reborn(&mut self, _ctx: &mut ExecCtx<'_, R>) {
         self.paused = None;
         self.cached.clear();
         self.out = TagValue::phantom();
     }
 
-    fn delete(&mut self, ctx: &mut ExecCtx<'_, R, E>) {
+    fn delete(&mut self, ctx: &mut ExecCtx<'_, R>) {
         if let Some(id) = self.bind_id.take() {
             ctx.unref_var(id, self.top_id);
         }
@@ -910,16 +906,12 @@ fn get_question_id(cached: &CachedVals, idx: usize) -> Option<QuestionIdValue> {
 #[derive(Debug, Default)]
 pub(crate) struct AnswerEv;
 
-impl<R: Rt, E: UserEvent> EvalCached<R, E> for AnswerEv {
+impl<R: Rt> EvalCached<R> for AnswerEv {
     const EFFECT: Effect = Effect::Sync;
     const NAME: &str = "netidx_admin_answer";
     const ORDERED: bool = true;
 
-    fn eval(
-        &mut self,
-        _ctx: &mut ExecCtx<'_, R, E>,
-        cached: &CachedVals,
-    ) -> Option<Value> {
+    fn eval(&mut self, _ctx: &mut ExecCtx<'_, R>, cached: &CachedVals) -> Option<Value> {
         let qid = get_question_id(cached, 0)?;
         let a = cached.value(1)?;
         if std::env::var_os("GXDBG_ANSWER").is_some() {

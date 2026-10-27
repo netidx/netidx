@@ -12,7 +12,7 @@ use crate::{
 use anyhow::{Context, Result, bail};
 use arcstr::ArcStr;
 use graphix_compiler::{
-    Apply, BuiltIn, CompileCtx, ExecCtx, FastCall, Node, Rt, Scope, TagValue, UserEvent,
+    Apply, BuiltIn, CompileCtx, ExecCtx, FastCall, Node, Rt, Scope, TagValue,
     effects::Effect, errf, expr::ExprId, image::ImageBuf, typ::FnType,
 };
 use graphix_package_core::{
@@ -475,11 +475,11 @@ fn fc_installable_roles(_: &[Value]) -> Option<Value> {
 #[derive(Debug, Default)]
 pub(crate) struct InstallableRolesEv;
 
-impl<R: Rt, E: UserEvent> EvalCached<R, E> for InstallableRolesEv {
+impl<R: Rt> EvalCached<R> for InstallableRolesEv {
     const EFFECT: Effect = Effect::Stateless(Some(FastCall::Plain(fc_installable_roles)));
     const NAME: &str = "netidx_admin_installable_roles";
 
-    fn eval(&mut self, ctx: &mut ExecCtx<'_, R, E>, from: &CachedVals) -> Option<Value> {
+    fn eval(&mut self, ctx: &mut ExecCtx<'_, R>, from: &CachedVals) -> Option<Value> {
         fast_eval(ctx, fc_installable_roles, from)
     }
 }
@@ -824,18 +824,18 @@ pub(crate) struct LocalCeremony<T: LocalOp> {
     ph: PhantomData<T>,
 }
 
-impl<R: Rt, E: UserEvent, T: LocalOp> BuiltIn<R, E> for LocalCeremony<T> {
+impl<R: Rt, T: LocalOp> BuiltIn<R> for LocalCeremony<T> {
     const EFFECT: Effect = Effect::Async;
     const NAME: &str = T::NAME;
 
     fn init<'a, 'b, 'c, 'd>(
-        _ctx: &'a mut CompileCtx<R, E>,
+        _ctx: &'a mut CompileCtx<R>,
         _typ: &'a FnType,
         _resolved: Option<&'d FnType>,
         _scope: &'b Scope,
-        from: &'c [Node<R, E>],
+        from: &'c [Node<R>],
         _top_id: ExprId,
-    ) -> Result<Box<dyn Apply<R, E>>> {
+    ) -> Result<Box<dyn Apply<R>>> {
         Ok(Box::new(LocalCeremony::<T> {
             trigger: Trigger::new(from),
             out: TagValue::phantom(),
@@ -844,10 +844,10 @@ impl<R: Rt, E: UserEvent, T: LocalOp> BuiltIn<R, E> for LocalCeremony<T> {
     }
 
     fn image_decode(
-        _ctx: &mut ExecCtx<'_, R, E>,
-        _from: &[Node<R, E>],
+        _ctx: &mut ExecCtx<'_, R>,
+        _from: &[Node<R>],
         buf: &mut &[u8],
-    ) -> Result<Box<dyn Apply<R, E>>, PackError> {
+    ) -> Result<Box<dyn Apply<R>>, PackError> {
         Ok(Box::new(LocalCeremony::<T> {
             trigger: Trigger::image_decode(buf)?,
             out: TagValue::phantom(),
@@ -856,16 +856,12 @@ impl<R: Rt, E: UserEvent, T: LocalOp> BuiltIn<R, E> for LocalCeremony<T> {
     }
 }
 
-impl<R: Rt, E: UserEvent, T: LocalOp> Apply<R, E> for LocalCeremony<T> {
+impl<R: Rt, T: LocalOp> Apply<R> for LocalCeremony<T> {
     fn image_encode(&self, buf: &mut ImageBuf) -> Result<(), PackError> {
         self.trigger.image_encode(buf)
     }
 
-    fn update(
-        &mut self,
-        ctx: &mut ExecCtx<'_, R, E>,
-        from: &mut [Node<R, E>],
-    ) -> &TagValue {
+    fn update(&mut self, ctx: &mut ExecCtx<'_, R>, from: &mut [Node<R>]) -> &TagValue {
         let Some(args) = self.trigger.tick(ctx, from) else {
             return self.out.ride();
         };
@@ -877,7 +873,7 @@ impl<R: Rt, E: UserEvent, T: LocalOp> Apply<R, E> for LocalCeremony<T> {
         }
     }
 
-    fn sleep(&mut self, _ctx: &mut ExecCtx<'_, R, E>) {}
+    fn sleep(&mut self, _ctx: &mut ExecCtx<'_, R>) {}
 }
 
 pub(crate) fn string_arg(v: Option<&Value>, what: &str) -> Result<String> {

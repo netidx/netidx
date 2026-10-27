@@ -10,8 +10,8 @@ use anyhow::{Context, Error, Result};
 use arcstr::ArcStr;
 use compact_str::format_compact;
 use graphix_compiler::{
-    Apply, BuiltIn, CompileCtx, ExecCtx, Node, Rt, Scope, TagValue, UserEvent,
-    effects::Effect, errf, expr::ExprId, image::ImageBuf, typ::FnType,
+    Apply, BuiltIn, CompileCtx, ExecCtx, Node, Rt, Scope, TagValue, effects::Effect,
+    errf, expr::ExprId, image::ImageBuf, typ::FnType,
 };
 use graphix_package_core::{
     CachedArgsAsync, CachedVals, EvalCachedAsync, unit_image_state,
@@ -506,18 +506,18 @@ pub(crate) struct SessionCeremony<K: SessionKind> {
     ph: PhantomData<K>,
 }
 
-impl<R: Rt, E: UserEvent, K: SessionKind> BuiltIn<R, E> for SessionCeremony<K> {
+impl<R: Rt, K: SessionKind> BuiltIn<R> for SessionCeremony<K> {
     const EFFECT: Effect = Effect::Async;
     const NAME: &str = K::NAME;
 
     fn init<'a, 'b, 'c, 'd>(
-        _ctx: &'a mut CompileCtx<R, E>,
+        _ctx: &'a mut CompileCtx<R>,
         _typ: &'a FnType,
         _resolved: Option<&'d FnType>,
         _scope: &'b Scope,
-        from: &'c [Node<R, E>],
+        from: &'c [Node<R>],
         _top_id: ExprId,
-    ) -> Result<Box<dyn Apply<R, E>>> {
+    ) -> Result<Box<dyn Apply<R>>> {
         Ok(Box::new(SessionCeremony::<K> {
             trigger: ceremony::Trigger::new(from),
             out: TagValue::phantom(),
@@ -526,10 +526,10 @@ impl<R: Rt, E: UserEvent, K: SessionKind> BuiltIn<R, E> for SessionCeremony<K> {
     }
 
     fn image_decode(
-        _ctx: &mut ExecCtx<'_, R, E>,
-        _from: &[Node<R, E>],
+        _ctx: &mut ExecCtx<'_, R>,
+        _from: &[Node<R>],
         buf: &mut &[u8],
-    ) -> Result<Box<dyn Apply<R, E>>, PackError> {
+    ) -> Result<Box<dyn Apply<R>>, PackError> {
         Ok(Box::new(SessionCeremony::<K> {
             trigger: ceremony::Trigger::image_decode(buf)?,
             out: TagValue::phantom(),
@@ -538,16 +538,12 @@ impl<R: Rt, E: UserEvent, K: SessionKind> BuiltIn<R, E> for SessionCeremony<K> {
     }
 }
 
-impl<R: Rt, E: UserEvent, K: SessionKind> Apply<R, E> for SessionCeremony<K> {
+impl<R: Rt, K: SessionKind> Apply<R> for SessionCeremony<K> {
     fn image_encode(&self, buf: &mut ImageBuf) -> Result<(), PackError> {
         self.trigger.image_encode(buf)
     }
 
-    fn update(
-        &mut self,
-        ctx: &mut ExecCtx<'_, R, E>,
-        from: &mut [Node<R, E>],
-    ) -> &TagValue {
+    fn update(&mut self, ctx: &mut ExecCtx<'_, R>, from: &mut [Node<R>]) -> &TagValue {
         let Some(args) = self.trigger.tick(ctx, from) else {
             return self.out.ride();
         };
@@ -572,7 +568,7 @@ impl<R: Rt, E: UserEvent, K: SessionKind> Apply<R, E> for SessionCeremony<K> {
         }))
     }
 
-    fn sleep(&mut self, _ctx: &mut ExecCtx<'_, R, E>) {}
+    fn sleep(&mut self, _ctx: &mut ExecCtx<'_, R>) {}
 }
 
 /// Open an authenticated remote-admin session; `Done` carries the

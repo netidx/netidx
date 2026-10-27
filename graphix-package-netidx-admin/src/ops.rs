@@ -21,8 +21,8 @@ use anyhow::{Result, anyhow, bail};
 use arcstr::ArcStr;
 use enumflags2::BitFlags;
 use graphix_compiler::{
-    Apply, BuiltIn, CompileCtx, ExecCtx, Node, Rt, Scope, TagValue, UserEvent,
-    effects::Effect, errf, expr::ExprId, image::ImageBuf, typ::FnType,
+    Apply, BuiltIn, CompileCtx, ExecCtx, Node, Rt, Scope, TagValue, effects::Effect,
+    errf, expr::ExprId, image::ImageBuf, typ::FnType,
 };
 use graphix_package_core::{
     CachedArgsAsync, CachedVals, EvalCachedAsync, unit_image_state,
@@ -674,18 +674,18 @@ pub(crate) struct RemoteCeremony<T: RemoteOp> {
     ph: PhantomData<T>,
 }
 
-impl<R: Rt, E: UserEvent, T: RemoteOp> BuiltIn<R, E> for RemoteCeremony<T> {
+impl<R: Rt, T: RemoteOp> BuiltIn<R> for RemoteCeremony<T> {
     const EFFECT: Effect = Effect::Async;
     const NAME: &str = T::NAME;
 
     fn init<'a, 'b, 'c, 'd>(
-        _ctx: &'a mut CompileCtx<R, E>,
+        _ctx: &'a mut CompileCtx<R>,
         _typ: &'a FnType,
         _resolved: Option<&'d FnType>,
         _scope: &'b Scope,
-        from: &'c [Node<R, E>],
+        from: &'c [Node<R>],
         _top_id: ExprId,
-    ) -> Result<Box<dyn Apply<R, E>>> {
+    ) -> Result<Box<dyn Apply<R>>> {
         Ok(Box::new(RemoteCeremony::<T> {
             trigger: Trigger::new(from),
             out: TagValue::phantom(),
@@ -694,10 +694,10 @@ impl<R: Rt, E: UserEvent, T: RemoteOp> BuiltIn<R, E> for RemoteCeremony<T> {
     }
 
     fn image_decode(
-        _ctx: &mut ExecCtx<'_, R, E>,
-        _from: &[Node<R, E>],
+        _ctx: &mut ExecCtx<'_, R>,
+        _from: &[Node<R>],
         buf: &mut &[u8],
-    ) -> Result<Box<dyn Apply<R, E>>, PackError> {
+    ) -> Result<Box<dyn Apply<R>>, PackError> {
         Ok(Box::new(RemoteCeremony::<T> {
             trigger: Trigger::image_decode(buf)?,
             out: TagValue::phantom(),
@@ -706,16 +706,12 @@ impl<R: Rt, E: UserEvent, T: RemoteOp> BuiltIn<R, E> for RemoteCeremony<T> {
     }
 }
 
-impl<R: Rt, E: UserEvent, T: RemoteOp> Apply<R, E> for RemoteCeremony<T> {
+impl<R: Rt, T: RemoteOp> Apply<R> for RemoteCeremony<T> {
     fn image_encode(&self, buf: &mut ImageBuf) -> Result<(), PackError> {
         self.trigger.image_encode(buf)
     }
 
-    fn update(
-        &mut self,
-        ctx: &mut ExecCtx<'_, R, E>,
-        from: &mut [Node<R, E>],
-    ) -> &TagValue {
+    fn update(&mut self, ctx: &mut ExecCtx<'_, R>, from: &mut [Node<R>]) -> &TagValue {
         let Some(args) = self.trigger.tick(ctx, from) else {
             return self.out.ride();
         };
@@ -734,7 +730,7 @@ impl<R: Rt, E: UserEvent, T: RemoteOp> Apply<R, E> for RemoteCeremony<T> {
         }
     }
 
-    fn sleep(&mut self, _ctx: &mut ExecCtx<'_, R, E>) {}
+    fn sleep(&mut self, _ctx: &mut ExecCtx<'_, R>) {}
 }
 
 // ── the remote ops ───────────────────────────────────────────────
@@ -1162,18 +1158,18 @@ pub(crate) struct ChangePassword {
     out: TagValue,
 }
 
-impl<R: Rt, E: UserEvent> BuiltIn<R, E> for ChangePassword {
+impl<R: Rt> BuiltIn<R> for ChangePassword {
     const EFFECT: Effect = Effect::Async;
     const NAME: &str = "netidx_admin_change_password";
 
     fn init<'a, 'b, 'c, 'd>(
-        _ctx: &'a mut CompileCtx<R, E>,
+        _ctx: &'a mut CompileCtx<R>,
         _typ: &'a FnType,
         _resolved: Option<&'d FnType>,
         _scope: &'b Scope,
-        from: &'c [Node<R, E>],
+        from: &'c [Node<R>],
         _top_id: ExprId,
-    ) -> Result<Box<dyn Apply<R, E>>> {
+    ) -> Result<Box<dyn Apply<R>>> {
         Ok(Box::new(ChangePassword {
             trigger: Trigger::new(from),
             out: TagValue::phantom(),
@@ -1181,10 +1177,10 @@ impl<R: Rt, E: UserEvent> BuiltIn<R, E> for ChangePassword {
     }
 
     fn image_decode(
-        _ctx: &mut ExecCtx<'_, R, E>,
-        _from: &[Node<R, E>],
+        _ctx: &mut ExecCtx<'_, R>,
+        _from: &[Node<R>],
         buf: &mut &[u8],
-    ) -> Result<Box<dyn Apply<R, E>>, PackError> {
+    ) -> Result<Box<dyn Apply<R>>, PackError> {
         Ok(Box::new(ChangePassword {
             trigger: Trigger::image_decode(buf)?,
             out: TagValue::phantom(),
@@ -1192,16 +1188,12 @@ impl<R: Rt, E: UserEvent> BuiltIn<R, E> for ChangePassword {
     }
 }
 
-impl<R: Rt, E: UserEvent> Apply<R, E> for ChangePassword {
+impl<R: Rt> Apply<R> for ChangePassword {
     fn image_encode(&self, buf: &mut ImageBuf) -> Result<(), PackError> {
         self.trigger.image_encode(buf)
     }
 
-    fn update(
-        &mut self,
-        ctx: &mut ExecCtx<'_, R, E>,
-        from: &mut [Node<R, E>],
-    ) -> &TagValue {
+    fn update(&mut self, ctx: &mut ExecCtx<'_, R>, from: &mut [Node<R>]) -> &TagValue {
         let Some(args) = self.trigger.tick(ctx, from) else {
             return self.out.ride();
         };
@@ -1222,7 +1214,7 @@ impl<R: Rt, E: UserEvent> Apply<R, E> for ChangePassword {
         self.out.set(TagValue::fired(ceremony::start_ceremony(ctx, glyph, op)))
     }
 
-    fn sleep(&mut self, _ctx: &mut ExecCtx<'_, R, E>) {}
+    fn sleep(&mut self, _ctx: &mut ExecCtx<'_, R>) {}
 }
 
 // ── plain target-based builtins ──────────────────────────────────
