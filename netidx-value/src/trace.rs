@@ -6,7 +6,7 @@
 //! its own worklist and its depth costs no stack.
 
 use crate::{
-    Abstract, Map, Value,
+    Abstract, Value,
     array::{ValArrayBase, ValArrayInner},
 };
 use immutable_chunkmap::map::NodeRef;
@@ -19,7 +19,6 @@ enum Kind<'a> {
     Array(&'a Arc<ValArrayInner>),
     Base(&'a ValArrayBase),
     Error(&'a Arc<Value>),
-    MapRoot(&'a Map, NodeRef<'a, Value, Value, 32>),
     MapNode(NodeRef<'a, Value, Value, 32>),
     Abstract(&'a Abstract),
 }
@@ -31,22 +30,19 @@ impl<'a> Edge<'a> {
             Kind::Array(a) => Arc::as_ptr(*a) as usize,
             Kind::Base(b) => b.identity(),
             Kind::Error(e) => Arc::as_ptr(*e) as usize,
-            Kind::MapRoot(_, n) | Kind::MapNode(n) => n.identity(),
+            Kind::MapNode(n) => n.identity(),
             Kind::Abstract(a) => a.identity(),
         }
     }
 
-    /// How many owners the allocation has in all, or None where that
-    /// cannot be known (a map's inner node), which a collector must read
-    /// as held from outside.
-    pub fn strong(&self) -> Option<usize> {
+    /// How many owners the allocation has in all.
+    pub fn strong(&self) -> usize {
         match &self.0 {
-            Kind::Array(a) => Some(Arc::strong_count(*a)),
-            Kind::Base(b) => Some(b.strong_count()),
-            Kind::Error(e) => Some(Arc::strong_count(*e)),
-            Kind::MapRoot(m, _) => Some(m.strong_count()),
-            Kind::MapNode(_) => None,
-            Kind::Abstract(a) => Some(a.strong_count()),
+            Kind::Array(a) => Arc::strong_count(*a),
+            Kind::Base(b) => b.strong_count(),
+            Kind::Error(e) => Arc::strong_count(*e),
+            Kind::MapNode(n) => n.strong_count(),
+            Kind::Abstract(a) => a.strong_count(),
         }
     }
 
@@ -68,7 +64,7 @@ impl<'a> Edge<'a> {
             },
             Kind::Base(b) => b.iter().for_each(|v| v.edges(&mut f)),
             Kind::Error(e) => e.edges(f),
-            Kind::MapRoot(_, n) | Kind::MapNode(n) => {
+            Kind::MapNode(n) => {
                 for (k, v) in n.pairs() {
                     k.edges(&mut f);
                     v.edges(&mut f);
@@ -91,7 +87,7 @@ impl Value {
             Value::Error(e) => f(Edge(Kind::Error(e.as_arc()))),
             Value::Map(m) => {
                 if let Some(root) = m.root() {
-                    f(Edge(Kind::MapRoot(m, root)))
+                    f(Edge(Kind::MapNode(root)))
                 }
             }
             Value::Abstract(a) => f(Edge(Kind::Abstract(a))),
@@ -104,7 +100,7 @@ impl Value {
 mod test {
     use crate::{ValArray, Value};
 
-    fn edges(v: &Value) -> Vec<(usize, Option<usize>)> {
+    fn edges(v: &Value) -> Vec<(usize, usize)> {
         let mut out = vec![];
         v.edges(|e| out.push((e.id(), e.strong())));
         out
@@ -118,7 +114,7 @@ mod test {
         let outer = Value::Array(ValArray::from_iter_exact(
             [inner.clone(), inner.clone()].into_iter(),
         ));
-        let [(a, Some(1))] = edges(&outer)[..] else { panic!("{:?}", edges(&outer)) };
+        let [(a, 1)] = edges(&outer)[..] else { panic!("{:?}", edges(&outer)) };
         let mut bases = vec![];
         outer.edges(|e| e.children(|b| bases.push((b.id(), b.strong()))));
         assert_eq!(bases.len(), 1);
@@ -129,8 +125,16 @@ mod test {
         // the two elements are one allocation, held by them and by `inner`
         assert_eq!(elements.len(), 2);
         assert_eq!(elements[0], elements[1]);
-        assert_eq!(elements[0].1, Some(3));
+        assert_eq!(elements[0].1, 3);
         assert_ne!(elements[0].0, a);
         assert!(edges(&Value::I64(3)).is_empty());
+        let map =
+            Value::Map((0..1000i64).map(|i| (Value::from(i), Value::from(i))).collect());
+        let copy = map.clone();
+        let [(_, 2)] = edges(&map)[..] else { panic!("{:?}", edges(&map)) };
+        drop(copy);
+        let mut nodes = vec![];
+        map.edges(|e| e.children(|c| nodes.push(c.strong())));
+        assert!(!nodes.is_empty() && nodes.iter().all(|n| *n == 1), "{nodes:?}");
     }
 }
