@@ -222,6 +222,14 @@ impl Abstract {
         self.0.id
     }
 
+    pub(crate) fn identity(&self) -> usize {
+        Arc::as_ptr(&self.0) as *const () as usize
+    }
+
+    pub(crate) fn strong_count(&self) -> usize {
+        Arc::strong_count(&self.0)
+    }
+
     /// Downcast &self to &T. If self isn't a T then return None.
     pub fn downcast_ref<T: Any + Send + Sync>(&self) -> Option<&T> {
         (&*self.0.t).downcast_ref::<T>()

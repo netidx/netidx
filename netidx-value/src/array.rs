@@ -268,6 +268,16 @@ impl ValArrayBase {
     }
 }
 
+impl ValArrayBase {
+    pub(crate) fn identity(&self) -> usize {
+        self.0.ptr() as usize
+    }
+
+    pub(crate) fn strong_count(&self) -> usize {
+        ThinArc::strong_count(&self.0)
+    }
+}
+
 impl Deref for ValArrayBase {
     type Target = [Value];
 
@@ -307,6 +317,12 @@ pub struct ValArraySlice {
     base: ValArrayBase,
     start: Bound<usize>,
     end: Bound<usize>,
+}
+
+impl ValArraySlice {
+    pub(crate) fn base(&self) -> &ValArrayBase {
+        &self.base
+    }
 }
 
 impl Deref for ValArraySlice {
@@ -350,6 +366,12 @@ impl Drop for ValArray {
                 f.arcs.push(a)
             }
         });
+    }
+}
+
+impl ValArray {
+    pub(crate) fn inner(&self) -> &Arc<ValArrayInner> {
+        &self.0
     }
 }
 

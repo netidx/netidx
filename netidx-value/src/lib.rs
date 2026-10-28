@@ -99,6 +99,7 @@ mod print;
 pub mod shape;
 #[cfg(test)]
 mod test;
+pub mod trace;
 mod typ;
 
 pub use abstract_type::Abstract;
