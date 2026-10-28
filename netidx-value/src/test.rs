@@ -837,3 +837,49 @@ fn printf_precision_cuts_at_a_char_boundary() {
     .unwrap();
     assert_eq!(out, "|💖|💖💖|");
 }
+
+/// Numbers of different types order by value, exactly, ties by type, NaN
+/// below every number, and every number before every other kind.
+#[test]
+fn mixed_numbers_order_by_value() {
+    use rust_decimal::Decimal;
+    use std::{cmp::Ordering::*, str::FromStr};
+    let dec = |s: &str| Value::Decimal(triomphe::Arc::new(Decimal::from_str(s).unwrap()));
+    let two53 = 9007199254740992i64;
+    let cases = [
+        (Value::I64(3), Value::F64(2.5), Greater),
+        (Value::I64(1), Value::F64(1.5), Less),
+        (Value::I64(-1), Value::F64(-0.5), Less),
+        (Value::I64(two53 + 1), Value::F64(two53 as f64), Greater),
+        (Value::I64(two53 - 1), Value::F64(two53 as f64), Less),
+        (Value::U64(u64::MAX), Value::F64(1.8e19), Greater),
+        (Value::I64(i64::MIN), Value::F64(-9.3e18), Greater),
+        (Value::I64(i64::MIN), Value::F64(-9.2e18), Less),
+        (Value::U64(u64::MAX), Value::I64(i64::MAX), Greater),
+        (Value::I64(i64::MAX), Value::F64(f64::INFINITY), Less),
+        (Value::I64(i64::MIN), Value::F64(f64::NEG_INFINITY), Greater),
+        (Value::F64(f64::NAN), Value::I64(i64::MIN), Less),
+        (Value::F64(f64::NAN), dec("-1"), Less),
+        (dec("0.1"), Value::F64(0.1), Less),
+        (dec("1.5"), Value::I64(1), Greater),
+        (dec("-2.25"), Value::F32(-2.0), Less),
+        (Value::F32(0.5), Value::F64(0.75), Less),
+        (Value::I64(3), Value::F64(3.0), Value::I64(3).cmp(&Value::I64(3)).then(Less)),
+        (Value::U8(200), Value::I64(-5), Greater),
+        (dec("1e20"), Value::Bool(false), Less),
+        (Value::F64(f64::NAN), Value::Null, Less),
+    ];
+    for (a, b, want) in cases.iter() {
+        assert_eq!(a.cmp(b), *want, "{a:?} vs {b:?}");
+        assert_eq!(b.cmp(a), want.reverse(), "{b:?} vs {a:?}");
+    }
+    // one value, two types: never Equal, so the order agrees with ==
+    assert_ne!(Value::I64(3).cmp(&Value::F64(3.0)), Equal);
+    let mut xs =
+        vec![Value::I64(3), Value::F64(2.5), Value::I64(1), Value::F64(0.5), dec("1.25")];
+    xs.sort();
+    assert_eq!(
+        xs,
+        vec![Value::F64(0.5), Value::I64(1), dec("1.25"), Value::F64(2.5), Value::I64(3)]
+    );
+}

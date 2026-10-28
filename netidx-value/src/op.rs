@@ -224,6 +224,106 @@ impl PartialEq for Value {
 
 impl Eq for Value {}
 
+/// A number's value, exact, for ordering numbers of different types.
+enum Num {
+    Int(i128),
+    Float(f64),
+    Decimal(Decimal),
+}
+
+impl Num {
+    fn of(v: &Value) -> Option<Self> {
+        Some(match v {
+            Value::U8(x) => Num::Int(*x as i128),
+            Value::I8(x) => Num::Int(*x as i128),
+            Value::U16(x) => Num::Int(*x as i128),
+            Value::I16(x) => Num::Int(*x as i128),
+            Value::U32(x) | Value::V32(x) => Num::Int(*x as i128),
+            Value::I32(x) | Value::Z32(x) => Num::Int(*x as i128),
+            Value::U64(x) | Value::V64(x) => Num::Int(*x as i128),
+            Value::I64(x) | Value::Z64(x) => Num::Int(*x as i128),
+            Value::F32(x) => Num::Float(*x as f64),
+            Value::F64(x) => Num::Float(*x),
+            Value::Decimal(d) => Num::Decimal(**d),
+            _ => return None,
+        })
+    }
+
+    /// NaN below every number, then the values themselves.
+    fn cmp(&self, other: &Self) -> Ordering {
+        use Num::*;
+        match (self, other) {
+            (Int(x), Int(y)) => x.cmp(y),
+            (Float(x), Float(y)) => match (x.is_nan(), y.is_nan()) {
+                (true, true) => Ordering::Equal,
+                (true, false) => Ordering::Less,
+                (false, true) => Ordering::Greater,
+                (false, false) => x.partial_cmp(y).unwrap_or(Ordering::Equal),
+            },
+            (Int(i), Float(f)) => int_float(*i, *f),
+            (Float(f), Int(i)) => int_float(*i, *f).reverse(),
+            (Decimal(x), Decimal(y)) => x.cmp(y),
+            (Int(i), Decimal(d)) => {
+                rust_decimal::Decimal::from_i128_with_scale(*i, 0).cmp(d)
+            }
+            (Decimal(d), Int(i)) => {
+                d.cmp(&rust_decimal::Decimal::from_i128_with_scale(*i, 0))
+            }
+            (Float(f), Decimal(d)) => float_decimal(*f, d),
+            (Decimal(d), Float(f)) => float_decimal(*f, d).reverse(),
+        }
+    }
+}
+
+/// An integer (at most 64 bits wide) against a float, exactly.
+fn int_float(i: i128, f: f64) -> Ordering {
+    if f.is_nan() || f == f64::NEG_INFINITY || f <= -1.0e30 {
+        return Ordering::Greater;
+    }
+    if f == f64::INFINITY || f >= 1.0e30 {
+        return Ordering::Less;
+    }
+    let t = f.trunc();
+    match i.cmp(&(t as i128)) {
+        Ordering::Equal if f > t => Ordering::Less,
+        Ordering::Equal if f < t => Ordering::Greater,
+        o => o,
+    }
+}
+
+/// A float against a decimal, the float read to the decimal's precision.
+fn float_decimal(f: f64, d: &Decimal) -> Ordering {
+    if f.is_nan() || f == f64::NEG_INFINITY {
+        return Ordering::Less;
+    }
+    if f == f64::INFINITY {
+        return Ordering::Greater;
+    }
+    match Decimal::from_f64_retain(f) {
+        Some(x) => x.cmp(d),
+        // past a decimal's range, or nearer zero than its precision
+        None if f.abs() >= 1.0 => f.partial_cmp(&0.0).unwrap_or(Ordering::Equal),
+        None if d.is_zero() => f.partial_cmp(&0.0).unwrap_or(Ordering::Equal),
+        None if d.is_sign_positive() => Ordering::Less,
+        None => Ordering::Greater,
+    }
+}
+
+/// The order of two values' kinds: every number before every other kind,
+/// numbers of different types by value, ties and other kinds by type.
+fn kind_cmp(this: &Value, other: &Value) -> Ordering {
+    let (t, o) = (Typ::get(this), Typ::get(other));
+    if t == o {
+        return Ordering::Equal;
+    }
+    match (Num::of(this), Num::of(other)) {
+        (Some(a), Some(b)) => a.cmp(&b).then(t.cmp(&o)),
+        (Some(_), None) => Ordering::Less,
+        (None, Some(_)) => Ordering::Greater,
+        (None, None) => t.cmp(&o),
+    }
+}
+
 impl PartialOrd for Value {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         use std::num::FpCategory::*;
@@ -248,7 +348,7 @@ impl PartialOrd for Value {
                 },
                 W::Pair(l, r) => (l, r),
             };
-            let ord = match Typ::get(this).cmp(&Typ::get(other)) {
+            let ord = match kind_cmp(this, other) {
                 Ordering::Greater => Some(Ordering::Greater),
                 Ordering::Less => Some(Ordering::Less),
                 Ordering::Equal => match (this, other) {
