@@ -503,23 +503,35 @@ where
         attempt(constant("datetime"))
             .with(from_str(quoted(must_escape, esc)))
             .map(|d| Value::DateTime(Arc::new(d))),
-        constant("duration")
-            .with(float_text().and(choice((
-                attempt(string("ms")),
-                string("ns"),
-                string("us"),
-                string("s"),
-                string("m"),
-                string("h"),
-                string("d"),
-                string("M"),
-                string("y"),
-            ))))
-            .then(|(n, suffix): (CompactString, _)| match duration_of(&n, suffix) {
-                Some(d) => combine::value(Value::Duration(Arc::new(d))).right(),
-                None => unexpected_any("a duration that is negative or too long").left(),
-            }),
+        constant("duration").with(duration()).map(|d| Value::Duration(Arc::new(d))),
     )))
+}
+
+/// A duration's text, as `duration:` prefixes it and as it prints: a
+/// float literal and its unit, ns, us (or µs), ms, s, m, h, d, M or y.
+pub fn duration<I>() -> impl Parser<I, Output = Duration>
+where
+    I: RangeStream<Token = char>,
+    I::Error: ParseError<I::Token, I::Range, I::Position>,
+    I::Range: Range,
+{
+    float_text()
+        .and(choice((
+            attempt(string("ms")),
+            string("ns"),
+            string("us"),
+            string("µs").map(|_| "us"),
+            string("s"),
+            string("m"),
+            string("h"),
+            string("d"),
+            string("M"),
+            string("y"),
+        )))
+        .then(|(n, unit): (CompactString, &'static str)| match duration_of(&n, unit) {
+            Some(d) => combine::value(d).right(),
+            None => unexpected_any("a duration that is negative or too long").left(),
+        })
 }
 
 /// The seconds in a minute, hour, day, month and year — a month is

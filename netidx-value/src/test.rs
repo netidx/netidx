@@ -654,6 +654,7 @@ fn duration_units_round_trip() {
     for (text, want, printed) in [
         ("duration:250.ns", 250e-9, "250.ns"),
         ("duration:7.us", 7e-6, "7.us"),
+        ("duration:7.µs", 7e-6, "7.us"),
         ("duration:500.ms", 0.5, "500.ms"),
         ("duration:1.5s", 1.5, "1.5s"),
         ("duration:90.s", 90., "90.s"),
