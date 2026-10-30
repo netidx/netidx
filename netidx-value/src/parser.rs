@@ -541,19 +541,16 @@ const DURATION_UNITS: [(&str, u64); 5] =
 
 const NANOS: u128 = 1_000_000_000;
 
-/// `n`, a float literal's text, of the duration literal unit `suffix`,
-/// exactly, to the nearest nanosecond; `None` when that is negative or
-/// past `Duration::MAX`.
+/// `n`, a float literal's text, of the duration unit `suffix`, exactly,
+/// to the nearest nanosecond; `None` when `suffix` is no unit, or the
+/// duration is negative or past `Duration::MAX`.
 pub fn duration_of(n: &str, suffix: &str) -> Option<Duration> {
     let unit: u128 = match suffix {
         "ns" => 1,
-        "us" => 1_000,
+        "us" | "µs" => 1_000,
         "ms" => 1_000_000,
         "s" => NANOS,
-        unit => match DURATION_UNITS.iter().find(|(u, _)| *u == unit) {
-            Some((_, secs)) => *secs as u128 * NANOS,
-            None => unreachable!("duration unit {unit}"),
-        },
+        unit => DURATION_UNITS.iter().find(|(u, _)| *u == unit)?.1 as u128 * NANOS,
     };
     let (mantissa, exp) = match n.split_once('e') {
         Some((m, e)) => (m, e.parse::<i64>().ok()?),

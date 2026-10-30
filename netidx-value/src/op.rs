@@ -2,7 +2,7 @@ use crate::{Typ, ValArray, Value};
 use arcstr::literal;
 use compact_str::format_compact;
 use poolshark::local::LPooled;
-use rust_decimal::Decimal;
+use rust_decimal::{Decimal, prelude::ToPrimitive};
 use std::{
     cmp::{Ordering, PartialEq, PartialOrd},
     hash::Hash,
@@ -224,15 +224,18 @@ impl PartialEq for Value {
 
 impl Eq for Value {}
 
-/// A number's value, exact, for ordering numbers of different types.
-enum Num {
+/// A number ordered exactly against any other, whatever their kinds: an
+/// integer, a decimal or a float, NaN equal to NaN and below every number.
+#[derive(Debug, Clone, Copy)]
+pub enum Num {
     Int(i128),
+    Dec(Decimal),
     Float(f64),
-    Decimal(Decimal),
 }
 
 impl Num {
-    fn of(v: &Value) -> Option<Self> {
+    /// `v` as a number when it is one.
+    pub fn of(v: &Value) -> Option<Self> {
         Some(match v {
             Value::U8(x) => Num::Int(*x as i128),
             Value::I8(x) => Num::Int(*x as i128),
@@ -244,68 +247,120 @@ impl Num {
             Value::I64(x) | Value::Z64(x) => Num::Int(*x as i128),
             Value::F32(x) => Num::Float(*x as f64),
             Value::F64(x) => Num::Float(*x),
-            Value::Decimal(d) => Num::Decimal(**d),
+            Value::Decimal(d) => Num::Dec(**d),
             _ => return None,
         })
     }
 
-    /// NaN below every number, then the values themselves.
-    fn cmp(&self, other: &Self) -> Ordering {
-        use Num::*;
-        match (self, other) {
-            (Int(x), Int(y)) => x.cmp(y),
-            (Float(x), Float(y)) => match (x.is_nan(), y.is_nan()) {
-                (true, true) => Ordering::Equal,
-                (true, false) => Ordering::Less,
-                (false, true) => Ordering::Greater,
-                (false, false) => x.partial_cmp(y).unwrap_or(Ordering::Equal),
-            },
-            (Int(i), Float(f)) => int_float(*i, *f),
-            (Float(f), Int(i)) => int_float(*i, *f).reverse(),
-            (Decimal(x), Decimal(y)) => x.cmp(y),
-            (Int(i), Decimal(d)) => {
-                rust_decimal::Decimal::from_i128_with_scale(*i, 0).cmp(d)
-            }
-            (Decimal(d), Int(i)) => {
-                d.cmp(&rust_decimal::Decimal::from_i128_with_scale(*i, 0))
-            }
-            (Float(f), Decimal(d)) => float_decimal(*f, d),
-            (Decimal(d), Float(f)) => float_decimal(*f, d).reverse(),
+    /// The integer or decimal `s` writes, exactly.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.parse::<i128>() {
+            Ok(n) => Some(Num::Int(n)),
+            Err(_) => s.parse::<Decimal>().ok().map(Num::Dec),
         }
     }
 }
 
-/// An integer (at most 64 bits wide) against a float, exactly.
-fn int_float(i: i128, f: f64) -> Ordering {
-    if f.is_nan() || f == f64::NEG_INFINITY || f <= -1.0e30 {
-        return Ordering::Greater;
-    }
-    if f == f64::INFINITY || f >= 1.0e30 {
-        return Ordering::Less;
-    }
-    let t = f.trunc();
-    match i.cmp(&(t as i128)) {
-        Ordering::Equal if f > t => Ordering::Less,
-        Ordering::Equal if f < t => Ordering::Greater,
-        o => o,
+impl Ord for Num {
+    fn cmp(&self, other: &Self) -> Ordering {
+        use Num::*;
+        match (self, other) {
+            (Int(a), Int(b)) => a.cmp(b),
+            (Dec(a), Dec(b)) => a.cmp(b),
+            (Float(a), Float(b)) => float_cmp(*a, *b),
+            (Int(i), Dec(d)) => int_dec_cmp(*i, d),
+            (Dec(d), Int(i)) => int_dec_cmp(*i, d).reverse(),
+            (Int(i), Float(f)) => int_float_cmp(*i, *f),
+            (Float(f), Int(i)) => int_float_cmp(*i, *f).reverse(),
+            (Dec(d), Float(f)) => dec_float_cmp(d, *f),
+            (Float(f), Dec(d)) => dec_float_cmp(d, *f).reverse(),
+        }
     }
 }
 
-/// A float against a decimal, the float read to the decimal's precision.
-fn float_decimal(f: f64, d: &Decimal) -> Ordering {
-    if f.is_nan() || f == f64::NEG_INFINITY {
-        return Ordering::Less;
+impl PartialOrd for Num {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
     }
-    if f == f64::INFINITY {
-        return Ordering::Greater;
+}
+
+impl PartialEq for Num {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other) == Ordering::Equal
     }
-    match Decimal::from_f64_retain(f) {
-        Some(x) => x.cmp(d),
-        // past a decimal's range, or nearer zero than its precision
-        None if f.abs() >= 1.0 => f.partial_cmp(&0.0).unwrap_or(Ordering::Equal),
-        None if d.is_zero() => f.partial_cmp(&0.0).unwrap_or(Ordering::Equal),
-        None if d.is_sign_positive() => Ordering::Less,
-        None => Ordering::Greater,
+}
+
+impl Eq for Num {}
+
+fn float_cmp(a: f64, b: f64) -> Ordering {
+    match (a.is_nan(), b.is_nan()) {
+        (true, true) => Ordering::Equal,
+        (true, false) => Ordering::Less,
+        (false, true) => Ordering::Greater,
+        (false, false) => a.partial_cmp(&b).expect("no NaN"),
+    }
+}
+
+/// A decimal's whole part, which always fits an i128.
+fn dec_whole(d: &Decimal) -> i128 {
+    d.trunc().to_i128().expect("a decimal's whole part fits an i128")
+}
+
+fn int_dec_cmp(i: i128, d: &Decimal) -> Ordering {
+    i.cmp(&dec_whole(d)).then_with(|| Decimal::ZERO.cmp(&d.fract()))
+}
+
+fn int_float_cmp(i: i128, f: f64) -> Ordering {
+    if f.is_nan() || f < i128::MIN as f64 {
+        Ordering::Greater
+    } else if f >= i128::MAX as f64 {
+        Ordering::Less
+    } else {
+        let whole = f.trunc();
+        i.cmp(&(whole as i128)).then_with(|| 0f64.total_cmp(&(f - whole)))
+    }
+}
+
+fn dec_float_cmp(d: &Decimal, f: f64) -> Ordering {
+    // 2^96: no decimal reaches it
+    const PAST_EVERY_DECIMAL: f64 = 79228162514264337593543950336.0;
+    if f.is_nan() || f <= -PAST_EVERY_DECIMAL {
+        Ordering::Greater
+    } else if f >= PAST_EVERY_DECIMAL {
+        Ordering::Less
+    } else {
+        let whole = f.trunc();
+        dec_whole(d).cmp(&(whole as i128)).then_with(|| fract_cmp(d.fract(), f - whole))
+    }
+}
+
+/// Two fractions, each under 1 in magnitude, compared exactly: `d` is
+/// `n / 10^s` and `f` is `m / 2^e`, so `d` against `f` is `n * 2^e`
+/// against `m * 5^s * 2^s`.
+fn fract_cmp(d: Decimal, f: f64) -> Ordering {
+    let sign = d.cmp(&Decimal::ZERO).cmp(&f.partial_cmp(&0.0).expect("no NaN"));
+    if sign != Ordering::Equal || d.is_zero() {
+        return sign;
+    }
+    let bits = f.abs().to_bits();
+    let (biased, fraction) = ((bits >> 52) as u32, bits & ((1 << 52) - 1));
+    let (m, e) = match biased {
+        0 => (fraction, 1074),
+        b => (fraction | 1 << 52, 1075 - b),
+    };
+    let (n, s) = (d.mantissa().unsigned_abs(), d.scale());
+    let rhs = m as u128 * 5u128.pow(s);
+    let magnitude =
+        if e >= s { shl_cmp(n, e - s, rhs) } else { shl_cmp(rhs, s - e, n).reverse() };
+    if d.is_sign_negative() { magnitude.reverse() } else { magnitude }
+}
+
+/// `a * 2^k` against `b`.
+fn shl_cmp(a: u128, k: u32, b: u128) -> Ordering {
+    if a != 0 && (k >= 128 || a.leading_zeros() < k) {
+        Ordering::Greater
+    } else {
+        a.checked_shl(k).unwrap_or(0).cmp(&b)
     }
 }
 

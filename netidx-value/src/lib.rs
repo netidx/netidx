@@ -108,6 +108,7 @@ pub use convert::FromValue;
 #[doc(hidden)]
 pub use convert::derive_struct_field;
 pub use error::ValError;
+pub use op::Num;
 pub use pbuf::PBytes;
 pub use print::{NakedValue, printf};
 pub use shape::{NetidxShape, Shape};

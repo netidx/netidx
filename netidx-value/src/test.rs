@@ -647,6 +647,18 @@ fn valerror_is_pointer_sized_and_stops_at_shared_arcs() {
 
 /// Duration literals take every unit from nanoseconds to years, and a
 /// duration prints in the largest unit that measures it exactly — so
+/// `duration_of` answers for its units alone: another suffix is no
+/// duration, never a panic.
+#[test]
+fn duration_of_knows_its_units() {
+    use crate::parser::duration_of;
+    assert_eq!(duration_of("7", "µs"), Some(Duration::from_micros(7)));
+    assert_eq!(duration_of("1", "y"), Some(Duration::from_secs(31_557_600)));
+    for unit in ["min", "w", "S", "", "sec"] {
+        assert_eq!(duration_of("1", unit), None, "{unit}");
+    }
+}
+
 /// each form here round-trips through the parser and the printer.
 #[test]
 fn duration_units_round_trip() {
@@ -882,4 +894,59 @@ fn mixed_numbers_order_by_value() {
         xs,
         vec![Value::F64(0.5), Value::I64(1), dec("1.25"), Value::F64(2.5), Value::I64(3)]
     );
+}
+
+/// Numbers of every kind in one exact order: a float against a decimal
+/// is compared as the binary fraction it is, never rounded to the
+/// decimal's precision.
+#[test]
+fn mixed_numbers_order_exactly() {
+    use crate::Num::{self, *};
+    let dec = |s: &str| -> Num { Dec(s.parse::<Decimal>().unwrap()) };
+    // ascending, each strictly below the next
+    let ascending = [
+        Float(f64::NAN),
+        Float(f64::NEG_INFINITY),
+        Float(-1e30),
+        dec("-79228162514264337593543950335"),
+        Int(-3),
+        Float(-0.1),
+        dec("-0.1000000000000000055511151231"),
+        dec("-0.1"),
+        Int(0),
+        Float(5e-324),
+        dec("0.0000000000000000000000000001"),
+        dec("0.1"),
+        dec("0.10000000000000000001"),
+        dec("0.1000000000000000055511151231"),
+        Float(0.1),
+        dec("0.1000000000000000055511151232"),
+        dec("0.5000000000000000000000000001"),
+        Int(9007199254740993),
+        dec("9007199254740993.25"),
+        Float(9007199254740994.0),
+        dec("79228162514264337593543950335"),
+        Float(1e30),
+        Int(i128::MAX),
+        Float(f64::INFINITY),
+    ];
+    for (i, a) in ascending.iter().enumerate() {
+        for (j, b) in ascending.iter().enumerate() {
+            assert_eq!(a.cmp(b), i.cmp(&j), "{a:?} against {b:?}");
+        }
+    }
+    assert_eq!(Int(1), dec("1.000"));
+    assert_eq!(Int(1), Float(1.0));
+    assert_eq!(dec("0.5"), Float(0.5));
+    assert_eq!(dec("-0.5"), Float(-0.5));
+    assert_eq!(Float(f64::NAN), Float(f64::NAN));
+    // and Value orders by it: a float above a decimal that rounds to it
+    let (f, d) = (
+        Value::F64(0.1),
+        Value::Decimal(Arc::new(
+            "0.1000000000000000055511151231".parse::<Decimal>().unwrap(),
+        )),
+    );
+    assert_eq!(f.cmp(&d), std::cmp::Ordering::Greater);
+    assert_eq!(d.cmp(&f), std::cmp::Ordering::Less);
 }
