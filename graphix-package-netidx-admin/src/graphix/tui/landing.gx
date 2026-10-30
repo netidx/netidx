@@ -87,12 +87,12 @@ let reachable = |#polling: &mut bool, known: Book, recheck: Any| {
     visible <- array::filter_map(known.domains, |k| {
       let verified = array::filter_map(k.addrs, |a| select identity_at(a) {
         error as _ => null,
-        id if id.fingerprint.code == k.fingerprint => a,
+        id if id.fingerprint.code == k.fingerprint => `Keep(a),
         _ => null
       });
       select verified {
         [] => null,
-        [addr, ..] => { known: k, addr }
+        [addr, ..] => `Keep({ known: k, addr })
       }
     });
     *polling <- false
@@ -109,7 +109,7 @@ let discovered = |#toast: &mut [Report, null], known: Book, at: Any| -> Book {
     let found = discover_domains(at)?;
     let verified = array::filter_map(found.domains, |r| select r.identity {
       null as _ => null,
-      id => { domain: r.domain, servers: r.servers, fp: id.fingerprint.code }
+      id => `Keep({ domain: r.domain, servers: r.servers, fp: id.fingerprint.code })
     });
     *toast <- select array::len(found.diagnosis) {
       0 => select array::len(verified) {

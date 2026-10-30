@@ -157,7 +157,7 @@ let gate_warning = |s: ServerInfo, gate: GateReq, now: datetime| {
 let csv = |s: string| array::filter_map(str::split(#pat: ",", s), |p|
   select str::trim(p) {
     "" => null,
-    t => t
+    t => `Keep(t)
   });
 
 let list_text = |xs: Array<string>| str::join(#sep: ", ", xs);

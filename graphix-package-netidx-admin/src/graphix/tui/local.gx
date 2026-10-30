@@ -234,7 +234,7 @@ let parent_picker = |
   };
   let chosen = |cs: Array<ParentCandidate>, t: Array<bool>| -> Array<ParentCandidate>
     array::filter_map(array::zip(cs, t), |(c, on)| select on {
-      true => c,
+      true => `Keep(c),
       false => null
     });
   let resolvers: [Array<string>, null] = null;

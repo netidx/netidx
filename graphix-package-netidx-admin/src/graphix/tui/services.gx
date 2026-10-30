@@ -104,7 +104,7 @@ let words = |s: string|
 let csv = |s: string|
   array::filter_map(str::split(#pat: ",", s), |p| select str::trim(p) {
     "" => null,
-    t => t
+    t => `Keep(t)
   });
 
 let opt_of = |s: string| select str::trim(s) {
