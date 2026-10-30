@@ -25,7 +25,7 @@ pub async fn run(
     crate::log_errors::publisher(&publisher);
     let net_config = NetConfig::Ready { publisher, subscriber };
     let shell = ShellBuilder::default().setup_context(Box::new(move |ctx| {
-        ctx.libstate.set(net_config);
+        ctx.libstate.set(net_config.clone());
     }));
     gx::run_tui(shell, literal!(include_str!("browser.gx"))).await
 }
