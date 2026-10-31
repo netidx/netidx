@@ -7,7 +7,6 @@
 //! and presentation logic belongs in Graphix (the no-workarounds rule).
 
 use anyhow::{Context, Error, Result};
-use arcstr::ArcStr;
 use compact_str::format_compact;
 use graphix_compiler::{
     Apply, BuiltIn, CompileCtx, ExecCtx, Node, Rt, Scope, TagValue, effects::Effect,

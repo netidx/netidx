@@ -10,7 +10,6 @@ use crate::{
     ops::opt_string,
 };
 use anyhow::{Context, Result, bail};
-use arcstr::ArcStr;
 use graphix_compiler::{
     Apply, BuiltIn, CompileCtx, ExecCtx, FastCall, Node, Rt, Scope, TagValue,
     effects::Effect, errf, expr::ExprId, image::ImageBuf, typ::FnType,
