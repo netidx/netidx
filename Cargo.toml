@@ -46,7 +46,6 @@ fs3 = "0.5"
 nohash = "0.2"
 ahash = "0.8.12"
 futures = "0.3"
-crossterm = "0.29"
 globset = "0.4"
 graphix-shell = { version = "0.9.0", path = "../graphix/graphix-shell", default-features = false, features = ["tui", "str", "json", "re"] }
 graphix-rt = { version = "0.9.0", path = "../graphix/graphix-rt" }

@@ -4,8 +4,9 @@
 //! modals, key events answer them, and the ceremony's result lands.
 
 use anyhow::{Result, bail};
-use crossterm::event::{Event, KeyCode, KeyEvent};
-use graphix_package_tui::testing::TuiTestHarness;
+use graphix_package_tui::testing::{
+    Event, KeyCode, KeyEvent, KeyModifiers, TuiTestHarness,
+};
 use netidx_admin::testing::TestAdminDomain;
 use netidx_value::Value;
 use std::{
@@ -15,7 +16,7 @@ use std::{
 use tempfile::TempDir;
 
 fn key(code: KeyCode) -> Event {
-    Event::Key(KeyEvent::new(code, crossterm::event::KeyModifiers::NONE))
+    Event::Key(KeyEvent::new(code, KeyModifiers::NONE))
 }
 
 async fn type_text(h: &mut TuiTestHarness, s: &str) -> Result<()> {
