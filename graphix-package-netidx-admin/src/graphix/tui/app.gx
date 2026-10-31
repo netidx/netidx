@@ -28,6 +28,12 @@ let app = |#server: string = ""| -> tui::Tui {
     false => `Local,
     true => front
   };
+  // inside a tool (an admin panel, the services list, the connect
+  // screen) the tab bar is gone and Tab stays put: Esc backs out first
+  let in_tool = select shown {
+    `Local => loc.in_tool,
+    `Remote => rem.in_tool
+  };
   // the tab's own keys come first; what it leaves alone reaches the
   // global ones
   let tab_handle = |e: Event| select e ~ shown {
@@ -36,8 +42,9 @@ let app = |#server: string = ""| -> tui::Tui {
   };
   let global = |e: Event| on_press(e, |k| select k.code {
     `Tab => {
-      front <- k ~ select (loc.installed, front) {
-        (true, `Local) => `Remote,
+      front <- select k ~ (loc.installed, in_tool, front) {
+        (_, true, _) => never(),
+        (true, false, `Local) => `Remote,
         _ => `Local
       };
       `Stop
@@ -49,9 +56,12 @@ let app = |#server: string = ""| -> tui::Tui {
     `Local => 0,
     `Remote => 1
   };
-  let body = select loc.installed {
-    false => loc.view,
-    true => {
+  let view = select shown {
+    `Local => loc.view,
+    `Remote => rem.view
+  };
+  let body = select (loc.installed, in_tool) {
+    (true, false) => {
       // the bar alone: each tab's view is laid out below it
       let bar = tabs(
         #selected: &selected,
@@ -60,27 +70,26 @@ let app = |#server: string = ""| -> tui::Tui {
       );
       layout(#direction: &`Vertical, &[
         child(#constraint: `Length(3), theme::panel(#title: "netidx admin", bar)),
-        child(#constraint: `Min(1), select shown {
-          `Local => loc.view,
-          `Remote => rem.view
-        })
+        child(#constraint: `Min(1), view)
       ])
-    }
+    },
+    _ => view
   };
-  let status = select p.progress {
-    null as _ => select shown {
+  let tab_layers = select shown {
+    `Local => loc.layers,
+    `Remote => rem.layers
+  };
+  // the keys of what is in front: the tab's, a dialog's (every dialog
+  // closes on Esc), or none while the pump shows work under way
+  let status = select (p.busy, array::len(p.layers), array::len(tab_layers)) {
+    (false, 0, 0) => select shown {
       `Local => loc.status,
       `Remote => rem.status
     },
-    pr => line(" working… [pr.message] ")
+    (false, 0, _) | (true, _, _) => line(" answer above · Esc cancel "),
+    _ => line(" working… · Ctrl-C quit ")
   };
-  let layers = array::concat(
-    select shown {
-      `Local => loc.layers,
-      `Remote => rem.layers
-    },
-    p.layers
-  );
+  let layers = array::concat(tab_layers, p.layers);
   // a dialog stands alone on the backdrop, nothing behind it
   let screen = select array::len(layers) {
     0 => body,

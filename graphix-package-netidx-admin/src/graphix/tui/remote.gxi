@@ -3,12 +3,14 @@ use tui::overlay::Layer;
 
 /// The admin-domain tab: the landing screen (the known admin
 /// domains), the connect screen, and the admin-server panels over
-/// the session it opens.
+/// the session it opens. `in_tool` is true off the landing screen,
+/// where the app hides its tab bar.
 type Remote = {
   view: tui::Tui,
   handle: fn(e: tui::input_handler::Event) -> [`Stop, `Continue],
   status: tui::Line,
-  layers: Array<Layer>
+  layers: Array<Layer>,
+  in_tool: bool
 };
 
 /// Build the admin-domain tab. `#q` is the app's question bus: every

@@ -480,22 +480,72 @@ let pump = |q: Question| -> Pump {
     `ConfirmIdentity({ identity, .. }) => roomy(confirm_identity_modal(identity)),
     `OneTimeSecret({ kind, password, .. }) => fitted(width, 3, keyed(secret_modal(kind, password)))
   };
-  // the standing code, while nothing is asked: the operator reads it to
-  // the approving admin, who sees the same one in their confirmation
-  let code_box = |c: { purpose: string, fp: Fingerprint }| theme::panel(
-    #title: "Verification code — [c.purpose]",
-    #legend: " waiting for approval ",
-    layout(#direction: &`Vertical, &[
-      child(#constraint: `Length(2), paragraph(#style: &hint,
-        &"Read this code to the approving admin out of band; they must see the same one before they approve.")),
-      child(#constraint: `Length(13),
-        paragraph(#alignment: &`Center, #trim: &false, &identity_lines(c.fp)))
-    ])
+  // ── while nothing is asked: what the ceremony is doing ──
+  // the code the operator reads to the approving admin, who sees the
+  // same one in their confirmation
+  let code_lines = |c: { purpose: string, fp: Fingerprint }| array::concat(
+    [
+      line(#style: hint,
+        "Read this code to the approving admin out of band; they must see the same one before they approve."),
+      line("")
+    ],
+    identity_lines(c.fp)
   );
+  let code_box = |c: { purpose: string, fp: Fingerprint }| {
+    let lines = code_lines(c);
+    fitted(width, lines_rows(width - 2, lines), keyed(theme::panel(
+      #title: "Verification code — [c.purpose]",
+      #legend: " waiting for approval ",
+      paragraph(#trim: &false, &lines)
+    )))
+  };
+  let stage_title = |s: Stage| select s {
+    `Discovering => "Searching the network",
+    `Enrolling => "Enrolling",
+    `WaitingApproval => "Waiting for approval",
+    `Applying => "Applying",
+    `Done => "Working"
+  };
+  // the step under way and a bar that moves: filled over the step's
+  // expected duration when it has one, bouncing when it does not
+  let working = |pr: { stage: Stage, message: string, duration: [duration, null] }| {
+    let tick = 0;
+    tick <- sys::time::timer(duration:100.ms, true) ~ tick + 1;
+    let started = sys::time::now(pr);
+    let ratio = select pr.duration {
+      null as _ => null,
+      d => min(
+        1.0,
+        cast<f64>(sys::time::diff(sys::time::now(tick), started))$ / max(0.001, cast<f64>(d)$)
+      )
+    };
+    let lines = array::concat(
+      [line(pr.message)],
+      select code {
+        null as _ => [],
+        c => array::concat(
+          [line(""), line(#style: theme::alert, "Verification code — [c.purpose]")],
+          code_lines(c)
+        )
+      }
+    );
+    let rows = lines_rows(width - 2, lines);
+    fitted(width, rows + 2, keyed(theme::panel(
+      #title: stage_title(pr.stage),
+      layout(#direction: &`Vertical, &[
+        child(#constraint: `Length(rows), paragraph(#trim: &false, &lines)),
+        child(#constraint: `Length(1), text(&[])),
+        child(#constraint: `Length(1), theme::progress_bar(#width: width - 2, #tick: tick, ratio))
+      ])
+    )))
+  };
   let layers = select modal {
-    null as _ => select code {
-      null as _ => [],
-      c => [theme::dialog(#width: &`Percentage(70), #height: &`Length(17), keyed(code_box(c)))]
+    null as _ => select progress {
+      null as _ => select code {
+        null as _ => [],
+        c => [code_box(c)]
+      },
+      pr => [working(pr)]
     },
     l => [l]
   };

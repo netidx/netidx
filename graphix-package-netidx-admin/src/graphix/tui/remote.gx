@@ -155,6 +155,10 @@ let remote = |#q: &mut Question, #book_dir: [string, null], #server: string = ""
     view: body,
     handle,
     status,
-    layers: array::concat(pan.layers, toast_layers(&mut toast))
+    layers: array::concat(pan.layers, toast_layers(&mut toast)),
+    in_tool: select screen {
+      `Landing => false,
+      _ => true
+    }
   }
 }

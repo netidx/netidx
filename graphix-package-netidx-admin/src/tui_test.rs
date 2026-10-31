@@ -632,7 +632,8 @@ impl Drop for InstallRecordGuard {
 
 /// Tab brings the Admin Domain tab forward, and it stays forward when
 /// that tab changes underneath it: a screen switch re-fires the tab's
-/// whole struct, which must not put the first tab back in front.
+/// whole struct, which must not put the first tab back in front. Inside
+/// a tool Tab does nothing.
 #[tokio::test(flavor = "multi_thread")]
 async fn tab_keeps_the_admin_domain_tab_in_front_when_it_changes() -> Result<()> {
     if let Some(r) = netidx_admin::testing::in_own_process().await {
@@ -665,6 +666,21 @@ async fn tab_keeps_the_admin_domain_tab_in_front_when_it_changes() -> Result<()>
     h.dispatch_event(key(KeyCode::Char('c'))).await?;
     wait_render(&mut h, Duration::from_secs(20), "the connect screen", |lines| {
         lines.iter().any(|l| l.contains("Connect to an admin domain"))
+    })
+    .await?;
+    // the connect screen is a tool: Tab stays put, Esc backs out to the
+    // landing, and from there Tab switches
+    h.dispatch_event(key(KeyCode::Tab)).await?;
+    h.drain().await?;
+    let lines = h.render_lines()?;
+    assert!(
+        lines.iter().any(|l| l.contains("Connect to an admin domain")),
+        "Tab left the connect screen:\n{}",
+        lines.join("\n")
+    );
+    h.dispatch_event(key(KeyCode::Esc)).await?;
+    wait_render(&mut h, Duration::from_secs(20), "the landing screen again", |lines| {
+        lines.iter().any(|l| l.contains("d discover"))
     })
     .await?;
     h.dispatch_event(key(KeyCode::Tab)).await?;
@@ -744,6 +760,13 @@ async fn local_tab_detects_a_ca_install_and_opens_its_roster() -> Result<()> {
             && lines.iter().any(|l| l.contains("Recovery slot") && l.contains("set"))
     })
     .await?;
+    // the footer offers the dialog's way out, not the action list's keys
+    let lines = h.render_lines()?;
+    assert!(
+        lines.last().is_some_and(|l| l.contains("answer above · Esc cancel")),
+        "the footer under the status card:\n{}",
+        lines.join("\n")
+    );
     // any key closes it
     h.dispatch_event(key(KeyCode::Esc)).await?;
     wait_render(&mut h, Duration::from_secs(10), "the card to close", |lines| {
@@ -762,12 +785,28 @@ async fn local_tab_detects_a_ca_install_and_opens_its_roster() -> Result<()> {
             && lines.iter().any(|l| l.contains(&admin) && l.contains("role"))
     })
     .await?;
+    // a tool hides the tab bar, and Tab does not switch to a tab that
+    // is not shown
+    let tab_bar = |lines: &[String]| {
+        lines.iter().any(|l| l.contains("Local") && l.contains("Admin Domain"))
+    };
+    let lines = h.render_lines()?;
+    assert!(!tab_bar(&lines), "the tab bar inside the roster:\n{}", lines.join("\n"));
+    h.dispatch_event(key(KeyCode::Tab)).await?;
+    h.drain().await?;
+    let lines = h.render_lines()?;
+    assert!(
+        lines.iter().any(|l| l.contains("Admin Roster")),
+        "Tab left the roster:\n{}",
+        lines.join("\n")
+    );
     // Esc backs straight out to the action list — there is no panel menu
-    // behind a local panel
+    // behind a local panel — and the tab bar is back
     h.dispatch_event(key(KeyCode::Esc)).await?;
     wait_render(&mut h, Duration::from_secs(10), "the action list again", |lines| {
         lines.iter().any(|l| l.contains("CA ("))
             && !lines.iter().any(|l| l.contains("Admin Roster"))
+            && tab_bar(lines)
     })
     .await?;
     Ok(())
@@ -892,6 +931,76 @@ async fn a_server_argument_on_a_fresh_machine_leaves_the_keys_with_the_install()
         lines.iter().any(|l| l.contains("full netidx node"))
     })
     .await?;
+    Ok(())
+}
+
+/// The pump's progress dialog moves while a step is under way: a step
+/// with an expected duration fills a gauge as the time passes, and one
+/// without bounces a block across the bar.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_progress_bar_moves() -> Result<()> {
+    if let Some(r) = netidx_admin::testing::in_own_process().await {
+        return r;
+    }
+    const ACCENT: Color = Color::Rgb(170, 0, 0);
+    let prog = |duration: &str| {
+        format!(
+            r#"
+use tui::{{overlay::overlay, text::text}};
+let q: netidx_admin::ceremony::Question = `Progress({{
+  stage: `Discovering,
+  message: "Looking for admin servers",
+  duration: {duration}
+}});
+let p = netidx_admin::tui::pump(q);
+let result = overlay(#layers: &p.layers, text(&[]))
+"#
+        )
+    };
+    let shown = |lines: &[String]| {
+        lines.iter().any(|l| l.contains("Searching the network"))
+            && lines.iter().any(|l| l.contains("Looking for admin servers"))
+    };
+    // timed: the gauge's percentage climbs
+    let percent = |lines: &[String]| {
+        lines.iter().find_map(|l| {
+            let end = l.find('%')?;
+            let digits: Vec<char> =
+                l[..end].chars().rev().take_while(|c| c.is_ascii_digit()).collect();
+            digits.into_iter().rev().collect::<String>().parse::<u32>().ok()
+        })
+    };
+    let mut h =
+        TuiTestHarness::with_register(&prog("duration:2.s"), crate::TEST_REGISTER, 80, 24)
+            .await?;
+    wait_render(&mut h, Duration::from_secs(20), "the timed progress dialog", |lines| {
+        shown(lines) && percent(lines).is_some()
+    })
+    .await?;
+    let first = percent(&h.render_lines()?).unwrap_or(0);
+    wait_render(&mut h, Duration::from_secs(10), "the gauge to fill", |lines| {
+        percent(lines).is_some_and(|p| p > first)
+    })
+    .await?;
+    // open-ended: the accent block changes place
+    let mut h =
+        TuiTestHarness::with_register(&prog("null"), crate::TEST_REGISTER, 80, 24).await?;
+    wait_render(&mut h, Duration::from_secs(20), "the open-ended progress dialog", shown)
+        .await?;
+    let block_at = |h: &mut TuiTestHarness| -> Result<Option<(u16, u16)>> {
+        let buf = h.render()?;
+        Ok((0..buf.area.height)
+            .flat_map(|y| (0..buf.area.width).map(move |x| (x, y)))
+            .find(|&p| buf[p].bg == ACCENT))
+    };
+    let first = block_at(&mut h)?.ok_or_else(|| anyhow::anyhow!("no bouncing block"))?;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while block_at(&mut h)? == Some(first) {
+        let left = deadline.saturating_duration_since(Instant::now());
+        if !h.next_update(left).await? {
+            bail!("the block stayed at {first:?}");
+        }
+    }
     Ok(())
 }
 

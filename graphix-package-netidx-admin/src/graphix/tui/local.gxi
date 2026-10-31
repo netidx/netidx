@@ -3,15 +3,18 @@ use tui::overlay::Layer;
 
 /// The Local tab's surface: its view and status line, the key
 /// handler, its modal layers (the welcome dialog, the status card,
-/// confirmations, toasts, and the local admin panels' own), and
-/// whether anything is installed on this host — a fresh machine has
-/// only the install choices, so the app shows no tab bar.
+/// confirmations, toasts, and the local admin panels' own), whether
+/// anything is installed on this host — a fresh machine has only the
+/// install choices, so the app shows no tab bar — and whether a tool
+/// (the local admin panels, the services list) is open, which hides
+/// the tab bar too.
 type Local = {
   view: tui::Tui,
   handle: fn(e: tui::input_handler::Event) -> [`Stop, `Continue],
   status: tui::Line,
   layers: Array<Layer>,
-  installed: bool
+  installed: bool,
+  in_tool: bool
 };
 
 /// The Local tab: what is installed on this host and what can be done

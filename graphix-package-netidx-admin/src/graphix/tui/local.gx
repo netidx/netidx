@@ -1324,5 +1324,9 @@ let local = |#q: &mut Question| {
     confirm_layers(#on_confirm: |a| { run <- a; null }, &mut confirm),
     toast_layers(&mut toast)
   );
-  { view, handle, status, layers, installed: !fresh }
+  let in_tool = select screen {
+    `Home => false,
+    _ => true
+  };
+  { view, handle, status, layers, installed: !fresh, in_tool }
 }

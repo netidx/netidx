@@ -1,6 +1,7 @@
 use tui::{
   line, span, style,
   block::block,
+  gauge::gauge,
   layout::{child, layout},
   overlay::layer,
   text::text
@@ -76,6 +77,30 @@ let dialog = |#width: &Constraint, #height: &Constraint, content: Tui| -> Layer 
       child(#constraint: `Min(0), shadow)
     ]))
   ]))
+};
+
+let progress_bar = |#width: i64, #tick: i64, ratio: [f64, null]| -> Tui {
+  let trough = `Rgb({ r: 150, g: 150, b: 150 });
+  select ratio {
+    null as _ => {
+      let seg = max(1, width / 4);
+      let travel = max(0, width - seg);
+      let at = select travel {
+        0 => 0,
+        t => tick % (2 * t)
+      };
+      let pos = select at {
+        n if n <= travel => n,
+        n => 2 * travel - n
+      };
+      let cells = |bg, n| span(
+        #style: style(#bg: bg),
+        str::join(#sep: "", array::init(n, |_| " "))
+      );
+      text(&[line([cells(trough, pos), cells(red, seg), cells(trough, width - pos - seg)])])
+    },
+    r => gauge(#gauge_style: &style(#fg: red, #bg: trough), &r)
+  }
 };
 
 let button = |label: string, focused: bool| -> Span span(

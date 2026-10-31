@@ -50,6 +50,10 @@ val panel: fn(
 /// size; any other constraint sizes the panel and its shadow together.
 val dialog: fn(#width: &Constraint, #height: &Constraint, content: Tui) -> Layer;
 
+/// A progress bar `width` cells wide: filled to `ratio`, or, with no
+/// ratio, a block that bounces end to end as `tick` counts.
+val progress_bar: fn(#width: i64, #tick: i64, ratio: [f64, null]) -> Tui;
+
 /// A `<label>` button, in the accent when it has the focus.
 val button: fn(label: string, focused: bool) -> Span;
 
