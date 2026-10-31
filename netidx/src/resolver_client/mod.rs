@@ -1069,6 +1069,26 @@ impl ResolverWrite {
     /// Clear all published paths from this publisher.
     ///
     // CR estokes: this is broken on complex clusters
+    // CR claude for claude: [bug/medium] clear only reaches the default
+    // resolver. ToWrite::Clear has no path, so Router::route_batch puts it in
+    // the None batch, and ResolverWrapInner::send_to_server sends that batch on
+    // default_con alone. The connections in by_server, to resolvers this
+    // writer reached through referrals, never get it. Publisher::shutdown
+    // relies on this clear, so a publisher whose paths live behind a referral
+    // leaves them registered there, dead, until that resolver's writer ttl
+    // drops them. Seen 2026-10-31 with rustc-dist on netidx-admin workstations
+    // (default resolver 127.0.0.1:4654 serving /local, /build referred to the
+    // domain resolver 192.168.1.2:4564): after Publisher::shutdown returned,
+    // `netidx resolver resolve /build/rustc-dist/ryouko/state` still listed
+    // the stopped publisher (`netidx subscriber` on it: "connect failed") for
+    // about five minutes, and paths the old daemon published but the new one
+    // didn't stayed listed beside the new one's. Fix: send Clear on
+    // default_con and on every connection in by_server, and wait for an
+    // Unpublished reply from each, e.g. a broadcast in ResolverWrapInner for
+    // writes with no path. Test: a publisher whose paths are referred to a
+    // second resolver shuts down, and that resolver then lists none of them.
+    // This is what the CR estokes above calls broken on complex clusters.
+    // (resolver-clear-01)
     pub async fn clear(&self) -> Result<()> {
         let mut batch = RAWTOWRITEPOOL.take();
         batch.push(ToWrite::Clear);
