@@ -5,7 +5,7 @@
 
 use anyhow::{Result, bail};
 use graphix_package_tui::testing::{
-    Event, KeyCode, KeyEvent, KeyModifiers, TuiTestHarness,
+    Color, Event, KeyCode, KeyEvent, KeyModifiers, TuiTestHarness,
 };
 use netidx_admin::testing::TestAdminDomain;
 use netidx_value::Value;
@@ -892,6 +892,56 @@ async fn a_server_argument_on_a_fresh_machine_leaves_the_keys_with_the_install()
         lines.iter().any(|l| l.contains("full netidx node"))
     })
     .await?;
+    Ok(())
+}
+
+/// The Debian-installer look on a fresh machine: the backdrop fills the
+/// screen with nothing behind the welcome dialog, which is a gray panel
+/// with a shadow one cell down and to the right, its prompt in the accent.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_welcome_dialog_floats_on_the_backdrop() -> Result<()> {
+    if let Some(r) = netidx_admin::testing::in_own_process().await {
+        return r;
+    }
+    const BACKDROP: Color = Color::Rgb(0, 40, 120);
+    const PANEL: Color = Color::Rgb(199, 199, 199);
+    const SHADOW: Color = Color::Rgb(0, 22, 66);
+    const ACCENT: Color = Color::Rgb(170, 0, 0);
+    let _ = std::fs::remove_file(netidx_admin::paths::user_install_record()?);
+    let prog = "let result = netidx_admin::tui::app::app()";
+    let mut h =
+        TuiTestHarness::with_register(prog, crate::TEST_REGISTER, 120, 40).await?;
+    wait_render(&mut h, Duration::from_secs(60), "the welcome dialog", |lines| {
+        lines.iter().any(|l| l.contains("Welcome to netidx"))
+    })
+    .await?;
+    let prompt = h
+        .render_lines()?
+        .iter()
+        .enumerate()
+        .find_map(|(y, l)| {
+            let x = l.find("Press Enter to continue")?;
+            Some((l[..x].chars().count() as u16, y as u16))
+        })
+        .ok_or_else(|| anyhow::anyhow!("no prompt in the welcome dialog"))?;
+    let buf = h.render()?;
+    let find = |sym: &str| {
+        (0..buf.area.height)
+            .flat_map(|y| (0..buf.area.width).map(move |x| (x, y)))
+            .find(|&p| buf[p].symbol() == sym)
+            .ok_or_else(|| anyhow::anyhow!("no {sym} in the render"))
+    };
+    let (left, top) = find("┌")?;
+    let (right, _) = find("┐")?;
+    let (_, bottom) = find("└")?;
+    let bg = |x: u16, y: u16| buf[(x, y)].bg;
+    assert_eq!(bg(0, 0), BACKDROP, "the screen's corner");
+    assert_eq!(bg(left + 1, top + 1), PANEL, "inside the dialog");
+    assert_eq!(bg(right + 1, top + 1), SHADOW, "the shadow's right edge");
+    assert_eq!(bg(left + 1, bottom + 1), SHADOW, "the shadow's bottom edge");
+    assert_eq!(bg(right + 1, top), BACKDROP, "above the shadow");
+    assert_eq!(bg(left, bottom + 1), BACKDROP, "left of the shadow");
+    assert_eq!(bg(prompt.0, prompt.1), ACCENT, "the prompt");
     Ok(())
 }
 

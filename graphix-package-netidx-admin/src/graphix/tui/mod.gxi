@@ -18,7 +18,7 @@ use super::{
     identicon
 };
 
-use tui::{line, overlay::{Layer, layer}, span, style};
+use tui::{line, overlay::Layer, span};
 
 /// An admin error as one line for the operator.
 val admin_text: fn(a: AdminError) -> string;
@@ -58,13 +58,6 @@ val glyph: fn(fp: Fingerprint) -> Array<tui::Line>;
 /// The code alone, grouped four to a row, bold; centered unless told
 /// otherwise.
 val fingerprint_lines: fn(?#alignment: tui::Alignment, fp: Fingerprint) -> Array<tui::Line>;
-
-/// The dim style of hints, legends and secondary text.
-val hint: tui::Style;
-
-/// The style of the row a cursor rests on; optional, as a list's
-/// `#highlight_style` reference is.
-val selstyle: [null, tui::Style];
 
 /// How many rows there are; none while they are absent.
 val opt_len: fn(o: [null, Array<'a>]) -> i64;

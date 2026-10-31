@@ -1,0 +1,105 @@
+use tui::{
+  line, span, style,
+  block::block,
+  layout::{child, layout},
+  overlay::layer,
+  text::text
+};
+
+// the Debian installer's colors, each an explicit rgb so the look is
+// the same whatever palette the terminal has
+let blue = `Rgb({ r: 0, g: 40, b: 120 });
+let gray = `Rgb({ r: 199, g: 199, b: 199 });
+let black = `Rgb({ r: 0, g: 0, b: 0 });
+let red = `Rgb({ r: 170, g: 0, b: 0 });
+let white = `Rgb({ r: 255, g: 255, b: 255 });
+
+let backdrop = style(#bg: blue, #fg: `Rgb({ r: 205, g: 212, b: 228 }));
+
+let plain = style(#bg: gray, #fg: black);
+
+let heading = style(#bg: gray, #fg: black, #add_modifier: [`Bold]);
+
+let hint = style(#bg: gray, #fg: `Rgb({ r: 88, g: 88, b: 88 }));
+
+let selected = style(#bg: red, #fg: white, #add_modifier: [`Bold]);
+
+let marker = "▸ ";
+
+let field = style(#bg: white, #fg: black);
+
+let error = style(#bg: gray, #fg: red);
+
+let alert = style(#bg: gray, #fg: red, #add_modifier: [`Bold]);
+
+let ok = style(#bg: gray, #fg: `Rgb({ r: 0, g: 120, b: 0 }));
+
+let warn = style(#bg: gray, #fg: `Rgb({ r: 176, g: 96, b: 0 }));
+
+let hash = style(#bg: gray, #fg: `Rgb({ r: 0, g: 0, b: 150 }), #add_modifier: [`Bold]);
+
+let glyph = style(#bg: black);
+
+let panel = |
+  #title: string,
+  #title_style: Style = heading,
+  #legend: [string, null] = null,
+  content: Tui
+| -> Tui block(
+  #border: &`All,
+  #style: &plain,
+  #title: &line(#style: title_style, " [title] "),
+  #title_bottom: &opt::map(legend, |l| line(#style: hint, l)),
+  &content
+);
+
+let dialog = |#width: &Constraint, #height: &Constraint, content: Tui| -> Layer {
+  // a fixed size is the panel's, so the layer is one cell bigger to
+  // hold the shadow
+  let with_shadow = |c: Constraint| -> Constraint select c {
+    `Length(n) => `Length(n + 1),
+    c => c
+  };
+  // the two cells the shadow's offset uncovers show the backdrop
+  let uncovered = text(#style: &backdrop, &[]);
+  let shadow = text(#style: &style(#bg: `Rgb({ r: 0, g: 22, b: 66 })), &[]);
+  layer(#width: &with_shadow(*width), #height: &with_shadow(*height), layout(#direction: &`Vertical, &[
+    child(#constraint: `Min(1), layout(#direction: &`Horizontal, &[
+      child(#constraint: `Min(1), content),
+      child(#constraint: `Length(1), layout(#direction: &`Vertical, &[
+        child(#constraint: `Length(1), uncovered),
+        child(#constraint: `Min(0), shadow)
+      ]))
+    ])),
+    child(#constraint: `Length(1), layout(#direction: &`Horizontal, &[
+      child(#constraint: `Length(1), uncovered),
+      child(#constraint: `Min(0), shadow)
+    ]))
+  ]))
+};
+
+let button = |label: string, focused: bool| -> Span span(
+  #style: select focused {
+    true => selected,
+    false => plain
+  },
+  " <[label]> "
+);
+
+let form = |
+  #title: string,
+  #help: [string, null] = null,
+  #on_submit: fn(values: Array<string>) -> null,
+  #on_cancel: [fn(e: Any) -> null, null] = null,
+  fields: Array<Field>
+| -> Form tui::form::form(
+  #title: " [title] ",
+  #help: help,
+  #on_submit: on_submit,
+  #on_cancel: on_cancel,
+  #title_style: heading,
+  #hint_style: hint,
+  #field_style: field,
+  #style: plain,
+  fields
+);

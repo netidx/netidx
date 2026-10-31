@@ -11,17 +11,16 @@ use package::{
   }
 };
 use super::{
-  Confirm, Toast, admin_text, conduct, confirm_layers, hint, identity_lines, opt_len,
-  panels, selected, selstyle, services, toast_layers
+  Confirm, Toast, admin_text, conduct, confirm_layers, identity_lines, opt_len, panels,
+  selected, services, toast_layers,
+  theme::{self, hint}
 };
 use tui::{
-  line, span, style,
-  block::block,
-  form::form,
+  line, span,
   input_handler::{Event, KeyEvent, input_handler, on_press},
   layout::{child, layout},
   list::list,
-  overlay::{Layer, layer},
+  overlay::Layer,
   paragraph::paragraph
 };
 
@@ -169,15 +168,15 @@ let ca_question = |#on_answer: fn(remove_ca: bool) -> null, ask: Any| -> Array<L
   };
   select up {
     false => [],
-    true => [layer(#width: &`Percentage(70), #height: &`Percentage(40),
-      input_handler(#handle: &handle, &block(
-        #border: &`All,
-        #title: &line("This install owns a CA"),
-        #title_bottom: &line(#style: hint, " ↑/↓ choose · Enter confirm · Esc cancel "),
-        &layout(#direction: &`Vertical, &[
+    true => [theme::dialog(#width: &`Percentage(70), #height: &`Percentage(40),
+      input_handler(#handle: &handle, &theme::panel(
+        #title: "This install owns a CA",
+        #title_style: theme::alert,
+        #legend: " ↑/↓ choose · Enter confirm · Esc cancel ",
+        layout(#direction: &`Vertical, &[
           child(#constraint: `Length(2), paragraph(#style: &hint,
             &"Removing the CA directory destroys the admin domain's trust root: every enrolled node's certificate becomes unverifiable and unrenewable. There is no undo.")),
-          child(#constraint: `Min(2), list(#highlight_style: &selstyle, #selected: &sel, &[
+          child(#constraint: `Min(2), list(#highlight_style: &theme::selected, #selected: &sel, &[
             line("Keep the CA directory"),
             line("DESTROY the CA — irreversible")
           ]))
@@ -240,7 +239,7 @@ let parent_picker = |
   let resolvers: [Array<string>, null] = null;
   let fields = never();
   let filling = false;
-  let address_form = form(
+  let address_form = theme::form(
     #title: "Add a parent",
     #help: "The parent's admin server is a host or host:port; the subtree is the path this resolver will own under it.",
     #on_submit: |v| {
@@ -304,17 +303,16 @@ let parent_picker = |
             line("[mark] [c.resolver]  [c.base]  via [c.admin]")
           }), manual)
         };
-        [layer(#width: &`Percentage(70), #height: &`Percentage(50),
-          input_handler(#handle: &handle, &block(
-            #border: &`All,
-            #title: &line("Pick a parent"),
-            #title_bottom: &line(#style: hint, " ↑/↓ move · Space tick a cluster, then untick members · Enter choose · Esc cancel "),
-            &list(#highlight_style: &selstyle, #selected: &sel, &items))))]
+        [theme::dialog(#width: &`Percentage(70), #height: &`Percentage(50),
+          input_handler(#handle: &handle, &theme::panel(
+            #title: "Pick a parent",
+            #legend: " ↑/↓ move · Space tick a cluster, then untick members · Enter choose · Esc cancel ",
+            list(#highlight_style: &theme::selected, #selected: &sel, &items))))]
       }
     },
     select filling {
       false => [],
-      true => [layer(#width: &`Percentage(70), #height: &`Percentage(40),
+      true => [theme::dialog(#width: &`Percentage(70), #height: &`Percentage(40),
         input_handler(#handle: &address_form.handle, &address_form.view))]
     }
   )
@@ -323,8 +321,6 @@ let parent_picker = |
 // the status card: everything known about one install, up from each
 // `open` until the next key
 let status_card = |row: [InstallRow, null], open: Any| -> Array<Layer> {
-  let good = style(#fg: `Green);
-  let warn = style(#fg: `Yellow);
   let show = false;
   show <- open ~ true;
   let kv = |label, value|
@@ -348,38 +344,38 @@ let status_card = |row: [InstallRow, null], open: Any| -> Array<Layer> {
         _ => select r.probe {
           `None => [],
           `Probing => [kvs("CA credentials", "checking…", hint)],
-          `Failed(e) => [kvs("CA credentials", e, warn)],
+          `Failed(e) => [kvs("CA credentials", e, theme::warn)],
           `Ready(c) => array::concat(
             [select (c.auto_approve_present, c.auto_approve_wired) {
-              (true, true) => kvs("Auto-approve", "active", good),
-              (true, false) => kvs("Auto-approve", "present (not wired)", warn),
+              (true, true) => kvs("Auto-approve", "active", theme::ok),
+              (true, false) => kvs("Auto-approve", "present (not wired)", theme::warn),
               (false, _) => kvs("Auto-approve", "not set up", hint)
             }],
             [select c.recovery_present {
-              true => kvs("Recovery slot", "set", good),
-              false => kvs("Recovery slot", "MISSING", warn)
+              true => kvs("Recovery slot", "set", theme::ok),
+              false => kvs("Recovery slot", "MISSING", theme::warn)
             }],
             select (c.external_signed, c.external_installed) {
               (false, _) => [],
-              (true, true) => [kvs("External CA", "installed", good)],
-              (true, false) => [kvs("External CA", "awaiting signature", warn)]
+              (true, true) => [kvs("External CA", "installed", theme::ok)],
+              (true, false) => [kvs("External CA", "awaiting signature", theme::warn)]
             }
           )
         }
       };
       let service = select d.service {
-        `Active => kvs("OS service", "active (running)", good),
-        `Inactive => kvs("OS service", "installed, not running", warn),
+        `Active => kvs("OS service", "active (running)", theme::ok),
+        `Inactive => kvs("OS service", "installed, not running", theme::warn),
         `NotInstalled => kvs("OS service", "not installed", hint)
       };
       let sync_lines = select r.sync {
         `NotApplicable => [],
         `Checking => [kvs("Admin domain sync", "checking…", hint)],
-        `InSync => [kvs("Admin domain sync", "✓ in sync", good)],
+        `InSync => [kvs("Admin domain sync", "✓ in sync", theme::ok)],
         `Failed(e) => [kvs("Admin domain sync", "could not check ([e])", hint)],
         `OutOfSync(cs) => array::concat(
-          [kvs("Admin domain sync", "⚠ [array::len(cs)] pending change(s) — press U to apply", warn)],
-          array::map(cs, |c| line([span("                   "), span(#style: warn, change_text(c))]))
+          [kvs("Admin domain sync", "⚠ [array::len(cs)] pending change(s) — press U to apply", theme::warn)],
+          array::map(cs, |c| line([span("                   "), span(#style: theme::warn, change_text(c))]))
         )
       };
       array::concat(
@@ -424,12 +420,11 @@ let status_card = |row: [InstallRow, null], open: Any| -> Array<Layer> {
           child(#constraint: `Length(24), paragraph(#alignment: &`Center, #trim: &false, &g))
         ])
       };
-      [layer(#width: &`Percentage(85), #height: &`Percentage(75),
-        input_handler(#handle: &handle, &block(
-          #border: &`All,
-          #title: &line(title),
-          #title_bottom: &line(#style: hint, " any key to close "),
-          &content)))]
+      [theme::dialog(#width: &`Percentage(85), #height: &`Percentage(75),
+        input_handler(#handle: &handle, &theme::panel(
+          #title: title,
+          #legend: " any key to close ",
+          content)))]
     }
   }
 };
@@ -442,16 +437,15 @@ let welcome = |fresh: bool| -> Array<Layer> {
     e ~ `Stop
   };
   select (fresh, seen) {
-    (true, false) => [layer(#width: &`Length(64), #height: &`Length(10),
-      input_handler(#handle: &handle, &block(
-        #border: &`All,
-        #title: &line("Welcome to netidx"),
-        &paragraph(#trim: &true, &[
-          line(#style: style(#add_modifier: [`Bold]), "netidx isn't installed on this machine."),
+    (true, false) => [theme::dialog(#width: &`Length(64), #height: &`Length(10),
+      input_handler(#handle: &handle, &theme::panel(
+        #title: "Welcome to netidx",
+        paragraph(#trim: &true, &[
+          line(#style: theme::heading, "netidx isn't installed on this machine."),
           line(""),
           line("Choose a role to install — a Workstation for a laptop or desktop, a Resolver to run an admin domain's directory, or a Publisher — or choose Restore from Backup to recover any managed installation."),
           line(""),
-          line(#style: selstyle$, " Press Enter to continue ")
+          line(#style: theme::selected, " Press Enter to continue ")
         ]))))],
     _ => []
   }
@@ -1252,18 +1246,18 @@ let local = |#q: &mut Question| {
     let choice = selected(fresh_choices, role_sel)$;
     let keys = select choice.act {
       `Restore => " Enter restore ",
-      _ => " Enter install · p preview "
+      _ => " Enter · p preview "
     };
     layout(#direction: &`Horizontal, &[
-      child(#constraint: `Length(24), block(
-        #border: &`All,
-        #title: &line("Set Up This Machine"),
-        #title_bottom: &line(#style: hint, keys),
-        &list(#highlight_style: &selstyle, #selected: &role_sel, &titles))),
-      child(#constraint: `Min(0), block(
-        #border: &`All,
-        #title: &line(choice.title),
-        &paragraph(&choice.blurb)))
+      child(#constraint: `Length(24), theme::panel(
+        #title: "Set Up This Machine",
+        #legend: keys,
+        list(
+          #highlight_style: &theme::selected,
+          #highlight_symbol: &theme::marker,
+          #selected: &role_sel,
+          &titles))),
+      child(#constraint: `Min(0), theme::panel(#title: choice.title, paragraph(&choice.blurb)))
     ])
   };
   let home_view = {
@@ -1281,15 +1275,16 @@ let local = |#q: &mut Question| {
       i => [line(i.desc)]
     };
     layout(#direction: &`Horizontal, &[
-      child(#constraint: `Min(0), block(
-        #border: &`All,
-        #title: &line(title),
-        #title_bottom: &line(#style: hint, keys),
-        &list(#highlight_style: &selstyle, #selected: &menu_sel, &labels))),
-      child(#constraint: `Length(42), block(
-        #border: &`All,
-        #title: &line("Description"),
-        &paragraph(#trim: &false, &desc_lines)))
+      child(#constraint: `Min(0), theme::panel(
+        #title: title,
+        #legend: keys,
+        list(
+          #highlight_style: &theme::selected,
+          #highlight_symbol: &theme::marker,
+          #selected: &menu_sel,
+          &labels))),
+      child(#constraint: `Length(42),
+        theme::panel(#title: "Description", paragraph(#trim: &false, &desc_lines)))
     ])
   };
   let handle = |e: Event| on_press(e, |k| select k ~ screen {
@@ -1312,8 +1307,8 @@ let local = |#q: &mut Question| {
     `Admin => pan.status,
     `Services => svc.status,
     `Home => select fresh {
-      true => line(#style: hint, " ↑/↓ choose · Enter install "),
-      false => line(#style: hint, " Enter run · U update · r renew · u uninstall · R re-detect ")
+      true => line(" ↑/↓ choose · Enter install "),
+      false => line(" Enter run · U update · r renew · u uninstall · R re-detect ")
     }
   };
   let layers = array::concat(

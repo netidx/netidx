@@ -1,7 +1,8 @@
 use package::ceremony::Question;
-use super::{hint, local, pump, remote, selstyle};
+use super::{local, pump, remote, theme};
 use tui::{
   line,
+  block::block,
   input_handler::{Event, input_handler, on_press},
   layout::{child, layout},
   overlay::overlay,
@@ -50,18 +51,28 @@ let app = |#server: string = ""| -> tui::Tui {
   };
   let body = select loc.installed {
     false => loc.view,
-    true => tabs(
-      #selected: &selected,
-      #highlight_style: &selstyle,
-      &[(line("Local"), loc.view), (line("Admin Domain"), rem.view)]
-    )
+    true => {
+      // the bar alone: each tab's view is laid out below it
+      let bar = tabs(
+        #selected: &selected,
+        #highlight_style: &theme::selected,
+        &[(line("Local"), text(&[])), (line("Admin Domain"), text(&[]))]
+      );
+      layout(#direction: &`Vertical, &[
+        child(#constraint: `Length(3), theme::panel(#title: "netidx admin", bar)),
+        child(#constraint: `Min(1), select shown {
+          `Local => loc.view,
+          `Remote => rem.view
+        })
+      ])
+    }
   };
   let status = select p.progress {
     null as _ => select shown {
       `Local => loc.status,
       `Remote => rem.status
     },
-    pr => line(#style: hint, " working… [pr.message] ")
+    pr => line(" working… [pr.message] ")
   };
   let layers = array::concat(
     select shown {
@@ -70,11 +81,16 @@ let app = |#server: string = ""| -> tui::Tui {
     },
     p.layers
   );
-  overlay(#layers: &layers,
+  // a dialog stands alone on the backdrop, nothing behind it
+  let screen = select array::len(layers) {
+    0 => body,
+    _ => text(&[])
+  };
+  block(#style: &theme::backdrop, &overlay(#layers: &layers,
     input_handler(#handle: &tab_handle,
       &input_handler(#handle: &global,
         &layout(#direction: &`Vertical, &[
-          child(#constraint: `Min(1), body),
+          child(#constraint: `Min(1), screen),
           child(#constraint: `Length(1), text(&[status]))
-        ]))))
+        ])))))
 }

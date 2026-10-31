@@ -1,8 +1,7 @@
 use package::discovery::{discover_domains, identity_at, local_domain};
-use super::{admin_text, hint, identity_lines, selected, selstyle};
+use super::{admin_text, identity_lines, selected, theme::{self, hint}};
 use tui::{
-  line, span, style,
-  block::block,
+  line, span,
   input_handler::{Event, on_press},
   layout::{child, layout},
   list::list,
@@ -132,7 +131,6 @@ let landing = |
   #on_connect: fn(c: Connect) -> null,
   #on_manual: fn(e: Any) -> null
 | -> Landing {
-  let bold = style(#add_modifier: [`Bold]);
   // ── the bookmarks ──
   let notice: [string, null] = null;
   let edit = never();
@@ -196,21 +194,24 @@ let landing = |
   };
   let notice_lines = select notice {
     null as _ => [],
-    m => [line(#style: style(#fg: `Red), m)]
+    m => [line(#style: theme::error, m)]
   };
   let toast_lines = select toast {
     null as _ => [],
-    t => array::concat([line(#style: bold, t.title)], array::map(t.lines, |l| line(l)))
+    t => array::concat([line(#style: theme::heading, t.title)], array::map(t.lines, |l| line(l)))
   };
-  let legend = line(#style: hint, " Enter connect · d discover · c connect direct · r refresh ");
-  let view = block(
-    #border: &`All,
-    #title: &line("Admin Domains"),
-    #title_bottom: &legend,
-    &layout(#direction: &`Horizontal, &[
+  let legend = " Enter connect · d discover · c connect direct · r refresh ";
+  let view = theme::panel(
+    #title: "Admin Domains",
+    #legend: legend,
+    layout(#direction: &`Horizontal, &[
       child(#constraint: `Min(30), layout(#direction: &`Vertical, &[
         child(#constraint: `Length(array::len(empty)), paragraph(#trim: &false, &empty)),
-        child(#constraint: `Min(1), list(#highlight_style: &selstyle, #selected: &sel, &items)),
+        child(#constraint: `Min(1), list(
+          #highlight_style: &theme::selected,
+          #highlight_symbol: &theme::marker,
+          #selected: &sel,
+          &items)),
         child(#constraint: `Length(array::len(toast_lines)), paragraph(#trim: &false, &toast_lines)),
         child(#constraint: `Length(array::len(notice_lines)), text(&notice_lines))
       ])),
@@ -220,6 +221,6 @@ let landing = |
   {
     view,
     handle,
-    status: legend
+    status: line(legend)
   }
 }

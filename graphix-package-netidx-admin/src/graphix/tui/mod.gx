@@ -1,6 +1,8 @@
+mod theme;
+
+use theme::hint;
 use tui::{
   line_edit,
-  block::block,
   input_handler::{Event, KeyEvent, input_handler, on_press},
   layout::{child, layout},
   list::list,
@@ -10,15 +12,14 @@ use tui::{
 
 let glyph = |fp: Fingerprint| -> Array<tui::Line> select identicon(fp)$ {
   { cells, color } => {
-    let on = style(
-      #fg: `Rgb({
+    let on = {
+      theme::glyph with fg: `Rgb({
         r: cast<i64>(color.r)$,
         g: cast<i64>(color.g)$,
         b: cast<i64>(color.b)$
-      }),
-      #bg: `Black
-    );
-    let off = style(#bg: `Black);
+      })
+    };
+    let off = theme::glyph;
     let border = line(#style: off, #alignment: `Center, "                    ");
     let rows = array::map(cells, |row| line(#alignment: `Center, array::concat(
       [span(#style: off, "  ")],
@@ -42,7 +43,7 @@ let fingerprint_lines = |#alignment: tui::Alignment = `Center, fp: Fingerprint| 
     }
   });
   array::map(chunks, |c| line(
-    #style: style(#add_modifier: [`Bold]),
+    #style: theme::hash,
     #alignment: alignment,
     str::join(#sep: " ", c)
   ))
@@ -68,10 +69,6 @@ let conduct = |q: &mut Question, c: Result<Ceremony<'r>, AdminError>| -> Result<
 
 let identity_lines = |fp: Fingerprint| array::concat(glyph(fp), fingerprint_lines(fp));
 
-let hint = style(#fg: `DarkGray);
-
-let selstyle: [tui::Style, null] = style(#add_modifier: [`Reversed]);
-
 let opt_len = |o: [Array<'a>, null]| select o {
   null as _ => 0,
   a => array::len(a)
@@ -83,6 +80,44 @@ let selected = |rows: [Array<'a>, null], i: i64| -> ['a, null] select rows {
   [] => null,
   rows => rows[min(i, array::len(rows) - 1)]$
 };
+
+// the rows `text` takes in a paragraph `width` columns wide: each line
+// wraps at word boundaries, and a word wider than a row breaks across rows
+let wrapped_rows = |width: i64, text: string| -> i64 {
+  let line_rows = |l: string| -> i64 {
+    let words = array::filter(str::split(#pat: " ", l), |w| w != "");
+    let (rows, _) = array::fold(words, (1, 0), |(rows, col), w| {
+      let n = str::char_len(w);
+      select col {
+        c if c > 0 && c + 1 + n <= width => (rows, c + 1 + n),
+        c => {
+          let start = select c {
+            0 => rows,
+            _ => rows + 1
+          };
+          (start + (n - 1) / width, (n - 1) % width + 1)
+        }
+      }
+    });
+    rows
+  };
+  array::fold(str::split(#pat: "\n", text), 0, |n, l| n + line_rows(l))
+};
+
+let lines_rows = |width: i64, lines: [string, Array<tui::Line>]| -> i64 select lines {
+  string as s => wrapped_rows(width, s),
+  ls => array::fold(ls, 0, |n, l: tui::Line| n + wrapped_rows(width, select l.spans {
+    string as s => s,
+    spans => str::join(#sep: "", array::map(spans, |sp: tui::Span| sp.content))
+  }))
+};
+
+// a dialog `cap` columns wide, or as wide as the terminal leaves room for
+let dialog_width = |cap: i64| -> i64 min(cap, tui::size.width - 4);
+
+// a dialog sized to `rows` of content inside its borders
+let fitted = |width: i64, rows: i64, content: tui::Tui| -> Layer
+  theme::dialog(#width: &`Length(width), #height: &`Length(rows + 2), content);
 
 let toast_layers = |t: &mut [Toast, null]| -> Array<Layer> {
   let handle = |e: Event| {
@@ -96,16 +131,16 @@ let toast_layers = |t: &mut [Toast, null]| -> Array<Layer> {
     null as _ => [],
     tt => {
       let body = str::join(#sep: "\n", tt.lines);
-      let tstyle = select tt.error {
-        true => style(#fg: `Red),
-        false => style(#fg: `Green)
-      };
-      [layer(#width: &`Percentage(60), #height: &`Percentage(50),
-        input_handler(#handle: &handle, &block(
-          #border: &`All,
-          #title: &line(#style: tstyle, tt.title),
-          #title_bottom: &line(#style: hint, " Enter dismiss "),
-          &paragraph(#trim: &false, &body))))]
+      let width = dialog_width(72);
+      [fitted(width, wrapped_rows(width - 2, body),
+        input_handler(#handle: &handle, &theme::panel(
+          #title: tt.title,
+          #title_style: select tt.error {
+            true => theme::alert,
+            false => theme::heading
+          },
+          #legend: " Enter dismiss ",
+          paragraph(#trim: &false, &body))))]
     }
   }
 };
@@ -127,12 +162,15 @@ let confirm_layers = |#on_confirm: fn(a: 'a) -> null, c: &mut [Confirm<'a>, null
   };
   select *c {
     null as _ => [],
-    cc => [layer(#width: &`Percentage(60), #height: &`Percentage(50),
-      input_handler(#handle: &handle, &block(
-        #border: &`All,
-        #title: &line("Confirm"),
-        #title_bottom: &line(#style: hint, " y confirm · n cancel "),
-        &paragraph(#trim: &false, &cc.message))))]
+    cc => {
+      let width = dialog_width(70);
+      [fitted(width, lines_rows(width - 2, cc.message),
+        input_handler(#handle: &handle, &theme::panel(
+          #title: "Confirm",
+          #title_style: theme::alert,
+          #legend: " y confirm · n cancel ",
+          paragraph(#trim: &false, &cc.message))))]
+    }
   }
 };
 
@@ -309,46 +347,49 @@ let pump = |q: Question| -> Pump {
     })
   };
   // ── the modal views ──
+  let width = dialog_width(64);
+  let help_rows = |field: FieldInfo| wrapped_rows(width - 2, field.help);
+  // the field's help, then a blank row before what answers it
+  let helped = |field: FieldInfo, below: Array<tui::layout::Child>| layout(
+    #direction: &`Vertical,
+    &array::concat(
+      [
+        child(#constraint: `Length(help_rows(field)), paragraph(#style: &hint, &field.help)),
+        child(#constraint: `Length(1), text(&[]))
+      ],
+      below
+    )
+  );
   let err_lines = select err {
     null as _ => [],
-    m => [line(#style: style(#fg: `Red), m)]
+    m => [line(#style: theme::error, m)]
   };
-  let text_modal = |field: FieldInfo, mask| block(
-    #border: &`All,
-    #title: &line(field.label),
-    #title_bottom: &line(#style: hint, " Enter submit · Esc cancel "),
-    &layout(#direction: &`Vertical, &[
-      child(#constraint: `Min(1), paragraph(#style: &hint, &field.help)),
-      child(#constraint: `Length(1), text(&[line_edit::view(#mask: mask, &ed)])),
+  let text_modal = |field: FieldInfo, mask| theme::panel(
+    #title: field.label,
+    #legend: " Enter submit · Esc cancel ",
+    helped(field, [
+      child(#constraint: `Length(1),
+        text(#style: &theme::field, &[line_edit::view(#mask: mask, &ed)])),
       child(#constraint: `Length(1), text(&err_lines))
     ])
   );
-  let choice_modal = |field: FieldInfo, choices| block(
-    #border: &`All,
-    #title: &line(field.label),
-    #title_bottom: &line(#style: hint, " ↑/↓ move · Enter select · Esc cancel "),
-    &layout(#direction: &`Vertical, &[
-      child(#constraint: `Min(1), paragraph(#style: &hint, &field.help)),
+  let choice_modal = |field: FieldInfo, choices| theme::panel(
+    #title: field.label,
+    #legend: " ↑/↓ move · Enter select · Esc cancel ",
+    helped(field, [
       child(#constraint: `Length(array::len(choices)),
-        list(#highlight_style: &selstyle, #selected: &sel,
+        list(#highlight_style: &theme::selected, #selected: &sel,
           &array::map(choices, |c| line(c))))
     ])
   );
-  let confirm_modal = |field: FieldInfo| {
-    let buttons = select yes {
-      true => [line("\[Yes\]   No ")],
-      false => [line(" Yes   \[No\]")]
-    };
-    block(
-      #border: &`All,
-      #title: &line(field.label),
-      #title_bottom: &line(#style: hint, " ←/→ toggle · y/n · Enter confirm · Esc cancel "),
-      &layout(#direction: &`Vertical, &[
-        child(#constraint: `Min(1), paragraph(#style: &hint, &field.help)),
-        child(#constraint: `Length(1), text(#alignment: &`Center, &buttons))
-      ])
-    )
-  };
+  let confirm_modal = |field: FieldInfo| theme::panel(
+    #title: field.label,
+    #legend: " ←/→ toggle · y/n · Enter confirm · Esc cancel ",
+    helped(field, [
+      child(#constraint: `Length(1), text(#alignment: &`Center,
+        &[line([theme::button("Yes", yes), span("   "), theme::button("No", !yes)])]))
+    ])
+  );
   let domain_modal = |domains: Array<AdminDomain>| {
     let items = array::push(
       array::map(domains, |d| line(d.domain)),
@@ -363,39 +404,35 @@ let pump = |q: Question| -> Pump {
       s if s == array::len(domains) => [line(#style: hint, "Browse the network again.")],
       _ => [line(#style: hint, "Type an admin-server address (host:port).")]
     };
-    block(
-      #border: &`All,
-      #title: &line("Select an admin domain"),
-      #title_bottom: &line(#style: hint, " ↑/↓ move · Enter select · Esc cancel "),
-      &layout(#direction: &`Horizontal, &[
+    theme::panel(
+      #title: "Select an admin domain",
+      #legend: " ↑/↓ move · Enter select · Esc cancel ",
+      layout(#direction: &`Horizontal, &[
         child(#constraint: `Min(20),
-          list(#highlight_style: &selstyle, #selected: &sel, &items)),
+          list(#highlight_style: &theme::selected, #selected: &sel, &items)),
         child(#constraint: `Length(26), paragraph(#trim: &false, &side))
       ])
     )
   };
-  let announce_modal = |title, body| block(
-    #border: &`All,
-    #title: &line(title),
-    #title_bottom: &line(#style: hint, " Enter continue · Esc cancel "),
-    &paragraph(&body)
+  let announce_modal = |title, body| theme::panel(
+    #title: title,
+    #legend: " Enter continue · Esc cancel ",
+    paragraph(&body)
   );
-  let announce_identity_modal = |body, fp| block(
-    #border: &`All,
-    #title: &line("Verify this identity"),
-    #title_bottom: &line(#style: hint, " Enter continue · Esc cancel "),
-    &layout(#direction: &`Vertical, &[
+  let announce_identity_modal = |body, fp| theme::panel(
+    #title: "Verify this identity",
+    #legend: " Enter continue · Esc cancel ",
+    layout(#direction: &`Vertical, &[
       child(#constraint: `Min(2), paragraph(#style: &hint, &body)),
       child(#constraint: `Length(13),
         paragraph(#alignment: &`Center, #trim: &false,
           &identity_lines(fp)))
     ])
   );
-  let confirm_identity_modal = |identity: CaIdentity| block(
-    #border: &`All,
-    #title: &line("Confirm the CA's identity"),
-    #title_bottom: &line(#style: hint, " a accept · r reject "),
-    &layout(#direction: &`Vertical, &[
+  let confirm_identity_modal = |identity: CaIdentity| theme::panel(
+    #title: "Confirm the CA's identity",
+    #legend: " a accept · r reject ",
+    layout(#direction: &`Vertical, &[
       child(#constraint: `Length(2), paragraph(#style: &hint,
         &"Verify OUT OF BAND that this is [identity.domain]'s CA glyph and fingerprint.")),
       child(#constraint: `Min(13),
@@ -408,37 +445,47 @@ let pump = |q: Question| -> Pump {
       `CaRecovery => "CA recovery password — shown ONCE",
       `AdminPassword(name) => "One-time password for [name]"
     };
-    block(
-      #border: &`All,
-      #title: &line(title),
-      #title_bottom: &line(#style: hint, " Enter acknowledge "),
-      &layout(#direction: &`Vertical, &[
+    theme::panel(
+      #title: title,
+      #legend: " Enter acknowledge ",
+      layout(#direction: &`Vertical, &[
         child(#constraint: `Length(2), paragraph(#style: &hint,
           &"Record this now; it is never shown again.")),
         child(#constraint: `Length(1), text(#alignment: &`Center,
-          &[line(#style: style(#add_modifier: [`Bold]), password)]))
+          &[line(#style: theme::heading, password)]))
       ])
     )
   };
+  let keyed = |view: tui::Tui| input_handler(#handle: &handle, &view);
+  // a dialog sized to its text, or, carrying a glyph, to the screen
+  let roomy = |view: tui::Tui| theme::dialog(
+    #width: &`Percentage(70),
+    #height: &`Percentage(70),
+    keyed(view)
+  );
   let modal = select active {
     null as _ => null,
-    `Text({ field, .. }) => text_modal(field, null),
-    `Secret({ field, .. }) => text_modal(field, "•"),
-    `Choice({ field, choices, .. }) => choice_modal(field, choices),
-    `Confirm({ field, .. }) => confirm_modal(field),
-    `SelectAdminDomain({ domains, .. }) => domain_modal(domains),
-    `Announce({ title, body, .. }) => announce_modal(title, body),
-    `AnnounceIdentity({ body, fp, .. }) => announce_identity_modal(body, fp),
-    `ConfirmIdentity({ identity, .. }) => confirm_identity_modal(identity),
-    `OneTimeSecret({ kind, password, .. }) => secret_modal(kind, password)
+    `Text({ field, .. }) => fitted(width, help_rows(field) + 3, keyed(text_modal(field, null))),
+    `Secret({ field, .. }) => fitted(width, help_rows(field) + 3, keyed(text_modal(field, "•"))),
+    `Choice({ field, choices, .. }) => fitted(
+      width,
+      help_rows(field) + 1 + array::len(choices),
+      keyed(choice_modal(field, choices))
+    ),
+    `Confirm({ field, .. }) => fitted(width, help_rows(field) + 2, keyed(confirm_modal(field))),
+    `SelectAdminDomain({ domains, .. }) => roomy(domain_modal(domains)),
+    `Announce({ title, body, .. }) =>
+      fitted(width, wrapped_rows(width - 2, body), keyed(announce_modal(title, body))),
+    `AnnounceIdentity({ body, fp, .. }) => roomy(announce_identity_modal(body, fp)),
+    `ConfirmIdentity({ identity, .. }) => roomy(confirm_identity_modal(identity)),
+    `OneTimeSecret({ kind, password, .. }) => fitted(width, 3, keyed(secret_modal(kind, password)))
   };
   // the standing code, while nothing is asked: the operator reads it to
   // the approving admin, who sees the same one in their confirmation
-  let code_box = |c: { purpose: string, fp: Fingerprint }| block(
-    #border: &`All,
-    #title: &line("Verification code — [c.purpose]"),
-    #title_bottom: &line(#style: hint, " waiting for approval "),
-    &layout(#direction: &`Vertical, &[
+  let code_box = |c: { purpose: string, fp: Fingerprint }| theme::panel(
+    #title: "Verification code — [c.purpose]",
+    #legend: " waiting for approval ",
+    layout(#direction: &`Vertical, &[
       child(#constraint: `Length(2), paragraph(#style: &hint,
         &"Read this code to the approving admin out of band; they must see the same one before they approve.")),
       child(#constraint: `Length(13),
@@ -448,11 +495,9 @@ let pump = |q: Question| -> Pump {
   let layers = select modal {
     null as _ => select code {
       null as _ => [],
-      c => [layer(#width: &`Percentage(70), #height: &`Length(17),
-        input_handler(#handle: &handle, &code_box(c)))]
+      c => [theme::dialog(#width: &`Percentage(70), #height: &`Length(17), keyed(code_box(c)))]
     },
-    w => [layer(#width: &`Percentage(70), #height: &`Percentage(70),
-      input_handler(#handle: &handle, &w))]
+    l => [l]
   };
   {
     layers,

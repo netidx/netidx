@@ -3,16 +3,14 @@ use package::units::{
   UnitTrigger
 };
 use super::{
-  Confirm, Toast, admin_text, confirm_layers, hint, opt_len, selstyle, toast_layers
+  Confirm, Toast, admin_text, confirm_layers, opt_len, toast_layers,
+  theme::{self, hint}
 };
 use tui::{
-  line, span, style,
-  block::block,
-  form::form,
+  line, span,
   input_handler::{Event, input_handler, on_press},
   layout::{child, layout},
   list::list,
-  overlay::layer,
   paragraph::paragraph
 };
 
@@ -24,10 +22,6 @@ type Act = [
 
 type EnvVar = { name: string, value: string };
 
-let good = style(#fg: `Green);
-let warn = style(#fg: `Yellow);
-let bad = style(#fg: `Red);
-
 let fmt_op = |op: ServiceOp| select op {
   `Start => "Started",
   `Stop => "Stopped",
@@ -38,12 +32,12 @@ let fmt_op = |op: ServiceOp| select op {
 // a unit's state as a word, and how to color it: the supervisor's
 // report when it has one, else what the mismatch means
 let state_word = |s: [UnitState, null], defined| select s {
-  `Running(_) => ("running", good),
-  `Stopped => ("stopped", warn),
-  `Died => ("died", bad),
+  `Running(_) => ("running", theme::ok),
+  `Stopped => ("stopped", theme::warn),
+  `Died => ("died", theme::error),
   `NotStarted => ("not started", hint),
   null as _ => select defined {
-    true => ("not loaded (press r)", warn),
+    true => ("not loaded (press r)", theme::warn),
     false => ("removed (press r)", hint)
   }
 };
@@ -232,7 +226,7 @@ let services = |#units_dir: string, #on_close: fn(e: Any) -> null, open: Any| ->
     toast <- { title: "Bad unit", lines: [m], error: true };
     null
   };
-  let unit_form = form(
+  let unit_form = theme::form(
     #title: select editing {
       `Create(_) => "New unit",
       `Edit(name, _) => "Edit [name]",
@@ -396,25 +390,22 @@ let services = |#units_dir: string, #on_close: fn(e: Any) -> null, open: Any| ->
     }
   };
   let view = layout(#direction: &`Horizontal, &[
-    child(#constraint: `Length(28), block(
-      #border: &`All,
-      #title: &line("Services"),
-      &list(#highlight_style: &selstyle, #selected: &sel, &names))),
+    child(#constraint: `Length(28), theme::panel(#title: "Services", list(
+      #highlight_style: &theme::selected,
+      #highlight_symbol: &theme::marker,
+      #selected: &sel,
+      &names))),
     child(#constraint: `Min(0), layout(#direction: &`Vertical, &[
-      child(#constraint: `Length(4), block(
-        #border: &`All,
-        #title: &line("Status"),
-        &paragraph(#trim: &false, &status_lines))),
-      child(#constraint: `Min(0), block(
-        #border: &`All,
-        #title: &line("Definition"),
-        &paragraph(#trim: &false, &detail)))
+      child(#constraint: `Length(4),
+        theme::panel(#title: "Status", paragraph(#trim: &false, &status_lines))),
+      child(#constraint: `Min(0),
+        theme::panel(#title: "Definition", paragraph(#trim: &false, &detail)))
     ]))
   ]);
   let layers = array::concat(
     select editing {
       null as _ => [],
-      _ => [layer(#width: &`Percentage(80), #height: &`Percentage(90),
+      _ => [theme::dialog(#width: &`Percentage(80), #height: &`Percentage(90),
         input_handler(#handle: &unit_form.handle, &unit_form.view))]
     },
     confirm_layers(#on_confirm: |a| { run <- a; null }, &mut confirm),
@@ -423,7 +414,7 @@ let services = |#units_dir: string, #on_close: fn(e: Any) -> null, open: Any| ->
   {
     view,
     handle,
-    status: line(#style: hint, " s start · t stop · R restart · c create · e edit · d delete · r refresh · Esc back "),
+    status: line(" s start · t stop · R restart · c create · e edit · d delete · r refresh · Esc back "),
     layers
   }
 }

@@ -2,10 +2,13 @@ use package::{
   Fingerprint, Target, change_password_at, connect, info,
   ceremony::{questions, result}
 };
-use super::{Toast, admin_text, hint, panels, toast_layers, landing::{self, Connected}};
+use super::{
+  Toast, admin_text, panels, toast_layers,
+  landing::{self, Connected},
+  theme::{self, hint}
+};
 use tui::{
-  line, line_edit, style,
-  block::block,
+  line, line_edit,
   input_handler::{Event, KeyEvent, on_press},
   layout::{child, layout},
   paragraph::paragraph,
@@ -126,16 +129,15 @@ let remote = |#q: &mut Question, #book_dir: [string, null], #server: string = ""
   };
   let conn_err_lines = select conn_err {
     null as _ => [],
-    m => [line(#style: style(#fg: `Red), m)]
+    m => [line(#style: theme::error, m)]
   };
-  let connect_view = block(
-    #border: &`All,
-    #title: &line("Connect to an admin domain"),
-    #title_bottom: &line(#style: hint, " Enter connect · Esc back "),
-    &layout(#direction: &`Vertical, &[
+  let connect_view = theme::panel(
+    #title: "Connect to an admin domain",
+    #legend: " Enter connect · Esc back ",
+    layout(#direction: &`Vertical, &[
       child(#constraint: `Length(2),
         paragraph(#style: &hint, &"Enter the admin server's address (host:port).")),
-      child(#constraint: `Length(1), text(&[line_edit::view(&ed)])),
+      child(#constraint: `Length(1), text(#style: &theme::field, &[line_edit::view(&ed)])),
       child(#constraint: `Length(1), text(&conn_err_lines))
     ])
   );
@@ -146,7 +148,7 @@ let remote = |#q: &mut Question, #book_dir: [string, null], #server: string = ""
   };
   let status = select screen {
     `Landing => land.status,
-    `Connect => line(#style: hint, " type an address · Enter connect · Esc back "),
+    `Connect => line(" type an address · Enter connect · Esc back "),
     `Panels => pan.status
   };
   {

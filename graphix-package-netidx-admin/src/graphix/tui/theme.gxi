@@ -1,0 +1,63 @@
+use tui::{Constraint, Span, Style, Tui, form::{Field, Form}, overlay::Layer};
+
+/// The screen behind everything, and the text drawn on it (the footer).
+val backdrop: Style;
+
+/// A panel's title: bold on the panel.
+val heading: Style;
+
+/// Secondary text on a panel: help, legends, labels.
+val hint: Style;
+
+/// The row a cursor rests on, or the focused control.
+val selected: Style;
+
+/// What a panel's list draws before the selected row.
+val marker: string;
+
+/// A text field: a white inset on the panel.
+val field: Style;
+
+/// A failure on a panel: a refused answer, a dead unit.
+val error: Style;
+
+/// The title of a dialog that warns or reports a failure.
+val alert: Style;
+
+/// A status that is healthy.
+val ok: Style;
+
+/// A status that wants attention.
+val warn: Style;
+
+/// A fingerprint's code.
+val hash: Style;
+
+/// The tile an identicon is drawn on.
+val glyph: Style;
+
+/// The gray box every view and dialog is drawn in: `#title` in its top
+/// border, `#legend` (its keys) in its bottom border.
+val panel: fn(
+  #title: string,
+  ?#title_style: Style,
+  ?#legend: [string, null],
+  content: Tui
+) -> Tui;
+
+/// `content` as a dialog: a centered layer over the backdrop with a drop
+/// shadow one cell down and to the right. A `Length` is the panel's own
+/// size; any other constraint sizes the panel and its shadow together.
+val dialog: fn(#width: &Constraint, #height: &Constraint, content: Tui) -> Layer;
+
+/// A `<label>` button, in the accent when it has the focus.
+val button: fn(label: string, focused: bool) -> Span;
+
+/// `tui::form::form` in the theme's colors.
+val form: fn(
+  #title: string,
+  ?#help: [string, null],
+  #on_submit: fn(values: Array<string>) -> null,
+  ?#on_cancel: [fn(e: Any) -> null, null],
+  fields: Array<Field>
+) -> Form;
