@@ -696,10 +696,33 @@ impl Dval {
     }
 }
 
+/// A subscribe in flight: the id its `Val` will carry and who else waits
+/// for it.
+#[derive(Debug)]
+struct PendingSub {
+    sub_id: SubId,
+    waiters: SmallVec<[oneshot::Sender<Result<Val>>; 1]>,
+}
+
 #[derive(Debug)]
 enum SubStatus {
     Subscribed(ValWeak),
-    Pending(Box<SmallVec<[oneshot::Sender<Result<Val>>; 1]>>), // the box ensures SubStatus is tag + 1 word
+    Pending(Box<PendingSub>), // the box ensures SubStatus is tag + 1 word
+}
+
+impl SubStatus {
+    fn pending(sub_id: SubId) -> Self {
+        Self::Pending(Box::new(PendingSub { sub_id, waiters: SmallVec::new() }))
+    }
+
+    /// The id the path's events carry, while a `Val` for it lives or is
+    /// coming.
+    fn sub_id(&self) -> Option<SubId> {
+        match self {
+            Self::Subscribed(w) => w.upgrade().map(|v| v.id()),
+            Self::Pending(p) => Some(p.sub_id),
+        }
+    }
 }
 
 const REMEBER_FAILED: Duration = Duration::from_secs(60);
@@ -1652,7 +1675,7 @@ impl Subscriber {
     {
         #[derive(Debug)]
         enum St {
-            Resolve(Streams),
+            Resolve(SubId, Streams),
             Subscribing(oneshot::Receiver<Result<Val>>),
             WaitingOther(oneshot::Receiver<Result<Val>>, Streams),
             Subscribed(Val, Streams),
@@ -1667,15 +1690,16 @@ impl Subscriber {
             for (p, chans) in batch {
                 let streams: Streams = chans.into_iter().collect();
                 trace!("subscribing to {} streams {}", p, streams.len());
+                let sub_id = t.durable_id(&p).unwrap_or_else(SubId::new);
                 match t.subscribed.entry(p.clone()) {
                     Entry::Vacant(e) => {
-                        e.insert(SubStatus::Pending(Box::new(SmallVec::new())));
-                        pending.insert(p, St::Resolve(streams));
+                        e.insert(SubStatus::pending(sub_id));
+                        pending.insert(p, St::Resolve(sub_id, streams));
                     }
                     Entry::Occupied(mut e) => match e.get_mut() {
                         SubStatus::Pending(v) => {
                             let (tx, rx) = oneshot::channel();
-                            v.push(tx);
+                            v.waiters.push(tx);
                             pending.insert(p, St::WaitingOther(rx, streams));
                         }
                         SubStatus::Subscribed(r) => match r.upgrade() {
@@ -1684,8 +1708,8 @@ impl Subscriber {
                                 pending.insert(p, St::Subscribed(r, streams));
                             }
                             None => {
-                                e.insert(SubStatus::Pending(Box::new(SmallVec::new())));
-                                pending.insert(p, St::Resolve(streams));
+                                e.insert(SubStatus::pending(sub_id));
+                                pending.insert(p, St::Resolve(sub_id, streams));
                             }
                         },
                     },
@@ -1698,7 +1722,7 @@ impl Subscriber {
             let to_resolve = pending
                 .iter()
                 .filter(|(_, s)| match s {
-                    St::Resolve(_) => true,
+                    St::Resolve(..) => true,
                     _ => false,
                 })
                 .map(|(p, _)| p.clone())
@@ -1739,7 +1763,6 @@ impl Subscriber {
                             pending.insert(p, St::Error(SubscribeError::NotFound.err()));
                         } else if let Some(ch) = t.choose_addr(&publishers, &resolved) {
                             let tls_ctx = t.tls_ctx.clone();
-                            let sub_id = t.durable_id(&p).unwrap_or_else(SubId::new);
                             let con = t.connections.entry(ch.addr).or_insert_with(|| {
                                 Connection { primary: None, isolated: IntMap::default() }
                             });
@@ -1771,8 +1794,8 @@ impl Subscriber {
                             };
                             let (tx, rx) = oneshot::channel();
                             let con_ = con.clone();
-                            let streams = match pending.remove(&p) {
-                                Some(St::Resolve(streams)) => streams,
+                            let (sub_id, streams) = match pending.remove(&p) {
+                                Some(St::Resolve(sub_id, streams)) => (sub_id, streams),
                                 _ => unreachable!(),
                             };
                             let r = con.send(ToCon::Subscribe(SubscribeValRequest {
@@ -1808,7 +1831,7 @@ impl Subscriber {
         // Wait
         async fn wait_result(sub: Subscriber, path: Path, st: St) -> (Path, Result<Val>) {
             match st {
-                St::Resolve(_) => unreachable!(),
+                St::Resolve(..) => unreachable!(),
                 St::Subscribed(raw, streams) => {
                     for (f, tx) in streams {
                         let m = ToCon::Stream {
@@ -1825,7 +1848,7 @@ impl Subscriber {
                     if let Some(sub) = t.subscribed.remove(path.as_ref()) {
                         match sub {
                             SubStatus::Subscribed(_) => unreachable!(),
-                            SubStatus::Pending(waiters) => fanout(&e, &path, *waiters),
+                            SubStatus::Pending(p) => fanout(&e, &path, p.waiters),
                         }
                     }
                     (path, Err(e))
@@ -1855,8 +1878,8 @@ impl Subscriber {
                         Entry::Occupied(mut e) => match res {
                             Err(err) => match e.remove() {
                                 SubStatus::Subscribed(_) => unreachable!(),
-                                SubStatus::Pending(waiters) => {
-                                    fanout(&err, &path, *waiters);
+                                SubStatus::Pending(p) => {
+                                    fanout(&err, &path, p.waiters);
                                     (path, Err(err))
                                 }
                             },
@@ -1867,8 +1890,8 @@ impl Subscriber {
                                 );
                                 match s {
                                     SubStatus::Subscribed(_) => unreachable!(),
-                                    SubStatus::Pending(waiters) => {
-                                        for w in waiters.into_iter() {
+                                    SubStatus::Pending(p) => {
+                                        for w in p.waiters.into_iter() {
                                             let _ = w.send(Ok(raw.clone()));
                                         }
                                         (path, Ok(raw))
@@ -1936,8 +1959,11 @@ impl Subscriber {
                 return s;
             }
         }
+        // a `Val` for the path, live or coming, is what this one will hold:
+        // its events carry that `Val`'s id
+        let sub_id = t.subscribed.get(&path).and_then(SubStatus::sub_id);
         let s = Dval(Arc::new(Mutex::new(DvalInner {
-            sub_id: SubId::new(),
+            sub_id: sub_id.unwrap_or_else(SubId::new),
             sub: DvState::Dead(Box::new(DvDead {
                 queued_writes: Vec::new(),
                 waiting: Vec::new(),

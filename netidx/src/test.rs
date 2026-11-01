@@ -1313,6 +1313,69 @@ mod publisher {
         Ok(())
     }
 
+    /// A durable subscription to a path whose previous one was dropped while
+    /// its subscribe was in flight is told its updates under its own id.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_dval_replacing_one_dropped_mid_subscribe_gets_its_updates() -> Result<()> {
+        let _ = env_logger::try_init();
+        let env = crate::InternalOnly::new().await?;
+        let (pb, sub) = (env.publisher(), env.subscriber());
+        let mut df = pb.publish_default(Path::from("/held"))?;
+        pb.flushed().await;
+        let path = Path::from("/held/x");
+        let d1 = sub.subscribe(path.clone());
+        // the publisher holds d1's subscribe until it is answered
+        let (asked, reply) = df.next().await.expect("the default publisher ended");
+        assert_eq!(asked, path);
+        drop(d1);
+        let (tx, mut rx) = mpsc::channel::<GPooled<Vec<(SubId, Event)>>>(10);
+        let d2 =
+            sub.subscribe_updates(path.clone(), [(UpdatesFlags::BEGIN_WITH_LAST, tx)]);
+        // d2 leaves the dead set when the resubscription task takes it up,
+        // which then joins it to d1's subscribe before polling that again
+        while sub.durable_stats().dead > 0 {
+            time::sleep(Duration::from_millis(1)).await;
+        }
+        let v = pb.publish(path.clone(), 42u64)?;
+        let _ = reply.send(());
+        d2.wait_subscribed().await?;
+        let mut b = pb.start_batch();
+        v.update(&mut b, 43u64);
+        b.commit(None).await;
+        let mut seen = vec![];
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !seen.contains(&(d2.id(), Event::Update(Value::U64(43)))) {
+            match time::timeout_at(deadline, rx.next()).await {
+                Ok(Some(mut batch)) => seen.extend(batch.drain(..)),
+                _ => panic!("d2 {:?} saw {seen:?}", d2.id()),
+            }
+        }
+        assert_eq!(seen[0], (d2.id(), Event::Update(Value::U64(42))), "{seen:?}");
+        Ok(())
+    }
+
+    /// A durable subscription made beside a live non-durable one of its
+    /// path holds that one's `Val`, and is told its events under its id.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_dval_beside_a_live_val_gets_its_updates() -> Result<()> {
+        let _ = env_logger::try_init();
+        let env = crate::InternalOnly::new().await?;
+        let (pb, sub) = (env.publisher(), env.subscriber());
+        let path = Path::from("/shared");
+        let _v = pb.publish(path.clone(), 42u64)?;
+        pb.flushed().await;
+        let val = sub.subscribe_nondurable_one(path.clone(), None).await?;
+        let (tx, mut rx) = mpsc::channel::<GPooled<Vec<(SubId, Event)>>>(10);
+        let dv = sub.subscribe_updates(path, [(UpdatesFlags::BEGIN_WITH_LAST, tx)]);
+        dv.wait_subscribed().await?;
+        let batch = time::timeout(Duration::from_secs(30), rx.next())
+            .await?
+            .expect("the subscription ended");
+        assert_eq!(batch[0], (dv.id(), Event::Update(Value::U64(42))), "{batch:?}");
+        assert_eq!(dv.id(), val.id());
+        Ok(())
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn tls_publish_subscribe() {
         let _ = env_logger::try_init();
