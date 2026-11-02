@@ -1376,6 +1376,23 @@ mod publisher {
         Ok(())
     }
 
+    /// A Dval made just after its path's only Val was dropped subscribes on
+    /// its own, so the dropped Val's unsubscribe is none of its business.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_dval_after_a_dropped_val_is_not_unsubscribed_by_it() -> Result<()> {
+        let _ = env_logger::try_init();
+        let env = crate::InternalOnly::new().await?;
+        let (pb, sub) = (env.publisher(), env.subscriber());
+        let path = Path::from("/shared");
+        let _v = pb.publish(path.clone(), 42u64)?;
+        pb.flushed().await;
+        drop(sub.subscribe_nondurable_one(path.clone(), None).await?);
+        let dv = sub.subscribe(path);
+        time::timeout(Duration::from_secs(30), dv.wait_subscribed()).await??;
+        assert_eq!(dv.last(), Event::Update(Value::U64(42)));
+        Ok(())
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn tls_publish_subscribe() {
         let _ = env_logger::try_init();
