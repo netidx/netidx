@@ -326,3 +326,13 @@ async fn a_failed_handshake_is_not_an_accept_error() {
     );
     drop(bad)
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_server_waiting_to_read_learns_its_publisher_shut_down() {
+    let ctx = Ctx::new().await;
+    let (server, _client) = pair(&ctx).await;
+    let waiting = task::spawn(async move { server.recv_one().await.is_err() });
+    time::sleep(Duration::from_millis(100)).await;
+    ctx.publisher.clone().shutdown().await;
+    assert!(time::timeout(TO, waiting).await.expect("recv_one never returned").unwrap());
+}

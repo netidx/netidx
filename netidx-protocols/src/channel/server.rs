@@ -287,13 +287,6 @@ impl Connection {
         Ok(batch.commit(self.timeout).await)
     }
 
-    fn check_dead(&self) -> Result<()> {
-        if self.is_dead() {
-            bail!("connection is dead")
-        }
-        Ok(())
-    }
-
     /// Queue what the client has sent, waiting until something comes. Fails
     /// only when nothing is left to read and the client is gone.
     async fn fill(&self, recv: &mut Receiver) -> Result<()> {

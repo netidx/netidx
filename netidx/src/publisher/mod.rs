@@ -1547,15 +1547,6 @@ impl Publisher {
     /// - All metadata related to this publisher has been cleared from the resolver server
     ///
     /// Drop does the same thing, but doesn't wait for every operation to finish.
-    // CR claude for claude: [bug/low] shutdown clears clients and by_id
-    // without sending Unsubscribe or Destroyed events, and leaves on_write
-    // and on_event_by_id_chans in place, so nothing wakes a reader waiting
-    // on a value's write or event channel. A channel server Connection
-    // blocked in recv_one when its own publisher shuts down waits forever:
-    // it waits on both channels and neither ends. Predates d77e0289; found
-    // reviewing it, from reading the code, not yet shown by a test. Fix:
-    // drop the write and event channels here (or send Destroyed for each
-    // id), so those reads see the end. (publisher-shutdown-wake-01)
     pub async fn shutdown(self) {
         let stopped = mem::replace(&mut self.0.lock().stop, None).map(|stop| {
             let (tx, rx) = oneshot::channel();
@@ -1571,6 +1562,12 @@ impl Publisher {
             let mut inner = self.0.lock();
             inner.clients.clear();
             inner.by_id.clear();
+            // end every write and event channel, so nothing is left waiting
+            // on this publisher
+            inner.on_write.clear();
+            inner.on_write_chans.clear();
+            inner.on_event_chans.clear();
+            inner.on_event_by_id_chans.clear();
             inner.resolver.clone()
         };
         // clear out the resolver
