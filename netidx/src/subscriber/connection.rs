@@ -81,6 +81,20 @@ fn unsubscribe(
     if let Some(last) = &sub.last {
         *last.lock() = Event::Unsubscribed;
     }
+    // CR claude for claude: [bug/medium] Dropping a Val and then subscribing
+    // a Dval to the same path tells the new Dval it was unsubscribed. The
+    // Val's drop sends Unsubscribe, the Dval's subscribe goes out behind it,
+    // and when the publisher's Unsubscribed reply for the Val arrives this
+    // function removes the path's durable entry by path alone, catching the
+    // Dval that is pending on that path though the sub being removed was
+    // never its. The Dval goes Unsubscribed and resubscribes later.
+    // Repro: in netidx-protocols' channel tests, drop the Val that
+    // ask_for_session subscribes, then client::Connection::connect to the
+    // same listener: connect fails with "connect failed, unsubscribed after
+    // connect" (it checks Dval::last after wait_subscribed). Fails the same
+    // before c0c47111. The mechanism is a reading of this code; confirm it
+    // with a netidx test before fixing. Fix: only touch the durable entry
+    // when it belongs to `sub` (its sub_id). (subscriber-dval-unsub-01)
     if let Some(dsw) = subscriber
         .durable_alive
         .remove(&sub.path)
