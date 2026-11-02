@@ -26,14 +26,14 @@ impl Receiver {
     ) -> Result<()> {
         match r {
             None => {
-                dead.store(true, Ordering::Relaxed);
+                dead.store(true, Ordering::Release);
                 bail!("connection is dead")
             }
             Some(mut batch) => {
                 for (_, ev) in batch.drain(..) {
                     match ev {
                         Event::Update(v) => self.queued.push_back(v),
-                        Event::Unsubscribed => dead.store(true, Ordering::Relaxed),
+                        Event::Unsubscribed => dead.store(true, Ordering::Release),
                     }
                 }
             }
@@ -42,15 +42,22 @@ impl Receiver {
     }
 
     async fn fill_queue(&mut self, dead: &AtomicBool) -> Result<()> {
-        self.try_fill_queue(dead)?;
-        if self.queued.len() == 0 {
-            if dead.load(Ordering::Relaxed) {
+        loop {
+            // dead before the drain, so the drain saw everything the
+            // connection put in the channel before it died
+            let gone = dead.load(Ordering::Acquire);
+            self.try_fill_queue(dead)?;
+            if self.queued.len() > 0 {
+                break Ok(());
+            }
+            if gone {
                 bail!("connection is dead")
             }
-            let r = self.updates.next().await;
-            self.fill_from_channel(dead, r)?
+            if !dead.load(Ordering::Acquire) {
+                let r = self.updates.next().await;
+                self.fill_from_channel(dead, r)?
+            }
         }
-        Ok(())
     }
 
     fn try_fill_queue(&mut self, dead: &AtomicBool) -> Result<()> {
@@ -190,7 +197,7 @@ impl Connection {
     pub async fn flush(&self) -> Result<()> {
         self.check_dead()?;
         let r = self.con.flush().await.map_err(|_| {
-            self.dead.store(true, Ordering::Relaxed);
+            self.dead.store(true, Ordering::Release);
             anyhow!("connection is dead")
         });
         self.dirty.store(false, Ordering::Relaxed);
@@ -199,49 +206,6 @@ impl Connection {
 
     /// Wait for a value to arrive from the other side and return it
     /// when it does.
-    // CR claude for claude: [bug/medium] recv_one checks dead before it reads
-    // the updates already in Receiver::updates, and a failed flush marks the
-    // connection dead. So when the other side sends its last messages and
-    // closes while this side is still sending, recv_one can fail with
-    // "connection is dead" with those messages waiting unread. recv and
-    // try_recv_one drain first. Seen in rustc-dist: a compile that failed
-    // before its late rlibs arrived reported "connection is dead" instead of
-    // the exit the server had sent (rustc-dist e2e test
-    // a_compile_error_ends_a_job_whose_rlibs_are_still_coming, which fails
-    // without rustc-dist's workaround, `next` in src/remote.rs). Fix:
-    // try_fill_queue before check_dead, here and in fill_queue.
-    // (channel-recv-dead-01)
-    // 2026-11-01 claude: rustc-dist no longer calls recv_one on a client
-    // channel: as of rustc-dist 1c361ef each daemon keeps one channel per box
-    // and reads it with recv in Link::read (src/remote.rs), and the workaround
-    // next is gone, so rustc-dist's e2e tests no longer exercise this. The bug
-    // still stands for other callers.
-    // 2026-11-02 claude: Fixed on both sides. Client: recv_one and recv no
-    // longer check dead before fill_queue, which drains first. Server (same
-    // bug, plus a hang): Connection::fill drains, then checks dead, then waits
-    // on the writes or on the anchor's events (events_for_id, registered when
-    // the singleton is published), so a receive wakes when the client
-    // unsubscribes; before, a server waiting in recv_one when its client left
-    // waited forever. That wakeup needed the publisher to put a client's writes
-    // in the write channel before applying its unsubscribe from the same value
-    // in the same batch (uncut_len in netidx/src/publisher/server.rs). Tests
-    // that fail if undone:
-    // a_client_reads_what_arrived_before_the_connection_died,
-    // a_server_reads_what_the_client_sent_before_it_left,
-    // a_server_waiting_to_read_learns_the_client_left (channel/test.rs),
-    // a_write_is_delivered_before_the_unsubscribe_after_it (netidx/src/test.rs,
-    // fails 3 of 3 on the old publisher).
-    // 2026-11-02 claude: Review (2026-11-02, my reading plus an independent
-    // reviewer agent): the fix does not hold for one interleaving.
-    // Connection::fill on the server drains, then checks dead; if the publisher
-    // puts the client's last write in the channel and applies its unsubscribe
-    // between the drain and the check, the receive fails with that write
-    // unread. The client's fill_queue has the same order and races a flush
-    // failing on another task. Fix: read dead-ness before draining (server:
-    // is_dead, which takes the publisher lock; client: an Acquire load, with
-    // Release stores), fail only when it was dead before a drain that found
-    // nothing, and otherwise drain again before waiting. No deterministic test
-    // reaches this window.
     pub async fn recv_one(&self) -> Result<Value> {
         let mut recv = self.receiver.lock().await;
         loop {
@@ -267,14 +231,8 @@ impl Connection {
     /// put them in the specified data structure.
     pub async fn recv(&self, dst: &mut impl Extend<Value>) -> Result<()> {
         let mut recv = self.receiver.lock().await;
-        recv.try_fill_queue(&self.dead)?;
-        loop {
-            if recv.queued.len() > 0 {
-                break Ok(dst.extend(recv.queued.drain(..)));
-            } else {
-                recv.fill_queue(&self.dead).await?
-            }
-        }
+        recv.fill_queue(&self.dead).await?;
+        Ok(dst.extend(recv.queued.drain(..)))
     }
 
     /// Receive all messages that are available now, but don't wait

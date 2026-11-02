@@ -298,11 +298,17 @@ impl Connection {
     /// only when nothing is left to read and the client is gone.
     async fn fill(&self, recv: &mut Receiver) -> Result<()> {
         loop {
+            // gone before the drain, so the drain saw all it sent: the
+            // publisher puts a client's writes in the channel before its
+            // unsubscribe takes effect
+            let gone = self.is_dead();
             recv.try_fill_queue(&self.dead, self.client)?;
             if recv.queued.len() > 0 {
                 break Ok(());
             }
-            self.check_dead()?;
+            if gone {
+                bail!("connection is dead")
+            }
             tokio::select! {
                 biased;
                 r = recv.writes.next() => recv.fill_from_channel(&self.dead, self.client, r)?,
