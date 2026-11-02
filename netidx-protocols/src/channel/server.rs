@@ -1,14 +1,18 @@
-use anyhow::Result;
-use futures::{channel::mpsc, prelude::*};
+use super::HANDSHAKE_TIMEOUT;
+use anyhow::{Result, anyhow};
+use futures::{channel::mpsc, prelude::*, stream::FuturesUnordered};
+use log::warn;
 use netidx::{
     path::Path,
     protocol::resolver::UserInfo,
-    publisher::{ClId, PublishFlags, Publisher, UpdateBatch, Val, Value, WriteRequest},
+    publisher::{
+        ClId, Event, PublishFlags, Publisher, SendResult, UpdateBatch, Val, Value,
+        WriteRequest,
+    },
 };
 use poolshark::global::GPooled;
 use std::{
     collections::VecDeque,
-    result,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -20,6 +24,10 @@ use tokio::{
     task::{self, JoinHandle},
     time,
 };
+
+/// The most handshakes a listener runs at once. A "connect" beyond them
+/// waits in the listener's write channel.
+const MAX_HANDSHAKES: usize = 64;
 
 /// Generate a random session name ${base}/uuid
 pub fn session(base: &Path) -> Path {
@@ -49,6 +57,9 @@ impl Batch {
 
 struct Receiver {
     writes: mpsc::Receiver<GPooled<Vec<WriteRequest>>>,
+    /// The anchor's subscribe and unsubscribe events. A receive waits on
+    /// them too, so it wakes when the client goes away.
+    events: mpsc::UnboundedReceiver<Event>,
     queued: VecDeque<Value>,
 }
 
@@ -67,15 +78,6 @@ impl Receiver {
                 dead.store(true, Ordering::Relaxed);
                 bail!("connection is dead")
             }
-        }
-        Ok(())
-    }
-
-    async fn fill_queue(&mut self, dead: &AtomicBool, client: ClId) -> Result<()> {
-        self.try_fill_queue(dead, client)?;
-        while self.queued.len() == 0 {
-            let r = self.writes.next().await;
-            self.fill_from_channel(dead, client, r)?
         }
         Ok(())
     }
@@ -105,17 +107,27 @@ struct SingletonInner {
     publisher: Publisher,
     anchor: Arc<Val>,
     timeout: Option<Duration>,
+    subscribe_within: Option<Duration>,
     writes: mpsc::Receiver<GPooled<Vec<WriteRequest>>>,
+    events: mpsc::UnboundedReceiver<Event>,
 }
 
 impl SingletonInner {
     pub async fn wait_connected(self) -> Result<Connection> {
-        let mut subscribed = loop {
-            self.publisher.wait_client(self.anchor.id()).await;
-            let subs = self.publisher.subscribed(&self.anchor.id());
-            if subs.len() > 0 {
-                break subs;
+        let subscribed = async {
+            loop {
+                self.publisher.wait_client(self.anchor.id()).await;
+                let subs = self.publisher.subscribed(&self.anchor.id());
+                if subs.len() > 0 {
+                    break subs;
+                }
             }
+        };
+        let mut subscribed = match self.subscribe_within {
+            None => subscribed.await,
+            Some(to) => time::timeout(to, subscribed)
+                .await
+                .map_err(|_| anyhow!("the client did not subscribe in time"))?,
         };
         let con = Connection {
             publisher: self.publisher,
@@ -125,10 +137,11 @@ impl SingletonInner {
             timeout: self.timeout,
             receiver: Mutex::new(Receiver {
                 writes: self.writes,
+                events: self.events,
                 queued: VecDeque::new(),
             }),
         };
-        let to = Duration::from_secs(15);
+        let to = HANDSHAKE_TIMEOUT;
         match time::timeout(to, con.recv_one()).await?? {
             Value::String(s) if &*s == "ready" => {
                 con.send_one(Value::from("ready")).await?
@@ -168,6 +181,18 @@ pub async fn singleton_with_flags(
     timeout: Option<Duration>,
     path: Path,
 ) -> Result<Singleton> {
+    start_singleton(publisher, flags, timeout, path, None).await
+}
+
+/// `singleton_with_flags`, with a deadline for the client's subscribe when
+/// `subscribe_within` is given.
+async fn start_singleton(
+    publisher: &Publisher,
+    flags: PublishFlags,
+    timeout: Option<Duration>,
+    path: Path,
+    subscribe_within: Option<Duration>,
+) -> Result<Singleton> {
     let publisher = publisher.clone();
     let (tx_res, rx_res) = oneshot::channel();
     let jh = task::spawn(async move {
@@ -179,8 +204,10 @@ pub async fn singleton_with_flags(
             Some(tx),
         );
         publisher.flushed().await;
+        let (tx_events, events) = mpsc::unbounded();
         let val = match res {
             Ok(val) => {
+                publisher.events_for_id(val.id(), tx_events);
                 let _ = tx_res.send(Ok(()));
                 val
             }
@@ -192,8 +219,10 @@ pub async fn singleton_with_flags(
         let inner = SingletonInner {
             publisher: publisher.clone(),
             timeout,
+            subscribe_within,
             anchor: Arc::new(val),
             writes: rx,
+            events,
         };
         Ok(inner.wait_connected().await?)
     });
@@ -265,6 +294,25 @@ impl Connection {
         Ok(())
     }
 
+    /// Queue what the client has sent, waiting until something comes. Fails
+    /// only when nothing is left to read and the client is gone.
+    async fn fill(&self, recv: &mut Receiver) -> Result<()> {
+        loop {
+            recv.try_fill_queue(&self.dead, self.client)?;
+            if recv.queued.len() > 0 {
+                break Ok(());
+            }
+            self.check_dead()?;
+            tokio::select! {
+                biased;
+                r = recv.writes.next() => recv.fill_from_channel(&self.dead, self.client, r)?,
+                e = recv.events.next() => if e.is_none() {
+                    self.dead.store(true, Ordering::Relaxed)
+                },
+            }
+        }
+    }
+
     /// Wait for one message from the other side, and return it when
     /// it arrives.
     pub async fn recv_one(&self) -> Result<Value> {
@@ -272,10 +320,7 @@ impl Connection {
         loop {
             match recv.queued.pop_front() {
                 Some(v) => break Ok(v),
-                None => {
-                    self.check_dead()?;
-                    recv.fill_queue(&self.dead, self.client).await?
-                }
+                None => self.fill(&mut recv).await?,
             }
         }
     }
@@ -297,15 +342,8 @@ impl Connection {
     /// arrives.
     pub async fn recv(&self, dst: &mut impl Extend<Value>) -> Result<()> {
         let mut recv = self.receiver.lock().await;
-        recv.try_fill_queue(&self.dead, self.client)?;
-        loop {
-            if recv.queued.len() > 0 {
-                break Ok(dst.extend(recv.queued.drain(..)));
-            } else {
-                self.check_dead()?;
-                recv.fill_queue(&self.dead, self.client).await?
-            }
-        }
+        self.fill(&mut recv).await?;
+        Ok(dst.extend(recv.queued.drain(..)))
     }
 
     /// Receive all available messages, if any, but don't wait for
@@ -367,37 +405,105 @@ impl ListenerInner {
         })
     }
 
-    /// Wait for a client to connect, and return a singleton
-    /// connection to the new client.
-    async fn accept(&mut self) -> Result<Singleton> {
-        let send_result = loop {
-            if let Some(req) = self.queued.pop() {
-                match &req.value {
-                    Value::String(c) if &**c == "connect" => {
-                        if let Some(send_result) = req.send_result {
-                            break send_result;
-                        }
+    /// Wait for the next "connect" that asked for a reply. None when the
+    /// listener is closed. Cancel safe.
+    async fn next_connect(&mut self) -> Option<SendResult> {
+        loop {
+            match self.queued.pop() {
+                Some(req) => match (&req.value, req.send_result) {
+                    (Value::String(c), Some(reply)) if &**c == "connect" => {
+                        return Some(reply);
                     }
                     _ => (),
-                }
-            } else {
-                if let Some(batch) = self.waiting.next().await {
-                    self.queued = batch;
-                } else {
-                    bail!("listener is closed")
-                }
+                },
+                None => self.queued = self.waiting.next().await?,
             }
-        };
-        let session = session(&self.base);
-        send_result.send(Value::from(session.clone()));
-        Ok(singleton_with_flags(&self.publisher, self.flags, self.timeout, session)
-            .await?)
+        }
+    }
+
+    /// Hand out connections until the listener is closed or nobody takes
+    /// them. Every client gets its own handshake, and one that fails is
+    /// logged and dropped.
+    async fn run(mut self, mut tx: mpsc::Sender<Connection>) {
+        let mut handshakes = FuturesUnordered::new();
+        // XCR claude for estokes: [bug/high] One client can stop a
+        // listener. This task runs each handshake to the end before
+        // it takes the next "connect", and SingletonInner::wait_connected
+        // waits for the client to subscribe with no timeout, so a
+        // client that writes "connect" and dies before subscribing
+        // (a killed process, an address change) stalls the listener
+        // for good, with nothing logged. A handshake that does fail
+        // comes out of Listener::accept as an Err, the same as
+        // "listener is closed" and "accept task died", which repeat
+        // on every call, so a caller can't tell whether to keep
+        // accepting; rustc-dist stopped taking jobs on the first one.
+        // Repro: rustc-dist's e2e test
+        // a_client_that_fails_to_connect_holds_up_no_other timed out
+        // against this Listener. rustc-dist now runs its own accept
+        // loop over singleton_with_flags (rustc-dist src/sandbox.rs
+        // `listen`). A fix here: wait for each singleton in a task of
+        // its own, with a timeout, send only finished connections, and
+        // make accept fail only when the listener is gone.
+        // (channel-listener-01)
+        // 2026-11-02 claude: Eric agreed the design (2026-11-02).
+        // ListenerInner::run now takes connects while up to MAX_HANDSHAKES
+        // handshakes run, each in its own singleton task; the session is
+        // published before the client is told its path, the client has
+        // HANDSHAKE_TIMEOUT (15 s, shared with the client side) to subscribe
+        // and each later step its own 15 s; a failed handshake is logged and
+        // dropped; Listener::accept fails only once the listener is closed, and
+        // then every time. Tests that fail if undone:
+        // a_client_that_never_comes_to_its_session_holds_up_no_other and
+        // a_failed_handshake_is_not_an_accept_error (channel/test.rs).
+        loop {
+            let room = handshakes.len() < MAX_HANDSHAKES;
+            tokio::select! {
+                biased;
+                Some(r) = handshakes.next() => match r {
+                    Ok(con) => if tx.send(con).await.is_err() {
+                        break;
+                    },
+                    Err(e) => warn!("{}: a client's handshake failed: {e:?}", self.base),
+                },
+                reply = self.next_connect(), if room => match reply {
+                    None => break,
+                    Some(reply) => handshakes.push(handshake(
+                        self.publisher.clone(),
+                        self.flags,
+                        self.timeout,
+                        session(&self.base),
+                        reply,
+                    )),
+                },
+            }
+        }
     }
 }
 
+/// Publish `session` for one client, tell the client where it is, and wait
+/// for the client to connect there.
+async fn handshake(
+    publisher: Publisher,
+    flags: PublishFlags,
+    timeout: Option<Duration>,
+    session: Path,
+    reply: SendResult,
+) -> Result<Connection> {
+    let mut singleton = start_singleton(
+        &publisher,
+        flags,
+        timeout,
+        session.clone(),
+        Some(HANDSHAKE_TIMEOUT),
+    )
+    .await?;
+    reply.send(Value::from(session));
+    singleton.wait_connected().await
+}
+
 pub struct Listener {
-    rx: mpsc::Receiver<Result<Connection>>,
-    jh: JoinHandle<result::Result<(), mpsc::SendError>>,
+    rx: mpsc::Receiver<Connection>,
+    jh: JoinHandle<()>,
 }
 
 impl Drop for Listener {
@@ -415,27 +521,18 @@ impl Listener {
         path: Path,
     ) -> Result<Listener> {
         let publisher = publisher.clone();
-        let (mut tx, rx) = mpsc::channel(3);
+        let (tx, rx) = mpsc::channel(3);
         let (tx_res, rx_res) = oneshot::channel();
         let jh = task::spawn(async move {
             match ListenerInner::new_with_flags(publisher, flags, timeout, path).await {
                 Err(e) => {
                     let _ = tx_res.send(Err(e));
                 }
-                Ok(mut inner) => {
+                Ok(inner) => {
                     let _ = tx_res.send(Ok(()));
-                    loop {
-                        match inner.accept().await {
-                            Ok(mut s) => match s.wait_connected().await {
-                                Err(e) => tx.send(Err(e)).await?,
-                                Ok(con) => tx.send(Ok(con)).await?,
-                            },
-                            Err(e) => tx.send(Err(e)).await?,
-                        }
-                    }
+                    inner.run(tx).await
                 }
             }
-            Ok::<_, mpsc::SendError>(())
         });
         rx_res.await??;
         Ok(Self { rx, jh })
@@ -455,11 +552,13 @@ impl Listener {
     /// Wait for a client to connect, and return a singleton
     /// connection to the new client. This method is cancel safe, it
     /// can be safely used in a select! without risk of losing an
-    /// incoming connection.
+    /// incoming connection. A client whose handshake fails is logged
+    /// and never returned. An error means the listener is closed, and
+    /// every later call fails too.
     pub async fn accept(&mut self) -> Result<Connection> {
         match self.rx.next().await {
-            Some(r) => r,
-            None => bail!("accept task died"),
+            Some(con) => Ok(con),
+            None => bail!("listener is closed"),
         }
     }
 }

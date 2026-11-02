@@ -1914,6 +1914,49 @@ mod publisher {
         Ok(())
     }
 
+    /// A client writes to a value and unsubscribes from it while the value's
+    /// write channel has no room. Each write must be in the channel before
+    /// the unsubscribe takes effect, however long the channel stays full.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_write_is_delivered_before_the_unsubscribe_after_it() -> Result<()> {
+        use super::errors::{anon_server, publisher, subscriber};
+        const TO: Duration = Duration::from_secs(10);
+        let _ = env_logger::try_init();
+        let (_server, cfg) = anon_server().await?;
+        let pb = publisher(&cfg, DesiredAuth::Anonymous).await?;
+        let path = Path::from("/local/foo");
+        let v = pb.publish(path.clone(), Value::from(0u64))?;
+        // no room: the send of a write waits until the write before it is read
+        let (tx, mut writes) = mpsc::channel(0);
+        pb.writes(v.id(), tx);
+        pb.flushed().await;
+        let sub = subscriber(&cfg, DesiredAuth::Anonymous)?;
+        let s = sub.subscribe_nondurable_one(path, Some(TO)).await?;
+        s.write(Value::from(1u64));
+        s.flush().await?;
+        s.write(Value::from(2u64));
+        drop(s);
+        let mut read = Vec::new();
+        while read.len() < 2 {
+            time::sleep(Duration::from_millis(200)).await;
+            assert_eq!(
+                pb.subscribed_len(&v.id()),
+                1,
+                "unsubscribed having read {read:?}"
+            );
+            let mut batch = time::timeout(TO, writes.next()).await?.unwrap();
+            read.extend(batch.drain(..).map(|req| req.value));
+        }
+        assert_eq!(read, [Value::from(1u64), Value::from(2u64)]);
+        time::timeout(TO, async {
+            while pb.subscribed_len(&v.id()) > 0 {
+                time::sleep(Duration::from_millis(10)).await
+            }
+        })
+        .await?;
+        Ok(())
+    }
+
     struct PTestPub(mpsc::UnboundedSender<(bool, oneshot::Sender<()>)>);
 
     impl PTestPub {
@@ -2228,7 +2271,7 @@ mod errors {
         "127.0.0.1/32".parse().unwrap()
     }
 
-    async fn anon_server() -> Result<(Server, ClientConfig)> {
+    pub(super) async fn anon_server() -> Result<(Server, ClientConfig)> {
         let server_cfg = ServerConfig::load("../cfg/simple-server.json")?;
         let mut cfg = ClientConfig::load("../cfg/simple-client.json")?;
         let server = Server::new(server_cfg, false, 0).await?;
@@ -2249,7 +2292,10 @@ mod errors {
         Ok((server, cfg))
     }
 
-    async fn publisher(cfg: &ClientConfig, auth: DesiredAuth) -> Result<Publisher> {
+    pub(super) async fn publisher(
+        cfg: &ClientConfig,
+        auth: DesiredAuth,
+    ) -> Result<Publisher> {
         PublisherBuilder::new(cfg.clone())
             .desired_auth(auth)
             .bind_cfg(Some(bind()))
@@ -2257,7 +2303,10 @@ mod errors {
             .await
     }
 
-    fn subscriber(cfg: &ClientConfig, auth: DesiredAuth) -> Result<Subscriber> {
+    pub(super) fn subscriber(
+        cfg: &ClientConfig,
+        auth: DesiredAuth,
+    ) -> Result<Subscriber> {
         SubscriberBuilder::new(cfg.clone()).desired_auth(auth).build()
     }
 

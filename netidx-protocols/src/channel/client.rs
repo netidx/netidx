@@ -1,3 +1,4 @@
+use super::HANDSHAKE_TIMEOUT;
 use anyhow::{Result, anyhow};
 use futures::{channel::mpsc, prelude::*};
 use netidx::{
@@ -82,7 +83,7 @@ pub struct Connection {
 
 impl Connection {
     async fn connect_singleton(subscriber: &Subscriber, path: Path) -> Result<Self> {
-        let to = Duration::from_secs(15);
+        let to = HANDSHAKE_TIMEOUT;
         let (tx, rx) = mpsc::channel(5);
         let mut n = 0;
         let f = UpdatesFlags::empty();
@@ -114,7 +115,7 @@ impl Connection {
             receiver: Mutex::new(Receiver { updates: rx, queued: VecDeque::new() }),
         };
         con.send(Value::from("ready"))?;
-        match time::timeout(Duration::from_secs(15), con.recv_one()).await {
+        match time::timeout(to, con.recv_one()).await {
             Err(_) => bail!("timeout waiting for channel handshake"),
             Ok(Err(e)) => return Err(e),
             Ok(Ok(Value::String(s))) if &*s == "connection" => (),
@@ -124,7 +125,7 @@ impl Connection {
             }
             Ok(Ok(v)) => bail!("channel handshake, expected \"connection\" got {}", v),
         }
-        match time::timeout(Duration::from_secs(15), con.recv_one()).await {
+        match time::timeout(to, con.recv_one()).await {
             Err(_) => bail!("timeout waiting for channel handshake"),
             Ok(Err(e)) => return Err(e),
             Ok(Ok(Value::String(s))) if &*s == "ready" => con.send(Value::from("go"))?,
@@ -136,7 +137,7 @@ impl Connection {
     /// Connect to the endpoint at the specified path. The endpoint
     /// may be either a listener or a singleton.
     pub async fn connect(subscriber: &Subscriber, path: Path) -> Result<Self> {
-        let to = Duration::from_secs(15);
+        let to = HANDSHAKE_TIMEOUT;
         let acceptor = subscriber.subscribe(path.clone());
         time::timeout(to, acceptor.wait_subscribed()).await??;
         match acceptor.last() {
@@ -198,15 +199,44 @@ impl Connection {
 
     /// Wait for a value to arrive from the other side and return it
     /// when it does.
+    // XCR claude for claude: [bug/medium] recv_one checks dead before it reads
+    // the updates already in Receiver::updates, and a failed flush marks the
+    // connection dead. So when the other side sends its last messages and
+    // closes while this side is still sending, recv_one can fail with
+    // "connection is dead" with those messages waiting unread. recv and
+    // try_recv_one drain first. Seen in rustc-dist: a compile that failed
+    // before its late rlibs arrived reported "connection is dead" instead of
+    // the exit the server had sent (rustc-dist e2e test
+    // a_compile_error_ends_a_job_whose_rlibs_are_still_coming, which fails
+    // without rustc-dist's workaround, `next` in src/remote.rs). Fix:
+    // try_fill_queue before check_dead, here and in fill_queue.
+    // (channel-recv-dead-01)
+    // 2026-11-01 claude: rustc-dist no longer calls recv_one on a client
+    // channel: as of rustc-dist 1c361ef each daemon keeps one channel per box
+    // and reads it with recv in Link::read (src/remote.rs), and the workaround
+    // next is gone, so rustc-dist's e2e tests no longer exercise this. The bug
+    // still stands for other callers.
+    // 2026-11-02 claude: Fixed on both sides. Client: recv_one and recv no
+    // longer check dead before fill_queue, which drains first. Server (same
+    // bug, plus a hang): Connection::fill drains, then checks dead, then waits
+    // on the writes or on the anchor's events (events_for_id, registered when
+    // the singleton is published), so a receive wakes when the client
+    // unsubscribes; before, a server waiting in recv_one when its client left
+    // waited forever. That wakeup needed the publisher to put a client's writes
+    // in the write channel before applying its unsubscribe from the same value
+    // in the same batch (uncut_len in netidx/src/publisher/server.rs). Tests
+    // that fail if undone:
+    // a_client_reads_what_arrived_before_the_connection_died,
+    // a_server_reads_what_the_client_sent_before_it_left,
+    // a_server_waiting_to_read_learns_the_client_left (channel/test.rs),
+    // a_write_is_delivered_before_the_unsubscribe_after_it (netidx/src/test.rs,
+    // fails 3 of 3 on the old publisher).
     pub async fn recv_one(&self) -> Result<Value> {
         let mut recv = self.receiver.lock().await;
         loop {
             match recv.queued.pop_front() {
                 Some(v) => break Ok(v),
-                None => {
-                    self.check_dead()?;
-                    recv.fill_queue(&self.dead).await?
-                }
+                None => recv.fill_queue(&self.dead).await?,
             }
         }
     }
@@ -231,7 +261,6 @@ impl Connection {
             if recv.queued.len() > 0 {
                 break Ok(dst.extend(recv.queued.drain(..)));
             } else {
-                self.check_dead()?;
                 recv.fill_queue(&self.dead).await?
             }
         }

@@ -31,7 +31,7 @@ use futures::{
     stream::{FuturesUnordered, SelectAll},
 };
 use log::{debug, info};
-use nohash::IntMap;
+use nohash::{IntMap, IntSet};
 use parking_lot::RwLock;
 use poolshark::global::GPooled;
 use protocol::resolver::{AuthChallenge, HashMethod, UserInfo};
@@ -241,6 +241,27 @@ fn write(
     Ok(())
 }
 
+/// How many messages at the front of `batch` can be handled at once. A
+/// client's writes to a value must be in the value's write channels before
+/// its unsubscribe from that value takes effect, and a write is only queued
+/// for delivery while the batch is handled, so the batch is cut before an
+/// unsubscribe from a value written earlier in it.
+fn uncut_len(batch: &[publisher::To], written: &mut IntSet<Id>) -> usize {
+    use publisher::To;
+    written.clear();
+    batch
+        .iter()
+        .position(|m| match m {
+            To::Write(id, ..) => {
+                written.insert(*id);
+                false
+            }
+            To::Unsubscribe(id) => written.contains(id),
+            To::Subscribe { .. } => false,
+        })
+        .unwrap_or(batch.len())
+}
+
 fn check_token(
     token: Bytes,
     now: u64,
@@ -295,7 +316,11 @@ struct ClientCtx {
     client: ClId,
     publisher: PublisherWeak,
     secrets: Arc<RwLock<AHashMap<SocketAddr, u128>>>,
+    /// Messages read from the client and not yet handled. Between reads it
+    /// holds the rest of a batch that `uncut_len` cut, which must wait until
+    /// `blocked_sends` is empty.
     batch: Vec<publisher::To>,
+    written_in_batch: IntSet<Id>,
     write_batches:
         IntMap<ChanId, (GPooled<Vec<WriteRequest>>, Sender<GPooled<Vec<WriteRequest>>>)>,
     blocked_sends: FuturesUnordered<BlockedSendFut>,
@@ -330,6 +355,7 @@ impl ClientCtx {
             publisher,
             secrets,
             batch: Vec::new(),
+            written_in_batch: IntSet::default(),
             write_batches: HashMap::default(),
             blocked_sends: FuturesUnordered::new(),
             pending_receipts,
@@ -512,7 +538,8 @@ impl ClientCtx {
         let mut pb = t_st.0.lock();
         let secrets = self.secrets.read();
         let mut gc = false;
-        for msg in self.batch.drain(..) {
+        let n = uncut_len(&self.batch, &mut self.written_in_batch);
+        for msg in self.batch.drain(..n) {
             match msg {
                 Subscribe { path, resolver, timestamp, permissions, token } => {
                     gc = true;
@@ -619,12 +646,11 @@ impl ClientCtx {
             con.queue_send(&m)?
         }
         if let Some(usubs) = &mut up.unsubscribes {
-            for id in usubs.drain(..) {
-                self.batch.push(To::Unsubscribe(id));
+            let cut = self.batch.len() > 0;
+            self.batch.extend(usubs.drain(..).map(To::Unsubscribe));
+            if !cut {
+                self.handle_batch(con)?;
             }
-        }
-        if self.batch.len() > 0 {
-            self.handle_batch(con)?;
         }
         if con.bytes_queued() > 0 {
             self.msg_sent = true;
@@ -661,6 +687,8 @@ impl ClientCtx {
                     blocked.next().await;
                 } else if receipts_full {
                     future::pending::<()>().await;
+                } else if batch.len() > 0 {
+                    break Ok(());
                 } else {
                     con.receive_batch(batch).await?;
                     break Ok(());
