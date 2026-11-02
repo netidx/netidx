@@ -1034,6 +1034,26 @@ mod republish {
         let _ = w.publish(iter::once(p("/t/four"))).await;
         converges_to("b", &rb, &paths, &[]).await;
     }
+
+    /// A writer publishes under a referral on the cluster the referral names,
+    /// so a clear has to reach that cluster as well as the configured one.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_clear_reaches_the_clusters_referrals_led_to() {
+        let _ = env_logger::try_init();
+        let root_port = free_port();
+        let eu_port = free_port();
+        let _root = start(root_cfg_file(root_port, &[eu_port]), 0).await;
+        let _eu = start_member(&[eu_port], 120, 0).await;
+        let w = writer(&[addr(root_port)]);
+        let (eu_paths, root_paths) = (vec![p("/eu/x"), p("/eu/y")], vec![p("/t/x")]);
+        w.publish(eu_paths.iter().chain(root_paths.iter()).cloned()).await.unwrap();
+        let (eu, root) = (reader(addr(eu_port)), reader(addr(root_port)));
+        converges_to("eu", &eu, &eu_paths, &eu_paths).await;
+        converges_to("root", &root, &root_paths, &root_paths).await;
+        w.clear().await.unwrap();
+        assert_eq!(published(&eu, &eu_paths).await, BTreeSet::new());
+        assert_eq!(published(&root, &root_paths).await, BTreeSet::new());
+    }
 }
 
 mod publisher {

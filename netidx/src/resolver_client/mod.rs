@@ -48,7 +48,7 @@ use std::{
         hash_map::Entry,
     },
     error, fmt,
-    iter::IntoIterator,
+    iter::{self, IntoIterator},
     marker::PhantomData,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     result,
@@ -562,6 +562,38 @@ where
         Arc::clone(&self.0.lock().secrets)
     }
 
+    /// Send `msg`, which names no path, to the default cluster and to every
+    /// cluster a referral has led this client to, and return each one's
+    /// replies.
+    async fn send_everywhere(&self, msg: T) -> Result<LPooled<Vec<F>>> {
+        let deadline = Instant::now() + MAX_REQUEST;
+        let mut waiters: LPooled<Vec<ResponseChan<F>>> = {
+            let mut guard = self.0.lock();
+            let inner = &mut *guard;
+            inner.refresh_default();
+            let mut servers: LPooled<Vec<Option<Arc<Referral>>>> = iter::once(None)
+                .chain(inner.by_server.keys().cloned().map(Some))
+                .collect();
+            servers
+                .drain(..)
+                .map(|server| {
+                    let mut batch = inner.ti_pool.take();
+                    batch.push((0, msg.clone()));
+                    inner.send_to_server(deadline, server, batch)
+                })
+                .collect()
+        };
+        let mut replies: LPooled<Vec<F>> = LPooled::take();
+        for r in future::join_all(waiters.drain(..)).await {
+            let (_, mut r) = match r {
+                Err(_) => return Err(ResolverError::Unreachable.err()),
+                Ok(r) => r.map_err(Error::from)?,
+            };
+            replies.extend(r.drain(..).map(|(_, m)| m));
+        }
+        Ok(replies)
+    }
+
     async fn send(
         &self,
         batch: &GPooled<Vec<T>>,
@@ -575,6 +607,16 @@ where
                 let mut guard = self.0.lock();
                 let inner = &mut *guard;
                 inner.refresh_default();
+                // CR claude for claude: [risk/low] For a writer this drops
+                // the write connections to every referred cluster. A dropped
+                // WriteClient's write_mgr exits, so the paths published
+                // through it stop being heartbeated and expire on that
+                // cluster while the publisher still thinks they are
+                // published, and clear (send_everywhere) no longer reaches
+                // them. Reachable only past MAX_REFERRALS referred clusters,
+                // so not seen. Fix: for writes, keep any connection that
+                // still holds published paths, or evict only idle ones.
+                // (resolver-referral-cap-01)
                 if inner.by_server.len() > MAX_REFERRALS {
                     inner.by_server.clear(); // a workable sledgehammer
                 }
@@ -1068,8 +1110,8 @@ impl ResolverWrite {
 
     /// Clear all published paths from this publisher.
     ///
-    // CR estokes: this is broken on complex clusters
-    // CR claude for claude: [bug/medium] clear only reaches the default
+    // XCR estokes: this is broken on complex clusters
+    // XCR claude for claude: [bug/medium] clear only reaches the default
     // resolver. ToWrite::Clear has no path, so Router::route_batch puts it in
     // the None batch, and ResolverWrapInner::send_to_server sends that batch on
     // default_con alone. The connections in by_server, to resolvers this
@@ -1089,18 +1131,22 @@ impl ResolverWrite {
     // second resolver shuts down, and that resolver then lists none of them.
     // This is what the CR estokes above calls broken on complex clusters.
     // (resolver-clear-01)
+    // 2026-11-02 claude: Eric agreed (2026-11-02). clear now goes through
+    // ResolverWrap::send_everywhere: Clear to the default cluster and to every
+    // cluster in by_server, each of which must answer Unpublished. Test that
+    // fails if undone: a_clear_reaches_the_clusters_referrals_led_to
+    // (netidx/src/test.rs; on the old code the referred cluster still listed
+    // both paths after clear returned). Still open nearby: the MAX_REFERRALS
+    // clear of by_server in ResolverWrap::send drops the referred write
+    // connections, which then neither heartbeat nor get this clear.
     pub async fn clear(&self) -> Result<()> {
-        let mut batch = RAWTOWRITEPOOL.take();
-        batch.push(ToWrite::Clear);
-        let (_, r) = self.inner.send(&batch).await?;
-        if r.len() != 1 {
-            bail!("unexpected response to clear command {:?}", r)
-        } else {
-            match &r[0] {
-                FromWrite::Unpublished => Ok(()),
+        for m in self.inner.send_everywhere(ToWrite::Clear).await?.drain(..) {
+            match m {
+                FromWrite::Unpublished => (),
                 m => bail!("unexpected response to clear command {:?}", m),
             }
         }
+        Ok(())
     }
 
     pub(crate) fn secrets(&self) -> Arc<RwLock<AHashMap<SocketAddr, u128>>> {
