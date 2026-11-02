@@ -1935,45 +1935,51 @@ mod publisher {
     }
 
     /// A client writes to a value and unsubscribes from it while the value's
-    /// write channel has no room. Each write must be in the channel before
-    /// the unsubscribe takes effect, however long the channel stays full.
+    /// write channel is full. When the unsubscribe takes effect the write must
+    /// already be in the channel, so a handler that drains after it sees the
+    /// client go still gets it. A late write would leave only a short window,
+    /// so the test looks many times.
     #[tokio::test(flavor = "multi_thread")]
-    async fn a_write_is_delivered_before_the_unsubscribe_after_it() -> Result<()> {
+    async fn a_write_is_in_its_channel_before_the_unsubscribe_after_it() -> Result<()> {
         use super::errors::{anon_server, publisher, subscriber};
         const TO: Duration = Duration::from_secs(10);
         let _ = env_logger::try_init();
         let (_server, cfg) = anon_server().await?;
         let pb = publisher(&cfg, DesiredAuth::Anonymous).await?;
-        let path = Path::from("/local/foo");
-        let v = pb.publish(path.clone(), Value::from(0u64))?;
-        // no room: the send of a write waits until the write before it is read
-        let (tx, mut writes) = mpsc::channel(0);
-        pb.writes(v.id(), tx);
-        pb.flushed().await;
         let sub = subscriber(&cfg, DesiredAuth::Anonymous)?;
-        let s = sub.subscribe_nondurable_one(path, Some(TO)).await?;
-        s.write(Value::from(1u64));
-        s.flush().await?;
-        s.write(Value::from(2u64));
-        drop(s);
-        let mut read = Vec::new();
-        while read.len() < 2 {
-            time::sleep(Duration::from_millis(200)).await;
-            assert_eq!(
-                pb.subscribed_len(&v.id()),
-                1,
-                "unsubscribed having read {read:?}"
-            );
-            let mut batch = time::timeout(TO, writes.next()).await?.unwrap();
-            read.extend(batch.drain(..).map(|req| req.value));
+        for round in 0..50 {
+            let path = Path::from(format!("/local/foo{round}"));
+            let v = pb.publish(path.clone(), Value::from(0u64))?;
+            // no room: the first write fills it
+            let (tx, mut writes) = mpsc::channel(0);
+            pb.writes(v.id(), tx);
+            let (tx, mut events) = mpsc::unbounded();
+            pb.events_for_id(v.id(), tx);
+            pb.flushed().await;
+            let s = sub.subscribe_nondurable_one(path, Some(TO)).await?;
+            s.write(Value::from(1u64));
+            s.flush().await?;
+            s.write(Value::from(2u64));
+            drop(s);
+            let mut read = Vec::new();
+            time::timeout(TO, async {
+                loop {
+                    select_biased! {
+                        e = events.select_next_some() => if let PEvent::Unsubscribe(..) = e {
+                            if let Ok(mut batch) = writes.try_recv() {
+                                read.extend(batch.drain(..).map(|req| req.value));
+                            }
+                            break;
+                        },
+                        mut batch = writes.select_next_some() => {
+                            read.extend(batch.drain(..).map(|req| req.value))
+                        },
+                    }
+                }
+            })
+            .await?;
+            assert_eq!(read, [Value::from(1u64), Value::from(2u64)], "round {round}");
         }
-        assert_eq!(read, [Value::from(1u64), Value::from(2u64)]);
-        time::timeout(TO, async {
-            while pb.subscribed_len(&v.id()) > 0 {
-                time::sleep(Duration::from_millis(10)).await
-            }
-        })
-        .await?;
         Ok(())
     }
 

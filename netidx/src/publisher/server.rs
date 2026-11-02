@@ -29,9 +29,10 @@ use futures::{
     prelude::*,
     select_biased,
     stream::{FuturesUnordered, SelectAll},
+    task::noop_waker_ref,
 };
 use log::{debug, info};
-use nohash::{IntMap, IntSet};
+use nohash::IntMap;
 use parking_lot::RwLock;
 use poolshark::global::GPooled;
 use protocol::resolver::{AuthChallenge, HashMethod, UserInfo};
@@ -45,6 +46,7 @@ use std::{
     net::SocketAddr,
     pin::Pin,
     sync::Arc,
+    task::Context,
     time::{Duration, SystemTime},
 };
 use tokio::{
@@ -174,10 +176,7 @@ fn write(
     client: ClId,
     gc_on_write: &mut Vec<ChanWrap<GPooled<Vec<WriteRequest>>>>,
     wait_write_res: &mut Vec<(Id, WriteId, oneshot::Receiver<Value>)>,
-    write_batches: &mut IntMap<
-        ChanId,
-        (GPooled<Vec<WriteRequest>>, Sender<GPooled<Vec<WriteRequest>>>),
-    >,
+    write_batches: &mut WriteBatches,
     id: Id,
     v: Value,
     r: bool,
@@ -241,39 +240,28 @@ fn write(
     Ok(())
 }
 
-// CR claude for eric: [risk/low] The rest of a cut batch waits in
-// ClientCtx::batch until every blocked send completes, which with a full
-// write channel is until that value's handler reads. If the client loop
-// exits meanwhile (the client goes away and the next heartbeat flush
-// fails), the rest is dropped with the ClientCtx, so its writes to other
-// values, already read from the socket, are never delivered; before the
-// cut they went out on the next pass. Example: one connection carries
-// channel sessions X and Y, X's handler is backed up, and the client sends
-// [W X, U X, W Y, U Y] and exits: W Y is lost and Y's server sees the
-// client leave. Writes in a later frame were already lost the same way, so
-// this widens an existing loss rather than adding a kind. Options: accept
-// it; or, when the loop exits, deliver the writes in a pending rest before
-// the cleanup unsubscribes. Found reviewing d77e0289.
-// (publisher-cut-loss-01)
-/// How many messages at the front of `batch` can be handled at once. A
-/// client's writes to a value must be in the value's write channels before
-/// its unsubscribe from that value takes effect, and a write is only queued
-/// for delivery while the batch is handled, so the batch is cut before an
-/// unsubscribe from a value written earlier in it.
-fn uncut_len(batch: &[publisher::To], written: &mut IntSet<Id>) -> usize {
-    use publisher::To;
-    written.clear();
-    batch
-        .iter()
-        .position(|m| match m {
-            To::Write(id, ..) => {
-                written.insert(*id);
-                false
-            }
-            To::Unsubscribe(id) => written.contains(id),
-            To::Subscribe { .. } => false,
-        })
-        .unwrap_or(batch.len())
+type WriteBatches =
+    IntMap<ChanId, (GPooled<Vec<WriteRequest>>, Sender<GPooled<Vec<WriteRequest>>>)>;
+
+/// Put each pending write batch in its channel now, however full the
+/// channel is, and leave a future in `blocked` for each channel that is now
+/// over capacity, which reading waits on. Each batch's sender is a clone
+/// made for it, and futures-mpsc gives every sender a slot of its own, so
+/// try_send fails only on a closed channel. A client's writes are therefore
+/// in their channels before its unsubscribe after them takes effect, and
+/// none that were read are lost if the connection dies.
+fn push_writes(
+    write_batches: &mut WriteBatches,
+    blocked: &mut FuturesUnordered<BlockedSendFut>,
+) {
+    let cx = &mut Context::from_waker(noop_waker_ref());
+    for (_, (batch, mut sender)) in write_batches.drain() {
+        if sender.try_send(batch).is_ok() && sender.poll_ready(cx).is_pending() {
+            blocked.push(Box::pin(async move {
+                let _ = future::poll_fn(|cx| sender.poll_ready(cx)).await;
+            }));
+        }
+    }
 }
 
 fn check_token(
@@ -330,13 +318,8 @@ struct ClientCtx {
     client: ClId,
     publisher: PublisherWeak,
     secrets: Arc<RwLock<AHashMap<SocketAddr, u128>>>,
-    /// Messages read from the client and not yet handled. Between reads it
-    /// holds the rest of a batch that `uncut_len` cut, which must wait until
-    /// `blocked_sends` is empty.
     batch: Vec<publisher::To>,
-    written_in_batch: IntSet<Id>,
-    write_batches:
-        IntMap<ChanId, (GPooled<Vec<WriteRequest>>, Sender<GPooled<Vec<WriteRequest>>>)>,
+    write_batches: WriteBatches,
     blocked_sends: FuturesUnordered<BlockedSendFut>,
     pending_receipts: PendingReceipts,
     flushing_updates: Option<Instant>,
@@ -369,7 +352,6 @@ impl ClientCtx {
             publisher,
             secrets,
             batch: Vec::new(),
-            written_in_batch: IntSet::default(),
             write_batches: HashMap::default(),
             blocked_sends: FuturesUnordered::new(),
             pending_receipts,
@@ -552,8 +534,7 @@ impl ClientCtx {
         let mut pb = t_st.0.lock();
         let secrets = self.secrets.read();
         let mut gc = false;
-        let n = uncut_len(&self.batch, &mut self.written_in_batch);
-        for msg in self.batch.drain(..n) {
+        for msg in self.batch.drain(..) {
             match msg {
                 Subscribe { path, resolver, timestamp, permissions, token } => {
                     gc = true;
@@ -613,6 +594,7 @@ impl ClientCtx {
                 )?,
                 Unsubscribe(id) => {
                     gc = true;
+                    push_writes(&mut self.write_batches, &mut self.blocked_sends);
                     unsubscribe(&mut *pb, self.client, id);
                     con.queue_send(&From::Unsubscribed(id))?;
                 }
@@ -629,14 +611,9 @@ impl ClientCtx {
 
     fn handle_batch(&mut self, con: &mut WriteChannel) -> Result<()> {
         use protocol::publisher::From;
-        self.handle_batch_inner(con)?;
-        self.blocked_sends.extend(self.write_batches.drain().map(
-            |(_, (batch, mut sender))| {
-                Box::pin(async move {
-                    let _ = sender.send(batch).await;
-                }) as BlockedSendFut
-            },
-        ));
+        let r = self.handle_batch_inner(con);
+        push_writes(&mut self.write_batches, &mut self.blocked_sends);
+        r?;
         self.pending_receipts.inner_mut().extend(self.wait_write_res.drain(..).map(
             |(id, wid, rx)| {
                 Box::pin(async move {
@@ -660,11 +637,12 @@ impl ClientCtx {
             con.queue_send(&m)?
         }
         if let Some(usubs) = &mut up.unsubscribes {
-            let cut = self.batch.len() > 0;
-            self.batch.extend(usubs.drain(..).map(To::Unsubscribe));
-            if !cut {
-                self.handle_batch(con)?;
+            for id in usubs.drain(..) {
+                self.batch.push(To::Unsubscribe(id));
             }
+        }
+        if self.batch.len() > 0 {
+            self.handle_batch(con)?;
         }
         if con.bytes_queued() > 0 {
             self.msg_sent = true;
@@ -701,8 +679,6 @@ impl ClientCtx {
                     blocked.next().await;
                 } else if receipts_full {
                     future::pending::<()>().await;
-                } else if batch.len() > 0 {
-                    break Ok(());
                 } else {
                     con.receive_batch(batch).await?;
                     break Ok(());
