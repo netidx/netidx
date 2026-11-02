@@ -241,6 +241,20 @@ fn write(
     Ok(())
 }
 
+// CR claude for eric: [risk/low] The rest of a cut batch waits in
+// ClientCtx::batch until every blocked send completes, which with a full
+// write channel is until that value's handler reads. If the client loop
+// exits meanwhile (the client goes away and the next heartbeat flush
+// fails), the rest is dropped with the ClientCtx, so its writes to other
+// values, already read from the socket, are never delivered; before the
+// cut they went out on the next pass. Example: one connection carries
+// channel sessions X and Y, X's handler is backed up, and the client sends
+// [W X, U X, W Y, U Y] and exits: W Y is lost and Y's server sees the
+// client leave. Writes in a later frame were already lost the same way, so
+// this widens an existing loss rather than adding a kind. Options: accept
+// it; or, when the loop exits, deliver the writes in a pending rest before
+// the cleanup unsubscribes. Found reviewing d77e0289.
+// (publisher-cut-loss-01)
 /// How many messages at the front of `batch` can be handled at once. A
 /// client's writes to a value must be in the value's write channels before
 /// its unsubscribe from that value takes effect, and a write is only queued

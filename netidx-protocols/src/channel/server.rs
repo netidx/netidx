@@ -426,35 +426,6 @@ impl ListenerInner {
     /// logged and dropped.
     async fn run(mut self, mut tx: mpsc::Sender<Connection>) {
         let mut handshakes = FuturesUnordered::new();
-        // XCR claude for estokes: [bug/high] One client can stop a
-        // listener. This task runs each handshake to the end before
-        // it takes the next "connect", and SingletonInner::wait_connected
-        // waits for the client to subscribe with no timeout, so a
-        // client that writes "connect" and dies before subscribing
-        // (a killed process, an address change) stalls the listener
-        // for good, with nothing logged. A handshake that does fail
-        // comes out of Listener::accept as an Err, the same as
-        // "listener is closed" and "accept task died", which repeat
-        // on every call, so a caller can't tell whether to keep
-        // accepting; rustc-dist stopped taking jobs on the first one.
-        // Repro: rustc-dist's e2e test
-        // a_client_that_fails_to_connect_holds_up_no_other timed out
-        // against this Listener. rustc-dist now runs its own accept
-        // loop over singleton_with_flags (rustc-dist src/sandbox.rs
-        // `listen`). A fix here: wait for each singleton in a task of
-        // its own, with a timeout, send only finished connections, and
-        // make accept fail only when the listener is gone.
-        // (channel-listener-01)
-        // 2026-11-02 claude: Eric agreed the design (2026-11-02).
-        // ListenerInner::run now takes connects while up to MAX_HANDSHAKES
-        // handshakes run, each in its own singleton task; the session is
-        // published before the client is told its path, the client has
-        // HANDSHAKE_TIMEOUT (15 s, shared with the client side) to subscribe
-        // and each later step its own 15 s; a failed handshake is logged and
-        // dropped; Listener::accept fails only once the listener is closed, and
-        // then every time. Tests that fail if undone:
-        // a_client_that_never_comes_to_its_session_holds_up_no_other and
-        // a_failed_handshake_is_not_an_accept_error (channel/test.rs).
         loop {
             let room = handshakes.len() < MAX_HANDSHAKES;
             tokio::select! {

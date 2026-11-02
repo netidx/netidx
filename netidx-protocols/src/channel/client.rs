@@ -199,7 +199,7 @@ impl Connection {
 
     /// Wait for a value to arrive from the other side and return it
     /// when it does.
-    // XCR claude for claude: [bug/medium] recv_one checks dead before it reads
+    // CR claude for claude: [bug/medium] recv_one checks dead before it reads
     // the updates already in Receiver::updates, and a failed flush marks the
     // connection dead. So when the other side sends its last messages and
     // closes while this side is still sending, recv_one can fail with
@@ -231,6 +231,17 @@ impl Connection {
     // a_server_waiting_to_read_learns_the_client_left (channel/test.rs),
     // a_write_is_delivered_before_the_unsubscribe_after_it (netidx/src/test.rs,
     // fails 3 of 3 on the old publisher).
+    // 2026-11-02 claude: Review (2026-11-02, my reading plus an independent
+    // reviewer agent): the fix does not hold for one interleaving.
+    // Connection::fill on the server drains, then checks dead; if the publisher
+    // puts the client's last write in the channel and applies its unsubscribe
+    // between the drain and the check, the receive fails with that write
+    // unread. The client's fill_queue has the same order and races a flush
+    // failing on another task. Fix: read dead-ness before draining (server:
+    // is_dead, which takes the publisher lock; client: an Acquire load, with
+    // Release stores), fail only when it was dead before a drain that found
+    // nothing, and otherwise drain again before waiting. No deterministic test
+    // reaches this window.
     pub async fn recv_one(&self) -> Result<Value> {
         let mut recv = self.receiver.lock().await;
         loop {
