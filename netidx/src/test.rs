@@ -1035,6 +1035,32 @@ mod republish {
         converges_to("b", &rb, &paths, &[]).await;
     }
 
+    /// A member added to a referred cluster gets what the writer published
+    /// there before it joined, as a member added to the writer's own cluster
+    /// does.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_member_added_to_a_referred_cluster_gets_what_was_published_there() {
+        let _ = env_logger::try_init();
+        let root_port = free_port();
+        let eu_ports = [free_port(), free_port()];
+        let root = start(root_cfg_file(root_port, &[eu_ports[0]]), 0).await;
+        let _eu0 = start_member(&eu_ports, 120, 0).await;
+        let _eu1 = start_member(&eu_ports, 120, 1).await;
+        let w = writer(&[addr(root_port)]);
+        let before = p("/eu/before");
+        w.publish(iter::once(before.clone())).await.unwrap();
+        let eu0 = reader(addr(eu_ports[0]));
+        converges_to("eu0", &eu0, &[before.clone()], &[before.clone()]).await;
+        let not_applied = root.reload(&root_cfg_file(root_port, &eu_ports)).await;
+        assert_eq!(not_applied.unwrap(), Default::default());
+        // past the referral's ttl, so the next publish asks root again
+        time::sleep(Duration::from_secs(2)).await;
+        let after = p("/eu/after");
+        w.publish(iter::once(after.clone())).await.unwrap();
+        let both = [before, after];
+        converges_to("eu1", &reader(addr(eu_ports[1])), &both, &both).await;
+    }
+
     /// A writer publishes under a referral on the cluster the referral names,
     /// so a clear has to reach that cluster as well as the configured one.
     #[tokio::test(flavor = "multi_thread")]

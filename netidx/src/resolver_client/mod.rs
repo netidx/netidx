@@ -48,7 +48,7 @@ use std::{
         hash_map::Entry,
     },
     error, fmt,
-    iter::{self, IntoIterator},
+    iter::IntoIterator,
     marker::PhantomData,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     result,
@@ -333,12 +333,6 @@ impl ToReferral for FromWrite {
 /// published, and the sender dropped: `borrow` keeps working forever and
 /// `changed` never fires, so a connection to a referral learned at runtime
 /// needs no special case.
-fn constant(referral: Arc<Referral>) -> watch::Receiver<Arc<Referral>> {
-    let (tx, rx) = watch::channel(referral);
-    drop(tx);
-    rx
-}
-
 trait Connection<T, F>
 where
     T: ToPath + Send + Sync + 'static,
@@ -353,6 +347,9 @@ where
         tls: Option<tls::CachedConnector>,
         events: Option<UnboundedSender<GPooled<Vec<WriteEvent>>>>,
     ) -> Self;
+    /// True if dropping the connection loses nothing. A write connection
+    /// holds what was published through it, so it is never dropped.
+    const STATELESS: bool;
     /// `deadline` is the budget for the whole request, referrals included.
     fn send(
         &mut self,
@@ -362,6 +359,8 @@ where
 }
 
 impl Connection<ToRead, FromRead> for ReadClient {
+    const STATELESS: bool = true;
+
     fn new(
         resolver: watch::Receiver<Arc<Referral>>,
         desired_auth: DesiredAuth,
@@ -384,6 +383,8 @@ impl Connection<ToRead, FromRead> for ReadClient {
 }
 
 impl Connection<ToWrite, FromWrite> for WriteClient {
+    const STATELESS: bool = false;
+
     fn new(
         resolver: watch::Receiver<Arc<Referral>>,
         desired_auth: DesiredAuth,
@@ -424,12 +425,14 @@ where
     router: Router,
     desired_auth: DesiredAuth,
     /// The local cluster, which can change under us as members are added and
-    /// removed. Its connection is kept out of `by_server` — that map is keyed
-    /// by referral, so re-keying it on every address change would drop the
-    /// connection and everything it knows.
+    /// removed. Its members come from the config, through this watch, so its
+    /// connection is kept apart from `by_server`.
     default: watch::Receiver<Arc<Referral>>,
     default_con: Option<C>,
-    by_server: HashMap<Arc<Referral>, C>,
+    /// The referred clusters, by the path each is mounted at. A referral
+    /// naming other members reaches the connection through its watch, so
+    /// the connection follows the cluster and keeps what it holds.
+    by_server: HashMap<Path, (watch::Sender<Arc<Referral>>, C)>,
     writer_addr: SocketAddr,
     priority: PublisherPriority,
     secrets: Arc<RwLock<AHashMap<SocketAddr, u128>>>,
@@ -489,11 +492,27 @@ where
                 }
                 self.default_con.as_mut().unwrap().send(deadline, batch)
             }
-            Some(r) => match self.by_server.get_mut(&r) {
-                Some(con) => con.send(deadline, batch),
+            Some(r) => match self.by_server.get_mut(&r.path) {
+                Some((referral, con)) => {
+                    if **referral.borrow() != *r {
+                        referral.send_replace(r);
+                    }
+                    con.send(deadline, batch)
+                }
                 None => {
+                    if self.by_server.len() >= MAX_REFERRALS {
+                        if C::STATELESS {
+                            self.by_server.clear()
+                        } else {
+                            warn!(
+                                "a writer referred to more than {MAX_REFERRALS} clusters; \
+                                 is the resolver hierarchy misconfigured?"
+                            )
+                        }
+                    }
+                    let (referral, rx) = watch::channel(r.clone());
                     let mut con = C::new(
-                        constant(r.clone()),
+                        rx,
                         self.desired_auth.clone(),
                         self.writer_addr,
                         self.priority,
@@ -501,7 +520,7 @@ where
                         self.tls.clone(),
                         self.events.clone(),
                     );
-                    self.by_server.insert(r, con.clone());
+                    self.by_server.insert(r.path.clone(), (referral, con.clone()));
                     con.send(deadline, batch)
                 }
             },
@@ -567,22 +586,20 @@ where
     /// replies.
     async fn send_everywhere(&self, msg: T) -> Result<LPooled<Vec<F>>> {
         let deadline = Instant::now() + MAX_REQUEST;
-        let mut waiters: LPooled<Vec<ResponseChan<F>>> = {
+        let mut waiters: LPooled<Vec<ResponseChan<F>>> = LPooled::take();
+        {
             let mut guard = self.0.lock();
             let inner = &mut *guard;
             inner.refresh_default();
-            let mut servers: LPooled<Vec<Option<Arc<Referral>>>> = iter::once(None)
-                .chain(inner.by_server.keys().cloned().map(Some))
-                .collect();
-            servers
-                .drain(..)
-                .map(|server| {
-                    let mut batch = inner.ti_pool.take();
-                    batch.push((0, msg.clone()));
-                    inner.send_to_server(deadline, server, batch)
-                })
-                .collect()
-        };
+            let mut batch = inner.ti_pool.take();
+            batch.push((0, msg.clone()));
+            waiters.push(inner.send_to_server(deadline, None, batch));
+            for (_, con) in inner.by_server.values_mut() {
+                let mut batch = inner.ti_pool.take();
+                batch.push((0, msg.clone()));
+                waiters.push(con.send(deadline, batch));
+            }
+        }
         let mut replies: LPooled<Vec<F>> = LPooled::take();
         for r in future::join_all(waiters.drain(..)).await {
             let (_, mut r) = match r {
@@ -607,19 +624,6 @@ where
                 let mut guard = self.0.lock();
                 let inner = &mut *guard;
                 inner.refresh_default();
-                // CR claude for claude: [risk/low] For a writer this drops
-                // the write connections to every referred cluster. A dropped
-                // WriteClient's write_mgr exits, so the paths published
-                // through it stop being heartbeated and expire on that
-                // cluster while the publisher still thinks they are
-                // published, and clear (send_everywhere) no longer reaches
-                // them. Reachable only past MAX_REFERRALS referred clusters,
-                // so not seen. Fix: for writes, keep any connection that
-                // still holds published paths, or evict only idle ones.
-                // (resolver-referral-cap-01)
-                if inner.by_server.len() > MAX_REFERRALS {
-                    inner.by_server.clear(); // a workable sledgehammer
-                }
                 for (r, batch) in inner.router.route_batch(&inner.ti_pool, batch) {
                     waiters.push(inner.send_to_server(deadline, r, batch))
                 }
