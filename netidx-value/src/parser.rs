@@ -550,43 +550,57 @@ const DURATION_UNITS: [(&str, u64); 5] =
 const NANOS: u128 = 1_000_000_000;
 
 /// `n`, a float literal's text, of the duration unit `suffix`, exactly,
-/// to the nearest nanosecond; `None` when `suffix` is no unit, or the
-/// duration is negative or past `Duration::MAX`.
+/// to the nearest nanosecond, a half rounding up, whatever its digits and
+/// exponent; `None` when `suffix` is no unit, or the duration is negative
+/// or past `Duration::MAX`.
 pub fn duration_of(n: &str, suffix: &str) -> Option<Duration> {
-    let unit: u128 = match suffix {
-        "ns" => 1,
-        "us" | "µs" => 1_000,
-        "ms" => 1_000_000,
-        "s" => NANOS,
-        unit => DURATION_UNITS.iter().find(|(u, _)| *u == unit)?.1 as u128 * NANOS,
+    use std::num::IntErrorKind;
+    let (unit, places): (u64, i128) = match suffix {
+        "ns" => (1, 0),
+        "us" | "µs" => (1, 3),
+        "ms" => (1, 6),
+        "s" => (1, 9),
+        unit => (DURATION_UNITS.iter().find(|(u, _)| *u == unit)?.1, 9),
     };
     let (mantissa, exp) = match n.split_once('e') {
-        Some((m, e)) => (m, e.parse::<i64>().ok()?),
         None => (n, 0),
+        Some((m, e)) => match e.parse::<i64>() {
+            Ok(e) => (m, e),
+            Err(e) => match e.kind() {
+                IntErrorKind::PosOverflow => (m, i64::MAX),
+                IntErrorKind::NegOverflow => (m, i64::MIN),
+                _ => return None,
+            },
+        },
     };
     let (whole, frac) = mantissa.split_once('.').unwrap_or((mantissa, ""));
     let negative = whole.starts_with('-');
-    let digits = || whole.trim_start_matches('-').chars().chain(frac.chars());
-    if negative && digits().any(|c| c != '0') {
+    let digits = || whole.trim_start_matches('-').bytes().chain(frac.bytes());
+    if negative && digits().any(|c| c != b'0') {
         return None;
     }
-    let mut value: u128 = 0;
-    for c in digits().skip_while(|c| *c == '0') {
-        value = value.checked_mul(10)?.checked_add(c.to_digit(10)? as u128)?;
-    }
-    let value = value.checked_mul(unit)?;
-    // value * 10^-scale nanoseconds
-    let scale = frac.len() as i64 - exp;
-    let nanos = match u32::try_from(scale.unsigned_abs()) {
-        _ if value == 0 => 0,
-        Ok(k) if scale <= 0 => value.checked_mul(10u128.checked_pow(k)?)?,
-        Ok(k) => match 10u128.checked_pow(k) {
-            Some(d) => value / d + u128::from(value % d >= d - d / 2),
+    // The digits read as an integer, times unit, are the product whose
+    // digit of index i weighs 10^(i + weight) ns.
+    let weight = places + exp as i128 - frac.len() as i128;
+    let (mut nanos, mut carry, mut half) = (0u128, 0u64, false);
+    let mut digits = digits().rev();
+    for i in 0.. {
+        let d = match digits.next() {
+            Some(c) => (c as char).to_digit(10)? as u64,
+            None if carry == 0 => break,
             None => 0,
-        },
-        Err(_) if scale > 0 => 0,
-        Err(_) => return None,
-    };
+        };
+        let product = d * unit + carry;
+        let (digit, w) = (product % 10, i + weight);
+        carry = product / 10;
+        if w == -1 {
+            half = digit >= 5
+        } else if w >= 0 && digit > 0 {
+            let place = 10u128.checked_pow(u32::try_from(w).ok()?)?;
+            nanos = nanos.checked_add(place.checked_mul(digit as u128)?)?
+        }
+    }
+    let nanos = nanos.checked_add(half as u128)?;
     let secs = u64::try_from(nanos / NANOS).ok()?;
     Some(Duration::new(secs, (nanos % NANOS) as u32))
 }

@@ -659,6 +659,49 @@ fn duration_of_knows_its_units() {
     }
 }
 
+/// A duration's count is read exactly whatever its digits and exponent:
+/// zeros past any width, an exponent past i64's range, a rounding decided
+/// by the digit just under a nanosecond however many follow it.
+#[test]
+fn duration_of_reads_any_digits_and_exponent() {
+    use crate::parser::duration_of;
+    let ns = Duration::from_nanos;
+    let max_secs = "18446744073709551615";
+    for (n, unit, want) in [
+        ("1.0000000000000000000000000000000000000000", "s", Some(ns(1_000_000_000))),
+        ("0000000000000000000000000000000000000000002.", "ns", Some(ns(2))),
+        ("1e-99999999999999999999", "s", Some(Duration::ZERO)),
+        ("1.e-9223372036854775808", "s", Some(Duration::ZERO)),
+        ("0.e-9223372036854775808", "s", Some(Duration::ZERO)),
+        ("1.5e-9223372036854775807", "y", Some(Duration::ZERO)),
+        ("1e99999999999999999999", "s", None),
+        ("0e99999999999999999999", "s", Some(Duration::ZERO)),
+        ("-0.e99999999999999999999", "s", Some(Duration::ZERO)),
+        ("1.e9223372036854775807", "ns", None),
+        ("0.49999999999999999999999999999999999999999999", "ns", Some(Duration::ZERO)),
+        ("0.50000000000000000000000000000000000000000000", "ns", Some(ns(1))),
+        ("2.4999999999999999999999999999999999999999999e-9", "s", Some(ns(2))),
+        ("1.5e-15", "M", Some(ns(4))),
+        ("1.2e-15", "M", Some(ns(3))),
+        ("1e-6", "y", Some(ns(31_557_600_000))),
+        (&format!("{max_secs}.9999999994999999999999999999"), "s", Some(Duration::MAX)),
+        (&format!("{max_secs}.9999999995"), "s", None),
+        (&format!("{max_secs}000000000e-9"), "s", Some(Duration::new(u64::MAX, 0))),
+        ("-1e-99999999999999999999", "s", None),
+        ("1e1x", "s", None),
+    ] {
+        assert_eq!(duration_of(n, unit), want, "{n}{unit}");
+    }
+    let long = format!("1.{}", "0".repeat(100_000));
+    assert_eq!(duration_of(&long, "s"), Some(ns(1_000_000_000)));
+    for (text, want) in [
+        ("duration:1.e-9223372036854775808s", Duration::ZERO),
+        ("duration:1.0000000000000000000000000000000000000000s", ns(1_000_000_000)),
+    ] {
+        assert_eq!(text.parse::<Value>().unwrap(), Value::Duration(Arc::new(want)));
+    }
+}
+
 /// each form here round-trips through the parser and the printer.
 #[test]
 fn duration_units_round_trip() {
