@@ -167,6 +167,7 @@ pub fn value(s: &str) -> Result<(Value, usize), Failure> {
 }
 
 /// The bytes of whitespace at the start of `s`.
+#[inline]
 pub fn whitespace(s: &str) -> usize {
     s.len() - s.trim_start().len()
 }

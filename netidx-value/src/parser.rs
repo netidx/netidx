@@ -580,8 +580,10 @@ pub fn duration_of(n: &str, suffix: &str) -> Option<Duration> {
         return None;
     }
     // The digits read as an integer, times unit, are the product whose
-    // digit of index i weighs 10^(i + weight) ns.
+    // digit of index i weighs 10^(i + weight) ns; `place` is that weight
+    // once it is at least 1, `None` past u128.
     let weight = places + exp as i128 - frac.len() as i128;
+    let mut place = u32::try_from(weight.max(0)).ok().and_then(|w| 10u128.checked_pow(w));
     let (mut nanos, mut carry, mut half) = (0u128, 0u64, false);
     let mut digits = digits().rev();
     for i in 0.. {
@@ -595,9 +597,11 @@ pub fn duration_of(n: &str, suffix: &str) -> Option<Duration> {
         carry = product / 10;
         if w == -1 {
             half = digit >= 5
-        } else if w >= 0 && digit > 0 {
-            let place = 10u128.checked_pow(u32::try_from(w).ok()?)?;
-            nanos = nanos.checked_add(place.checked_mul(digit as u128)?)?
+        } else if w >= 0 {
+            if digit > 0 {
+                nanos = nanos.checked_add(place?.checked_mul(digit as u128)?)?
+            }
+            place = place.and_then(|p| p.checked_mul(10))
         }
     }
     let nanos = nanos.checked_add(half as u128)?;
