@@ -2,13 +2,6 @@ use anyhow::{Context, Error, Result, anyhow};
 use arcstr::ArcStr;
 use bytes::BytesMut;
 use clap::Args;
-use combine::{
-    EasyParser, ParseError, Parser, RangeStream,
-    parser::char::spaces,
-    sep_by,
-    stream::{Range, position},
-    token,
-};
 use escaping::Escape;
 use futures::{
     channel::mpsc::{self, Receiver, Sender},
@@ -19,7 +12,7 @@ use futures::{
 use netidx::{
     config::Config,
     path::Path,
-    protocol::value_parser::{VAL_ESC, VAL_MUST_ESC, escaped_string, value},
+    protocol::value_parser::rd::{self, Expected, Failure, Item},
     resolver_client::DesiredAuth,
     subscriber::{
         Dval, Event, SubId, SubscribeErrors, Subscriber, Typ, UpdatesFlags, Value,
@@ -58,8 +51,9 @@ pub(super) struct Params {
     paths: Vec<String>,
 }
 
+const RPC_ARG_MUST_ESC: [char; 2] = ['\\', '='];
 static RPC_ARG_ESC: LazyLock<Escape> =
-    LazyLock::new(|| Escape::new('\\', &['\\', '='], &[], None).unwrap());
+    LazyLock::new(|| Escape::new('\\', &RPC_ARG_MUST_ESC, &[], None).unwrap());
 
 async fn write_buffer<W>(writer: &mut W, buffer: &mut BytesMut) -> Result<()>
 where
@@ -73,27 +67,32 @@ where
     Ok(())
 }
 
-fn rpc_arg<I>() -> impl Parser<I, Output = (String, Value)>
-where
-    I: RangeStream<Token = char>,
-    I::Error: ParseError<I::Token, I::Range, I::Position>,
-    I::Range: Range,
-{
-    (
-        spaces().with(escaped_string(&['\\', '='], &RPC_ARG_ESC)),
-        spaces().with(token('=')),
-        spaces().with(value(&VAL_MUST_ESC, &VAL_ESC)),
-    )
-        .map(|(arg_name, _, arg_val)| (arg_name, arg_val))
-}
-
-fn rpc_args<I>() -> impl Parser<I, Output = Vec<(String, Value)>>
-where
-    I: RangeStream<Token = char>,
-    I::Error: ParseError<I::Token, I::Range, I::Position>,
-    I::Range: Range,
-{
-    sep_by(rpc_arg(), spaces().with(token(',')))
+/// `name=value, ...`, all of `s`: a name runs to its `=`, `\=` and `\\`
+/// writing `=` and `\` in it, and a value is a value literal.
+fn rpc_args(s: &str) -> std::result::Result<Vec<(String, Value)>, Failure> {
+    let ws = |at: usize| at + s[at..].len() - s[at..].trim_start().len();
+    let expect = |at: usize, c: char, items: &'static [Item]| match s[at..].starts_with(c)
+    {
+        true => Ok(at + 1),
+        false => Err(Failure { offset: at, expected: Expected::OneOf(items) }),
+    };
+    let mut args = vec![];
+    let mut at = ws(0);
+    if at == s.len() {
+        return Ok(args);
+    }
+    loop {
+        let (name, n) = rd::escaped_string(&s[at..], &RPC_ARG_MUST_ESC, &RPC_ARG_ESC)
+            .map_err(|f| f.after(at))?;
+        at = expect(at + n, '=', &[Item::Char('=')])?;
+        let (v, n) = rd::value(&s[at..]).map_err(|f| f.after(at))?;
+        args.push((name.into_owned(), v));
+        at = ws(at + n);
+        if at == s.len() {
+            return Ok(args);
+        }
+        at = ws(expect(at, ',', &[Item::Char(','), Item::Text("end of input")])?);
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -127,10 +126,7 @@ impl FromStr for In {
             let path = Path::from(ArcStr::from(path));
             let args = match parts.next() {
                 None => vec![],
-                Some(s) => rpc_args()
-                    .easy_parse(position::Stream::new(s))
-                    .map(|(r, _)| r)
-                    .map_err(|e| anyhow!(format!("{}", e)))?,
+                Some(s) => rpc_args(s).map_err(|f| anyhow!("{}", f.in_text(s)))?,
             };
             Ok(In::Call(path, args))
         } else {
@@ -459,6 +455,39 @@ mod tests {
         ) -> Poll<std::io::Result<()>> {
             Poll::Ready(Ok(()))
         }
+    }
+
+    fn call_args(s: &str) -> Result<Vec<(String, Value)>> {
+        match format!("CALL|/rpc|{s}").parse::<In>()? {
+            In::Call(_, args) => Ok(args),
+            i => panic!("{i:?}"),
+        }
+    }
+
+    #[test]
+    fn call_reads_named_value_arguments() {
+        let s = |s: &str| Value::String(ArcStr::from(s));
+        assert_eq!(call_args("").unwrap(), vec![]);
+        assert_eq!(call_args("a=1").unwrap(), vec![("a".into(), Value::I64(1))]);
+        assert_eq!(
+            call_args(r#"a=1, b="x",c\=d=[u8:2, null] "#).unwrap(),
+            vec![
+                ("a".into(), Value::I64(1)),
+                ("b".into(), s("x")),
+                ("c=d".into(), Value::Array([Value::U8(2), Value::Null].into())),
+            ]
+        );
+        assert_eq!(
+            call_args(r#"\\=error:"e""#).unwrap(),
+            vec![("\\".into(), Value::error("e"))]
+        );
+        for bad in ["a=1x", "a=1 b=2", "a=1,", "a", "a=", r"a\q=1", "a=[1"] {
+            assert!(call_args(bad).is_err(), "{bad}")
+        }
+        assert_eq!(
+            format!("{}", call_args("a=1, b=2 3").unwrap_err()),
+            "Parse error at line: 1, column: 10\nUnexpected `3`\nExpected `,` or end of input\n"
+        );
     }
 
     #[test]
