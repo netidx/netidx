@@ -67,10 +67,11 @@ where
     Ok(())
 }
 
-/// `name=value, ...`, all of `s`: a name runs to its `=`, `\=` and `\\`
-/// writing `=` and `\` in it, and a value is a value literal.
+/// `name=value, ...`, all of `s`, whitespace around it and around each
+/// comma, none for whitespace alone: a name runs to its `=`, `\=` and
+/// `\\` writing `=` and `\` in it, and a value is a value literal.
 fn rpc_args(s: &str) -> std::result::Result<Vec<(String, Value)>, Failure> {
-    let ws = |at: usize| at + s[at..].len() - s[at..].trim_start().len();
+    let ws = |at: usize| at + rd::whitespace(&s[at..]);
     let expect = |at: usize, c: char, items: &'static [Item]| match s[at..].starts_with(c)
     {
         true => Ok(at + 1),
@@ -467,7 +468,9 @@ mod tests {
     #[test]
     fn call_reads_named_value_arguments() {
         let s = |s: &str| Value::String(ArcStr::from(s));
-        assert_eq!(call_args("").unwrap(), vec![]);
+        for none in ["", " ", "\t", " \n "] {
+            assert_eq!(call_args(none).unwrap(), vec![], "{none:?}");
+        }
         assert_eq!(call_args("a=1").unwrap(), vec![("a".into(), Value::I64(1))]);
         assert_eq!(
             call_args(r#"a=1, b="x",c\=d=[u8:2, null] "#).unwrap(),

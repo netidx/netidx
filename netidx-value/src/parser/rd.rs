@@ -37,11 +37,13 @@ pub struct Failure {
 /// What a parse wanted where it stopped.
 #[derive(Debug, Clone, Copy)]
 pub enum Expected {
-    /// One of these; none when only what stands there is wrong.
+    /// One of these.
     OneOf(&'static [Item]),
     /// One of the [`escapes`] of this string grammar, after its escape char.
     Escape(&'static [char], &'static Escape),
-    /// The text ending at the offset reads, and is refused for this reason.
+    /// What was read is refused for this reason: a datetime or a value
+    /// nested too deep that starts at the offset, anything else that ends
+    /// there.
     Refused(&'static str),
 }
 
@@ -65,7 +67,6 @@ const VALUE: Expected = Expected::OneOf(&[Item::Text("a value")]);
 const DIGIT: Expected = Expected::OneOf(&[Item::Text("a digit")]);
 const SIGN_OR_DIGIT: Expected =
     Expected::OneOf(&[Item::Char('-'), Item::Text("a digit")]);
-const NOTHING: Expected = Expected::OneOf(&[]);
 const NESTING: Expected = Expected::Refused("value nesting too deep");
 const BAD_SIGNED: Expected = Expected::Refused("invalid signed integer");
 const BAD_UNSIGNED: Expected = Expected::Refused("invalid unsigned integer");
@@ -81,7 +82,8 @@ impl Failure {
 
     /// The failure in `text`, the text the parse began on: its line and
     /// column, the token found there, and what was expected instead or
-    /// why what was read is refused.
+    /// why what was read is refused. Another text panics where the offset
+    /// is past its end or inside a character.
     pub fn in_text<'a>(&'a self, text: &'a str) -> impl fmt::Display + 'a {
         Report { failure: self, text }
     }
@@ -99,38 +101,43 @@ impl fmt::Display for Report<'_> {
             .chars()
             .fold((1, 1), |(l, c), ch| if ch == '\n' { (l + 1, 1) } else { (l, c + 1) });
         writeln!(f, "Parse error at line: {line}, column: {column}")?;
-        let (mut listed, mut escaped);
-        let items: &mut dyn Iterator<Item = Item> = match expected {
-            Expected::Refused(why) => return writeln!(f, "{why}"),
-            Expected::OneOf(items) => {
-                listed = items.iter().copied();
-                &mut listed
-            }
+        let found = self.text[offset..].chars().next();
+        match expected {
+            Expected::Refused(why) => writeln!(f, "{why}"),
+            Expected::OneOf(items) => unexpected(f, found, items.iter().copied()),
             Expected::Escape(must_esc, esc) => {
-                escaped = escapes(must_esc, esc).map(Item::Char);
-                &mut escaped
+                unexpected(f, found, escapes(must_esc, esc).map(Item::Char))
             }
-        };
-        match self.text[offset..].chars().next() {
-            Some(c) => writeln!(f, "Unexpected `{c}`")?,
-            None => writeln!(f, "Unexpected end of input")?,
         }
-        let mut items = items.peekable();
-        let mut first = true;
-        while let Some(i) = items.next() {
-            let sep = match (first, items.peek()) {
-                (true, _) => "Expected ",
-                (false, None) => " or ",
-                (false, Some(_)) => ", ",
-            };
-            write!(f, "{sep}{i}")?;
-            first = false;
-        }
-        if !first {
-            writeln!(f)?;
-        }
-        Ok(())
     }
+}
+
+/// The char a failure found, `None` for the end of the text, and what it
+/// expected instead.
+fn unexpected(
+    f: &mut fmt::Formatter<'_>,
+    found: Option<char>,
+    expected: impl Iterator<Item = Item>,
+) -> fmt::Result {
+    match found {
+        Some(c) => writeln!(f, "Unexpected `{c}`")?,
+        None => writeln!(f, "Unexpected end of input")?,
+    }
+    let mut items = expected.peekable();
+    let mut first = true;
+    while let Some(i) = items.next() {
+        let sep = match (first, items.peek()) {
+            (true, _) => "Expected ",
+            (false, None) => " or ",
+            (false, Some(_)) => ", ",
+        };
+        write!(f, "{sep}{i}")?;
+        first = false;
+    }
+    if !first {
+        writeln!(f)?;
+    }
+    Ok(())
 }
 
 /// The characters an escape char may precede in a string whose
@@ -159,14 +166,21 @@ pub fn value(s: &str) -> Result<(Value, usize), Failure> {
     Ok((v, c.at))
 }
 
+/// The bytes of whitespace at the start of `s`.
+pub fn whitespace(s: &str) -> usize {
+    s.len() - s.trim_start().len()
+}
+
 /// The whitespace at the start of `s`, then its end: the bytes of
 /// whitespace, or where something else stands.
 pub fn end(s: &str) -> Result<usize, Failure> {
-    let mut c = Cursor::new(s);
-    c.skip_ws();
-    match c.at == s.len() {
-        true => Ok(c.at),
-        false => Err(c.fail(Expected::OneOf(&[Item::Text("end of input")]))),
+    let at = whitespace(s);
+    match at == s.len() {
+        true => Ok(at),
+        false => Err(Failure {
+            offset: at,
+            expected: Expected::OneOf(&[Item::Text("end of input")]),
+        }),
     }
 }
 
@@ -221,10 +235,13 @@ const TYPED: [(Typ, Read); 20] = [
     (Typ::F64, |c, _| c.float().map(Value::F64)),
     (Typ::Decimal, |c, _| c.float().map(|d: Decimal| Value::Decimal(Arc::new(d)))),
     (Typ::DateTime, |c, _| {
+        let offset = c.at;
         let s = c.quoted(&VAL_MUST_ESC, &VAL_ESC)?;
         match DateTime::<Utc>::from_str(&s) {
             Ok(d) => Ok(Value::DateTime(Arc::new(d))),
-            Err(e) => Err(c.fail(Expected::Refused(datetime_refusal(e)))),
+            Err(e) => {
+                Err(Failure { offset, expected: Expected::Refused(datetime_refusal(e)) })
+            }
         }
     }),
     (Typ::Duration, |c, _| c.duration().map(|d| Value::Duration(Arc::new(d)))),
@@ -252,9 +269,13 @@ fn datetime_refusal(e: chrono::ParseError) -> &'static str {
     }
 }
 
-/// `true`, `false` and `null`: the bool each is, none for `null`.
-const KEYWORDS: [(&str, Option<bool>); 3] =
-    [("true", Some(true)), ("false", Some(false)), ("null", None)];
+/// `true`, `false` and `null`: the bool each is, none for `null`, and
+/// what a letter, digit or `_` right after one fails for.
+const KEYWORDS: [(&str, Option<bool>, Expected); 3] = [
+    ("true", Some(true), Expected::OneOf(&[Item::Text("the end of `true`")])),
+    ("false", Some(false), Expected::OneOf(&[Item::Text("the end of `false`")])),
+    ("null", None, Expected::OneOf(&[Item::Text("the end of `null`")])),
+];
 
 /// The duration units, each checked before any unit that is its prefix.
 const UNITS: [&str; 10] = ["ms", "ns", "us", "µs", "s", "m", "h", "d", "M", "y"];
@@ -291,8 +312,7 @@ impl<'a> Cursor<'a> {
     }
 
     fn skip_ws(&mut self) {
-        let rest = self.rest();
-        self.at += rest.len() - rest.trim_start().len()
+        self.at += whitespace(self.rest())
     }
 
     fn eat(&mut self, c: u8) -> bool {
@@ -421,11 +441,12 @@ impl<'a> Cursor<'a> {
     /// and what that type reads, whitespace around the `:`.
     fn word(&mut self, depth: usize) -> Result<Value, Failure> {
         let rest = self.rest();
-        if let Some((kw, v)) = KEYWORDS.iter().find(|(kw, _)| rest.starts_with(kw)) {
+        if let Some((kw, v, end)) = KEYWORDS.iter().find(|(kw, ..)| rest.starts_with(kw))
+        {
             self.at += kw.len();
             return match not_prefix(self.rest()) {
                 true => Ok(v.map_or(Value::Null, Value::Bool)),
-                false => Err(self.fail(NOTHING)),
+                false => Err(self.fail(*end)),
             };
         }
         let Some((typ, read)) = TYPED.iter().find(|(t, _)| rest.starts_with(t.name()))

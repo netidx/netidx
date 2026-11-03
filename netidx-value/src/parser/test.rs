@@ -539,14 +539,11 @@ struct Tally {
 /// Whether a failure the combine grammar reported at `old` and the
 /// hand-written one at `new` is of a kind the hand-written one reports
 /// further on: a type's name not followed by `:`, which combine reported
-/// at the name's start, a datetime chrono refused, which combine reported
-/// at its opening quote, and a keyword run into an identifier at a list's
+/// at the name's start, and a keyword run into an identifier at a list's
 /// item, which combine reported at the item.
 fn moved_on(old: usize, new: usize, msg: &str) -> bool {
     old < new
-        && (msg.ends_with("Expected `:`\n")
-            || msg.contains("\ninvalid datetime: ")
-            || msg.lines().count() == 2)
+        && (msg.ends_with("Expected `:`\n") || msg.contains("\nExpected the end of `"))
 }
 
 /// A message without its position line and the token it found.
@@ -827,7 +824,18 @@ fn failure_messages() {
         msg("[\n1\n2]"),
         "Parse error at line: 3, column: 1\nUnexpected `2`\nExpected `,` or `]`\n"
     );
-    assert_eq!(msg("truex"), "Parse error at line: 1, column: 5\nUnexpected `x`\n");
+    assert_eq!(
+        msg("truex"),
+        "Parse error at line: 1, column: 5\nUnexpected `x`\nExpected the end of `true`\n"
+    );
+    assert_eq!(
+        msg("[1, null_]"),
+        "Parse error at line: 1, column: 9\nUnexpected `_`\nExpected the end of `null`\n"
+    );
+    assert_eq!(
+        msg("[datetime:\"2020-01-01T00:00:00Z\", datetime:\"2020-02-30T00:00:00Z\"]"),
+        "Parse error at line: 1, column: 44\ninvalid datetime: input is out of range\n"
+    );
     assert_eq!(
         msg(""),
         "Parse error at line: 1, column: 1\nUnexpected end of input\nExpected a value\n"
