@@ -781,3 +781,52 @@ fn failure_messages() {
         "Parse error at line: 1, column: 1\nUnexpected end of input\nExpected a value\n"
     );
 }
+
+/// Parses the printed corpus (`NV_PARSER_SET=valid`) or its damaged
+/// copies (`failing`) ten times with the grammar `NV_PARSER_BENCH` names:
+/// `old` or `new` for `parse_value`, `old-prefix` or `new-prefix` for a
+/// value at the start of the text, `none` for the corpus alone. Run under
+/// `perf stat` to count each grammar's instructions.
+#[test]
+#[ignore]
+fn parse_speed() {
+    use std::hint::black_box;
+    let which = std::env::var("NV_PARSER_BENCH").unwrap();
+    let printed = printed(3000, 200);
+    let corpus = match std::env::var("NV_PARSER_SET").unwrap().as_str() {
+        "valid" => printed,
+        _ => {
+            let mut rng = Rng(0x9e37_79b9_7f4a_7c15);
+            let mut damage = vec![];
+            for s in &printed {
+                damaged(s, 2, &mut rng, &mut damage)
+            }
+            damage
+        }
+    };
+    let old_parse_value = |s: &str| {
+        value(&VAL_MUST_ESC, &VAL_ESC)
+            .skip(spaces())
+            .skip(eof())
+            .easy_parse(position::Stream::new(s))
+            .map(|(r, _)| r)
+            .map_err(|e| anyhow::anyhow!(format!("{}", e)))
+    };
+    for _ in 0..10 {
+        for s in &corpus {
+            let s = black_box(s.as_str());
+            match which.as_str() {
+                "old" => drop(black_box(old_parse_value(s))),
+                "new" => drop(black_box(parse_value(s))),
+                "old-prefix" => drop(black_box(value(&VAL_MUST_ESC, &VAL_ESC).parse(s))),
+                "new-prefix" => drop(black_box(rd::value(s))),
+                _ => (),
+            }
+        }
+    }
+    println!(
+        "{} inputs, {} bytes",
+        corpus.len(),
+        corpus.iter().map(|s| s.len()).sum::<usize>()
+    );
+}
