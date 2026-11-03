@@ -29,11 +29,18 @@ const MAX_FREE_ARCS: usize = 1024;
 
 type Base = ThinArc<(), Value>;
 
+/// The bytes of free arrays a thread keeps. A thread that drops more
+/// arrays of a length than it builds (a parallel evaluator's) keeps the
+/// rest on that length's list, so each thread is held to this much.
+const MAX_FREE_BYTES: usize = 256 * 1024;
+
 /// The free arrays of each length (every element `Null`) and the free
 /// outer arcs (each holding `empty`), per thread: a worker that builds
 /// and drops arrays never touches another thread's lists or counts.
 struct Free {
     bases: [Vec<Base>; MAX_LEN + 1],
+    /// The bytes `bases` hold, at most `MAX_FREE_BYTES`.
+    bytes: usize,
     arcs: Vec<Arc<ValArrayInner>>,
     empty: ValArrayBase,
 }
@@ -41,13 +48,15 @@ struct Free {
 thread_local! {
     static FREE: RefCell<Free> = RefCell::new(Free {
         bases: std::array::from_fn(|_| Vec::new()),
+        bytes: 0,
         arcs: Vec::new(),
         empty: ValArrayBase(ManuallyDrop::new(new_base(0))),
     });
 }
 
-fn max_free(len: usize) -> usize {
-    32 * (MAX_LEN + 1 - len)
+/// The bytes a free array of `len` elements holds.
+fn base_bytes(len: usize) -> usize {
+    2 * mem::size_of::<usize>() + len * mem::size_of::<Value>()
 }
 
 static EMPTY: LazyLock<ValArrayBase> =
@@ -67,7 +76,14 @@ fn get_by_size(len: usize) -> ValArrayBase {
     }
     let free = (len <= MAX_LEN)
         .then(|| {
-            FREE.try_with(|f| f.try_borrow_mut().ok()?.bases[len].pop()).ok().flatten()
+            FREE.try_with(|f| {
+                let mut f = f.try_borrow_mut().ok()?;
+                let base = f.bases[len].pop()?;
+                f.bytes -= base_bytes(len);
+                Some(base)
+            })
+            .ok()
+            .flatten()
         })
         .flatten();
     ValArrayBase(ManuallyDrop::new(free.unwrap_or_else(|| new_base(len))))
@@ -260,8 +276,9 @@ impl ValArrayBase {
         });
         let _ = FREE.try_with(|f| {
             if let Ok(mut f) = f.try_borrow_mut()
-                && f.bases[len].len() < max_free(len)
+                && f.bytes + base_bytes(len) <= MAX_FREE_BYTES
             {
+                f.bytes += base_bytes(len);
                 f.bases[len].push(t)
             }
         });
@@ -846,5 +863,46 @@ impl Pack for ValArray {
             })?
         }
         Ok(new_arc(ValArrayInner::Base(data)))
+    }
+}
+
+#[cfg(test)]
+mod free_test {
+    use super::*;
+    use std::thread;
+
+    fn free_bytes() -> usize {
+        FREE.with(|f| f.borrow().bytes)
+    }
+
+    fn arrays(len: usize, n: usize) -> Vec<ValArray> {
+        (0..n)
+            .map(|i| {
+                ValArray::from_iter_exact((0..len).map(|j| Value::I64((i + j) as i64)))
+            })
+            .collect()
+    }
+
+    /// A thread that drops arrays another thread built keeps at most
+    /// `MAX_FREE_BYTES` of them, however many arrive, and builds from
+    /// what it kept.
+    #[test]
+    fn a_thread_keeps_a_bounded_share_of_foreign_arrays() {
+        for len in [1, 2, 8, 63, 128] {
+            let n = 4 * MAX_FREE_BYTES / base_bytes(len);
+            let built = thread::spawn(move || arrays(len, n)).join().unwrap();
+            thread::spawn(move || {
+                drop(built);
+                let kept = free_bytes();
+                assert!(kept <= MAX_FREE_BYTES, "{kept} bytes of arrays of {len} kept");
+                assert!(kept + base_bytes(len) > MAX_FREE_BYTES, "{kept} bytes of {len}");
+                let reused = arrays(len, kept / base_bytes(len));
+                assert_eq!(free_bytes(), 0, "arrays of {len}");
+                drop(reused);
+                assert_eq!(free_bytes(), kept, "arrays of {len}");
+            })
+            .join()
+            .unwrap()
+        }
     }
 }
