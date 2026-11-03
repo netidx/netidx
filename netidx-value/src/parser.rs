@@ -1,10 +1,22 @@
+//! netidx's value literal grammar, twice: [`rd`], plain functions over
+//! the text, which [`parse_value`] and `Value`'s `FromStr` read with,
+//! and the same grammar as combine parsers ([`value`], [`int`],
+//! [`duration`], [`escaped_string`], [`not_prefix`]) for parsers built
+//! with combine to compose.
+
 use crate::{Abstract, ValArray, Value, pbuf::PBytes};
 use arcstr::ArcStr;
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use bytes::Bytes;
 use combine::{
-    EasyParser, ParseError, Parser, RangeStream, attempt, between, choice, eof, from_str,
-    look_ahead, many1, none_of, not_followed_by, one_of, optional, parser,
+    ErrorOffset,
+    error::{ParseResult, StreamError, Tracked},
+    parser::ParseMode,
+    stream::{Stream, StreamOnce},
+};
+use combine::{
+    ParseError, Parser, RangeStream, attempt, between, choice, from_str, look_ahead,
+    many1, none_of, not_followed_by, one_of, optional, parser,
     parser::{
         char::{alpha_num, digit, spaces, string},
         combinator::recognize,
@@ -12,14 +24,8 @@ use combine::{
         repeat::escaped,
     },
     satisfy, sep_by, sep_by1,
-    stream::{Range, position},
+    stream::Range,
     token, unexpected_any,
-};
-use combine::{
-    ErrorOffset,
-    error::{ParseResult, StreamError, Tracked},
-    parser::ParseMode,
-    stream::{Stream, StreamOnce},
 };
 use compact_str::{CompactString, format_compact};
 use escaping::Escape;
@@ -37,6 +43,8 @@ use std::{
     time::Duration,
 };
 use triomphe::Arc;
+
+pub mod rd;
 
 /// Default [`max_nesting`].
 ///
@@ -625,14 +633,15 @@ parser! {
     }
 }
 
+/// `s`, all of it, as a value; whitespace around it allowed.
 pub fn parse_value(s: &str) -> anyhow::Result<Value> {
-    value(&VAL_MUST_ESC, &VAL_ESC)
-        .skip(spaces())
-        .skip(eof())
-        .easy_parse(position::Stream::new(s))
-        .map(|(r, _)| r)
-        .map_err(|e| anyhow::anyhow!(format!("{}", e)))
+    rd::value(s)
+        .and_then(|(v, n)| rd::end(&s[n..]).map_err(|f| f.after(n)).map(|_| v))
+        .map_err(|f| anyhow::anyhow!("{}", f.in_text(s)))
 }
+
+#[cfg(test)]
+mod test;
 
 #[cfg(test)]
 mod tests {
