@@ -723,7 +723,8 @@ fn hand_written_matches_combine() {
     }
 }
 
-/// A deep value parses on a small stack, growing it.
+/// Arrays, maps or errors nested to the limit parse on a small stack,
+/// growing it, and drop there.
 #[test]
 fn deep_values_parse_on_a_small_stack() {
     std::thread::Builder::new()
@@ -741,6 +742,57 @@ fn deep_values_parse_on_a_small_stack() {
         .unwrap()
         .join()
         .unwrap()
+}
+
+/// A parse drops the values it read and lost on stack it guaranteed: a
+/// sibling as deep as the limit allows, of each mix of kinds, before a
+/// failure, as a key with no `=>`, or beside a value under the same key,
+/// at every depth, on threads just over the red zone, so that one level
+/// starts with the red zone and no more.
+#[test]
+fn deep_values_a_parse_loses_drop_on_a_small_stack() {
+    let max = max_nesting();
+    let mixes: [&[(&str, &str)]; 3] = [
+        &[("{1 => ", "}"), ("[", "]")],
+        &[("{1 => ", "}"), ("error:", ""), ("[", "]"), ("error:", "")],
+        &[("[", "]"), ("{", " => 1}")],
+    ];
+    let deep = |mix: &[(&str, &str)], n: usize| {
+        let (mut open, mut close) = (String::new(), String::new());
+        for (o, c) in mix.iter().cycle().take(n) {
+            open.push_str(o);
+            close.insert_str(0, c);
+        }
+        format!("{open}1{close}")
+    };
+    for stack in [16, 64].map(|k| rd::RED_ZONE + k * 1024) {
+        std::thread::Builder::new()
+            .stack_size(stack)
+            .spawn(move || {
+                for mix in mixes {
+                    for p in 0..max - 1 {
+                        let d = deep(mix, max - 2 - p);
+                        let (open, close) = ("[".repeat(p), "]".repeat(p));
+                        for s in [
+                            format!("{open}[{d}, @]{close}"),
+                            format!("{open}{{{d} @}}{close}"),
+                        ] {
+                            assert!(parse_value(&s).is_err(), "{stack} {p}")
+                        }
+                        for s in [
+                            format!("{open}{{1 => {d}, 1 => 2}}{close}"),
+                            format!("{open}{{1 => 2, 1 => {d}}}{close}"),
+                        ] {
+                            let kept = parse_value(&s).unwrap();
+                            stacker::maybe_grow(4 << 20, 8 << 20, || drop(kept))
+                        }
+                    }
+                }
+            })
+            .unwrap()
+            .join()
+            .unwrap()
+    }
 }
 
 /// What `parse_value`'s failures say.

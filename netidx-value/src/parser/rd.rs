@@ -18,9 +18,10 @@ use rust_decimal::Decimal;
 use std::{borrow::Cow, fmt, str::FromStr, time::Duration};
 use triomphe::Arc;
 
-/// Stack headroom each nesting level is guaranteed; one level of
-/// [`value`] costs far less.
-const RED_ZONE: usize = 64 * 1024;
+/// Stack each nesting level is guaranteed: room for its frames and for
+/// dropping the values it read and lost, which Value's drop guards bound
+/// to a few hundred KB however deep the value.
+pub(super) const RED_ZONE: usize = 1024 * 1024;
 
 /// Size of each fresh stack segment, mmap'd on entry and released on exit.
 const SEGMENT: usize = 2 * 1024 * 1024;
