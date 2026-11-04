@@ -56,6 +56,18 @@ const RED_ZONE: usize = 1024 * 1024;
 /// Size of each fresh stack segment, mmap'd on entry and released on exit.
 const SEGMENT: usize = 2 * 1024 * 1024;
 
+// CR claude for eric: [risk/low] The printer escapes only Cc controls
+// (should_escape_generic is char::is_control), so a value string holding a
+// bidi control (U+202A-202E, U+2066-2069), a zero-width character (U+200B-200F,
+// U+FEFF) or a line or paragraph separator (U+2028, U+2029) prints raw: netidx's
+// Display, and since value-unicode-escape-01 graphix fmt too, which rewrites
+// `error:"a\u{202e}b"` with the raw override in the file (the Trojan Source
+// class: text that shows in another order than it reads). Options: (a) escape
+// them too, by range here (no new dependency), which changes the printed text
+// of strings holding them, netidx's and graphix fmt's for value literals; (b)
+// leave it, as graphix's own strings already hold them raw. Rec (a). probe:
+// ~/ptmp/cr29/scratch/review-ue/r2-2/bidi.gx (`gx Y fmt --stdout bidi.gx | od
+// -c`). (value-escape-format-01)
 fn should_escape_generic(c: char) -> bool {
     c.is_control()
 }
