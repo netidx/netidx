@@ -970,9 +970,13 @@ let result = overlay(#layers: &p.layers, text(&[]))
             digits.into_iter().rev().collect::<String>().parse::<u32>().ok()
         })
     };
-    let mut h =
-        TuiTestHarness::with_register(&prog("duration:2.s"), crate::TEST_REGISTER, 80, 24)
-            .await?;
+    let mut h = TuiTestHarness::with_register(
+        &prog("duration:2.s"),
+        crate::TEST_REGISTER,
+        80,
+        24,
+    )
+    .await?;
     wait_render(&mut h, Duration::from_secs(20), "the timed progress dialog", |lines| {
         shown(lines) && percent(lines).is_some()
     })
@@ -984,7 +988,8 @@ let result = overlay(#layers: &p.layers, text(&[]))
     .await?;
     // open-ended: the accent block changes place
     let mut h =
-        TuiTestHarness::with_register(&prog("null"), crate::TEST_REGISTER, 80, 24).await?;
+        TuiTestHarness::with_register(&prog("null"), crate::TEST_REGISTER, 80, 24)
+            .await?;
     wait_render(&mut h, Duration::from_secs(20), "the open-ended progress dialog", shown)
         .await?;
     let block_at = |h: &mut TuiTestHarness| -> Result<Option<(u16, u16)>> {
