@@ -521,25 +521,13 @@ fn check_whole(s: &str) {
 }
 
 const GRAPHIX_MUST_ESC: [char; 4] = ['"', '\\', '[', ']'];
-static GRAPHIX_ESC: LazyLock<Escape> = LazyLock::new(|| {
+static GRAPHIX_STRINGS: LazyLock<StringSyntax> = LazyLock::new(|| {
     const NAMED: [(char, &str); 4] = [('\n', "n"), ('\r', "r"), ('\t', "t"), ('\0', "0")];
-    let esc: Vec<char> =
-        GRAPHIX_MUST_ESC.into_iter().chain(NAMED.map(|(c, _)| c)).collect();
-    Escape::new('\\', &esc, &NAMED, None).unwrap()
-});
-static GRAPHIX_STRINGS: LazyLock<StringSyntax> = LazyLock::new(|| StringSyntax {
-    must_esc: &GRAPHIX_MUST_ESC,
-    esc: &GRAPHIX_ESC,
-    unicode: false,
+    StringSyntax::new('\\', &GRAPHIX_MUST_ESC, &NAMED, None).unwrap()
 });
 const RPC_MUST_ESC: [char; 2] = ['\\', '='];
-static RPC_ESC: LazyLock<Escape> =
-    LazyLock::new(|| Escape::new('\\', &['\\', '='], &[], None).unwrap());
-static RPC_STRINGS: LazyLock<StringSyntax> = LazyLock::new(|| StringSyntax {
-    must_esc: &RPC_MUST_ESC,
-    esc: &RPC_ESC,
-    unicode: false,
-});
+static RPC_STRINGS: LazyLock<StringSyntax> =
+    LazyLock::new(|| StringSyntax::new('\\', &RPC_MUST_ESC, &[], None).unwrap());
 
 /// The starts of `s`'s suffixes another parser might hand one of these:
 /// after a `:`, quote, bracket, comma, space or arrow.
@@ -921,6 +909,37 @@ fn unicode_escapes() {
         let f = escaped_string(r"\u{41}", syntax).unwrap_err();
         assert_eq!(f.offset, 1);
         assert!(!format!("{}", f.in_text(r"\u{41}")).contains("u{"));
+    }
+}
+
+/// Every character, alone and beside the characters an escape is made
+/// of, prints in a value string that reads back as itself.
+#[test]
+fn every_character_reads_back() {
+    let reads_back = |s: &str| {
+        let printed = format!("{}", Value::String(s.into()));
+        match parse_value(&printed) {
+            Ok(Value::String(t)) if t == s => (),
+            r => panic!("{s:?} printed as {printed:?} read as {r:?}"),
+        }
+    };
+    let mut buf = [0; 4];
+    for c in (0..=char::MAX as u32).filter_map(char::from_u32) {
+        reads_back(c.encode_utf8(&mut buf))
+    }
+    const NEAR: [char; 14] = [
+        '\u{1}', '\u{7f}', '\u{85}', '\\', '"', 'u', '{', '}', '0', '4', '1', 'a', 'F',
+        'n',
+    ];
+    let mut s = String::new();
+    for a in NEAR {
+        for b in NEAR {
+            for c in NEAR {
+                s.clear();
+                s.extend([a, b, c]);
+                reads_back(&s)
+            }
+        }
     }
 }
 

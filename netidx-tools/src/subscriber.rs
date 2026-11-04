@@ -2,7 +2,6 @@ use anyhow::{Context, Error, Result, anyhow};
 use arcstr::ArcStr;
 use bytes::BytesMut;
 use clap::Args;
-use escaping::Escape;
 use futures::{
     channel::mpsc::{self, Receiver, Sender},
     prelude::*,
@@ -52,13 +51,8 @@ pub(super) struct Params {
 }
 
 const RPC_ARG_MUST_ESC: [char; 2] = ['\\', '='];
-static RPC_ARG_ESC: LazyLock<Escape> =
-    LazyLock::new(|| Escape::new('\\', &RPC_ARG_MUST_ESC, &[], None).unwrap());
-static RPC_ARG_STRINGS: LazyLock<StringSyntax> = LazyLock::new(|| StringSyntax {
-    must_esc: &RPC_ARG_MUST_ESC,
-    esc: &RPC_ARG_ESC,
-    unicode: false,
-});
+static RPC_ARG_STRINGS: LazyLock<StringSyntax> =
+    LazyLock::new(|| StringSyntax::new('\\', &RPC_ARG_MUST_ESC, &[], None).unwrap());
 
 async fn write_buffer<W>(writer: &mut W, buffer: &mut BytesMut) -> Result<()>
 where

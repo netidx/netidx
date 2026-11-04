@@ -16,6 +16,7 @@ use escaping::Escape;
 use netidx_core::pack::Pack;
 use poolshark::local::LPooled;
 use rust_decimal::Decimal;
+use smallvec::SmallVec;
 use std::{
     borrow::Cow,
     fmt,
@@ -59,7 +60,45 @@ fn should_escape_generic(c: char) -> bool {
     c.is_control()
 }
 
+/// How a string grammar writes its text: the characters its strings
+/// hold only after the escape char, and the [`Escape`] that writes and
+/// reads them. Where the escape prints other characters generically, the
+/// escape char followed by `u{`, one to six hex digits in either case
+/// naming a Unicode scalar value (no surrogate, at most 10FFFF), and `}`
+/// reads as that character, so whatever the escape prints reads back.
+#[derive(Debug)]
+pub struct StringSyntax {
+    must_esc: &'static [char],
+    esc: Escape,
+    unicode: bool,
+}
+
+impl StringSyntax {
+    /// The syntax whose escape char `esc_char` writes each of `must_esc`
+    /// as itself and each character `tr` names as its name, and, where
+    /// `generic` holds, any other character as `u{hex}`.
+    pub fn new(
+        esc_char: char,
+        must_esc: &'static [char],
+        tr: &[(char, &str)],
+        generic: Option<fn(char) -> bool>,
+    ) -> anyhow::Result<Self> {
+        let escaped: SmallVec<[char; 8]> =
+            must_esc.iter().copied().chain(tr.iter().map(|(c, _)| *c)).collect();
+        let esc = Escape::new(esc_char, &escaped, tr, generic)?;
+        Ok(Self { must_esc, esc, unicode: generic.is_some() })
+    }
+
+    /// The escape that writes and reads this syntax's strings.
+    pub fn escape(&self) -> &Escape {
+        &self.esc
+    }
+}
+
 pub const VAL_MUST_ESC: [char; 2] = ['\\', '"'];
+
+/// The strings of value text: a control character with no name prints
+/// as `\u{hex}`.
 // XCR claude for eric: [bug/low] A string holding a control character other
 // than \n, \r, \t and \0 prints, through VAL_ESC's generic arm, as a `\u{..}`
 // escape that the grammar refuses: Cursor::escaped admits after `\` only what
@@ -84,33 +123,27 @@ pub const VAL_MUST_ESC: [char; 2] = ['\\', '"'];
 // printed_values_read_back (every character generated again), failure_messages,
 // texts_read_as_recorded (expected.txt rewritten, 11 `\u` cases added), and
 // graphix's expr::parser::test::unicode_escape_reads_in_value_literals_alone.
-pub static VAL_ESC: LazyLock<Escape> = LazyLock::new(|| {
-    Escape::new(
-        '\\',
-        &['\\', '"', '\n', '\r', '\0', '\t'],
-        &[('\n', "n"), ('\r', "r"), ('\t', "t"), ('\0', "0")],
-        Some(should_escape_generic),
-    )
-    .unwrap()
-});
-
-/// How a string grammar writes its text: the characters it holds only
-/// after the escape char, the escape that reads it, and whether the escape
-/// char followed by `u{hex}` reads as the character `hex` names, the form
-/// an escape's generic arm prints.
-#[derive(Debug)]
-pub struct StringSyntax {
-    pub must_esc: &'static [char],
-    pub esc: &'static Escape,
-    pub unicode: bool,
-}
-
-/// The strings of value text: [`VAL_ESC`], reading back the `\u{hex}`
-/// its generic arm prints.
-pub static VAL_STRINGS: LazyLock<StringSyntax> = LazyLock::new(|| StringSyntax {
-    must_esc: &VAL_MUST_ESC,
-    esc: &VAL_ESC,
-    unicode: true,
+// 2026-11-04 claude: Review fixes: StringSyntax's fields are private and
+// StringSyntax::new builds its Escape from the escape char, must_esc, the named
+// escapes and the generic arm, its strings reading `\u{hex}` exactly where that
+// arm prints it, so a syntax that prints `\u{..}` and refuses it cannot be
+// built; VAL_ESC is VAL_STRINGS.escape(), and this CR moved with it.
+// Cursor::unicode decides by char::from_u32 over u32::from_str_radix, as the
+// escape's decoder does, the ranges only picking the message. Corrections to
+// the note above: 10 `\u` texts were added to hand_picked, not 11, and
+// printed_values_read_back generates only U+0001 and U+007F among the
+// characters printed as `\u{..}`. parser::test::every_character_reads_back
+// (new) prints and reads back every scalar value and every 3-character string
+// over U+0001, U+007F, U+0085, the backslash, the quote, u, braces and hex
+// digits; it fails with the `u` arm off, as unicode_escapes,
+// printed_values_read_back and texts_read_as_recorded do. Graphix nv-G2 prints
+// a value literal's strings through VAL_STRINGS.escape(), so graphix fmt keeps
+// `error:"\u{1}"` (pin
+// expr::format::tests::a_value_literals_strings_print_as_netidx_prints_them),
+// and the tree-sitter grammar's value_string reads `\u{hex}`.
+pub static VAL_STRINGS: LazyLock<StringSyntax> = LazyLock::new(|| {
+    const NAMED: [(char, &str); 4] = [('\n', "n"), ('\r', "r"), ('\t', "t"), ('\0', "0")];
+    StringSyntax::new('\\', &VAL_MUST_ESC, &NAMED, Some(should_escape_generic)).unwrap()
 });
 
 pub trait FromStrRadix: Sized {
@@ -534,11 +567,12 @@ impl<'a> Cursor<'a> {
         }
     }
 
-    /// `u{`, one to six hex digits naming a Unicode scalar value, and `}`.
+    /// `u`, `{`, one to six hex digits naming a Unicode scalar value, and
+    /// `}`.
     fn unicode(&mut self) -> Result<(), Failure> {
         const HEX: Item = Item::Text("a hex digit");
         const CLOSE: Item = Item::Char('}');
-        self.at += 1;
+        self.eat(b'u');
         if !self.eat(b'{') {
             return Err(self.fail(Expected::OneOf(&[Item::Char('{')])));
         }
@@ -553,12 +587,16 @@ impl<'a> Cursor<'a> {
             };
             return Err(self.fail(Expected::OneOf(expected)));
         }
-        let why =
-            match hex.chars().filter_map(|d| d.to_digit(16)).fold(0, |n, d| n * 16 + d) {
-                0xD800..=0xDFFF => "invalid unicode escape: a surrogate, not a character",
-                0x110000.. => "invalid unicode escape: past 10FFFF, the last character",
-                _ => return Ok(()),
-            };
+        let n = u32::from_str_radix(hex, 16).ok();
+        if n.and_then(char::from_u32).is_some() {
+            return Ok(());
+        }
+        let why = match n {
+            Some(0xD800..=0xDFFF) => {
+                "invalid unicode escape: a surrogate, not a character"
+            }
+            _ => "invalid unicode escape: past 10FFFF, the last character",
+        };
         Err(self.fail(Expected::Refused(why)))
     }
 

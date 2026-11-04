@@ -4,9 +4,11 @@
   printed as a `\u{hex}` escape the parser refused, so such a value could not
   be written back from its text. A value string now reads `\u{hex}`, one to
   six hex digits naming a Unicode scalar value, as that character. The string
-  entry points say whether their syntax reads it: `escaped_string`, `escapes`
-  and `Expected::Escape` take a `StringSyntax` (the characters it must
-  escape, its `Escape`, and `unicode`), and `VAL_STRINGS` is value text's;
+  entry points read a `StringSyntax`: `escaped_string`, `escapes` and
+  `Expected::Escape` take one, and `StringSyntax::new` builds one from the
+  escape char, the characters its strings must escape, the named escapes and
+  the generic arm, its strings reading `\u{hex}` exactly where that arm prints
+  it. `VAL_STRINGS` is value text's, its `escape()` replacing `VAL_ESC`;
   `escapes` yields `Item`s. A breaking change to netidx-value's API.
 
 - `netidx_value::parser` is the value grammar as plain functions over a `&str`

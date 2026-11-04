@@ -50,7 +50,7 @@ impl<'a> fmt::Display for NakedValue<'a> {
 
 impl fmt::Display for Value {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.fmt_ext(f, &parser::VAL_ESC, true)
+        self.fmt_ext(f, parser::VAL_STRINGS.escape(), true)
     }
 }
 
@@ -215,7 +215,9 @@ impl Value {
                 let (n, unit) = parser::duration_display(**v);
                 write!(f, "{n}{unit}")
             }
-            Value::String(s) => write!(f, "\"{}\"", parser::VAL_ESC.escape(s)),
+            Value::String(s) => {
+                write!(f, "\"{}\"", parser::VAL_STRINGS.escape().escape(s))
+            }
             Value::Bytes(b) => write!(f, "{}", BASE64.encode(b)),
             Value::Bool(true) => write!(f, "true"),
             Value::Bool(false) => write!(f, "false"),
@@ -228,7 +230,7 @@ impl Value {
     }
 
     pub fn fmt_notyp(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.fmt_ext(f, &parser::VAL_ESC, false)
+        self.fmt_ext(f, parser::VAL_STRINGS.escape(), false)
     }
 
     pub fn fmt_ext(
