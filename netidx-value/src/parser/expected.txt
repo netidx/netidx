@@ -1,16 +1,26 @@
 "\"\"" | value ok 2 "\"\"" | whole ok
 "\"abc\"" | value ok 5 "\"abc\"" | whole ok
 "\"\\n\\r\\t\\0\\\\\\\"\"" | value ok 14 "\"\\n\\r\\t\\0\\\\\\\"\"" | whole ok
-"\"\\q\"" | value err 2 | whole err "Parse error at line: 1, column: 3\nUnexpected `q`\nExpected `n`, `r`, `t`, `0`, `\\` or `\"`\n"
-"\"\\u{41}\"" | value err 2 | whole err "Parse error at line: 1, column: 3\nUnexpected `u`\nExpected `n`, `r`, `t`, `0`, `\\` or `\"`\n"
-"\"\\" | value err 2 | whole err "Parse error at line: 1, column: 3\nUnexpected end of input\nExpected `n`, `r`, `t`, `0`, `\\` or `\"`\n"
-"\"a\\" | value err 3 | whole err "Parse error at line: 1, column: 4\nUnexpected end of input\nExpected `n`, `r`, `t`, `0`, `\\` or `\"`\n"
+"\"\\q\"" | value err 2 | whole err "Parse error at line: 1, column: 3\nUnexpected `q`\nExpected `n`, `r`, `t`, `0`, `u{`, `\\` or `\"`\n"
+"\"\\u{41}\"" | value ok 8 "\"A\"" | whole ok
+"\"\\u{1F496}\\u{10ffff}\\u{000041}\\u{0}\"" | value ok 36 "\"💖\u{10ffff}A\\0\"" | whole ok
+"\"\\u41\"" | value err 3 | whole err "Parse error at line: 1, column: 4\nUnexpected `4`\nExpected `{`\n"
+"\"\\u\"" | value err 3 | whole err "Parse error at line: 1, column: 4\nUnexpected `\"`\nExpected `{`\n"
+"\"\\u{}\"" | value err 4 | whole err "Parse error at line: 1, column: 5\nUnexpected `}`\nExpected a hex digit\n"
+"\"\\u{g}\"" | value err 4 | whole err "Parse error at line: 1, column: 5\nUnexpected `g`\nExpected a hex digit\n"
+"\"\\u{4g}\"" | value err 5 | whole err "Parse error at line: 1, column: 6\nUnexpected `g`\nExpected a hex digit or `}`\n"
+"\"\\u{41\"" | value err 6 | whole err "Parse error at line: 1, column: 7\nUnexpected `\"`\nExpected a hex digit or `}`\n"
+"\"\\u{1234567}\"" | value err 10 | whole err "Parse error at line: 1, column: 11\nUnexpected `7`\nExpected `}`\n"
+"\"\\u{d800}\"" | value err 9 | whole err "Parse error at line: 1, column: 10\ninvalid unicode escape: a surrogate, not a character\n"
+"\"\\u{110000}\"" | value err 11 | whole err "Parse error at line: 1, column: 12\ninvalid unicode escape: past 10FFFF, the last character\n"
+"\"\\" | value err 2 | whole err "Parse error at line: 1, column: 3\nUnexpected end of input\nExpected `n`, `r`, `t`, `0`, `u{`, `\\` or `\"`\n"
+"\"a\\" | value err 3 | whole err "Parse error at line: 1, column: 4\nUnexpected end of input\nExpected `n`, `r`, `t`, `0`, `u{`, `\\` or `\"`\n"
 "\"a\u{1}b\"" | value ok 5 "\"a\\u{1}b\"" | whole ok
 "\"\n\"" | value ok 3 "\"\\n\"" | whole ok
 "\"💖é\"" | value ok 8 "\"💖é\"" | whole ok
 "\"abc" | value err 4 | whole err "Parse error at line: 1, column: 5\nUnexpected end of input\nExpected `\"`\n"
 "\"a\"b\"" | value ok 3 "\"a\"" | whole err "Parse error at line: 1, column: 4\nUnexpected `b`\nExpected end of input\n"
-"\"\\[\"" | value err 2 | whole err "Parse error at line: 1, column: 3\nUnexpected `[`\nExpected `n`, `r`, `t`, `0`, `\\` or `\"`\n"
+"\"\\[\"" | value err 2 | whole err "Parse error at line: 1, column: 3\nUnexpected `[`\nExpected `n`, `r`, `t`, `0`, `u{`, `\\` or `\"`\n"
 "u8:5" | value ok 4 "u8:5" | whole ok
 "u16:5" | value ok 5 "u16:5" | whole ok
 "u32:5" | value ok 5 "u32:5" | whole ok
@@ -205,7 +215,7 @@
 "datetime:\"x\"" | value err 9 | whole err "Parse error at line: 1, column: 10\ninvalid datetime: input contains invalid characters\n"
 "datetime:x" | value err 9 | whole err "Parse error at line: 1, column: 10\nUnexpected `x`\nExpected `\"`\n"
 "datetime:\"2020" | value err 14 | whole err "Parse error at line: 1, column: 15\nUnexpected end of input\nExpected `\"`\n"
-"datetime:\"\\q\"" | value err 11 | whole err "Parse error at line: 1, column: 12\nUnexpected `q`\nExpected `n`, `r`, `t`, `0`, `\\` or `\"`\n"
+"datetime:\"\\q\"" | value err 11 | whole err "Parse error at line: 1, column: 12\nUnexpected `q`\nExpected `n`, `r`, `t`, `0`, `u{`, `\\` or `\"`\n"
 "datetime:\"2020-13-01T00:00:00Z\"" | value err 9 | whole err "Parse error at line: 1, column: 10\ninvalid datetime: input is out of range\n"
 "error:" | value err 6 | whole err "Parse error at line: 1, column: 7\nUnexpected end of input\nExpected a value\n"
 "error" | value err 5 | whole err "Parse error at line: 1, column: 6\nUnexpected end of input\nExpected `:`\n"
@@ -304,16 +314,57 @@
 "\"" | i64 i8 u8 usize duration err 0 "Expected `-` or a digit" | value graphix ok 0 "\"\"" | rpc ok 1 "\"\\\"\"" | not_prefix true | whitespace 0
 "" | i64 i8 u8 usize duration err 0 "Expected `-` or a digit" | value graphix rpc ok 0 "\"\"" | not_prefix true | whitespace 0
 "\"\\q\"" | i64 i8 u8 usize duration err 0 "Expected `-` or a digit" | value graphix ok 0 "\"\"" | rpc err 2 "Expected `\\` or `=`" | not_prefix true | whitespace 0
-"\\q\"" | i64 i8 u8 usize duration err 0 "Expected `-` or a digit" | value err 1 "Expected `n`, `r`, `t`, `0`, `\\` or `\"`" | graphix err 1 "Expected `n`, `r`, `t`, `0`, `\"`, `\\`, `[` or `]`" | rpc err 1 "Expected `\\` or `=`" | not_prefix true | whitespace 0
+"\\q\"" | i64 i8 u8 usize duration err 0 "Expected `-` or a digit" | value err 1 "Expected `n`, `r`, `t`, `0`, `u{`, `\\` or `\"`" | graphix err 1 "Expected `n`, `r`, `t`, `0`, `\"`, `\\`, `[` or `]`" | rpc err 1 "Expected `\\` or `=`" | not_prefix true | whitespace 0
 "" | i64 i8 u8 usize duration err 0 "Expected `-` or a digit" | value graphix rpc ok 0 "\"\"" | not_prefix true | whitespace 0
 "\"\\u{41}\"" | i64 i8 u8 usize duration err 0 "Expected `-` or a digit" | value graphix ok 0 "\"\"" | rpc err 2 "Expected `\\` or `=`" | not_prefix true | whitespace 0
-"\\u{41}\"" | i64 i8 u8 usize duration err 0 "Expected `-` or a digit" | value err 1 "Expected `n`, `r`, `t`, `0`, `\\` or `\"`" | graphix err 1 "Expected `n`, `r`, `t`, `0`, `\"`, `\\`, `[` or `]`" | rpc err 1 "Expected `\\` or `=`" | not_prefix true | whitespace 0
+"\\u{41}\"" | i64 i8 u8 usize duration err 0 "Expected `-` or a digit" | value ok 6 "\"A\"" | graphix err 1 "Expected `n`, `r`, `t`, `0`, `\"`, `\\`, `[` or `]`" | rpc err 1 "Expected `\\` or `=`" | not_prefix true | whitespace 0
 "41}\"" | i64 i8 u8 usize ok 2 "41" | duration err 2 "Expected `.` or `e`" | value graphix ok 3 "\"41}\"" | rpc ok 4 "\"41}\\\"\"" | not_prefix false | whitespace 0
 "" | i64 i8 u8 usize duration err 0 "Expected `-` or a digit" | value graphix rpc ok 0 "\"\"" | not_prefix true | whitespace 0
+"\"\\u{1F496}\\u{10ffff}\\u{000041}\\u{0}\"" | i64 i8 u8 usize duration err 0 "Expected `-` or a digit" | value graphix ok 0 "\"\"" | rpc err 2 "Expected `\\` or `=`" | not_prefix true | whitespace 0
+"\\u{1F496}\\u{10ffff}\\u{000041}\\u{0}\"" | i64 i8 u8 usize duration err 0 "Expected `-` or a digit" | value ok 34 "\"💖\\u{10ffff}A\\0\"" | graphix err 1 "Expected `n`, `r`, `t`, `0`, `\"`, `\\`, `[` or `]`" | rpc err 1 "Expected `\\` or `=`" | not_prefix true | whitespace 0
+"1F496}\\u{10ffff}\\u{000041}\\u{0}\"" | i64 i8 u8 usize ok 1 "1" | duration err 1 "Expected `.` or `e`" | value ok 31 "\"1F496}\\u{10ffff}A\\0\"" | graphix err 7 "Expected `n`, `r`, `t`, `0`, `\"`, `\\`, `[` or `]`" | rpc err 7 "Expected `\\` or `=`" | not_prefix false | whitespace 0
+"10ffff}\\u{000041}\\u{0}\"" | i64 i8 u8 usize ok 2 "10" | duration err 2 "Expected `.` or `e`" | value ok 22 "\"10ffff}A\\0\"" | graphix err 8 "Expected `n`, `r`, `t`, `0`, `\"`, `\\`, `[` or `]`" | rpc err 8 "Expected `\\` or `=`" | not_prefix false | whitespace 0
+"000041}\\u{0}\"" | i64 i8 u8 usize ok 6 "41" | duration err 6 "Expected `.` or `e`" | value ok 12 "\"000041}\\0\"" | graphix err 8 "Expected `n`, `r`, `t`, `0`, `\"`, `\\`, `[` or `]`" | rpc err 8 "Expected `\\` or `=`" | not_prefix false | whitespace 0
+"0}\"" | i64 i8 u8 usize ok 1 "0" | duration err 1 "Expected `.` or `e`" | value graphix ok 2 "\"0}\"" | rpc ok 3 "\"0}\\\"\"" | not_prefix false | whitespace 0
+"" | i64 i8 u8 usize duration err 0 "Expected `-` or a digit" | value graphix rpc ok 0 "\"\"" | not_prefix true | whitespace 0
+"\"\\u41\"" | i64 i8 u8 usize duration err 0 "Expected `-` or a digit" | value graphix ok 0 "\"\"" | rpc err 2 "Expected `\\` or `=`" | not_prefix true | whitespace 0
+"\\u41\"" | i64 i8 u8 usize duration err 0 "Expected `-` or a digit" | value err 2 "Expected `{`" | graphix err 1 "Expected `n`, `r`, `t`, `0`, `\"`, `\\`, `[` or `]`" | rpc err 1 "Expected `\\` or `=`" | not_prefix true | whitespace 0
+"" | i64 i8 u8 usize duration err 0 "Expected `-` or a digit" | value graphix rpc ok 0 "\"\"" | not_prefix true | whitespace 0
+"\"\\u\"" | i64 i8 u8 usize duration err 0 "Expected `-` or a digit" | value graphix ok 0 "\"\"" | rpc err 2 "Expected `\\` or `=`" | not_prefix true | whitespace 0
+"\\u\"" | i64 i8 u8 usize duration err 0 "Expected `-` or a digit" | value err 2 "Expected `{`" | graphix err 1 "Expected `n`, `r`, `t`, `0`, `\"`, `\\`, `[` or `]`" | rpc err 1 "Expected `\\` or `=`" | not_prefix true | whitespace 0
+"" | i64 i8 u8 usize duration err 0 "Expected `-` or a digit" | value graphix rpc ok 0 "\"\"" | not_prefix true | whitespace 0
+"\"\\u{}\"" | i64 i8 u8 usize duration err 0 "Expected `-` or a digit" | value graphix ok 0 "\"\"" | rpc err 2 "Expected `\\` or `=`" | not_prefix true | whitespace 0
+"\\u{}\"" | i64 i8 u8 usize duration err 0 "Expected `-` or a digit" | value err 3 "Expected a hex digit" | graphix err 1 "Expected `n`, `r`, `t`, `0`, `\"`, `\\`, `[` or `]`" | rpc err 1 "Expected `\\` or `=`" | not_prefix true | whitespace 0
+"}\"" | i64 i8 u8 usize duration err 0 "Expected `-` or a digit" | value graphix ok 1 "\"}\"" | rpc ok 2 "\"}\\\"\"" | not_prefix true | whitespace 0
+"" | i64 i8 u8 usize duration err 0 "Expected `-` or a digit" | value graphix rpc ok 0 "\"\"" | not_prefix true | whitespace 0
+"\"\\u{g}\"" | i64 i8 u8 usize duration err 0 "Expected `-` or a digit" | value graphix ok 0 "\"\"" | rpc err 2 "Expected `\\` or `=`" | not_prefix true | whitespace 0
+"\\u{g}\"" | i64 i8 u8 usize duration err 0 "Expected `-` or a digit" | value err 3 "Expected a hex digit" | graphix err 1 "Expected `n`, `r`, `t`, `0`, `\"`, `\\`, `[` or `]`" | rpc err 1 "Expected `\\` or `=`" | not_prefix true | whitespace 0
+"g}\"" | i64 i8 u8 usize duration err 0 "Expected `-` or a digit" | value graphix ok 2 "\"g}\"" | rpc ok 3 "\"g}\\\"\"" | not_prefix false | whitespace 0
+"" | i64 i8 u8 usize duration err 0 "Expected `-` or a digit" | value graphix rpc ok 0 "\"\"" | not_prefix true | whitespace 0
+"\"\\u{4g}\"" | i64 i8 u8 usize duration err 0 "Expected `-` or a digit" | value graphix ok 0 "\"\"" | rpc err 2 "Expected `\\` or `=`" | not_prefix true | whitespace 0
+"\\u{4g}\"" | i64 i8 u8 usize duration err 0 "Expected `-` or a digit" | value err 4 "Expected a hex digit or `}`" | graphix err 1 "Expected `n`, `r`, `t`, `0`, `\"`, `\\`, `[` or `]`" | rpc err 1 "Expected `\\` or `=`" | not_prefix true | whitespace 0
+"4g}\"" | i64 i8 u8 usize ok 1 "4" | duration err 1 "Expected `.` or `e`" | value graphix ok 3 "\"4g}\"" | rpc ok 4 "\"4g}\\\"\"" | not_prefix false | whitespace 0
+"" | i64 i8 u8 usize duration err 0 "Expected `-` or a digit" | value graphix rpc ok 0 "\"\"" | not_prefix true | whitespace 0
+"\"\\u{41\"" | i64 i8 u8 usize duration err 0 "Expected `-` or a digit" | value graphix ok 0 "\"\"" | rpc err 2 "Expected `\\` or `=`" | not_prefix true | whitespace 0
+"\\u{41\"" | i64 i8 u8 usize duration err 0 "Expected `-` or a digit" | value err 5 "Expected a hex digit or `}`" | graphix err 1 "Expected `n`, `r`, `t`, `0`, `\"`, `\\`, `[` or `]`" | rpc err 1 "Expected `\\` or `=`" | not_prefix true | whitespace 0
+"41\"" | i64 i8 u8 usize ok 2 "41" | duration err 2 "Expected `.` or `e`" | value graphix ok 2 "\"41\"" | rpc ok 3 "\"41\\\"\"" | not_prefix false | whitespace 0
+"" | i64 i8 u8 usize duration err 0 "Expected `-` or a digit" | value graphix rpc ok 0 "\"\"" | not_prefix true | whitespace 0
+"\"\\u{1234567}\"" | i64 i8 u8 usize duration err 0 "Expected `-` or a digit" | value graphix ok 0 "\"\"" | rpc err 2 "Expected `\\` or `=`" | not_prefix true | whitespace 0
+"\\u{1234567}\"" | i64 i8 u8 usize duration err 0 "Expected `-` or a digit" | value err 9 "Expected `}`" | graphix err 1 "Expected `n`, `r`, `t`, `0`, `\"`, `\\`, `[` or `]`" | rpc err 1 "Expected `\\` or `=`" | not_prefix true | whitespace 0
+"1234567}\"" | i64 ok 7 "1234567" | i8 u8 err 7 "invalid signed integer" | usize ok 7 "1234567" | duration err 7 "Expected `.` or `e`" | value graphix ok 8 "\"1234567}\"" | rpc ok 9 "\"1234567}\\\"\"" | not_prefix false | whitespace 0
+"" | i64 i8 u8 usize duration err 0 "Expected `-` or a digit" | value graphix rpc ok 0 "\"\"" | not_prefix true | whitespace 0
+"\"\\u{d800}\"" | i64 i8 u8 usize duration err 0 "Expected `-` or a digit" | value graphix ok 0 "\"\"" | rpc err 2 "Expected `\\` or `=`" | not_prefix true | whitespace 0
+"\\u{d800}\"" | i64 i8 u8 usize duration err 0 "Expected `-` or a digit" | value err 8 "invalid unicode escape: a surrogate, not a character" | graphix err 1 "Expected `n`, `r`, `t`, `0`, `\"`, `\\`, `[` or `]`" | rpc err 1 "Expected `\\` or `=`" | not_prefix true | whitespace 0
+"d800}\"" | i64 i8 u8 usize duration err 0 "Expected `-` or a digit" | value graphix ok 5 "\"d800}\"" | rpc ok 6 "\"d800}\\\"\"" | not_prefix false | whitespace 0
+"" | i64 i8 u8 usize duration err 0 "Expected `-` or a digit" | value graphix rpc ok 0 "\"\"" | not_prefix true | whitespace 0
+"\"\\u{110000}\"" | i64 i8 u8 usize duration err 0 "Expected `-` or a digit" | value graphix ok 0 "\"\"" | rpc err 2 "Expected `\\` or `=`" | not_prefix true | whitespace 0
+"\\u{110000}\"" | i64 i8 u8 usize duration err 0 "Expected `-` or a digit" | value err 10 "invalid unicode escape: past 10FFFF, the last character" | graphix err 1 "Expected `n`, `r`, `t`, `0`, `\"`, `\\`, `[` or `]`" | rpc err 1 "Expected `\\` or `=`" | not_prefix true | whitespace 0
+"110000}\"" | i64 ok 6 "110000" | i8 u8 err 6 "invalid signed integer" | usize ok 6 "110000" | duration err 6 "Expected `.` or `e`" | value graphix ok 7 "\"110000}\"" | rpc ok 8 "\"110000}\\\"\"" | not_prefix false | whitespace 0
+"" | i64 i8 u8 usize duration err 0 "Expected `-` or a digit" | value graphix rpc ok 0 "\"\"" | not_prefix true | whitespace 0
 "\"\\" | i64 i8 u8 usize duration err 0 "Expected `-` or a digit" | value graphix ok 0 "\"\"" | rpc err 2 "Expected `\\` or `=`" | not_prefix true | whitespace 0
-"\\" | i64 i8 u8 usize duration err 0 "Expected `-` or a digit" | value err 1 "Expected `n`, `r`, `t`, `0`, `\\` or `\"`" | graphix err 1 "Expected `n`, `r`, `t`, `0`, `\"`, `\\`, `[` or `]`" | rpc err 1 "Expected `\\` or `=`" | not_prefix true | whitespace 0
+"\\" | i64 i8 u8 usize duration err 0 "Expected `-` or a digit" | value err 1 "Expected `n`, `r`, `t`, `0`, `u{`, `\\` or `\"`" | graphix err 1 "Expected `n`, `r`, `t`, `0`, `\"`, `\\`, `[` or `]`" | rpc err 1 "Expected `\\` or `=`" | not_prefix true | whitespace 0
 "\"a\\" | i64 i8 u8 usize duration err 0 "Expected `-` or a digit" | value graphix ok 0 "\"\"" | rpc err 3 "Expected `\\` or `=`" | not_prefix true | whitespace 0
-"a\\" | i64 i8 u8 usize duration err 0 "Expected `-` or a digit" | value err 2 "Expected `n`, `r`, `t`, `0`, `\\` or `\"`" | graphix err 2 "Expected `n`, `r`, `t`, `0`, `\"`, `\\`, `[` or `]`" | rpc err 2 "Expected `\\` or `=`" | not_prefix false | whitespace 0
+"a\\" | i64 i8 u8 usize duration err 0 "Expected `-` or a digit" | value err 2 "Expected `n`, `r`, `t`, `0`, `u{`, `\\` or `\"`" | graphix err 2 "Expected `n`, `r`, `t`, `0`, `\"`, `\\`, `[` or `]`" | rpc err 2 "Expected `\\` or `=`" | not_prefix false | whitespace 0
 "\"a\u{1}b\"" | i64 i8 u8 usize duration err 0 "Expected `-` or a digit" | value graphix ok 0 "\"\"" | rpc ok 5 "\"\\\"a\\u{1}b\\\"\"" | not_prefix true | whitespace 0
 "a\u{1}b\"" | i64 i8 u8 usize duration err 0 "Expected `-` or a digit" | value graphix ok 3 "\"a\\u{1}b\"" | rpc ok 4 "\"a\\u{1}b\\\"\"" | not_prefix false | whitespace 0
 "" | i64 i8 u8 usize duration err 0 "Expected `-` or a digit" | value graphix rpc ok 0 "\"\"" | not_prefix true | whitespace 0
@@ -330,7 +381,7 @@
 "b\"" | i64 i8 u8 usize duration err 0 "Expected `-` or a digit" | value graphix ok 1 "\"b\"" | rpc ok 2 "\"b\\\"\"" | not_prefix false | whitespace 0
 "" | i64 i8 u8 usize duration err 0 "Expected `-` or a digit" | value graphix rpc ok 0 "\"\"" | not_prefix true | whitespace 0
 "\"\\[\"" | i64 i8 u8 usize duration err 0 "Expected `-` or a digit" | value graphix ok 0 "\"\"" | rpc err 2 "Expected `\\` or `=`" | not_prefix true | whitespace 0
-"\\[\"" | i64 i8 u8 usize duration err 0 "Expected `-` or a digit" | value err 1 "Expected `n`, `r`, `t`, `0`, `\\` or `\"`" | graphix ok 2 "\"[\"" | rpc err 1 "Expected `\\` or `=`" | not_prefix true | whitespace 0
+"\\[\"" | i64 i8 u8 usize duration err 0 "Expected `-` or a digit" | value err 1 "Expected `n`, `r`, `t`, `0`, `u{`, `\\` or `\"`" | graphix ok 2 "\"[\"" | rpc err 1 "Expected `\\` or `=`" | not_prefix true | whitespace 0
 "\"" | i64 i8 u8 usize duration err 0 "Expected `-` or a digit" | value graphix ok 0 "\"\"" | rpc ok 1 "\"\\\"\"" | not_prefix true | whitespace 0
 "" | i64 i8 u8 usize duration err 0 "Expected `-` or a digit" | value graphix rpc ok 0 "\"\"" | not_prefix true | whitespace 0
 "u8:5" | i64 i8 u8 usize duration err 0 "Expected `-` or a digit" | value graphix rpc ok 4 "\"u8:5\"" | not_prefix false | whitespace 0
@@ -666,7 +717,7 @@
 "2020" | i64 ok 4 "2020" | i8 u8 err 4 "invalid signed integer" | usize ok 4 "2020" | duration err 4 "Expected `.` or `e`" | value graphix rpc ok 4 "\"2020\"" | not_prefix false | whitespace 0
 "datetime:\"\\q\"" | i64 i8 u8 usize duration err 0 "Expected `-` or a digit" | value graphix ok 9 "\"datetime:\"" | rpc err 11 "Expected `\\` or `=`" | not_prefix false | whitespace 0
 "\"\\q\"" | i64 i8 u8 usize duration err 0 "Expected `-` or a digit" | value graphix ok 0 "\"\"" | rpc err 2 "Expected `\\` or `=`" | not_prefix true | whitespace 0
-"\\q\"" | i64 i8 u8 usize duration err 0 "Expected `-` or a digit" | value err 1 "Expected `n`, `r`, `t`, `0`, `\\` or `\"`" | graphix err 1 "Expected `n`, `r`, `t`, `0`, `\"`, `\\`, `[` or `]`" | rpc err 1 "Expected `\\` or `=`" | not_prefix true | whitespace 0
+"\\q\"" | i64 i8 u8 usize duration err 0 "Expected `-` or a digit" | value err 1 "Expected `n`, `r`, `t`, `0`, `u{`, `\\` or `\"`" | graphix err 1 "Expected `n`, `r`, `t`, `0`, `\"`, `\\`, `[` or `]`" | rpc err 1 "Expected `\\` or `=`" | not_prefix true | whitespace 0
 "" | i64 i8 u8 usize duration err 0 "Expected `-` or a digit" | value graphix rpc ok 0 "\"\"" | not_prefix true | whitespace 0
 "datetime:\"2020-13-01T00:00:00Z\"" | i64 i8 u8 usize duration err 0 "Expected `-` or a digit" | value graphix ok 9 "\"datetime:\"" | rpc ok 31 "\"datetime:\\\"2020-13-01T00:00:00Z\\\"\"" | not_prefix false | whitespace 0
 "\"2020-13-01T00:00:00Z\"" | i64 i8 u8 usize duration err 0 "Expected `-` or a digit" | value graphix ok 0 "\"\"" | rpc ok 22 "\"\\\"2020-13-01T00:00:00Z\\\"\"" | not_prefix true | whitespace 0
@@ -848,4 +899,4 @@
 "x" | i64 i8 u8 usize duration err 0 "Expected `-` or a digit" | value graphix rpc ok 1 "\"x\"" | not_prefix false | whitespace 0
 "@" | i64 i8 u8 usize duration err 0 "Expected `-` or a digit" | value graphix rpc ok 1 "\"@\"" | not_prefix true | whitespace 0
 "\u{1}" | i64 i8 u8 usize duration err 0 "Expected `-` or a digit" | value graphix rpc ok 1 "\"\\u{1}\"" | not_prefix true | whitespace 0
-5704 damaged copies: fnv ba1cb135b4755fde
+5984 damaged copies: fnv 6cf921e7a76f2414

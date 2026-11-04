@@ -60,7 +60,7 @@ fn should_escape_generic(c: char) -> bool {
 }
 
 pub const VAL_MUST_ESC: [char; 2] = ['\\', '"'];
-// CR claude for eric: [bug/low] A string holding a control character other
+// XCR claude for eric: [bug/low] A string holding a control character other
 // than \n, \r, \t and \0 prints, through VAL_ESC's generic arm, as a `\u{..}`
 // escape that the grammar refuses: Cursor::escaped admits after `\` only what
 // `escapes` lists, though VAL_ESC.unescape reads `u{..}`. So
@@ -74,6 +74,16 @@ pub const VAL_MUST_ESC: [char; 2] = ['\\', '"'];
 // parser::test's round trip (printed_values_read_back) generates no such
 // character, and texts_read_as_recorded records today's refusal.
 // (value-unicode-escape-01)
+// 2026-11-03 claude: Eric ruled (11-03): option (a). parser::StringSyntax says
+// whether a string syntax reads `\u{hex}` (the caller says: VAL_STRINGS does,
+// graphix's GRAPHIX_STRINGS and netidx-tools' RPC_ARG_STRINGS do not);
+// Cursor::unicode reads `u{`, 1 to 6 hex digits naming a scalar value, `}`, and
+// a malformed one fails naming `{`, a hex digit, `}` or why it is refused (a
+// surrogate, past 10FFFF); escapes() and the failure lists name `u{`. Pins that
+// fail with VAL_STRINGS.unicode false: parser::test::unicode_escapes,
+// printed_values_read_back (every character generated again), failure_messages,
+// texts_read_as_recorded (expected.txt rewritten, 11 `\u` cases added), and
+// graphix's expr::parser::test::unicode_escape_reads_in_value_literals_alone.
 pub static VAL_ESC: LazyLock<Escape> = LazyLock::new(|| {
     Escape::new(
         '\\',
@@ -82,6 +92,25 @@ pub static VAL_ESC: LazyLock<Escape> = LazyLock::new(|| {
         Some(should_escape_generic),
     )
     .unwrap()
+});
+
+/// How a string grammar writes its text: the characters it holds only
+/// after the escape char, the escape that reads it, and whether the escape
+/// char followed by `u{hex}` reads as the character `hex` names, the form
+/// an escape's generic arm prints.
+#[derive(Debug)]
+pub struct StringSyntax {
+    pub must_esc: &'static [char],
+    pub esc: &'static Escape,
+    pub unicode: bool,
+}
+
+/// The strings of value text: [`VAL_ESC`], reading back the `\u{hex}`
+/// its generic arm prints.
+pub static VAL_STRINGS: LazyLock<StringSyntax> = LazyLock::new(|| StringSyntax {
+    must_esc: &VAL_MUST_ESC,
+    esc: &VAL_ESC,
+    unicode: true,
 });
 
 pub trait FromStrRadix: Sized {
@@ -113,8 +142,8 @@ pub struct Failure {
 pub enum Expected {
     /// One of these.
     OneOf(&'static [Item]),
-    /// One of the [`escapes`] of this string grammar, after its escape char.
-    Escape(&'static [char], &'static Escape),
+    /// One of the [`escapes`] of this string syntax, after its escape char.
+    Escape(&'static StringSyntax),
     /// What was read is refused for this reason: a datetime or a value
     /// nested too deep that starts at the offset, anything else that ends
     /// there.
@@ -179,9 +208,7 @@ impl fmt::Display for Report<'_> {
         match expected {
             Expected::Refused(why) => writeln!(f, "{why}"),
             Expected::OneOf(items) => unexpected(f, found, items.iter().copied()),
-            Expected::Escape(must_esc, esc) => {
-                unexpected(f, found, escapes(must_esc, esc).map(Item::Char))
-            }
+            Expected::Escape(syntax) => unexpected(f, found, escapes(syntax)),
         }
     }
 }
@@ -214,16 +241,12 @@ fn unexpected(
     Ok(())
 }
 
-/// The characters an escape char may precede in a string whose
-/// unescaped text excludes `must_esc`.
-pub fn escapes<'a>(
-    must_esc: &'a [char],
-    esc: &'a Escape,
-) -> impl Iterator<Item = char> + 'a {
-    esc.get_tr()
-        .iter()
-        .filter_map(|(_, s)| s.chars().next())
-        .chain(must_esc.iter().copied())
+/// What the escape char may precede in `syntax`'s strings.
+pub fn escapes(syntax: &StringSyntax) -> impl Iterator<Item = Item> + '_ {
+    let tr = syntax.esc.get_tr().iter().filter_map(|(_, s)| s.chars().next());
+    tr.map(Item::Char)
+        .chain(syntax.unicode.then_some(Item::Text("`u{`")))
+        .chain(syntax.must_esc.iter().map(|c| Item::Char(*c)))
 }
 
 /// Whether `s` does not continue an identifier: it is empty or starts
@@ -232,8 +255,8 @@ pub fn not_prefix(s: &str) -> bool {
     !s.starts_with(|c: char| c == '_' || c.is_alphanumeric())
 }
 
-/// A value, after any whitespace, with the strings in it escaped by
-/// [`VAL_ESC`].
+/// A value, after any whitespace, with the strings in it written as
+/// [`VAL_STRINGS`] says.
 pub fn value(s: &str) -> Result<(Value, usize), Failure> {
     let mut c = Cursor::new(s);
     let v = c.value(0)?;
@@ -275,17 +298,16 @@ pub fn duration(s: &str) -> Result<(Duration, usize), Failure> {
     Ok((d, c.at))
 }
 
-/// The text of a string up to the first character of `must_esc` that
-/// no escape char precedes, unescaped by `esc`: borrowed when nothing
-/// in it is escaped. Possibly empty.
+/// The text of a string in `syntax` up to the first of its `must_esc`
+/// that no escape char precedes, unescaped: borrowed when nothing in it
+/// is escaped. Possibly empty.
 pub fn escaped_string<'a>(
     s: &'a str,
-    must_esc: &'static [char],
-    esc: &'static Escape,
+    syntax: &'static StringSyntax,
 ) -> Result<(Cow<'a, str>, usize), Failure> {
     let mut c = Cursor::new(s);
-    let raw = c.escaped(must_esc, esc)?;
-    Ok((esc.unescape(raw), c.at))
+    let raw = c.escaped(syntax)?;
+    Ok((syntax.esc.unescape(raw), c.at))
 }
 
 /// `s`, all of it, as a value; whitespace around it allowed.
@@ -318,7 +340,7 @@ const TYPED: [(Typ, Read); 20] = [
     (Typ::Decimal, |c, _| c.float().map(|d: Decimal| Value::Decimal(Arc::new(d)))),
     (Typ::DateTime, |c, _| {
         let offset = c.at;
-        let s = c.quoted(&VAL_MUST_ESC, &VAL_ESC)?;
+        let s = c.quoted(&VAL_STRINGS)?;
         match DateTime::<Utc>::from_str(&s) {
             Ok(d) => Ok(Value::DateTime(Arc::new(d))),
             Err(e) => {
@@ -412,9 +434,9 @@ impl<'a> Cursor<'a> {
             match self.peek() {
                 Some(b'[') => self.array(depth),
                 Some(b'{') => self.map(depth),
-                Some(b'"') => Ok(Value::String(ArcStr::from(
-                    &*self.quoted(&VAL_MUST_ESC, &VAL_ESC)?,
-                ))),
+                Some(b'"') => {
+                    Ok(Value::String(ArcStr::from(&*self.quoted(&VAL_STRINGS)?)))
+                }
                 Some(b'-' | b'0'..=b'9') => self.number(),
                 _ => self.word(depth),
             }
@@ -481,42 +503,63 @@ impl<'a> Cursor<'a> {
         }
     }
 
-    fn quoted(
-        &mut self,
-        must_esc: &'static [char],
-        esc: &'static Escape,
-    ) -> Result<Cow<'a, str>, Failure> {
+    fn quoted(&mut self, syntax: &'static StringSyntax) -> Result<Cow<'a, str>, Failure> {
         if !self.eat(b'"') {
             return Err(self.fail(QUOTE));
         }
-        let raw = self.escaped(must_esc, esc)?;
+        let raw = self.escaped(syntax)?;
         match self.eat(b'"') {
-            true => Ok(esc.unescape(raw)),
+            true => Ok(syntax.esc.unescape(raw)),
             false => Err(self.fail(QUOTE)),
         }
     }
 
-    fn escaped(
-        &mut self,
-        must_esc: &'static [char],
-        esc: &'static Escape,
-    ) -> Result<&'a str, Failure> {
+    fn escaped(&mut self, syntax: &'static StringSyntax) -> Result<&'a str, Failure> {
         let start = self.at;
-        let esc_char = esc.get_escape_char();
+        let esc_char = syntax.esc.get_escape_char();
         loop {
             let rest = self.rest();
-            self.at += rest.find(must_esc).unwrap_or(rest.len());
+            self.at += rest.find(syntax.must_esc).unwrap_or(rest.len());
             if !self.rest().starts_with(esc_char) {
                 return Ok(&self.text[start..self.at]);
             }
             self.at += esc_char.len_utf8();
             match self.rest().chars().next() {
-                Some(c) if escapes(must_esc, esc).any(|e| e == c) => {
+                Some('u') if syntax.unicode => self.unicode()?,
+                Some(c) if escapes(syntax).any(|e| e == Item::Char(c)) => {
                     self.at += c.len_utf8()
                 }
-                _ => return Err(self.fail(Expected::Escape(must_esc, esc))),
+                _ => return Err(self.fail(Expected::Escape(syntax))),
             }
         }
+    }
+
+    /// `u{`, one to six hex digits naming a Unicode scalar value, and `}`.
+    fn unicode(&mut self) -> Result<(), Failure> {
+        const HEX: Item = Item::Text("a hex digit");
+        const CLOSE: Item = Item::Char('}');
+        self.at += 1;
+        if !self.eat(b'{') {
+            return Err(self.fail(Expected::OneOf(&[Item::Char('{')])));
+        }
+        let start = self.at;
+        self.at = digits(self.text.as_bytes(), start, 16).min(start + 6);
+        let hex = &self.text[start..self.at];
+        if hex.is_empty() || !self.eat(b'}') {
+            let expected: &'static [Item] = match hex.len() {
+                0 => &[HEX],
+                6 => &[CLOSE],
+                _ => &[HEX, CLOSE],
+            };
+            return Err(self.fail(Expected::OneOf(expected)));
+        }
+        let why =
+            match hex.chars().filter_map(|d| d.to_digit(16)).fold(0, |n, d| n * 16 + d) {
+                0xD800..=0xDFFF => "invalid unicode escape: a surrogate, not a character",
+                0x110000.. => "invalid unicode escape: past 10FFFF, the last character",
+                _ => return Ok(()),
+            };
+        Err(self.fail(Expected::Refused(why)))
     }
 
     /// `true`, `false`, `null`, or a typed literal: a type's name, `:`

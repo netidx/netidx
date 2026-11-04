@@ -39,22 +39,9 @@ static OPAQUE: LazyLock<AbstractWrapper<Opaque>> = LazyLock::new(|| {
     Abstract::register::<Opaque>(Uuid::from_u128(0x7a1e_9a25_e500_0001)).unwrap()
 });
 
-/// Whether `c` prints in a string as a `\u{..}` escape, which the grammar
-/// refuses (value-unicode-escape-01).
-fn escaped_generically(c: char) -> bool {
-    c.is_control() && !"\n\r\t\0".contains(c)
-}
-
-/// Every scalar, its strings without the characters that print as
-/// `\u{..}` escapes unless `generic`.
-fn leaf(generic: bool) -> impl Strategy<Value = Value> {
-    let string = move |s: String| {
-        let s: String = match generic {
-            true => s,
-            false => s.chars().filter(|c| !escaped_generically(*c)).collect(),
-        };
-        Value::String(s.into())
-    };
+/// Every scalar.
+fn leaf() -> impl Strategy<Value = Value> {
+    let string = |s: String| Value::String(s.into());
     let datetime = (
         DateTime::<Utc>::MIN_UTC.timestamp()..DateTime::<Utc>::MAX_UTC.timestamp(),
         0..1_000_000_000u32,
@@ -91,8 +78,8 @@ fn leaf(generic: bool) -> impl Strategy<Value = Value> {
     ]
 }
 
-fn tree(generic: bool) -> impl Strategy<Value = Value> {
-    leaf(generic).prop_recursive(10, 1000, 100, |inner| {
+fn tree() -> impl Strategy<Value = Value> {
+    leaf().prop_recursive(10, 1000, 100, |inner| {
         prop_oneof![
             collection::vec(inner.clone(), 0..100)
                 .prop_map(|e| Value::Array(ValArray::from(e))),
@@ -120,7 +107,7 @@ fn printed(leaves: usize, trees: usize) -> Vec<String> {
         out.push(format!("{v}"));
         out.push(format!("{}", NoTypes(&v)));
     };
-    let (leaf, tree) = (leaf(true), tree(true));
+    let (leaf, tree) = (leaf(), tree());
     for _ in 0..leaves {
         add(leaf.new_tree(&mut runner).unwrap().current())
     }
@@ -142,6 +129,16 @@ fn hand_picked() -> Vec<String> {
         r#""\n\r\t\0\\\"""#,
         r#""\q""#,
         r#""\u{41}""#,
+        r#""\u{1F496}\u{10ffff}\u{000041}\u{0}""#,
+        r#""\u41""#,
+        r#""\u""#,
+        r#""\u{}""#,
+        r#""\u{g}""#,
+        r#""\u{4g}""#,
+        r#""\u{41""#,
+        r#""\u{1234567}""#,
+        r#""\u{d800}""#,
+        r#""\u{110000}""#,
         r#""\"#,
         r#""a\"#,
         "\"a\u{1}b\"",
@@ -487,7 +484,7 @@ proptest! {
     /// A value printed with its types reads back as itself, all of its
     /// text.
     #[test]
-    fn printed_values_read_back(v in tree(false)) {
+    fn printed_values_read_back(v in tree()) {
         let s = format!("{v}");
         let (w, n) = value(&s).unwrap_or_else(|f| panic!("{s:?}: {}", f.in_text(&s)));
         prop_assert!(same_value(&v, &w), "{s:?} read as {w}");
@@ -530,9 +527,19 @@ static GRAPHIX_ESC: LazyLock<Escape> = LazyLock::new(|| {
         GRAPHIX_MUST_ESC.into_iter().chain(NAMED.map(|(c, _)| c)).collect();
     Escape::new('\\', &esc, &NAMED, None).unwrap()
 });
+static GRAPHIX_STRINGS: LazyLock<StringSyntax> = LazyLock::new(|| StringSyntax {
+    must_esc: &GRAPHIX_MUST_ESC,
+    esc: &GRAPHIX_ESC,
+    unicode: false,
+});
 const RPC_MUST_ESC: [char; 2] = ['\\', '='];
 static RPC_ESC: LazyLock<Escape> =
     LazyLock::new(|| Escape::new('\\', &['\\', '='], &[], None).unwrap());
+static RPC_STRINGS: LazyLock<StringSyntax> = LazyLock::new(|| StringSyntax {
+    must_esc: &RPC_MUST_ESC,
+    esc: &RPC_ESC,
+    unicode: false,
+});
 
 /// The starts of `s`'s suffixes another parser might hand one of these:
 /// after a `:`, quote, bracket, comma, space or arrow.
@@ -565,15 +572,12 @@ fn check_parts(s: &str) {
     stop(s, int::<u8>(s));
     stop(s, int::<usize>(s));
     stop(s, duration(s));
-    for (must_esc, esc) in [
-        (&VAL_MUST_ESC[..], &*VAL_ESC),
-        (&GRAPHIX_MUST_ESC[..], &*GRAPHIX_ESC),
-        (&RPC_MUST_ESC[..], &*RPC_ESC),
-    ] {
-        let r = escaped_string(s, must_esc, esc);
+    for syntax in [&*VAL_STRINGS, &*GRAPHIX_STRINGS, &*RPC_STRINGS] {
+        let r = escaped_string(s, syntax);
         let read = r.is_ok();
         let n = stop(s, r);
-        assert!(!read || s[n..].is_empty() || s[n..].starts_with(must_esc), "{s:?} {n}");
+        let stopped = s[n..].is_empty() || s[n..].starts_with(syntax.must_esc);
+        assert!(!read || stopped, "{s:?} {n}");
     }
 }
 
@@ -667,16 +671,16 @@ fn part_record(s: &str) -> String {
             }
         }
     }
-    let escaped = |must_esc, esc| read(s, escaped_string(s, must_esc, esc));
+    let escaped = |syntax| read(s, escaped_string(s, syntax));
     let reads = [
         ("i64", read(s, int::<i64>(s))),
         ("i8", read(s, int::<i8>(s))),
         ("u8", read(s, int::<u8>(s))),
         ("usize", read(s, int::<usize>(s))),
         ("duration", read(s, duration(s))),
-        ("value", escaped(&VAL_MUST_ESC[..], &*VAL_ESC)),
-        ("graphix", escaped(&GRAPHIX_MUST_ESC[..], &*GRAPHIX_ESC)),
-        ("rpc", escaped(&RPC_MUST_ESC[..], &*RPC_ESC)),
+        ("value", escaped(&VAL_STRINGS)),
+        ("graphix", escaped(&GRAPHIX_STRINGS)),
+        ("rpc", escaped(&RPC_STRINGS)),
         ("not_prefix", not_prefix(s).to_string()),
         ("whitespace", whitespace(s).to_string()),
     ];
@@ -825,7 +829,7 @@ fn failure_messages() {
     );
     assert_eq!(
         msg("\"a\\q\""),
-        "Parse error at line: 1, column: 4\nUnexpected `q`\nExpected `n`, `r`, `t`, `0`, `\\` or `\"`\n"
+        "Parse error at line: 1, column: 4\nUnexpected `q`\nExpected `n`, `r`, `t`, `0`, `u{`, `\\` or `\"`\n"
     );
     assert_eq!(
         msg("u8:300"),
@@ -859,6 +863,65 @@ fn failure_messages() {
         msg(""),
         "Parse error at line: 1, column: 1\nUnexpected end of input\nExpected a value\n"
     );
+}
+
+/// A value string's `\u{hex}` reads as the character `hex` names: one to
+/// six hex digits, either case, naming a Unicode scalar value. Where it is
+/// malformed the failure says what it expected or why it is refused, and
+/// strings in a syntax that does not read it refuse it at the `u`.
+#[test]
+fn unicode_escapes() {
+    let read = |s: &str| match parse_value(s).unwrap() {
+        Value::String(s) => s.to_string(),
+        v => panic!("{s:?} read as {v}"),
+    };
+    let msg = |s: &str| format!("{}", parse_value(s).unwrap_err());
+    assert_eq!(read(r#""\u{41}""#), "A");
+    assert_eq!(read(r#""a\u{1F496}\u{1f496}b""#), "a💖💖b");
+    assert_eq!(
+        read(r#""\u{000041}\u{0}\u{10FFFF}\u{D7FF}\u{E000}""#),
+        "A\0\u{10ffff}\u{d7ff}\u{e000}"
+    );
+    assert_eq!(read(r#""\u{5c}u{41}""#), "\\u{41}");
+    let printed = format!("{}", Value::String("\u{1}\u{7f}\u{9f}".into()));
+    assert_eq!(printed, r#""\u{1}\u{7f}\u{9f}""#);
+    assert_eq!(read(&printed), "\u{1}\u{7f}\u{9f}");
+    assert_eq!(
+        parse_value(r#"[error:"\u{41}", datetime:"2020-01-02T03:04:05\u{5a}"]"#).unwrap(),
+        parse_value(r#"[error:"A", datetime:"2020-01-02T03:04:05Z"]"#).unwrap()
+    );
+    let at = |col: usize, rest: &str| {
+        format!("Parse error at line: 1, column: {col}\n{rest}\n")
+    };
+    assert_eq!(msg(r#""\u41""#), at(4, "Unexpected `4`\nExpected `{`"));
+    assert_eq!(msg(r#""\u"#), at(4, "Unexpected end of input\nExpected `{`"));
+    assert_eq!(msg(r#""\u{}""#), at(5, "Unexpected `}`\nExpected a hex digit"));
+    assert_eq!(msg(r#""\u{g}""#), at(5, "Unexpected `g`\nExpected a hex digit"));
+    assert_eq!(msg(r#""\u{-1}""#), at(5, "Unexpected `-`\nExpected a hex digit"));
+    assert_eq!(msg(r#""\u{4g}""#), at(6, "Unexpected `g`\nExpected a hex digit or `}`"));
+    assert_eq!(msg(r#""\u{41""#), at(7, "Unexpected `\"`\nExpected a hex digit or `}`"));
+    assert_eq!(
+        msg(r#""\u{41"#),
+        at(7, "Unexpected end of input\nExpected a hex digit or `}`")
+    );
+    assert_eq!(msg(r#""\u{1234567}""#), at(11, "Unexpected `7`\nExpected `}`"));
+    assert_eq!(msg(r#""\u{0000041}""#), at(11, "Unexpected `1`\nExpected `}`"));
+    for s in [r#""\u{d800}""#, r#""\u{DFFF}""#] {
+        assert_eq!(msg(s), at(10, "invalid unicode escape: a surrogate, not a character"))
+    }
+    assert_eq!(
+        msg(r#""\u{110000}""#),
+        at(12, "invalid unicode escape: past 10FFFF, the last character")
+    );
+    assert_eq!(
+        msg(r#""\U{41}""#),
+        at(3, "Unexpected `U`\nExpected `n`, `r`, `t`, `0`, `u{`, `\\` or `\"`")
+    );
+    for syntax in [&*GRAPHIX_STRINGS, &*RPC_STRINGS] {
+        let f = escaped_string(r"\u{41}", syntax).unwrap_err();
+        assert_eq!(f.offset, 1);
+        assert!(!format!("{}", f.in_text(r"\u{41}")).contains("u{"));
+    }
 }
 
 /// Parses the printed corpus (`NV_PARSER_SET=valid`) or its damaged

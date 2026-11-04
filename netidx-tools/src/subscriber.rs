@@ -12,7 +12,7 @@ use futures::{
 use netidx::{
     config::Config,
     path::Path,
-    protocol::value_parser::{self, Expected, Failure, Item},
+    protocol::value_parser::{self, Expected, Failure, Item, StringSyntax},
     resolver_client::DesiredAuth,
     subscriber::{
         Dval, Event, SubId, SubscribeErrors, Subscriber, Typ, UpdatesFlags, Value,
@@ -54,6 +54,11 @@ pub(super) struct Params {
 const RPC_ARG_MUST_ESC: [char; 2] = ['\\', '='];
 static RPC_ARG_ESC: LazyLock<Escape> =
     LazyLock::new(|| Escape::new('\\', &RPC_ARG_MUST_ESC, &[], None).unwrap());
+static RPC_ARG_STRINGS: LazyLock<StringSyntax> = LazyLock::new(|| StringSyntax {
+    must_esc: &RPC_ARG_MUST_ESC,
+    esc: &RPC_ARG_ESC,
+    unicode: false,
+});
 
 async fn write_buffer<W>(writer: &mut W, buffer: &mut BytesMut) -> Result<()>
 where
@@ -83,9 +88,8 @@ fn rpc_args(s: &str) -> std::result::Result<Vec<(String, Value)>, Failure> {
         return Ok(args);
     }
     loop {
-        let (name, n) =
-            value_parser::escaped_string(&s[at..], &RPC_ARG_MUST_ESC, &RPC_ARG_ESC)
-                .map_err(|f| f.after(at))?;
+        let (name, n) = value_parser::escaped_string(&s[at..], &RPC_ARG_STRINGS)
+            .map_err(|f| f.after(at))?;
         at = expect(at + n, '=', &[Item::Char('=')])?;
         let (v, n) = value_parser::value(&s[at..]).map_err(|f| f.after(at))?;
         args.push((name.into_owned(), v));
