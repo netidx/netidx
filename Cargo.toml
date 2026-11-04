@@ -27,7 +27,6 @@ bytes = { version = "1", features = ["serde"] }
 cbindgen = "0.29"
 chrono = { version = "^0.4.24", features = ["serde"] }
 clap = { version = "4", features = ["derive"] }
-combine = "4"
 compact_str = { version = "0.9", features = ["serde"] }
 crossbeam = "0.8"
 crossbeam-queue = "0.3"

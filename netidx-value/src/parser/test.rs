@@ -1,28 +1,17 @@
-//! The hand-written grammar ([`rd`]) against the combine grammar it
-//! replaces: the same values, the same bytes consumed and the same
-//! verdicts, over every value the generator makes, printed with and
-//! without types, hand-picked edge cases, and truncated and corrupted
-//! copies of both.
+//! The value grammar over every value the generator makes, printed and
+//! read back, hand-picked edge cases, values nested around the limit, and
+//! truncated and corrupted copies of all of them.
 
-use super::{rd, *};
+use super::*;
 use crate::{Map, abstract_type::AbstractWrapper};
 use bytes::{Buf, BufMut};
-use chrono::{DateTime, TimeZone, Utc};
-use combine::{
-    EasyParser, eof,
-    stream::position::{self, SourcePosition},
-};
+use chrono::TimeZone;
 use netidx_core::pack::PackError;
 use proptest::{
     collection, prelude::*, strategy::ValueTree, string::string_regex,
     test_runner::TestRunner,
 };
-use std::{
-    collections::HashMap,
-    fmt::{self, Write},
-    fs,
-    sync::LazyLock,
-};
+use std::{fmt, sync::LazyLock};
 use uuid::Uuid;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -468,131 +457,70 @@ fn damaged(s: &str, n: usize, rng: &mut Rng, out: &mut Vec<String>) {
     }
 }
 
-/// What a parse made of its input: the result and the bytes consumed,
-/// or where it failed and its message.
-type Verdict<T> = Result<(T, usize), (usize, String)>;
-
-fn offset_of(s: &str, p: SourcePosition) -> usize {
-    let (mut line, mut col) = (1, 1);
-    for (i, c) in s.char_indices() {
-        if (line, col) == (p.line, p.column) {
-            return i;
-        }
-        (line, col) = if c == '\n' { (line + 1, 1) } else { (line, col + 1) };
-    }
-    s.len()
-}
-
-macro_rules! old {
-    ($s:expr, $p:expr) => {{
-        let s: &str = $s;
-        match $p.easy_parse(position::Stream::new(s)) {
-            Ok((v, rest)) => Ok((v, s.len() - rest.input.len())),
-            Err(e) => Err((offset_of(s, e.position), format!("{e}"))),
-        }
-    }};
-}
-
-fn new<T>(s: &str, r: Result<(T, usize), rd::Failure>) -> Verdict<T> {
-    r.map_err(|f| (f.offset, format!("{}", f.in_text(s))))
-}
-
-/// The whole text as `parse_value` reads it, the old way.
-fn old_whole(s: &str) -> Verdict<Value> {
-    old!(s, value(&VAL_MUST_ESC, &VAL_ESC).skip(spaces()).skip(eof()))
-}
-
-fn new_whole(s: &str) -> Verdict<Value> {
-    match parse_value(s) {
-        Ok(v) => Ok((v, s.len())),
-        Err(e) => {
-            let e = format!("{e}");
-            let (line, col) = e
-                .strip_prefix("Parse error at line: ")
-                .and_then(|r| r.split_once(", column: "))
-                .and_then(|(l, r)| {
-                    Some((l.parse().ok()?, r.lines().next()?.parse().ok()?))
-                })
-                .unwrap();
-            Err((offset_of(s, SourcePosition { line, column: col }), e))
-        }
-    }
-}
-
 /// The same value: equal, and printed alike, which also tells floats'
 /// signs and decimals' scales apart.
 fn same_value(a: &Value, b: &Value) -> bool {
     a == b && format!("{a}") == format!("{b}")
 }
 
-/// Where the two disagreed only in where a failure stopped, by what, and
-/// each pair of messages after their position lines, the token found
-/// elided, with how often it was seen and the first input it was seen for.
-#[derive(Default)]
-struct Tally {
-    compared: usize,
-    accepted: usize,
-    moved: Vec<(&'static str, String, usize, usize, String, String)>,
-    messages: HashMap<(String, String), (usize, String)>,
+/// Whether every string in `v` is free of the control characters other
+/// than `\n`, `\r`, `\t` and `\0`: those print as `\u{..}` escapes, which
+/// the grammar refuses.
+fn reads_back(v: &Value) -> bool {
+    match v {
+        Value::String(s) => !s.chars().any(|c| c.is_control() && !"\n\r\t\0".contains(c)),
+        Value::Error(e) => reads_back(e),
+        Value::Array(a) => a.iter().all(reads_back),
+        Value::Map(m) => m.into_iter().all(|(k, v)| reads_back(k) && reads_back(v)),
+        _ => true,
+    }
 }
 
-/// Whether a failure the combine grammar reported at `old` and the
-/// hand-written one at `new` is of a kind the hand-written one reports
-/// further on: a type's name not followed by `:`, which combine reported
-/// at the name's start, and a keyword run into an identifier at a list's
-/// item, which combine reported at the item.
-fn moved_on(old: usize, new: usize, msg: &str) -> bool {
-    old < new
-        && (msg.ends_with("Expected `:`\n") || msg.contains("\nExpected the end of `"))
-}
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(2000))]
 
-/// A message without its position line and the token it found.
-fn gist(msg: &str) -> String {
-    msg.lines()
-        .skip(1)
-        .map(|l| match l.starts_with("Unexpected `") {
-            true => "Unexpected <token>",
-            false => l,
-        })
-        .collect::<Vec<_>>()
-        .join(" | ")
-}
-
-impl Tally {
-    fn check<T: fmt::Debug>(
-        &mut self,
-        what: &'static str,
-        s: &str,
-        old: Verdict<T>,
-        new: Verdict<T>,
-        same: impl Fn(&T, &T) -> bool,
-    ) {
-        self.compared += 1;
-        match (old, new) {
-            (Ok((a, n)), Ok((b, m))) => {
-                self.accepted += 1;
-                assert!(
-                    same(&a, &b) && n == m,
-                    "{what} {s:?}: {a:?} ({n}) vs {b:?} ({m})"
-                )
-            }
-            (Err((n, e)), Err((m, f))) => {
-                let entry = self.messages.entry((gist(&e), gist(&f))).or_default();
-                entry.0 += 1;
-                if entry.1.is_empty() {
-                    entry.1 = s.chars().take(80).collect();
-                }
-                if n != m {
-                    assert!(
-                        moved_on(n, m, &f),
-                        "{what} {s:?}: old {n} {e:?} new {m} {f:?}"
-                    );
-                    self.moved.push((what, s.to_string(), n, m, e, f))
-                }
-            }
-            (a, b) => panic!("{what} {s:?}: old {a:?} new {b:?}"),
+    /// A value printed with its types reads back as itself, all of its
+    /// text, unless a string in it holds a control character that prints
+    /// as a `\u{..}` escape: that text is refused.
+    #[test]
+    fn printed_values_read_back(v in tree()) {
+        let s = format!("{v}");
+        if reads_back(&v) {
+            let (w, n) = value(&s).unwrap_or_else(|f| panic!("{s:?}: {}", f.in_text(&s)));
+            prop_assert!(same_value(&v, &w), "{s:?} read as {w}");
+            prop_assert_eq!(n, s.len());
+        } else {
+            prop_assert!(parse_value(&s).is_err(), "{s:?}");
         }
     }
+}
+
+/// Whether a parse of `s` may stop at `n`.
+fn on_char(s: &str, n: usize) -> bool {
+    n <= s.len() && s.is_char_boundary(n)
+}
+
+/// `value` on `s` stops on a char boundary, and `parse_value` accepts
+/// exactly what `value` reads with only whitespace after it, failing
+/// with the message of where `value` or the end stopped.
+fn check_whole(s: &str) {
+    let whole = parse_value(s);
+    let failed = match value(s) {
+        Ok((v, n)) => {
+            assert!(on_char(s, n), "{s:?} {n}");
+            match end(&s[n..]) {
+                Ok(_) => {
+                    let w = whole.unwrap_or_else(|e| panic!("{s:?}: {e}"));
+                    return assert!(same_value(&v, &w), "{s:?}");
+                }
+                Err(f) => f.after(n),
+            }
+        }
+        Err(f) => f,
+    };
+    assert!(on_char(s, failed.offset), "{s:?} {failed:?}");
+    let e = whole.err().unwrap_or_else(|| panic!("{s:?} read whole"));
+    assert_eq!(format!("{e}"), format!("{}", failed.in_text(s)), "{s:?}")
 }
 
 const GRAPHIX_MUST_ESC: [char; 4] = ['"', '\\', '[', ']'];
@@ -606,55 +534,6 @@ const RPC_MUST_ESC: [char; 2] = ['\\', '='];
 static RPC_ESC: LazyLock<Escape> =
     LazyLock::new(|| Escape::new('\\', &['\\', '='], &[], None).unwrap());
 
-/// Every entry point the two grammars share, on `s`.
-fn compare(s: &str, t: &mut Tally) {
-    t.check(
-        "value",
-        s,
-        old!(s, value(&VAL_MUST_ESC, &VAL_ESC)),
-        new(s, rd::value(s)),
-        same_value,
-    );
-    t.check("parse_value", s, old_whole(s), new_whole(s), same_value);
-}
-
-/// The entry points other parsers call on part of their text, on `s`.
-fn compare_parts(s: &str, t: &mut Tally) {
-    macro_rules! int {
-        ($t:ty, $what:literal) => {
-            t.check(
-                $what,
-                s,
-                old!(s, int::<_, $t>()),
-                new(s, rd::int::<$t>(s)),
-                |a, b| a == b,
-            )
-        };
-    }
-    int!(i64, "int i64");
-    int!(i8, "int i8");
-    int!(u8, "int u8");
-    int!(usize, "int usize");
-    t.check("duration", s, old!(s, duration()), new(s, rd::duration(s)), |a, b| a == b);
-    macro_rules! escaped {
-        ($must:expr, $esc:expr, $what:literal) => {
-            t.check(
-                $what,
-                s,
-                old!(s, escaped_string(&$must, &$esc)),
-                new(s, rd::escaped_string(s, &$must, &$esc))
-                    .map(|(c, n)| (c.into_owned(), n)),
-                |a, b| a == b,
-            )
-        };
-    }
-    escaped!(VAL_MUST_ESC, VAL_ESC, "escaped value");
-    escaped!(GRAPHIX_MUST_ESC, GRAPHIX_ESC, "escaped graphix");
-    escaped!(RPC_MUST_ESC, RPC_ESC, "escaped rpc");
-    let old_np = not_prefix().parse(s).is_ok();
-    assert_eq!(old_np, rd::not_prefix(s), "not_prefix {s:?}");
-}
-
 /// The starts of `s`'s suffixes another parser might hand one of these:
 /// after a `:`, quote, bracket, comma, space or arrow.
 fn part_starts(s: &str) -> impl Iterator<Item = usize> + '_ {
@@ -665,23 +544,46 @@ fn part_starts(s: &str) -> impl Iterator<Item = usize> + '_ {
     )
 }
 
-fn report(t: &Tally) -> String {
-    let mut out = String::new();
-    let mut messages: Vec<_> = t.messages.iter().collect();
-    messages.sort_by_key(|(_, (n, _))| std::cmp::Reverse(*n));
-    for ((old, new), (n, s)) in messages {
-        writeln!(out, "@@@ {n} {s:?}\nold: {old}\nnew: {new}").unwrap();
+/// The entry points other parsers call on part of their text, on `s`:
+/// each stops on a char boundary, and `escaped_string` where the text
+/// ends or at a character it must escape.
+fn check_parts(s: &str) {
+    fn stop<T>(s: &str, r: Result<(T, usize), Failure>) -> usize {
+        let n = match r {
+            Ok((_, n)) => n,
+            Err(f) => {
+                assert!(on_char(s, f.offset), "{s:?} {f:?}");
+                let _ = f.in_text(s).to_string();
+                f.offset
+            }
+        };
+        assert!(on_char(s, n), "{s:?} {n}");
+        n
     }
-    for (what, s, n, m, e, f) in &t.moved {
-        let s: String = s.chars().take(120).collect();
-        writeln!(out, "### {what} {s:?}: old {n} new {m}\n{e}---\n{f}").unwrap();
+    stop(s, int::<i64>(s));
+    stop(s, int::<i8>(s));
+    stop(s, int::<u8>(s));
+    stop(s, int::<usize>(s));
+    stop(s, duration(s));
+    for (must_esc, esc) in [
+        (&VAL_MUST_ESC[..], &*VAL_ESC),
+        (&GRAPHIX_MUST_ESC[..], &*GRAPHIX_ESC),
+        (&RPC_MUST_ESC[..], &*RPC_ESC),
+    ] {
+        let r = escaped_string(s, must_esc, esc);
+        let read = r.is_ok();
+        let n = stop(s, r);
+        assert!(!read || s[n..].is_empty() || s[n..].starts_with(must_esc), "{s:?} {n}");
     }
-    out
 }
 
+/// Every text reads consistently: the hand-picked cases, values nested
+/// around the limit, every value the generator makes printed with and
+/// without types, and truncated and corrupted copies of all of them,
+/// whole, and from each place another parser might hand one of them.
+/// `NV_PARSER_CORPUS=full` reads a larger corpus.
 #[test]
-fn hand_written_matches_combine() {
-    let mut t = Tally::default();
+fn every_text_reads_consistently() {
     let mut rng = Rng(0x9e37_79b9_7f4a_7c15);
     let full = std::env::var("NV_PARSER_CORPUS").is_ok_and(|c| c == "full");
     let (leaves, trees, edits, long_edits) =
@@ -692,31 +594,14 @@ fn hand_written_matches_combine() {
     for s in cases.iter().chain(printed.iter()) {
         damaged(s, if s.len() > 200 { long_edits } else { edits }, &mut rng, &mut damage)
     }
-    let deep = deep();
-    for s in cases.iter().chain(&deep).chain(&printed).chain(&damage) {
-        compare(s, &mut t)
+    for s in cases.iter().chain(&deep()).chain(&printed).chain(&damage) {
+        check_whole(s)
     }
     let printed_leaves = &printed[..2 * leaves];
-    let short =
-        cases.iter().chain(printed_leaves).chain(damage.iter()).filter(|s| s.len() < 200);
-    for s in short {
+    for s in cases.iter().chain(printed_leaves).chain(&damage).filter(|s| s.len() < 200) {
         for i in part_starts(s) {
-            compare_parts(&s[i..], &mut t)
+            check_parts(&s[i..])
         }
-    }
-    println!(
-        "compared {} ({} accepted) over {} hand-picked, {} deep, {} printed, {} damaged; \
-         {} failures stopped elsewhere",
-        t.compared,
-        t.accepted,
-        cases.len(),
-        deep.len(),
-        printed.len(),
-        damage.len(),
-        t.moved.len()
-    );
-    if let Ok(path) = std::env::var("NV_PARSER_DIFF") {
-        fs::write(path, report(&t)).unwrap();
     }
 }
 
@@ -762,7 +647,7 @@ fn deep_values_a_parse_loses_drop_on_a_small_stack() {
         }
         format!("{open}1{close}")
     };
-    for stack in [16, 64].map(|k| rd::RED_ZONE + k * 1024) {
+    for stack in [16, 64].map(|k| RED_ZONE + k * 1024) {
         std::thread::Builder::new()
             .stack_size(stack)
             .spawn(move || {
@@ -843,10 +728,9 @@ fn failure_messages() {
 }
 
 /// Parses the printed corpus (`NV_PARSER_SET=valid`) or its damaged
-/// copies (`failing`) ten times with the grammar `NV_PARSER_BENCH` names:
-/// `old` or `new` for `parse_value`, `old-prefix` or `new-prefix` for a
-/// value at the start of the text, `none` for the corpus alone. Run under
-/// `perf stat` to count each grammar's instructions.
+/// copies (`failing`) ten times as `NV_PARSER_BENCH` says: `whole` with
+/// `parse_value`, `prefix` with `value`, `none` not at all, for the corpus
+/// alone. Run under `perf stat` to count the grammar's instructions.
 #[test]
 #[ignore]
 fn parse_speed() {
@@ -864,22 +748,12 @@ fn parse_speed() {
             damage
         }
     };
-    let old_parse_value = |s: &str| {
-        value(&VAL_MUST_ESC, &VAL_ESC)
-            .skip(spaces())
-            .skip(eof())
-            .easy_parse(position::Stream::new(s))
-            .map(|(r, _)| r)
-            .map_err(|e| anyhow::anyhow!(format!("{}", e)))
-    };
     for _ in 0..10 {
         for s in &corpus {
             let s = black_box(s.as_str());
             match which.as_str() {
-                "old" => drop(black_box(old_parse_value(s))),
-                "new" => drop(black_box(parse_value(s))),
-                "old-prefix" => drop(black_box(value(&VAL_MUST_ESC, &VAL_ESC).parse(s))),
-                "new-prefix" => drop(black_box(rd::value(s))),
+                "whole" => drop(black_box(parse_value(s))),
+                "prefix" => drop(black_box(value(s))),
                 _ => (),
             }
         }

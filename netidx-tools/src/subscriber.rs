@@ -12,7 +12,7 @@ use futures::{
 use netidx::{
     config::Config,
     path::Path,
-    protocol::value_parser::rd::{self, Expected, Failure, Item},
+    protocol::value_parser::{self, Expected, Failure, Item},
     resolver_client::DesiredAuth,
     subscriber::{
         Dval, Event, SubId, SubscribeErrors, Subscriber, Typ, UpdatesFlags, Value,
@@ -71,7 +71,7 @@ where
 /// comma, none for whitespace alone: a name runs to its `=`, `\=` and
 /// `\\` writing `=` and `\` in it, and a value is a value literal.
 fn rpc_args(s: &str) -> std::result::Result<Vec<(String, Value)>, Failure> {
-    let ws = |at: usize| at + rd::whitespace(&s[at..]);
+    let ws = |at: usize| at + value_parser::whitespace(&s[at..]);
     let expect = |at: usize, c: char, items: &'static [Item]| match s[at..].starts_with(c)
     {
         true => Ok(at + 1),
@@ -83,10 +83,11 @@ fn rpc_args(s: &str) -> std::result::Result<Vec<(String, Value)>, Failure> {
         return Ok(args);
     }
     loop {
-        let (name, n) = rd::escaped_string(&s[at..], &RPC_ARG_MUST_ESC, &RPC_ARG_ESC)
-            .map_err(|f| f.after(at))?;
+        let (name, n) =
+            value_parser::escaped_string(&s[at..], &RPC_ARG_MUST_ESC, &RPC_ARG_ESC)
+                .map_err(|f| f.after(at))?;
         at = expect(at + n, '=', &[Item::Char('=')])?;
-        let (v, n) = rd::value(&s[at..]).map_err(|f| f.after(at))?;
+        let (v, n) = value_parser::value(&s[at..]).map_err(|f| f.after(at))?;
         args.push((name.into_owned(), v));
         at = ws(at + n);
         if at == s.len() {

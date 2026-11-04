@@ -1,5 +1,14 @@
 # Unreleased
 
+- `netidx_value::parser` is the value grammar as plain functions over a `&str`
+  (`value`, `int`, `duration`, `escaped_string`, `not_prefix`, `end`,
+  `whitespace`): each returns what it read and the bytes it consumed, or a
+  `Failure` naming the byte offset where it stopped and what it expected
+  there. The combine parsers the module exported (`value`, `int`, `duration`,
+  `escaped_string`, `not_prefix`, `sep_by_tok`, `sep_by1_tok`, `close_expr`)
+  are gone, and netidx-value no longer depends on combine: a breaking change
+  to netidx-value's API.
+
 - Fixed: a resolver that rejected our certificate was reported as unreachable
   as well. The read client only recorded a reason when a handshake step
   failed, so a member that was simply down named nothing, and giving up added
