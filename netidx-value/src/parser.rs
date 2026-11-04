@@ -60,6 +60,20 @@ fn should_escape_generic(c: char) -> bool {
 }
 
 pub const VAL_MUST_ESC: [char; 2] = ['\\', '"'];
+// CR claude for eric: [bug/low] A string holding a control character other
+// than \n, \r, \t and \0 prints, through VAL_ESC's generic arm, as a `\u{..}`
+// escape that the grammar refuses: Cursor::escaped admits after `\` only what
+// `escapes` lists, though VAL_ESC.unescape reads `u{..}`. So
+// `Value::String("\u{1}".into())` prints `"\u{1}"`, which parse_value refuses,
+// and a subscribed value holding one cannot be written back from its text.
+// Either the grammar reads `\u{hex}` in VAL_ESC strings (texts refused today
+// then read: `"\u{41}"` as "A"; escaping's Escape does not say whether it has
+// a generic arm, so the grammar's callers would say), or the printer prints
+// those characters raw as graphix's VALUE_ESC does (terminals then get them
+// raw). I'd read `\u{hex}`: the escape keeps printed text safe to show.
+// parser::test's round trip (printed_values_read_back) generates no such
+// character, and texts_read_as_recorded records today's refusal.
+// (value-unicode-escape-01)
 pub static VAL_ESC: LazyLock<Escape> = LazyLock::new(|| {
     Escape::new(
         '\\',

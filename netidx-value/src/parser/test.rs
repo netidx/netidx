@@ -11,7 +11,10 @@ use proptest::{
     collection, prelude::*, strategy::ValueTree, string::string_regex,
     test_runner::TestRunner,
 };
-use std::{fmt, sync::LazyLock};
+use std::{
+    fmt::{self, Write},
+    sync::LazyLock,
+};
 use uuid::Uuid;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -36,7 +39,22 @@ static OPAQUE: LazyLock<AbstractWrapper<Opaque>> = LazyLock::new(|| {
     Abstract::register::<Opaque>(Uuid::from_u128(0x7a1e_9a25_e500_0001)).unwrap()
 });
 
-fn leaf() -> impl Strategy<Value = Value> {
+/// Whether `c` prints in a string as a `\u{..}` escape, which the grammar
+/// refuses (value-unicode-escape-01).
+fn escaped_generically(c: char) -> bool {
+    c.is_control() && !"\n\r\t\0".contains(c)
+}
+
+/// Every scalar, its strings without the characters that print as
+/// `\u{..}` escapes unless `generic`.
+fn leaf(generic: bool) -> impl Strategy<Value = Value> {
+    let string = move |s: String| {
+        let s: String = match generic {
+            true => s,
+            false => s.chars().filter(|c| !escaped_generically(*c)).collect(),
+        };
+        Value::String(s.into())
+    };
     let datetime = (
         DateTime::<Utc>::MIN_UTC.timestamp()..DateTime::<Utc>::MAX_UTC.timestamp(),
         0..1_000_000_000u32,
@@ -63,8 +81,8 @@ fn leaf() -> impl Strategy<Value = Value> {
         datetime,
         (any::<u64>(), 0..1_000_000_000u32)
             .prop_map(|(s, ns)| Value::Duration(Arc::new(Duration::new(s, ns)))),
-        any::<String>().prop_map(|s| Value::String(s.into())),
-        escapes.prop_map(|s| Value::String(s.into())),
+        any::<String>().prop_map(string),
+        escapes.prop_map(string),
         any::<Vec<u8>>().prop_map(|b| Value::Bytes(PBytes::new(Bytes::from(b)))),
         Just(Value::Bool(true)),
         Just(Value::Bool(false)),
@@ -73,8 +91,8 @@ fn leaf() -> impl Strategy<Value = Value> {
     ]
 }
 
-fn tree() -> impl Strategy<Value = Value> {
-    leaf().prop_recursive(10, 1000, 100, |inner| {
+fn tree(generic: bool) -> impl Strategy<Value = Value> {
+    leaf(generic).prop_recursive(10, 1000, 100, |inner| {
         prop_oneof![
             collection::vec(inner.clone(), 0..100)
                 .prop_map(|e| Value::Array(ValArray::from(e))),
@@ -102,7 +120,7 @@ fn printed(leaves: usize, trees: usize) -> Vec<String> {
         out.push(format!("{v}"));
         out.push(format!("{}", NoTypes(&v)));
     };
-    let (leaf, tree) = (leaf(), tree());
+    let (leaf, tree) = (leaf(true), tree(true));
     for _ in 0..leaves {
         add(leaf.new_tree(&mut runner).unwrap().current())
     }
@@ -463,35 +481,17 @@ fn same_value(a: &Value, b: &Value) -> bool {
     a == b && format!("{a}") == format!("{b}")
 }
 
-/// Whether every string in `v` is free of the control characters other
-/// than `\n`, `\r`, `\t` and `\0`: those print as `\u{..}` escapes, which
-/// the grammar refuses.
-fn reads_back(v: &Value) -> bool {
-    match v {
-        Value::String(s) => !s.chars().any(|c| c.is_control() && !"\n\r\t\0".contains(c)),
-        Value::Error(e) => reads_back(e),
-        Value::Array(a) => a.iter().all(reads_back),
-        Value::Map(m) => m.into_iter().all(|(k, v)| reads_back(k) && reads_back(v)),
-        _ => true,
-    }
-}
-
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(2000))]
 
     /// A value printed with its types reads back as itself, all of its
-    /// text, unless a string in it holds a control character that prints
-    /// as a `\u{..}` escape: that text is refused.
+    /// text.
     #[test]
-    fn printed_values_read_back(v in tree()) {
+    fn printed_values_read_back(v in tree(false)) {
         let s = format!("{v}");
-        if reads_back(&v) {
-            let (w, n) = value(&s).unwrap_or_else(|f| panic!("{s:?}: {}", f.in_text(&s)));
-            prop_assert!(same_value(&v, &w), "{s:?} read as {w}");
-            prop_assert_eq!(n, s.len());
-        } else {
-            prop_assert!(parse_value(&s).is_err(), "{s:?}");
-        }
+        let (w, n) = value(&s).unwrap_or_else(|f| panic!("{s:?}: {}", f.in_text(&s)));
+        prop_assert!(same_value(&v, &w), "{s:?} read as {w}");
+        prop_assert_eq!(n, s.len());
     }
 }
 
@@ -603,6 +603,140 @@ fn every_text_reads_consistently() {
             check_parts(&s[i..])
         }
     }
+}
+
+/// FNV-1a, a digest that is the same on every host and build.
+struct Fnv(u64);
+
+impl Fnv {
+    fn new() -> Self {
+        Fnv(0xcbf2_9ce4_8422_2325)
+    }
+
+    fn write(&mut self, s: &str) {
+        for b in s.bytes() {
+            self.0 = (self.0 ^ b as u64).wrapping_mul(0x0100_0000_01b3)
+        }
+    }
+
+    fn of(s: &str) -> u64 {
+        let mut h = Fnv::new();
+        h.write(s);
+        h.0
+    }
+}
+
+/// `s` quoted, or, past a line's share, its length and digest.
+fn shown(s: &str) -> String {
+    match s.len() <= 120 {
+        true => format!("{s:?}"),
+        false => format!("<{} bytes, fnv {:016x}>", s.len(), Fnv::of(s)),
+    }
+}
+
+/// What `value` and `parse_value` make of the whole of `s`: the value
+/// printed with its types and the bytes `value` consumed, or where
+/// `value` stopped; `parse_value`'s message.
+fn whole_record(s: &str) -> String {
+    let value = match value(s) {
+        Ok((v, n)) => format!("ok {n} {}", shown(&v.to_string())),
+        Err(f) => format!("err {}", f.offset),
+    };
+    let whole = match parse_value(s) {
+        Ok(_) => "ok".to_string(),
+        Err(e) => format!("err {:?}", e.to_string()),
+    };
+    format!("{} | value {value} | whole {whole}", shown(s))
+}
+
+/// What each entry point other parsers call makes of `s`: what it read
+/// and the bytes it consumed, or where it stopped and what it expected
+/// there; entry points that agree share their result.
+fn part_record(s: &str) -> String {
+    fn read<T: fmt::Debug>(s: &str, r: Result<(T, usize), Failure>) -> String {
+        match r {
+            Ok((v, n)) => format!("ok {n} {}", shown(&format!("{v:?}"))),
+            Err(f) => {
+                let msg = f.in_text(s).to_string();
+                let why: Vec<&str> = msg
+                    .lines()
+                    .skip(1)
+                    .filter(|l| !l.starts_with("Unexpected "))
+                    .collect();
+                format!("err {} {:?}", f.offset, why.join(" / "))
+            }
+        }
+    }
+    let escaped = |must_esc, esc| read(s, escaped_string(s, must_esc, esc));
+    let reads = [
+        ("i64", read(s, int::<i64>(s))),
+        ("i8", read(s, int::<i8>(s))),
+        ("u8", read(s, int::<u8>(s))),
+        ("usize", read(s, int::<usize>(s))),
+        ("duration", read(s, duration(s))),
+        ("value", escaped(&VAL_MUST_ESC[..], &*VAL_ESC)),
+        ("graphix", escaped(&GRAPHIX_MUST_ESC[..], &*GRAPHIX_ESC)),
+        ("rpc", escaped(&RPC_MUST_ESC[..], &*RPC_ESC)),
+        ("not_prefix", not_prefix(s).to_string()),
+        ("whitespace", whitespace(s).to_string()),
+    ];
+    let mut line = shown(s);
+    for (i, (what, r)) in reads.iter().enumerate() {
+        let same = |j: usize| reads.get(j).is_some_and(|(_, q)| q == r);
+        let sep = if i > 0 && same(i - 1) { " " } else { " | " };
+        write!(line, "{sep}{what}").unwrap();
+        if !same(i + 1) {
+            write!(line, " {r}").unwrap()
+        }
+    }
+    line
+}
+
+/// What the hand-picked texts and the values nested around the limit
+/// read as, whole, and the hand-picked ones from each place another parser
+/// might hand one of them, is `expected.txt`; its last line digests the
+/// same for their truncated and corrupted copies. `NV_PARSER_EXPECTED=write`
+/// writes the file from this build.
+#[test]
+fn texts_read_as_recorded() {
+    let cases = hand_picked();
+    let mut lines: Vec<String> =
+        cases.iter().chain(&deep()).map(|s| whole_record(s)).collect();
+    for s in &cases {
+        lines.extend(part_starts(s).map(|i| part_record(&s[i..])))
+    }
+    let (mut rng, mut damage) = (Rng(0x9e37_79b9_7f4a_7c15), vec![]);
+    for s in &cases {
+        damaged(s, 8, &mut rng, &mut damage)
+    }
+    let mut digest = Fnv::new();
+    for s in &damage {
+        let parts = part_starts(s).map(|i| part_record(&s[i..]));
+        for r in std::iter::once(whole_record(s)).chain(parts) {
+            digest.write(&r);
+            digest.write("\n")
+        }
+    }
+    lines.push(format!("{} damaged copies: fnv {:016x}", damage.len(), digest.0));
+    if std::env::var("NV_PARSER_EXPECTED").is_ok_and(|w| w == "write") {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/src/parser/expected.txt");
+        return std::fs::write(path, lines.join("\n") + "\n").unwrap();
+    }
+    let want: Vec<&str> = include_str!("expected.txt").lines().collect();
+    let changed: Vec<String> = want
+        .iter()
+        .zip(&lines)
+        .filter(|(w, g)| *w != g)
+        .take(20)
+        .map(|(w, g)| format!("- {w}\n+ {g}"))
+        .collect();
+    assert!(
+        changed.is_empty() && want.len() == lines.len(),
+        "{} records, {} expected; the first that differ:\n{}",
+        lines.len(),
+        want.len(),
+        changed.join("\n")
+    )
 }
 
 /// Arrays, maps or errors nested to the limit parse on a small stack,
