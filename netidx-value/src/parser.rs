@@ -111,48 +111,6 @@ pub const VAL_MUST_ESC: [char; 2] = ['\\', '"'];
 
 /// The strings of value text: a control character with no name prints
 /// as `\u{hex}`.
-// XCR claude for eric: [bug/low] A string holding a control character other
-// than \n, \r, \t and \0 prints, through VAL_ESC's generic arm, as a `\u{..}`
-// escape that the grammar refuses: Cursor::escaped admits after `\` only what
-// `escapes` lists, though VAL_ESC.unescape reads `u{..}`. So
-// `Value::String("\u{1}".into())` prints `"\u{1}"`, which parse_value refuses,
-// and a subscribed value holding one cannot be written back from its text.
-// Either the grammar reads `\u{hex}` in VAL_ESC strings (texts refused today
-// then read: `"\u{41}"` as "A"; escaping's Escape does not say whether it has
-// a generic arm, so the grammar's callers would say), or the printer prints
-// those characters raw as graphix's VALUE_ESC does (terminals then get them
-// raw). I'd read `\u{hex}`: the escape keeps printed text safe to show.
-// parser::test's round trip (printed_values_read_back) generates no such
-// character, and texts_read_as_recorded records today's refusal.
-// (value-unicode-escape-01)
-// 2026-11-03 claude: Eric ruled (11-03): option (a). parser::StringSyntax says
-// whether a string syntax reads `\u{hex}` (the caller says: VAL_STRINGS does,
-// graphix's GRAPHIX_STRINGS and netidx-tools' RPC_ARG_STRINGS do not);
-// Cursor::unicode reads `u{`, 1 to 6 hex digits naming a scalar value, `}`, and
-// a malformed one fails naming `{`, a hex digit, `}` or why it is refused (a
-// surrogate, past 10FFFF); escapes() and the failure lists name `u{`. Pins that
-// fail with VAL_STRINGS.unicode false: parser::test::unicode_escapes,
-// printed_values_read_back (every character generated again), failure_messages,
-// texts_read_as_recorded (expected.txt rewritten, 11 `\u` cases added), and
-// graphix's expr::parser::test::unicode_escape_reads_in_value_literals_alone.
-// 2026-11-04 claude: Review fixes: StringSyntax's fields are private and
-// StringSyntax::new builds its Escape from the escape char, must_esc, the named
-// escapes and the generic arm, its strings reading `\u{hex}` exactly where that
-// arm prints it, so a syntax that prints `\u{..}` and refuses it cannot be
-// built; VAL_ESC is VAL_STRINGS.escape(), and this CR moved with it.
-// Cursor::unicode decides by char::from_u32 over u32::from_str_radix, as the
-// escape's decoder does, the ranges only picking the message. Corrections to
-// the note above: 10 `\u` texts were added to hand_picked, not 11, and
-// printed_values_read_back generates only U+0001 and U+007F among the
-// characters printed as `\u{..}`. parser::test::every_character_reads_back
-// (new) prints and reads back every scalar value and every 3-character string
-// over U+0001, U+007F, U+0085, the backslash, the quote, u, braces and hex
-// digits; it fails with the `u` arm off, as unicode_escapes,
-// printed_values_read_back and texts_read_as_recorded do. Graphix nv-G2 prints
-// a value literal's strings through VAL_STRINGS.escape(), so graphix fmt keeps
-// `error:"\u{1}"` (pin
-// expr::format::tests::a_value_literals_strings_print_as_netidx_prints_them),
-// and the tree-sitter grammar's value_string reads `\u{hex}`.
 pub static VAL_STRINGS: LazyLock<StringSyntax> = LazyLock::new(|| {
     const NAMED: [(char, &str); 4] = [('\n', "n"), ('\r', "r"), ('\t', "t"), ('\0', "0")];
     StringSyntax::new('\\', &VAL_MUST_ESC, &NAMED, Some(should_escape_generic)).unwrap()
