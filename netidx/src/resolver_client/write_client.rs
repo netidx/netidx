@@ -12,7 +12,7 @@ use crate::{
     },
     publisher::{PublishError, PublishErrors},
     resolver_client::{ResolverError, ResolverErrors},
-    tls, utils,
+    tick, tls, utils,
 };
 use ahash::{AHashMap, AHasher};
 use anyhow::{Error, Result};
@@ -221,8 +221,8 @@ impl Connection {
         let linger = Duration::from_secs(max(1, ttl / 10));
         let heartbeat = Duration::from_secs(max(1, ttl / 2));
         let now = Instant::now();
-        self.heartbeat = time::interval_at(now + heartbeat, heartbeat);
-        self.disconnect = time::interval_at(now + linger, linger);
+        self.heartbeat = tick::interval_at(now + heartbeat, heartbeat);
+        self.disconnect = tick::interval_at(now + linger, linger);
     }
 
     /// Bring this member back in line with what the publisher believes.
@@ -673,8 +673,8 @@ impl Connection {
             con: None,
             degraded: true,
             active: false,
-            heartbeat: time::interval_at(now + HB, HB),
-            disconnect: time::interval_at(now + LINGER, LINGER),
+            heartbeat: tick::interval_at(now + HB, HB),
+            disconnect: tick::interval_at(now + LINGER, LINGER),
             events,
             refused: AHashMap::default(),
             reported_down: Some(Unavailable::Pending),

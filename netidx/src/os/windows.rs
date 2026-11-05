@@ -321,7 +321,7 @@ pub(crate) mod local_auth {
         io::{AsyncReadExt, AsyncWriteExt},
         net::windows::named_pipe::{ClientOptions, NamedPipeServer, ServerOptions},
         task::spawn,
-        time::{interval, sleep, timeout},
+        time::{sleep, timeout},
     };
     use windows::Win32::{
         Foundation::HANDLE,
@@ -403,7 +403,7 @@ pub(crate) mod local_auth {
         ) {
             let open = Arc::new(AtomicUsize::new(0));
             let mut stop = stop.fuse();
-            let mut gc = interval(Duration::from_secs(60));
+            let mut gc = crate::tick::interval(Duration::from_secs(60));
             loop {
                 select_biased! {
                     _ = stop => break,

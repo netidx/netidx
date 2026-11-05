@@ -11,7 +11,7 @@ use crate::{
             ServerHelloWrite, ToRead, ToWrite, WriteRefusal, check_addr,
         },
     },
-    tls, utils,
+    tick, tls, utils,
 };
 use ahash::AHashMap;
 use anyhow::{Context, Result, anyhow};
@@ -316,7 +316,7 @@ async fn client_loop_write(
     let mut batch = WRITE_BATCHES.take();
     let mut act = false;
     let mut timeout =
-        time::interval_at(Instant::now() + ctx.cfg.writer_ttl, ctx.cfg.writer_ttl);
+        tick::interval_at(Instant::now() + ctx.cfg.writer_ttl, ctx.cfg.writer_ttl);
     async fn receive_batch(
         con: &mut Option<Channel>,
         batch: &mut Vec<ToWrite>,
@@ -926,7 +926,7 @@ async fn client_loop_read(
     let mut server_stop = server_stop.fuse();
     let mut act = false;
     let mut timeout =
-        time::interval_at(Instant::now() + ctx.cfg.reader_ttl, ctx.cfg.reader_ttl);
+        tick::interval_at(Instant::now() + ctx.cfg.reader_ttl, ctx.cfg.reader_ttl);
     loop {
         select_biased! {
             _ = server_stop => break Ok(()),
