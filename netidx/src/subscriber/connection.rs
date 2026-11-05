@@ -15,7 +15,7 @@ use crate::{
         resolver::TargetAuth,
     },
     resolver_client::common::krb5_authentication,
-    tick, tls,
+    tls,
     utils::{ChanId, ChanWrap},
 };
 use ahash::AHashMap;
@@ -745,7 +745,7 @@ impl ConnectionCtx {
                 Ok(())
             }
         }
-        let mut periodic = tick::interval_at(Instant::now() + PERIOD, PERIOD);
+        let mut periodic = timer_grid::interval_at(Instant::now() + PERIOD, PERIOD);
         loop {
             select_biased! {
                 // this has to come first because batch_channel isn't cancel safe

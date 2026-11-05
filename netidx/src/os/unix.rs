@@ -247,7 +247,7 @@ pub(crate) mod local_auth {
         ) {
             let open = Arc::new(AtomicUsize::new(0));
             let mut stop = stop.fuse();
-            let mut gc = crate::tick::interval(Duration::from_secs(60));
+            let mut gc = timer_grid::interval(Duration::from_secs(60));
             loop {
                 select_biased! {
                     _ = stop => break,

@@ -164,7 +164,6 @@ pub mod resolver_server;
 pub mod subscriber;
 #[cfg(test)]
 mod test;
-pub mod tick;
 pub mod tls;
 
 use anyhow::Result;

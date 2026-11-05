@@ -13,7 +13,7 @@ use crate::{
     },
     resolver_client::DesiredAuth,
     resolver_server::{auth::Permissions, krb5_authentication},
-    tick, tls,
+    tls,
     utils::{self, BatchItem, Batched, ChanId, ChanWrap},
 };
 use ahash::AHashMap;
@@ -697,7 +697,7 @@ impl ClientCtx {
                 }
             }
         }
-        let mut hb = tick::interval(HB);
+        let mut hb = timer_grid::interval(HB);
         let (mut read_con, mut write_con) =
             time::timeout(HELLO_TIMEOUT, self.hello(con)).await??.split();
         let mut receipts: Vec<publisher::From> = vec![];

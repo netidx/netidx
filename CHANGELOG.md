@@ -1,16 +1,15 @@
 # Unreleased
 
-- Periodic timers tick on one clock grid, `netidx::tick`: a timer of period
-  `every` ticks when the wall clock reads a whole multiple of `every` since the
-  Unix epoch. The publisher's heartbeat to each subscriber, the resolver
-  client's heartbeat and linger, the resolver server's read and write
-  timeouts, the subscriber's connection check, the config watcher and the
-  local auth gc all use it, so timers due together fire in one wakeup, and the
-  heartbeats of processes whose clocks agree arrive together too. An idle
+- Periodic timers tick on one wall-clock grid, from the `timer-grid` crate: a
+  timer of period `every` ticks when the wall clock reads a whole multiple of
+  `every` since the Unix epoch. The publisher's heartbeat to each subscriber,
+  the resolver client's heartbeat and linger, the resolver server's read and
+  write timeouts, the subscriber's connection check, the config watcher and
+  the local auth gc all use it, so timers due together fire in one wakeup, and
+  the heartbeats of processes whose clocks agree arrive together too. An idle
   process that once woke for each connection's heartbeat on its own phase now
   wakes once a second for all of them. Timeouts still first tick a full period
-  after they start. Programs may put their own timers on the grid with
-  `tick::next`, `tick::interval` and `tick::interval_at`.
+  after they start.
 
 - Fixed: a value string holding a control character with no named escape
   printed as a `\u{hex}` escape the parser refused, so such a value could not

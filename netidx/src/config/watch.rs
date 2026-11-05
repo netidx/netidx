@@ -15,7 +15,7 @@
 use super::{Config, Origin, Tls};
 use crate::{
     protocol::resolver::{Auth, Referral},
-    tick, tls,
+    tls,
 };
 use anyhow::{Context, Result, bail};
 use log::{info, warn};
@@ -26,11 +26,7 @@ use std::{
     sync::Arc,
     time::{Duration, SystemTime},
 };
-use tokio::{
-    sync::watch,
-    task,
-    time::{self, Instant},
-};
+use tokio::{sync::watch, task};
 
 /// How often the origin file is checked. The list it holds changes at most a
 /// couple of times an hour even in an actively maintained admin domain, so
@@ -128,7 +124,7 @@ async fn poll(mut current: Config, path: Arc<FsPath>, tx: watch::Sender<Arc<Refe
     loop {
         tokio::select! {
             _ = tx.closed() => break,
-            _ = time::sleep_until(tick::next(POLL_INTERVAL, Instant::now())) => (),
+            _ = timer_grid::sleep(POLL_INTERVAL) => (),
         }
         let now = stamp(&path).await;
         if now == last && !retry {
